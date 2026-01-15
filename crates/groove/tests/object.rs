@@ -177,17 +177,17 @@ fn branch_ref_access() {
 
 use groove::sql::ColumnType;
 use groove::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
-use std::sync::Arc;
+use std::rc::Rc;
 
-fn make_test_descriptor() -> Arc<RowDescriptor> {
-    Arc::new(RowDescriptor::new([
+fn make_test_descriptor() -> Rc<RowDescriptor> {
+    Rc::new(RowDescriptor::new([
         ("name".to_string(), ColumnType::String, false),
         ("status".to_string(), ColumnType::String, false),
         ("count".to_string(), ColumnType::I32, false),
     ]))
 }
 
-fn make_row_content(desc: &Arc<RowDescriptor>, name: &str, status: &str, count: i32) -> Vec<u8> {
+fn make_row_content(desc: &Rc<RowDescriptor>, name: &str, status: &str, count: i32) -> Vec<u8> {
     let name_idx = desc.column_index("name").unwrap();
     let status_idx = desc.column_index("status").unwrap();
     let count_idx = desc.column_index("count").unwrap();

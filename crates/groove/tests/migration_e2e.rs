@@ -11,7 +11,7 @@ use groove::sql::{
     ColumnDef, ColumnType, LensGenerationOptions, TableSchema, diff_schemas, generate_lens,
     row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue},
 };
-use std::sync::Arc;
+use std::rc::Rc;
 
 /// Demo: Full migration workflow for column rename
 #[test]
@@ -154,10 +154,10 @@ fn test_migration_workflow_column_rename() {
     println!("\n=== Phase 5: Row Transform Demo ===\n");
 
     // Create v1 row descriptor
-    let v1_descriptor = Arc::new(RowDescriptor::from_table_schema(&v1_schema));
+    let v1_descriptor = Rc::new(RowDescriptor::from_table_schema(&v1_schema));
 
     // Create v2 row descriptor
-    let v2_descriptor = Arc::new(RowDescriptor::from_table_schema(&v2_schema));
+    let v2_descriptor = Rc::new(RowDescriptor::from_table_schema(&v2_schema));
 
     // Build a v1 row
     let v1_row = RowBuilder::new(v1_descriptor.clone())
@@ -308,7 +308,7 @@ fn test_migration_workflow_add_column() {
     println!("  Backward: {:?}", result.lens.backward);
 
     // Create and transform a row
-    let v1_descriptor = Arc::new(RowDescriptor::from_table_schema(&v1_schema));
+    let v1_descriptor = Rc::new(RowDescriptor::from_table_schema(&v1_schema));
 
     let v1_row = RowBuilder::new(v1_descriptor.clone())
         .set_i64_by_name("id", 1)

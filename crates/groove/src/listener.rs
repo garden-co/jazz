@@ -10,7 +10,8 @@
 //! Each layer caches its last value so new subscribers get the current state.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
+use std::sync::RwLock;
 
 use bytes::Bytes;
 
@@ -72,9 +73,9 @@ pub struct ObjectState {
     /// The current tip commit IDs.
     pub tips: Vec<CommitId>,
     /// Reference to the branch for resolving commits.
-    branch: Arc<RwLock<Branch>>,
+    branch: Rc<RwLock<Branch>>,
     /// Reference to the environment for loading chunked content.
-    env: Arc<dyn Environment>,
+    env: Rc<dyn Environment>,
 }
 
 impl std::fmt::Debug for ObjectState {
@@ -88,11 +89,7 @@ impl std::fmt::Debug for ObjectState {
 
 impl ObjectState {
     /// Create a new state with no previous tips.
-    pub fn new(
-        tips: Vec<CommitId>,
-        branch: Arc<RwLock<Branch>>,
-        env: Arc<dyn Environment>,
-    ) -> Self {
+    pub fn new(tips: Vec<CommitId>, branch: Rc<RwLock<Branch>>, env: Rc<dyn Environment>) -> Self {
         ObjectState {
             previous_tips: None,
             tips,
@@ -105,8 +102,8 @@ impl ObjectState {
     pub fn with_previous(
         previous_tips: Option<Vec<CommitId>>,
         tips: Vec<CommitId>,
-        branch: Arc<RwLock<Branch>>,
-        env: Arc<dyn Environment>,
+        branch: Rc<RwLock<Branch>>,
+        env: Rc<dyn Environment>,
     ) -> Self {
         ObjectState {
             previous_tips,
@@ -132,12 +129,12 @@ impl ObjectState {
     }
 
     /// Get the branch reference.
-    pub fn branch(&self) -> &Arc<RwLock<Branch>> {
+    pub fn branch(&self) -> &Rc<RwLock<Branch>> {
         &self.branch
     }
 
     /// Get the environment reference.
-    pub fn env(&self) -> &Arc<dyn Environment> {
+    pub fn env(&self) -> &Rc<dyn Environment> {
         &self.env
     }
 
@@ -337,22 +334,22 @@ pub fn compute_change_ranges(old: &[u8], new: &[u8]) -> Vec<DiffRange> {
 /// Type alias for object listener callbacks.
 ///
 /// No Send+Sync bounds - the listener system is single-threaded.
-pub type ObjectCallback = Box<dyn Fn(Arc<ObjectState>)>;
+pub type ObjectCallback = Box<dyn Fn(Rc<ObjectState>)>;
 
 /// Internal state for a single object key.
 struct ObjectListenerState {
     /// Cached current state (None if never set).
-    current: Option<Arc<ObjectState>>,
+    current: Option<Rc<ObjectState>>,
     /// Previous tips for computing diffs.
     previous_tips: Option<Vec<CommitId>>,
     /// Environment reference.
-    env: Arc<dyn Environment>,
+    env: Rc<dyn Environment>,
     /// Active listeners.
     listeners: HashMap<ListenerId, ObjectCallback>,
 }
 
 impl ObjectListenerState {
-    fn new(env: Arc<dyn Environment>) -> Self {
+    fn new(env: Rc<dyn Environment>) -> Self {
         ObjectListenerState {
             current: None,
             previous_tips: None,
@@ -362,11 +359,11 @@ impl ObjectListenerState {
     }
 
     /// Update state and notify all listeners.
-    fn update(&mut self, tips: Vec<CommitId>, branch: Arc<RwLock<Branch>>) {
+    fn update(&mut self, tips: Vec<CommitId>, branch: Rc<RwLock<Branch>>) {
         let prev = self.previous_tips.take();
         self.previous_tips = Some(tips.clone());
 
-        let state = Arc::new(ObjectState::with_previous(
+        let state = Rc::new(ObjectState::with_previous(
             prev,
             tips,
             branch,
@@ -436,7 +433,7 @@ impl ObjectListenerRegistry {
     pub fn subscribe(
         &self,
         key: ObjectKey,
-        env: Arc<dyn Environment>,
+        env: Rc<dyn Environment>,
         callback: ObjectCallback,
     ) -> ListenerId {
         let id = {
@@ -461,9 +458,9 @@ impl ObjectListenerRegistry {
     pub fn ensure_initial_state(
         &self,
         key: &ObjectKey,
-        env: Arc<dyn Environment>,
+        env: Rc<dyn Environment>,
         tips: Vec<CommitId>,
-        branch: Arc<RwLock<Branch>>,
+        branch: Rc<RwLock<Branch>>,
     ) {
         let mut states = self.states.write().unwrap();
         let state = states
@@ -472,7 +469,7 @@ impl ObjectListenerRegistry {
         if state.current.is_none() {
             // Set initial state without notifying (there are no listeners yet)
             state.previous_tips = Some(tips.clone());
-            state.current = Some(Arc::new(ObjectState::with_previous(
+            state.current = Some(Rc::new(ObjectState::with_previous(
                 None,
                 tips,
                 branch,
@@ -500,7 +497,7 @@ impl ObjectListenerRegistry {
 
     /// Notify all listeners for an object that its state has changed.
     /// This is called by LocalNode when an object is written to.
-    pub fn notify(&self, key: &ObjectKey, tips: Vec<CommitId>, branch: Arc<RwLock<Branch>>) {
+    pub fn notify(&self, key: &ObjectKey, tips: Vec<CommitId>, branch: Rc<RwLock<Branch>>) {
         let mut states = self.states.write().unwrap();
         if let Some(state) = states.get_mut(key) {
             state.update(tips, branch);
@@ -508,7 +505,7 @@ impl ObjectListenerRegistry {
     }
 
     /// Get the current cached state for an object (if any).
-    pub fn get_current(&self, key: &ObjectKey) -> Option<Arc<ObjectState>> {
+    pub fn get_current(&self, key: &ObjectKey) -> Option<Rc<ObjectState>> {
         let states = self.states.read().unwrap();
         states.get(key).and_then(|s| s.current.clone())
     }

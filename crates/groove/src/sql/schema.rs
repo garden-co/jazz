@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use super::row_buffer::RowDescriptor;
 
@@ -32,7 +32,7 @@ pub enum ColumnType {
     BlobArray,
     /// Array of rows (used for ARRAY_AGG and array subqueries).
     /// Contains the descriptor for each item in the array.
-    Array(Arc<RowDescriptor>),
+    Array(Rc<RowDescriptor>),
 }
 
 impl ColumnType {

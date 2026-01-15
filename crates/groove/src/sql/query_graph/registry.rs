@@ -4,7 +4,8 @@
 //! to relevant graphs, and manages subscriptions.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
+use std::sync::RwLock;
 
 use crate::listener::ListenerId;
 use crate::object::ObjectId;
@@ -18,23 +19,16 @@ use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
 /// Callback type for query output changes.
-#[cfg(not(feature = "wasm"))]
-pub type OutputCallback = Box<dyn Fn(&DeltaBatch) + Send + Sync>;
-
-#[cfg(feature = "wasm")]
+/// No Send+Sync bounds - the system is single-threaded on all platforms.
 pub type OutputCallback = Box<dyn Fn(&DeltaBatch)>;
 
-/// Arc-wrapped callback for internal storage (allows cloning for lock-free notification).
-#[cfg(not(feature = "wasm"))]
-type ArcCallback = std::sync::Arc<dyn Fn(&DeltaBatch) + Send + Sync>;
-
-#[cfg(feature = "wasm")]
-type ArcCallback = std::sync::Arc<dyn Fn(&DeltaBatch)>;
+/// Rc-wrapped callback for internal storage (allows cloning for callback notification).
+type RcCallback = Rc<dyn Fn(&DeltaBatch)>;
 
 /// A registered query with its graph and callbacks.
 struct RegisteredQuery {
     graph: QueryGraph,
-    callbacks: HashMap<ListenerId, ArcCallback>,
+    callbacks: HashMap<ListenerId, RcCallback>,
     next_listener_id: u64,
 }
 
@@ -51,7 +45,7 @@ impl RegisteredQuery {
         let id = ListenerId::new(self.next_listener_id);
         self.next_listener_id += 1;
         // Convert Box to Arc for clonability
-        self.callbacks.insert(id, std::sync::Arc::from(callback));
+        self.callbacks.insert(id, std::rc::Rc::from(callback));
         id
     }
 
@@ -60,7 +54,7 @@ impl RegisteredQuery {
     }
 
     /// Get clones of all callbacks (for lock-free notification).
-    fn get_callbacks(&self) -> Vec<ArcCallback> {
+    fn get_callbacks(&self) -> Vec<RcCallback> {
         self.callbacks.values().cloned().collect()
     }
 }
@@ -187,16 +181,13 @@ impl GraphRegistry {
     }
 
     /// Get the output schema and descriptor for a query.
-    pub fn get_output_schema(
-        &self,
-        graph_id: GraphId,
-    ) -> Option<(TableSchema, Arc<RowDescriptor>)> {
+    pub fn get_output_schema(&self, graph_id: GraphId) -> Option<(TableSchema, Rc<RowDescriptor>)> {
         self.queries.read().unwrap().get(&graph_id).map(|q| {
             let schema = q
                 .graph
                 .output_schema()
                 .unwrap_or_else(|| TableSchema::new("_output", vec![]));
-            let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+            let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
             (schema, descriptor)
         })
     }
@@ -239,7 +230,7 @@ impl GraphRegistry {
         let lens_context = db.build_lens_context_for_table(table);
 
         // Phase 1: Process graphs and collect output deltas + callbacks
-        let pending: Vec<(DeltaBatch, Vec<ArcCallback>)> = {
+        let pending: Vec<(DeltaBatch, Vec<RcCallback>)> = {
             let mut cache = self.cache.write().unwrap();
             let mut queries = self.queries.write().unwrap();
 
@@ -454,7 +445,7 @@ impl GraphRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     use super::*;
     use crate::sql::query_graph::PredicateValue;
@@ -474,8 +465,8 @@ mod tests {
         )
     }
 
-    fn test_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::from_table_schema(&test_schema()))
+    fn test_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::from_table_schema(&test_schema()))
     }
 
     /// Create an Object with a commit containing the given row data on "main" branch.
@@ -550,7 +541,7 @@ mod tests {
 
         // Track callback invocations
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count = Rc::new(AtomicUsize::new(0));
         let count_clone = call_count.clone();
 
         registry.subscribe(
@@ -673,7 +664,7 @@ mod tests {
         let graph_id = registry.register(graph);
 
         // Track callback invocations
-        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count = Rc::new(AtomicUsize::new(0));
         let count_clone = call_count.clone();
 
         registry.subscribe(
@@ -1228,7 +1219,7 @@ mod tests {
         use crate::sql::lens::LensGenerationOptions;
         use crate::sql::row_buffer::RowDescriptor;
         use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
-        use std::sync::Arc;
+        use std::rc::Rc;
 
         // Create database and table with v1 schema: "title" and "status" columns
         let db = Database::in_memory();
@@ -1238,7 +1229,7 @@ mod tests {
         // Get v1 descriptor ID
         let desc_v1_id = db.get_descriptor_id("documents").unwrap();
         let schema_v1 = db.get_table("documents").unwrap();
-        let desc_v1 = Arc::new(RowDescriptor::from_table_schema(&schema_v1));
+        let desc_v1 = Rc::new(RowDescriptor::from_table_schema(&schema_v1));
 
         // Execute migration to v2: rename "title" → "name"
         let schema_v2 = TableSchema::new(
@@ -1256,7 +1247,7 @@ mod tests {
 
         // Get v2 descriptor ID
         let desc_v2_id = db.get_descriptor_id("documents").unwrap();
-        let desc_v2 = Arc::new(RowDescriptor::from_table_schema(&schema_v2));
+        let desc_v2 = Rc::new(RowDescriptor::from_table_schema(&schema_v2));
 
         // Verify lens context is set up correctly
         let lens_context = db.state().build_lens_context_for_table("documents");

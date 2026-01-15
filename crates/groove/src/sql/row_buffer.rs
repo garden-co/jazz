@@ -21,7 +21,7 @@
 //! For fixed-size types, the flag is followed by the value bytes (or zeros if null).
 //! For variable-size types, if null the length is 0.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::object::ObjectId;
 use crate::storage::ContentRef;
@@ -58,7 +58,7 @@ impl ColDescriptor {
     }
 
     /// Get the item descriptor for Array types.
-    pub fn item_descriptor(&self) -> Option<&Arc<RowDescriptor>> {
+    pub fn item_descriptor(&self) -> Option<&Rc<RowDescriptor>> {
         match &self.ty {
             ColumnType::Array(desc) => Some(desc),
             _ => None,
@@ -715,7 +715,7 @@ impl<'a> RowRef<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnedRow {
     /// Descriptor defining the row structure.
-    pub descriptor: Arc<RowDescriptor>,
+    pub descriptor: Rc<RowDescriptor>,
     /// Owned buffer containing row data.
     pub buffer: Vec<u8>,
 }
@@ -788,7 +788,7 @@ impl IdentifiedRow {
     /// Decode from binary format.
     ///
     /// Returns None if buffer is too short.
-    pub fn from_bytes(data: &[u8], descriptor: Arc<RowDescriptor>) -> Option<Self> {
+    pub fn from_bytes(data: &[u8], descriptor: Rc<RowDescriptor>) -> Option<Self> {
         if data.len() < 16 {
             return None;
         }
@@ -800,7 +800,7 @@ impl IdentifiedRow {
 
 impl OwnedRow {
     /// Create a new OwnedRow.
-    pub fn new(descriptor: Arc<RowDescriptor>, buffer: Vec<u8>) -> Self {
+    pub fn new(descriptor: Rc<RowDescriptor>, buffer: Vec<u8>) -> Self {
         OwnedRow { descriptor, buffer }
     }
 
@@ -840,7 +840,7 @@ impl OwnedRow {
     pub fn qualify_columns(&self, table: &str, schema: &TableSchema) -> Self {
         // Create a new descriptor with qualified column names
         let qualified_descriptor =
-            Arc::new(RowDescriptor::from_table_schema_qualified(schema, table));
+            Rc::new(RowDescriptor::from_table_schema_qualified(schema, table));
 
         // Build the new row with qualified column names
         let mut builder = RowBuilder::new(qualified_descriptor.clone());
@@ -879,10 +879,7 @@ impl OwnedRow {
                 let items: Vec<OwnedRow> = arr
                     .iter()
                     .map(|row_ref| {
-                        OwnedRow::new(
-                            Arc::new(row_ref.descriptor.clone()),
-                            row_ref.buffer.to_vec(),
-                        )
+                        OwnedRow::new(Rc::new(row_ref.descriptor.clone()), row_ref.buffer.to_vec())
                     })
                     .collect();
                 builder.set_array(idx, &items)
@@ -901,7 +898,7 @@ impl OwnedRow {
     pub fn project_rename(
         &self,
         column_map: &std::collections::HashMap<String, String>,
-        output_descriptor: Arc<RowDescriptor>,
+        output_descriptor: Rc<RowDescriptor>,
     ) -> Self {
         let mut builder = RowBuilder::new(output_descriptor.clone());
 
@@ -926,7 +923,7 @@ impl OwnedRow {
     pub fn merge_rows(rows: &[&OwnedRow]) -> OwnedRow {
         if rows.is_empty() {
             // Return an empty row with empty descriptor
-            return OwnedRow::new(Arc::new(RowDescriptor::new(std::iter::empty())), vec![]);
+            return OwnedRow::new(Rc::new(RowDescriptor::new(std::iter::empty())), vec![]);
         }
 
         if rows.len() == 1 {
@@ -936,7 +933,7 @@ impl OwnedRow {
         // Build combined descriptor preserving buffer order from sources
         let descriptors: Vec<&RowDescriptor> = rows.iter().map(|r| r.descriptor.as_ref()).collect();
         let combined_descriptor =
-            Arc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
+            Rc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
 
         // Build the combined row using RowBuilder
         let mut builder = RowBuilder::new(combined_descriptor.clone());
@@ -958,14 +955,14 @@ impl OwnedRow {
 
 /// Builder for constructing row buffers.
 pub struct RowBuilder {
-    descriptor: Arc<RowDescriptor>,
+    descriptor: Rc<RowDescriptor>,
     fixed_section: Vec<u8>,
     variable_sections: Vec<Vec<u8>>,
 }
 
 impl RowBuilder {
     /// Create a new builder for the given descriptor.
-    pub fn new(descriptor: Arc<RowDescriptor>) -> Self {
+    pub fn new(descriptor: Rc<RowDescriptor>) -> Self {
         let fixed_size = descriptor.fixed_size;
         let var_count = descriptor.variable_count;
 
@@ -1349,10 +1346,7 @@ impl RowBuilder {
                 let items: Vec<OwnedRow> = arr
                     .iter()
                     .map(|row_ref| {
-                        OwnedRow::new(
-                            Arc::new(row_ref.descriptor.clone()),
-                            row_ref.buffer.to_vec(),
-                        )
+                        OwnedRow::new(Rc::new(row_ref.descriptor.clone()), row_ref.buffer.to_vec())
                     })
                     .collect();
                 self.set_array(idx, &items)
@@ -1448,7 +1442,7 @@ impl RowBuilder {
 pub fn project_row(
     row: RowRef<'_>,
     source_cols: &[usize],
-    target_descriptor: Arc<RowDescriptor>,
+    target_descriptor: Rc<RowDescriptor>,
 ) -> OwnedRow {
     let mut builder = RowBuilder::new(target_descriptor);
 
@@ -1481,7 +1475,7 @@ pub fn project_row(
 pub fn join_rows(
     left: RowRef<'_>,
     right: RowRef<'_>,
-    target_descriptor: Arc<RowDescriptor>,
+    target_descriptor: Rc<RowDescriptor>,
 ) -> OwnedRow {
     let mut builder = RowBuilder::new(target_descriptor.clone());
 
@@ -1656,12 +1650,12 @@ pub fn merge_per_column_lww(
     // Handle edge cases
     if candidates.is_empty() {
         // No candidates, return LCA as-is
-        return OwnedRow::new(Arc::new(descriptor.clone()), lca_content.to_vec());
+        return OwnedRow::new(Rc::new(descriptor.clone()), lca_content.to_vec());
     }
 
     if candidates.len() == 1 {
         // Single candidate, just return it (no merge needed)
-        return OwnedRow::new(Arc::new(descriptor.clone()), candidates[0].content.to_vec());
+        return OwnedRow::new(Rc::new(descriptor.clone()), candidates[0].content.to_vec());
     }
 
     // Step 1: For each candidate, compute which columns it changed relative to LCA
@@ -1676,7 +1670,7 @@ pub fn merge_per_column_lww(
 
     // Step 2: For each column, determine which candidate wins
     // Build the merged row using RowBuilder
-    let desc_arc = Arc::new(descriptor.clone());
+    let desc_arc = Rc::new(descriptor.clone());
     let mut builder = RowBuilder::new(desc_arc.clone());
 
     for (col_idx, col) in descriptor.columns.iter().enumerate() {
@@ -1750,7 +1744,7 @@ mod tests {
 
     #[test]
     fn test_row_builder_and_reader() {
-        let desc = Arc::new(RowDescriptor::new([
+        let desc = Rc::new(RowDescriptor::new([
             ("name".to_string(), ColumnType::String, false),
             ("age".to_string(), ColumnType::I32, false),
             ("score".to_string(), ColumnType::F64, false),
@@ -1775,7 +1769,7 @@ mod tests {
 
     #[test]
     fn test_nullable_columns() {
-        let desc = Arc::new(RowDescriptor::new([
+        let desc = Rc::new(RowDescriptor::new([
             ("name".to_string(), ColumnType::String, true),
             ("age".to_string(), ColumnType::I32, true),
         ]));
@@ -1804,7 +1798,7 @@ mod tests {
 
     #[test]
     fn test_projection() {
-        let source_desc = Arc::new(RowDescriptor::new([
+        let source_desc = Rc::new(RowDescriptor::new([
             ("a".to_string(), ColumnType::I32, false),
             ("b".to_string(), ColumnType::String, false),
             ("c".to_string(), ColumnType::I64, false),
@@ -1821,7 +1815,7 @@ mod tests {
             .build();
 
         // Project to just columns a and c
-        let target_desc = Arc::new(RowDescriptor::new([
+        let target_desc = Rc::new(RowDescriptor::new([
             ("a".to_string(), ColumnType::I32, false),
             ("c".to_string(), ColumnType::I64, false),
         ]));
@@ -1907,7 +1901,7 @@ mod tests {
         use std::collections::HashMap;
 
         // Create a row with qualified column names (like after a JOIN)
-        let source_desc = Arc::new(RowDescriptor::new([
+        let source_desc = Rc::new(RowDescriptor::new([
             ("documents.id".to_string(), ColumnType::I32, false),
             ("documents.title".to_string(), ColumnType::String, false),
             ("documents.folder_id".to_string(), ColumnType::I64, false),
@@ -1937,7 +1931,7 @@ mod tests {
         column_map.insert("documents.folder_id".to_string(), "folder_id".to_string());
 
         // Create output descriptor with unqualified names
-        let output_desc = Arc::new(RowDescriptor::new([
+        let output_desc = Rc::new(RowDescriptor::new([
             ("id".to_string(), ColumnType::I32, false),
             ("title".to_string(), ColumnType::String, false),
             ("folder_id".to_string(), ColumnType::I64, false),
@@ -1968,7 +1962,7 @@ mod tests {
         ])
     }
 
-    fn make_test_row(desc: &Arc<RowDescriptor>, name: &str, status: &str, count: i32) -> Vec<u8> {
+    fn make_test_row(desc: &Rc<RowDescriptor>, name: &str, status: &str, count: i32) -> Vec<u8> {
         let name_idx = desc.column_index("name").unwrap();
         let status_idx = desc.column_index("status").unwrap();
         let count_idx = desc.column_index("count").unwrap();
@@ -1983,7 +1977,7 @@ mod tests {
 
     #[test]
     fn test_diff_columns_no_changes() {
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let row = make_test_row(&desc, "Alice", "active", 10);
 
         // Same row should have no differences
@@ -1993,7 +1987,7 @@ mod tests {
 
     #[test]
     fn test_diff_columns_single_change() {
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let base = make_test_row(&desc, "Alice", "active", 10);
         let derived = make_test_row(&desc, "Bob", "active", 10);
 
@@ -2004,7 +1998,7 @@ mod tests {
 
     #[test]
     fn test_diff_columns_multiple_changes() {
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let base = make_test_row(&desc, "Alice", "active", 10);
         let derived = make_test_row(&desc, "Bob", "inactive", 20);
 
@@ -2017,7 +2011,7 @@ mod tests {
 
     #[test]
     fn test_merge_per_column_lww_empty_candidates() {
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let lca = make_test_row(&desc, "Original", "draft", 0);
 
         // Empty candidates should return LCA
@@ -2035,7 +2029,7 @@ mod tests {
 
     #[test]
     fn test_merge_per_column_lww_single_candidate() {
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let lca = make_test_row(&desc, "Original", "draft", 0);
         let candidate_a = make_test_row(&desc, "Alice", "active", 5);
 
@@ -2060,7 +2054,7 @@ mod tests {
         // Candidate B (t=150): changes status to "active"
         // Result: {name: "Alice", status: "active", count: 0}
 
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let lca = make_test_row(&desc, "Original", "draft", 0);
         let candidate_a = make_test_row(&desc, "Alice", "draft", 0); // Only name changed
         let candidate_b = make_test_row(&desc, "Original", "active", 0); // Only status changed
@@ -2086,7 +2080,7 @@ mod tests {
     #[test]
     fn test_merge_per_column_lww_conflicting_changes_timestamp_wins() {
         // Both candidates change the same column, later timestamp wins
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let lca = make_test_row(&desc, "Original", "draft", 0);
         let candidate_a = make_test_row(&desc, "Alice", "draft", 0);
         let candidate_b = make_test_row(&desc, "Bob", "draft", 0);
@@ -2106,7 +2100,7 @@ mod tests {
     fn test_merge_per_column_lww_conflicting_changes_commit_id_tiebreaker() {
         // Both candidates change the same column with same timestamp
         // Higher commit ID wins as tiebreaker
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let lca = make_test_row(&desc, "Original", "draft", 0);
         let candidate_a = make_test_row(&desc, "Alice", "draft", 0);
         let candidate_b = make_test_row(&desc, "Bob", "draft", 0);
@@ -2131,7 +2125,7 @@ mod tests {
     #[test]
     fn test_merge_per_column_lww_three_way_merge() {
         // Three candidates changing different columns
-        let desc = Arc::new(make_test_descriptor());
+        let desc = Rc::new(make_test_descriptor());
         let lca = make_test_row(&desc, "Original", "draft", 0);
         let candidate_a = make_test_row(&desc, "Alice", "draft", 0); // name
         let candidate_b = make_test_row(&desc, "Original", "active", 0); // status

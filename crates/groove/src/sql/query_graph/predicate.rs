@@ -390,10 +390,10 @@ mod tests {
 
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::ColumnType;
-    use std::sync::Arc;
+    use std::rc::Rc;
 
-    fn make_buffer_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([
+    fn make_buffer_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::new([
             ("name".to_string(), ColumnType::String, false),
             ("active".to_string(), ColumnType::Bool, false),
             ("age".to_string(), ColumnType::I64, true),
@@ -401,7 +401,7 @@ mod tests {
     }
 
     fn make_buffer_row(
-        descriptor: &Arc<RowDescriptor>,
+        descriptor: &Rc<RowDescriptor>,
         name: &str,
         active: bool,
         age: Option<i64>,

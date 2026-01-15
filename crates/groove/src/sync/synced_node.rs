@@ -13,7 +13,7 @@
 //! Objects marked as `node_private` in their metadata are never synced.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 
 // Platform-agnostic Instant
@@ -353,7 +353,7 @@ pub struct ConnectedClients {
     identity_sessions: HashMap<String, std::collections::HashSet<SessionId>>,
 
     /// Token validator.
-    token_validator: Option<Arc<dyn TokenValidator>>,
+    token_validator: Option<Rc<dyn TokenValidator>>,
 
     /// Next session ID.
     next_session_id: u64,
@@ -393,7 +393,7 @@ impl ConnectedClients {
     }
 
     /// Set the token validator.
-    pub fn set_token_validator(&mut self, validator: Arc<dyn TokenValidator>) {
+    pub fn set_token_validator(&mut self, validator: Rc<dyn TokenValidator>) {
         self.token_validator = Some(validator);
     }
 
@@ -602,7 +602,7 @@ pub type OnObjectsReceivedCallback =
 /// Objects marked as `node_private: true` in their metadata are never synced.
 pub struct SyncedNode<R: Runtime, E: ClientEnv> {
     /// The underlying object store.
-    node: Arc<LocalNode>,
+    node: Rc<LocalNode>,
 
     /// Runtime for spawning async tasks.
     runtime: R,
@@ -627,7 +627,7 @@ pub struct SyncedNode<R: Runtime, E: ClientEnv> {
 
 impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Create a new SyncedNode from a LocalNode.
-    pub fn new(node: Arc<LocalNode>, runtime: R) -> Self {
+    pub fn new(node: Rc<LocalNode>, runtime: R) -> Self {
         Self {
             node,
             runtime,
@@ -641,7 +641,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     }
 
     /// Create a new SyncedNode with custom configuration.
-    pub fn with_config(node: Arc<LocalNode>, runtime: R, config: SyncConfig) -> Self {
+    pub fn with_config(node: Rc<LocalNode>, runtime: R, config: SyncConfig) -> Self {
         Self {
             node,
             runtime,
@@ -660,8 +660,8 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     }
 
     /// Get the underlying LocalNode as an Arc.
-    pub fn node_arc(&self) -> Arc<LocalNode> {
-        Arc::clone(&self.node)
+    pub fn node_arc(&self) -> Rc<LocalNode> {
+        Rc::clone(&self.node)
     }
 
     /// Get the runtime.
@@ -718,7 +718,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
 
     #[cfg(not(target_arch = "wasm32"))]
     /// Set the token validator for accepting client connections.
-    pub fn set_token_validator(&self, validator: Arc<dyn TokenValidator>) {
+    pub fn set_token_validator(&self, validator: Rc<dyn TokenValidator>) {
         self.connected_clients
             .write()
             .set_token_validator(validator);
@@ -858,8 +858,8 @@ impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
     /// This spawns a background task that periodically checks for timed-out
     /// sessions and removes them. Stale states are kept for a grace period
     /// to allow reconnection.
-    pub fn start_timeout_monitor(self: &Arc<Self>) {
-        let node = Arc::clone(self);
+    pub fn start_timeout_monitor(self: &Rc<Self>) {
+        let node = Rc::clone(self);
         let timeout = Duration::from_millis(self.config.session_timeout_ms);
         let check_interval = Duration::from_secs(10);
         let grace_period = Duration::from_secs(300); // 5 minutes
@@ -915,16 +915,16 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
     ///
     /// The `queries` parameter specifies the initial queries to subscribe to.
     ///
-    /// Note: This method requires `Arc<Self>` for the spawn. On platforms where
+    /// Note: This method requires `Rc<Self>` for the spawn. On platforms where
     /// this isn't available (e.g., WASM), use `upstream_event_loop` directly
     /// with your own spawn pattern.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn start_upstream_sync(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         upstream_id: UpstreamId,
         queries: Vec<(String, SubscriptionOptions)>,
     ) {
-        let node = Arc::clone(self);
+        let node = Rc::clone(self);
         self.runtime.spawn(async move {
             node.upstream_event_loop(upstream_id, queries).await;
         });

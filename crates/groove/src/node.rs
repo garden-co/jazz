@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use bytes::Bytes;
 
@@ -72,9 +72,9 @@ pub fn generate_object_id() -> ObjectId {
 /// Uses internal mutability so that objects can be created and written to
 /// without requiring exclusive access to the node.
 pub struct LocalNode {
-    objects: RwLock<BTreeMap<ObjectId, Arc<RwLock<Object>>>>,
+    objects: RwLock<BTreeMap<ObjectId, Rc<RwLock<Object>>>>,
     listeners: ObjectListenerRegistry,
-    env: Arc<dyn Environment>,
+    env: Rc<dyn Environment>,
     /// Optional callback invoked when commits are applied via `apply_commits`.
     /// Used by Database to be notified of sync-applied commits.
     /// Single-threaded: uses RefCell on all platforms.
@@ -83,7 +83,7 @@ pub struct LocalNode {
 
 impl Default for LocalNode {
     fn default() -> Self {
-        Self::new(Arc::new(MemoryEnvironment::new()))
+        Self::new(Rc::new(MemoryEnvironment::new()))
     }
 }
 
@@ -98,7 +98,7 @@ impl std::fmt::Debug for LocalNode {
 
 impl LocalNode {
     /// Create a new LocalNode with the given environment.
-    pub fn new(env: Arc<dyn Environment>) -> Self {
+    pub fn new(env: Rc<dyn Environment>) -> Self {
         LocalNode {
             objects: RwLock::new(BTreeMap::new()),
             listeners: ObjectListenerRegistry::new(),
@@ -123,7 +123,7 @@ impl LocalNode {
     }
 
     /// Get the environment.
-    pub fn env(&self) -> &Arc<dyn Environment> {
+    pub fn env(&self) -> &Rc<dyn Environment> {
         &self.env
     }
 
@@ -185,7 +185,7 @@ impl LocalNode {
         self.objects
             .write()
             .unwrap()
-            .insert(id, Arc::new(RwLock::new(object)));
+            .insert(id, Rc::new(RwLock::new(object)));
 
         Some(id)
     }
@@ -198,7 +198,7 @@ impl LocalNode {
         self.objects
             .write()
             .unwrap()
-            .insert(id, Arc::new(RwLock::new(object)));
+            .insert(id, Rc::new(RwLock::new(object)));
         id
     }
 
@@ -213,7 +213,7 @@ impl LocalNode {
         self.objects
             .write()
             .unwrap()
-            .insert(id, Arc::new(RwLock::new(object)));
+            .insert(id, Rc::new(RwLock::new(object)));
         id
     }
 
@@ -224,7 +224,7 @@ impl LocalNode {
         let mut objects = self.objects.write().unwrap();
         if let std::collections::btree_map::Entry::Vacant(e) = objects.entry(id) {
             let object = Object::new(id, prefix);
-            e.insert(Arc::new(RwLock::new(object)));
+            e.insert(Rc::new(RwLock::new(object)));
             true
         } else {
             false
@@ -243,7 +243,7 @@ impl LocalNode {
         let mut objects = self.objects.write().unwrap();
         if let std::collections::btree_map::Entry::Vacant(e) = objects.entry(id) {
             let object = Object::new_with_meta(id, prefix, Some(meta));
-            e.insert(Arc::new(RwLock::new(object)));
+            e.insert(Rc::new(RwLock::new(object)));
             true
         } else {
             false
@@ -251,7 +251,7 @@ impl LocalNode {
     }
 
     /// Get an object by ID.
-    pub fn get_object(&self, id: ObjectId) -> Option<Arc<RwLock<Object>>> {
+    pub fn get_object(&self, id: ObjectId) -> Option<Rc<RwLock<Object>>> {
         self.objects.read().unwrap().get(&id).cloned()
     }
 
@@ -312,7 +312,7 @@ impl LocalNode {
     }
 
     /// Get current cached state for an object's branch.
-    pub fn get_current_state(&self, object_id: ObjectId, branch: &str) -> Option<Arc<ObjectState>> {
+    pub fn get_current_state(&self, object_id: ObjectId, branch: &str) -> Option<Rc<ObjectState>> {
         let key = ObjectKey::new(object_id, branch);
         self.listeners.get_current(&key)
     }
@@ -598,7 +598,7 @@ impl LocalNode {
                 drop(objects);
                 // Create new object with empty prefix
                 let object = Object::new(object_id, "");
-                let arc = Arc::new(RwLock::new(object));
+                let arc = Rc::new(RwLock::new(object));
                 self.objects.write().unwrap().insert(object_id, arc.clone());
                 arc
             }

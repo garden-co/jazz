@@ -1,8 +1,10 @@
 //! Integration tests for LocalNode.
 
-use groove::{LocalNode, ObjectId, generate_object_id};
+use std::rc::Rc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+
+use groove::{LocalNode, ObjectId, generate_object_id};
 
 #[test]
 fn local_node_create_and_get_objects() {
@@ -49,7 +51,7 @@ fn subscribe_to_empty_object() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let _listener_id = node
@@ -90,8 +92,8 @@ fn write_notifies_listener() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let tip_counts = Arc::new(RwLock::new(Vec::new()));
+    let call_count = Rc::new(AtomicUsize::new(0));
+    let tip_counts = Rc::new(RwLock::new(Vec::new()));
     let call_count_clone = call_count.clone();
     let tip_counts_clone = tip_counts.clone();
 
@@ -133,7 +135,7 @@ fn write_without_subscriber() {
     let commit_id = node.write(id, "main", b"hello", "alice", 1000).unwrap();
 
     // Now subscribe and verify content in callback
-    let received_tips = Arc::new(RwLock::new(Vec::new()));
+    let received_tips = Rc::new(RwLock::new(Vec::new()));
     let received_tips_clone = received_tips.clone();
 
     let _listener_id = node
@@ -159,7 +161,7 @@ fn notify_object() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let _listener_id = node
@@ -196,8 +198,8 @@ fn multiple_subscribers_all_notified() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    let count1 = Arc::new(AtomicUsize::new(0));
-    let count2 = Arc::new(AtomicUsize::new(0));
+    let count1 = Rc::new(AtomicUsize::new(0));
+    let count2 = Rc::new(AtomicUsize::new(0));
     let count1_clone = count1.clone();
     let count2_clone = count2.clone();
 
@@ -249,7 +251,7 @@ fn unsubscribe_stops_notifications() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let listener_id = node
@@ -282,7 +284,7 @@ fn callback_called_synchronously() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    let was_called = Arc::new(AtomicBool::new(false));
+    let was_called = Rc::new(AtomicBool::new(false));
     let was_called_clone = was_called.clone();
 
     let _listener_id = node

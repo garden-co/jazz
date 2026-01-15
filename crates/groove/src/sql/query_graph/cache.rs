@@ -1,7 +1,7 @@
 //! Shared row cache for query graphs.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::object::ObjectId;
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
@@ -100,7 +100,7 @@ impl RowCache {
 /// Table metadata for the buffer row cache.
 struct TableMeta {
     /// Row descriptor for this table (shared by all rows).
-    descriptor: Arc<RowDescriptor>,
+    descriptor: Rc<RowDescriptor>,
     /// Cached rows by ObjectId (None = confirmed deleted).
     rows: HashMap<ObjectId, Option<OwnedRow>>,
 }
@@ -135,7 +135,7 @@ impl BufferRowCache {
     ///
     /// This must be called before inserting rows for a table.
     pub fn register_table(&mut self, table: &str, schema: &TableSchema) {
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(schema));
         self.tables.insert(
             table.to_string(),
             TableMeta {
@@ -146,7 +146,7 @@ impl BufferRowCache {
     }
 
     /// Register a table with an existing descriptor.
-    pub fn register_table_with_descriptor(&mut self, table: &str, descriptor: Arc<RowDescriptor>) {
+    pub fn register_table_with_descriptor(&mut self, table: &str, descriptor: Rc<RowDescriptor>) {
         self.tables.insert(
             table.to_string(),
             TableMeta {
@@ -157,7 +157,7 @@ impl BufferRowCache {
     }
 
     /// Get the row descriptor for a table.
-    pub fn get_descriptor(&self, table: &str) -> Option<Arc<RowDescriptor>> {
+    pub fn get_descriptor(&self, table: &str) -> Option<Rc<RowDescriptor>> {
         self.tables.get(table).map(|t| t.descriptor.clone())
     }
 
@@ -265,14 +265,14 @@ mod tests {
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
     use crate::sql::schema::ColumnType;
 
-    fn make_user_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([
+    fn make_user_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::new([
             ("name".to_string(), ColumnType::String, false),
             ("age".to_string(), ColumnType::I32, false),
         ]))
     }
 
-    fn make_buffer_row(descriptor: &Arc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
+    fn make_buffer_row(descriptor: &Rc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
         let name_idx = descriptor.column_index("name").unwrap();
         let age_idx = descriptor.column_index("age").unwrap();
         RowBuilder::new(descriptor.clone())

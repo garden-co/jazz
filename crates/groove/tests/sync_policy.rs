@@ -9,7 +9,6 @@
 #![cfg(feature = "sync-server")]
 
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use groove::ObjectId;
@@ -310,7 +309,7 @@ async fn test_owner_policy_e2e() {
 
     // Create Alice's document
     let schema = db.get_table("documents").unwrap();
-    let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
     let row = RowBuilder::new(descriptor)
         .set_string_by_name("title", "Alice's Secret")
         .set_ref_by_name("owner_id", alice_id)

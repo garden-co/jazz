@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
@@ -260,8 +261,8 @@ pub struct Object {
     pub id: ObjectId,
     /// Type prefix (e.g., "chat", "message")
     pub prefix: String,
-    /// Named branches (wrapped in Arc<RwLock<>> for signal access)
-    branches: HashMap<String, Arc<RwLock<Branch>>>,
+    /// Named branches (wrapped in Rc<RwLock<>> for signal access)
+    branches: HashMap<String, Rc<RwLock<Branch>>>,
     /// Object-level metadata
     pub meta: Option<BTreeMap<String, String>>,
 }
@@ -283,7 +284,7 @@ impl Object {
         let mut branches = HashMap::new();
         branches.insert(
             "main".to_string(),
-            Arc::new(RwLock::new(Branch::new("main"))),
+            Rc::new(RwLock::new(Branch::new("main"))),
         );
 
         Object {
@@ -335,9 +336,9 @@ impl Object {
         meta.insert(key.to_string(), value.to_string());
     }
 
-    /// Get a reference to a branch (Arc<RwLock<Branch>>).
+    /// Get a reference to a branch (Rc<RwLock<Branch>>).
     /// Use this when you need to share the branch with signals.
-    pub fn branch_ref(&self, name: &str) -> Option<Arc<RwLock<Branch>>> {
+    pub fn branch_ref(&self, name: &str) -> Option<Rc<RwLock<Branch>>> {
         self.branches.get(name).cloned()
     }
 
@@ -409,8 +410,7 @@ impl Object {
         new_branch.frontier = vec![*from_commit];
 
         drop(source); // Release read lock before modifying self.branches
-        self.branches
-            .insert(name, Arc::new(RwLock::new(new_branch)));
+        self.branches.insert(name, Rc::new(RwLock::new(new_branch)));
         Ok(())
     }
 

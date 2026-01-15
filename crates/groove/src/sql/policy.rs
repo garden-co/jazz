@@ -1791,7 +1791,7 @@ mod tests {
     use crate::sql::schema::{ColumnDef, ColumnType};
 
     use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor};
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     /// Mock implementation for testing.
     struct MockLookup {
@@ -1823,7 +1823,7 @@ mod tests {
             F: FnOnce(RowBuilder) -> OwnedRow,
         {
             let schema = self.schemas.get(table).expect("schema must exist");
-            let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+            let descriptor = Rc::new(RowDescriptor::from_table_schema(schema));
             let row = f(RowBuilder::new(descriptor));
             self.rows.insert((table.to_string(), id), row);
         }
@@ -2147,7 +2147,7 @@ mod tests {
 
         // Alice can insert doc with herself as author
         let doc_schema = lookup.schemas.get("documents").unwrap();
-        let new_doc_desc = Arc::new(RowDescriptor::from_table_schema(doc_schema));
+        let new_doc_desc = Rc::new(RowDescriptor::from_table_schema(doc_schema));
         let new_doc_id = ObjectId::new(100);
         let new_doc = RowBuilder::new(new_doc_desc.clone())
             .set_string_by_name("title", "Alice's Doc")
@@ -2230,7 +2230,7 @@ mod tests {
         };
 
         let doc_schema = lookup.schemas.get("documents").unwrap();
-        let doc_desc = Arc::new(RowDescriptor::from_table_schema(doc_schema));
+        let doc_desc = Rc::new(RowDescriptor::from_table_schema(doc_schema));
 
         // Alice can update title
         let new_doc = RowBuilder::new(doc_desc.clone())

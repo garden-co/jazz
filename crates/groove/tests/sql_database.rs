@@ -1,7 +1,8 @@
 //! Integration tests for sql::Database
 
+use std::rc::Rc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
 
 use groove::ObjectId;
 use groove::sql::{
@@ -15,7 +16,7 @@ fn make_row<F>(schema: &TableSchema, f: F) -> OwnedRow
 where
     F: FnOnce(RowBuilder) -> RowBuilder,
 {
-    let desc = Arc::new(RowDescriptor::from_table_schema(schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(schema));
     f(RowBuilder::new(desc)).build()
 }
 
@@ -1277,8 +1278,8 @@ fn incremental_query_callback_on_insert() {
 
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let delta_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count = Rc::new(AtomicUsize::new(0));
+    let delta_counts = Rc::new(RwLock::new(Vec::<usize>::new()));
     let call_count_clone = call_count.clone();
     let delta_counts_clone = delta_counts.clone();
 
@@ -1337,8 +1338,8 @@ fn incremental_query_callback_on_delete() {
     assert!(names.contains(&Some(RowValue::String("Alice"))));
     assert!(names.contains(&Some(RowValue::String("Bob"))));
 
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let delta_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count = Rc::new(AtomicUsize::new(0));
+    let delta_counts = Rc::new(RwLock::new(Vec::<usize>::new()));
     let call_count_clone = call_count.clone();
     let delta_counts_clone = delta_counts.clone();
 
@@ -1427,8 +1428,8 @@ fn incremental_join_updates_on_post_insert() {
         .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let delta_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count = Rc::new(AtomicUsize::new(0));
+    let delta_counts = Rc::new(RwLock::new(Vec::<usize>::new()));
     let call_count_clone = call_count.clone();
     let delta_counts_clone = delta_counts.clone();
 
@@ -1478,7 +1479,7 @@ fn incremental_join_updates_on_user_change() {
         .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let _sub_id = query.subscribe(Box::new(move |_delta| {
@@ -1570,8 +1571,8 @@ fn incremental_join_delete_user() {
         .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let delta_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count = Rc::new(AtomicUsize::new(0));
+    let delta_counts = Rc::new(RwLock::new(Vec::<usize>::new()));
     let call_count_clone = call_count.clone();
     let delta_counts_clone = delta_counts.clone();
 
@@ -3361,7 +3362,7 @@ fn incremental_query_outer_join_with_inner_array_joins() {
 /// 3. Query should update correctly with resolved joins
 #[test]
 fn incremental_query_array_with_inner_join_empty_start() {
-    use std::sync::Arc;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -3406,7 +3407,7 @@ fn incremental_query_array_with_inner_join_empty_start() {
     assert_eq!(rows.len(), 0, "Should start with 0 rows");
 
     // Set up listener to track updates
-    let update_count = Arc::new(AtomicUsize::new(0));
+    let update_count = Rc::new(AtomicUsize::new(0));
     let update_count_clone = update_count.clone();
     query.subscribe(Box::new(move |_deltas| {
         update_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -3517,7 +3518,7 @@ fn incremental_query_array_with_inner_join_empty_start() {
 /// This was previously broken - inner join deltas were silently dropped.
 #[test]
 fn incremental_query_array_inner_join_update() {
-    use std::sync::Arc;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -3597,7 +3598,7 @@ fn incremental_query_array_inner_join_update() {
     }
 
     // Track updates
-    let update_count = Arc::new(AtomicUsize::new(0));
+    let update_count = Rc::new(AtomicUsize::new(0));
     let update_count_clone = update_count.clone();
     query.subscribe(Box::new(move |_deltas| {
         update_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -3659,7 +3660,7 @@ fn incremental_query_array_inner_join_update() {
 /// Query subscription is created BEFORE any data exists.
 #[test]
 fn incremental_query_outer_join_plus_array_inner_joins_empty_start() {
-    use std::sync::Arc;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -3732,7 +3733,7 @@ fn incremental_query_outer_join_plus_array_inner_joins_empty_start() {
     assert_eq!(rows.len(), 0, "Should start with 0 rows");
 
     // Set up listener to track updates
-    let update_count = Arc::new(AtomicUsize::new(0));
+    let update_count = Rc::new(AtomicUsize::new(0));
     let update_count_clone = update_count.clone();
     query.subscribe(Box::new(move |_deltas| {
         update_count_clone.fetch_add(1, Ordering::SeqCst);

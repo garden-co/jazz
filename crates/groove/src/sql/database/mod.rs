@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use crate::listener::ListenerId;
 use crate::node::{LocalNode, generate_object_id};
@@ -63,7 +63,7 @@ pub struct IncrementalQuery {
     /// The graph ID in the registry.
     graph_id: GraphId,
     /// Reference to database state for output retrieval.
-    db_state: Arc<DatabaseState>,
+    db_state: Rc<DatabaseState>,
 }
 
 impl std::fmt::Debug for IncrementalQuery {
@@ -143,7 +143,7 @@ impl Drop for IncrementalQuery {
 pub struct DatabaseState {
     /// Shared reference to the underlying object store.
     /// This can be shared with SyncedNode for sync operations.
-    node: Arc<LocalNode>,
+    node: Rc<LocalNode>,
     /// Object ID for the database catalog.
     catalog_object_id: ObjectId,
     /// Map from table name to schema object ID.
@@ -182,8 +182,8 @@ impl DatabaseState {
     }
 
     /// Get the underlying LocalNode as an Arc (for sharing with SyncedNode).
-    pub fn node_arc(&self) -> Arc<LocalNode> {
-        Arc::clone(&self.node)
+    pub fn node_arc(&self) -> Rc<LocalNode> {
+        Rc::clone(&self.node)
     }
 
     /// Get the catalog object ID.
@@ -275,8 +275,8 @@ impl DatabaseState {
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn new(env: Arc<dyn Environment>) -> Self {
-        let node = Arc::new(LocalNode::new(env));
+    fn new(env: Rc<dyn Environment>) -> Self {
+        let node = Rc::new(LocalNode::new(env));
 
         // Create catalog object
         let catalog_object_id = node.create_object("catalog");
@@ -308,7 +308,7 @@ impl DatabaseState {
 
     #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory() -> Self {
-        let node = Arc::new(LocalNode::in_memory());
+        let node = Rc::new(LocalNode::in_memory());
 
         // Create catalog object
         let catalog_object_id = node.create_object("catalog");
@@ -343,7 +343,7 @@ impl DatabaseState {
     /// This allows multiple clients to share the same catalog via sync.
     #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory_with_catalog(catalog_object_id: ObjectId) -> Self {
-        let node = Arc::new(LocalNode::in_memory());
+        let node = Rc::new(LocalNode::in_memory());
 
         // Ensure catalog object exists (creates if new, reuses if exists)
         let is_new = node.ensure_object(catalog_object_id, "catalog");
@@ -382,7 +382,7 @@ impl DatabaseState {
     /// Use `has_catalog()` or `await_catalog()` to check/wait for catalog arrival.
     #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory_replica(catalog_object_id: ObjectId) -> Self {
-        let node = Arc::new(LocalNode::in_memory());
+        let node = Rc::new(LocalNode::in_memory());
 
         // Create the catalog object but don't write to it
         node.ensure_object(catalog_object_id, "catalog");
@@ -421,8 +421,8 @@ impl DatabaseState {
     /// 2. Rebuilds column change metadata for proper per-column LWW merge
     /// 3. Notifies query graphs of the change
     ///
-    fn setup_sync_callback(state: Arc<DatabaseState>) {
-        let state_clone = Arc::clone(&state);
+    fn setup_sync_callback(state: Rc<DatabaseState>) {
+        let state_clone = Rc::clone(&state);
         let callback = Rc::new(
             move |object_id: ObjectId, branch: &str, _commits: &[crate::commit::Commit]| {
                 // Look up table name from object metadata
@@ -487,7 +487,7 @@ impl DatabaseState {
     pub fn get_object(
         &self,
         id: ObjectId,
-    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::object::Object>>> {
+    ) -> Option<std::rc::Rc<std::sync::RwLock<crate::object::Object>>> {
         self.node.get_object(id)
     }
 
@@ -497,7 +497,7 @@ impl DatabaseState {
             Some(s) => s,
             None => return vec![],
         };
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
 
         let row_ids: Vec<ObjectId> = {
             let table_rows_objects = self.table_rows_objects.read().unwrap();
@@ -538,7 +538,7 @@ impl DatabaseState {
     /// Get a single row by ID in buffer format.
     pub fn get_row(&self, table: &str, id: ObjectId) -> Option<(ObjectId, OwnedRow)> {
         let schema = self.get_schema(table)?;
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
 
         // Check if row belongs to this table
         {
@@ -611,9 +611,9 @@ impl DatabaseState {
     pub fn load_row_descriptor_by_id(
         &self,
         descriptor_id: DescriptorId,
-    ) -> Option<Arc<RowDescriptor>> {
+    ) -> Option<Rc<RowDescriptor>> {
         let table_descriptor = self.load_descriptor_by_id(descriptor_id)?;
-        Some(Arc::new(RowDescriptor::from_table_schema(
+        Some(Rc::new(RowDescriptor::from_table_schema(
             &table_descriptor.schema,
         )))
     }
@@ -690,7 +690,7 @@ impl DatabaseState {
 /// can hold references to the same data and auto-update when changes occur.
 pub struct Database {
     /// Shared database state.
-    state: Arc<DatabaseState>,
+    state: Rc<DatabaseState>,
 }
 
 /// Result of executing a SQL statement.
@@ -990,17 +990,17 @@ enum ChainJoinInfo {
 impl Database {
     /// Create a new database with the given environment.
     #[allow(clippy::arc_with_non_send_sync)]
-    pub fn new(env: Arc<dyn Environment>) -> Self {
-        let state = Arc::new(DatabaseState::new(env));
-        DatabaseState::setup_sync_callback(Arc::clone(&state));
+    pub fn new(env: Rc<dyn Environment>) -> Self {
+        let state = Rc::new(DatabaseState::new(env));
+        DatabaseState::setup_sync_callback(Rc::clone(&state));
         Database { state }
     }
 
     /// Create a new in-memory database (for testing).
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
-        let state = Arc::new(DatabaseState::in_memory());
-        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        let state = Rc::new(DatabaseState::in_memory());
+        DatabaseState::setup_sync_callback(Rc::clone(&state));
         Database { state }
     }
 
@@ -1009,8 +1009,8 @@ impl Database {
     /// when synced, allowing INSERT/SELECT to work across clients.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
-        let state = Arc::new(DatabaseState::in_memory_with_catalog(catalog_id));
-        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        let state = Rc::new(DatabaseState::in_memory_with_catalog(catalog_id));
+        DatabaseState::setup_sync_callback(Rc::clone(&state));
         Database { state }
     }
 
@@ -1021,8 +1021,8 @@ impl Database {
     /// Use `has_catalog()` to check if the catalog has arrived, then `reload_catalog()`.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_replica(catalog_id: ObjectId) -> Self {
-        let state = Arc::new(DatabaseState::in_memory_replica(catalog_id));
-        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        let state = Rc::new(DatabaseState::in_memory_replica(catalog_id));
+        DatabaseState::setup_sync_callback(Rc::clone(&state));
         Database { state }
     }
 
@@ -1034,17 +1034,17 @@ impl Database {
         self.state.has_catalog()
     }
 
-    /// Consume the Database and return the underlying Arc<DatabaseState>.
+    /// Consume the Database and return the underlying Rc<DatabaseState>.
     ///
     /// This is useful when you need to wrap the DatabaseState in a SyncedNode.
-    pub fn into_state(self) -> Arc<DatabaseState> {
+    pub fn into_state(self) -> Rc<DatabaseState> {
         self.state
     }
 
-    /// Create a Database from an existing Arc<DatabaseState>.
+    /// Create a Database from an existing Rc<DatabaseState>.
     ///
     /// This is useful when you have a SyncedNode and want to perform SQL operations.
-    pub fn from_state(state: Arc<DatabaseState>) -> Self {
+    pub fn from_state(state: Rc<DatabaseState>) -> Self {
         Database { state }
     }
 
@@ -1065,10 +1065,10 @@ impl Database {
     /// IndexedDB or other async storage backends.
     #[allow(clippy::arc_with_non_send_sync)]
     pub async fn from_env(
-        env: Arc<dyn Environment>,
+        env: Rc<dyn Environment>,
         catalog_object_id: ObjectId,
     ) -> Result<Self, DatabaseError> {
-        let node = Arc::new(LocalNode::new(env));
+        let node = Rc::new(LocalNode::new(env));
 
         // Load catalog object from Environment
         node.load_object(catalog_object_id, "catalog", "main")
@@ -1192,8 +1192,8 @@ impl Database {
             graph_registry: GraphRegistry::new(),
         };
 
-        let state = Arc::new(state);
-        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        let state = Rc::new(state);
+        DatabaseState::setup_sync_callback(Rc::clone(&state));
         Ok(Database { state })
     }
 
@@ -1614,7 +1614,7 @@ impl Database {
     /// The row should be built using `RowBuilder` with a descriptor from the table schema:
     /// ```ignore
     /// let schema = db.get_table("users")?;
-    /// let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    /// let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     /// let row = RowBuilder::new(desc)
     ///     .set_string_by_name("name", "Alice")
     ///     .set_i32_by_name("age", 30)
@@ -1765,7 +1765,7 @@ impl Database {
         let schema = self
             .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
         let row = f(RowBuilder::new(descriptor));
         self.insert_row(table, row)
     }
@@ -1827,7 +1827,7 @@ impl Database {
         };
 
         // Create OwnedRow directly from buffer
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
         let owned = OwnedRow::new(descriptor, data);
 
         Ok(Some((id, owned)))
@@ -2013,7 +2013,7 @@ impl Database {
     /// This replaces the entire row with the new values. Build the row using `RowBuilder`:
     /// ```ignore
     /// let schema = db.get_table("users")?;
-    /// let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    /// let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     /// let row = RowBuilder::new(desc)
     ///     .set_string_by_name("name", "Bob")
     ///     .set_i32_by_name("age", 35)
@@ -2041,7 +2041,7 @@ impl Database {
 
         // Create descriptor for row operations and per-column change tracking
         let descriptor = RowDescriptor::from_table_schema(&schema);
-        let descriptor_arc = Arc::new(descriptor.clone());
+        let descriptor_arc = Rc::new(descriptor.clone());
 
         // Read current row data for index updates (directly as OwnedRow)
         let old_row = match self.state.node.read(id, "main") {
@@ -2166,7 +2166,7 @@ impl Database {
 
         // Remove from indexes
         if let Some(data) = data {
-            let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+            let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
             let row = OwnedRow::new(descriptor, data);
             for col in schema.columns.iter() {
                 if matches!(col.ty, ColumnType::Ref(_))
@@ -2296,7 +2296,7 @@ impl Database {
         let schema = self
             .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
         let row = f(RowBuilder::new(descriptor));
         self.insert_row_as(table, row, viewer)
     }
@@ -2548,7 +2548,7 @@ impl Database {
                 let schema = self
                     .get_table(&ins.table)
                     .ok_or_else(|| DatabaseError::TableNotFound(ins.table.clone()))?;
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+                let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
 
                 if ins.columns.len() != ins.values.len() {
                     return Err(DatabaseError::ColumnMismatch {
@@ -4696,7 +4696,7 @@ impl Database {
         let rows = self.state.read_all_rows(table);
 
         // Transform each row
-        let new_descriptor_arc = Arc::new(RowDescriptor::from_table_schema(&new_schema));
+        let new_descriptor_arc = Rc::new(RowDescriptor::from_table_schema(&new_schema));
         let mut migrated_count = 0;
         let mut invisible_count = 0;
 

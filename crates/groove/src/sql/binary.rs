@@ -154,15 +154,15 @@ mod tests {
     use crate::object::ObjectId;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::ColumnType;
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     fn make_descriptor_with_id(
         columns: impl IntoIterator<Item = (String, ColumnType, bool)>,
-    ) -> Arc<RowDescriptor> {
+    ) -> Rc<RowDescriptor> {
         // id column is auto-added by TableSchema, but for tests we need to add it manually
         let mut cols: Vec<_> = vec![("id".to_string(), ColumnType::ObjectId, false)];
         cols.extend(columns);
-        Arc::new(RowDescriptor::new(cols))
+        Rc::new(RowDescriptor::new(cols))
     }
 
     #[test]

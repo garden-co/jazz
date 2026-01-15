@@ -1,7 +1,7 @@
 //! Delta types for representing row changes.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -86,7 +86,7 @@ impl RowDelta {
     }
 
     /// Get the row descriptor if available.
-    pub fn descriptor(&self) -> Option<&Arc<RowDescriptor>> {
+    pub fn descriptor(&self) -> Option<&Rc<RowDescriptor>> {
         match self {
             RowDelta::Added { row, .. } => Some(&row.descriptor),
             RowDelta::Updated { row, .. } => Some(&row.descriptor),
@@ -353,7 +353,7 @@ impl BufferJoinedRow {
     }
 
     /// Get the descriptor for a specific table.
-    pub fn get_descriptor(&self, table: &str) -> Option<&Arc<RowDescriptor>> {
+    pub fn get_descriptor(&self, table: &str) -> Option<&Rc<RowDescriptor>> {
         self.table_rows.get(table).map(|(_, row)| &row.descriptor)
     }
 
@@ -379,7 +379,7 @@ impl BufferJoinedRow {
             Some((_, row)) => row,
             None => {
                 // No primary table row - return empty
-                let empty_desc = Arc::new(RowDescriptor::new([]));
+                let empty_desc = Rc::new(RowDescriptor::new([]));
                 return RowBuilder::new(empty_desc).build();
             }
         };
@@ -407,7 +407,7 @@ impl BufferJoinedRow {
     pub fn to_output_row_with_schema(
         &self,
         combined_schema: &TableSchema,
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
     ) -> OwnedRow {
         use crate::sql::row_buffer::RowBuilder;
 
@@ -440,7 +440,7 @@ impl BufferJoinedRow {
         &self,
         table: &str,
         schema: &TableSchema,
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
     ) -> Option<(ObjectId, OwnedRow)> {
         use crate::sql::row_buffer::RowBuilder;
 
@@ -472,15 +472,15 @@ mod tests {
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
     use crate::sql::schema::ColumnType;
 
-    fn make_test_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([(
+    fn make_test_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::new([(
             "name".to_string(),
             ColumnType::String,
             false,
         )]))
     }
 
-    fn make_buffer_row(descriptor: &Arc<RowDescriptor>, name: &str) -> OwnedRow {
+    fn make_buffer_row(descriptor: &Rc<RowDescriptor>, name: &str) -> OwnedRow {
         let idx = descriptor.column_index("name").unwrap();
         RowBuilder::new(descriptor.clone())
             .set_string(idx, name)
@@ -604,15 +604,15 @@ mod tests {
     // BufferJoinedRow tests
     // ========================================================================
 
-    fn make_users_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([
+    fn make_users_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::new([
             ("name".to_string(), ColumnType::String, false),
             ("age".to_string(), ColumnType::I32, false),
         ]))
     }
 
-    fn make_posts_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([
+    fn make_posts_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::new([
             ("title".to_string(), ColumnType::String, false),
             (
                 "author_id".to_string(),
@@ -622,7 +622,7 @@ mod tests {
         ]))
     }
 
-    fn make_user_row(descriptor: &Arc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
+    fn make_user_row(descriptor: &Rc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
         let name_idx = descriptor.column_index("name").unwrap();
         let age_idx = descriptor.column_index("age").unwrap();
         RowBuilder::new(descriptor.clone())
@@ -631,11 +631,7 @@ mod tests {
             .build()
     }
 
-    fn make_post_row(
-        descriptor: &Arc<RowDescriptor>,
-        title: &str,
-        author_id: ObjectId,
-    ) -> OwnedRow {
+    fn make_post_row(descriptor: &Rc<RowDescriptor>, title: &str, author_id: ObjectId) -> OwnedRow {
         let title_idx = descriptor.column_index("title").unwrap();
         let author_idx = descriptor.column_index("author_id").unwrap();
         RowBuilder::new(descriptor.clone())

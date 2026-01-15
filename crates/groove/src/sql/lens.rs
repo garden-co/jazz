@@ -22,7 +22,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue};
 use crate::sql::schema::ColumnType;
@@ -717,7 +717,7 @@ fn apply_transforms(
 ) -> Result<OwnedRow, LensError> {
     // Build the target descriptor from source + transforms
     let target_descriptor = compute_target_descriptor(row.descriptor, transforms);
-    let target_descriptor = Arc::new(target_descriptor);
+    let target_descriptor = Rc::new(target_descriptor);
 
     // Build column mapping for renames
     let mapping = ColumnMapping::from_transforms(transforms);
@@ -866,10 +866,7 @@ fn set_builder_value(builder: RowBuilder, idx: usize, value: RowValue<'_>) -> Ro
             let items: Vec<OwnedRow> = arr
                 .iter()
                 .map(|row_ref| {
-                    OwnedRow::new(
-                        Arc::new(row_ref.descriptor.clone()),
-                        row_ref.buffer.to_vec(),
-                    )
+                    OwnedRow::new(Rc::new(row_ref.descriptor.clone()), row_ref.buffer.to_vec())
                 })
                 .collect();
             builder.set_array(idx, &items)
@@ -1951,7 +1948,7 @@ mod tests {
     #[test]
     fn test_apply_rename_forward() {
         // Create a row with 'title' column
-        let source_desc = Arc::new(RowDescriptor::new([(
+        let source_desc = Rc::new(RowDescriptor::new([(
             "title".to_string(),
             ColumnType::String,
             false,
@@ -1980,7 +1977,7 @@ mod tests {
     #[test]
     fn test_apply_rename_backward() {
         // Create a row with 'name' column
-        let source_desc = Arc::new(RowDescriptor::new([(
+        let source_desc = Rc::new(RowDescriptor::new([(
             "name".to_string(),
             ColumnType::String,
             false,
@@ -2007,7 +2004,7 @@ mod tests {
     #[test]
     fn test_apply_add_column_with_default() {
         // Create a row with just 'id' column
-        let source_desc = Arc::new(RowDescriptor::new([(
+        let source_desc = Rc::new(RowDescriptor::new([(
             "id".to_string(),
             ColumnType::I32,
             false,
@@ -2041,7 +2038,7 @@ mod tests {
     #[test]
     fn test_apply_remove_column() {
         // Create a row with 'id' and 'deprecated' columns
-        let source_desc = Arc::new(RowDescriptor::new([
+        let source_desc = Rc::new(RowDescriptor::new([
             ("id".to_string(), ColumnType::I32, false),
             ("deprecated".to_string(), ColumnType::String, false),
         ]));
@@ -2070,7 +2067,7 @@ mod tests {
     #[test]
     fn test_apply_nullable_add_without_default() {
         // Create a row with just 'id' column
-        let source_desc = Arc::new(RowDescriptor::new([(
+        let source_desc = Rc::new(RowDescriptor::new([(
             "id".to_string(),
             ColumnType::I32,
             false,
@@ -2123,7 +2120,7 @@ mod tests {
         // Demo scenario: rename `title` → `name` with bidirectional transforms
 
         // V1 row with title
-        let v1_desc = Arc::new(RowDescriptor::new([
+        let v1_desc = Rc::new(RowDescriptor::new([
             ("id".to_string(), ColumnType::I32, false),
             ("title".to_string(), ColumnType::String, false),
         ]));
@@ -2179,7 +2176,7 @@ mod tests {
         let composed = lens1.compose(&lens2);
 
         // Create row with 'a'
-        let source_desc = Arc::new(RowDescriptor::new([(
+        let source_desc = Rc::new(RowDescriptor::new([(
             "a".to_string(),
             ColumnType::String,
             false,
@@ -2235,7 +2232,7 @@ mod tests {
         ctx.register_lens(id_v1.clone(), id_v2.clone(), lens);
 
         // Create a v1 row with 'title'
-        let v1_desc = Arc::new(RowDescriptor::new([(
+        let v1_desc = Rc::new(RowDescriptor::new([(
             "title".to_string(),
             ColumnType::String,
             false,
@@ -2257,7 +2254,7 @@ mod tests {
         let id = DescriptorId::new_v1(ObjectId::new(1));
 
         // Create a row
-        let desc = Arc::new(RowDescriptor::new([(
+        let desc = Rc::new(RowDescriptor::new([(
             "name".to_string(),
             ColumnType::String,
             false,
@@ -2284,7 +2281,7 @@ mod tests {
         ctx.register_lens(id_v1.clone(), id_v2.clone(), lens);
 
         // Create a v2 row with 'name'
-        let v2_desc = Arc::new(RowDescriptor::new([(
+        let v2_desc = Rc::new(RowDescriptor::new([(
             "name".to_string(),
             ColumnType::String,
             false,
@@ -2319,7 +2316,7 @@ mod tests {
         assert!(query_ctx.can_transform(&id_v2)); // Same version
 
         // Create a v1 row
-        let v1_desc = Arc::new(RowDescriptor::new([(
+        let v1_desc = Rc::new(RowDescriptor::new([(
             "old".to_string(),
             ColumnType::String,
             false,

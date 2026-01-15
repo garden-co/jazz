@@ -1,7 +1,7 @@
 //! Query graph - the main computation DAG.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::object::ObjectId;
 use crate::sql::catalog::DescriptorId;
@@ -507,10 +507,10 @@ impl QueryGraph {
 
     /// Get schema and row descriptor for a specific table.
     ///
-    /// Returns both the table schema and an Arc<RowDescriptor> for creating rows.
-    pub fn get_table_schema(&self, table: &str) -> Option<(&TableSchema, Arc<RowDescriptor>)> {
+    /// Returns both the table schema and an Rc<RowDescriptor> for creating rows.
+    pub fn get_table_schema(&self, table: &str) -> Option<(&TableSchema, Rc<RowDescriptor>)> {
         self.all_schemas.get(table).map(|schema| {
-            let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+            let descriptor = Rc::new(RowDescriptor::from_table_schema(schema));
             (schema, descriptor)
         })
     }
@@ -1686,7 +1686,7 @@ mod tests {
     use crate::sql::query_graph::predicate::Predicate;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     fn test_schema() -> TableSchema {
         TableSchema::new(
@@ -1698,8 +1698,8 @@ mod tests {
         )
     }
 
-    fn test_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::from_table_schema(&test_schema()))
+    fn test_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::from_table_schema(&test_schema()))
     }
 
     fn make_owned_row(id: u128, name: &str, active: bool) -> (ObjectId, OwnedRow) {
@@ -1815,12 +1815,12 @@ mod tests {
         )
     }
 
-    fn folder_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::from_table_schema(&folder_schema()))
+    fn folder_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::from_table_schema(&folder_schema()))
     }
 
-    fn note_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::from_table_schema(&note_schema()))
+    fn note_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::from_table_schema(&note_schema()))
     }
 
     fn make_owned_folder(id: u128, name: &str) -> (ObjectId, OwnedRow) {
@@ -2065,7 +2065,7 @@ mod tests {
     /// 4. Check that arrays are populated via inner delta processing
     #[test]
     fn array_aggregate_inner_delta_via_database_api() {
-        use std::sync::Arc;
+        use std::rc::Rc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let outer_schema = folder_schema();
@@ -2082,7 +2082,7 @@ mod tests {
         ).unwrap();
 
         // Track updates
-        let update_count = Arc::new(AtomicUsize::new(0));
+        let update_count = Rc::new(AtomicUsize::new(0));
         let update_count_clone = update_count.clone();
         query.subscribe(Box::new(move |_delta| {
             update_count_clone.fetch_add(1, Ordering::SeqCst);
@@ -2173,7 +2173,7 @@ mod tests {
     /// Test two chained ArrayAggregates (like Issues with IssueLabels and IssueAssignees)
     #[test]
     fn array_aggregate_two_chained_inner_deltas_via_database_api() {
-        use std::sync::Arc;
+        use std::rc::Rc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Create schemas
@@ -2205,7 +2205,7 @@ mod tests {
             .unwrap();
 
         // Track updates
-        let update_count = Arc::new(AtomicUsize::new(0));
+        let update_count = Rc::new(AtomicUsize::new(0));
         let update_count_clone = update_count.clone();
         query.subscribe(Box::new(move |_delta| {
             update_count_clone.fetch_add(1, Ordering::SeqCst);

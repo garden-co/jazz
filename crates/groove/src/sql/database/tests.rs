@@ -1,6 +1,7 @@
+use super::*;
 /// Unit tests for internal APIs only.
 /// Most tests have been moved to tests/sql_database.rs as integration tests.
-use super::*;
+use std::rc::Rc;
 
 // ========== Tests for Buffer-Based Row APIs ==========
 
@@ -11,7 +12,7 @@ fn insert_row_basic() {
         .unwrap();
 
     let schema = db.get_table("users").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
 
     let row = RowBuilder::new(desc)
         .set_string_by_name("name", "Alice")
@@ -52,7 +53,7 @@ fn update_row_basic() {
 
     // Update using new API
     let schema = db.get_table("users").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
 
     let new_row = RowBuilder::new(desc)
         .set_string_by_name("name", "Bob")
@@ -91,7 +92,7 @@ fn insert_row_with_ref() {
 
     // Insert post using new API
     let schema = db.get_table("posts").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
 
     let post = RowBuilder::new(desc)
         .set_ref_by_name("author", user_id)
@@ -371,7 +372,7 @@ fn incremental_query_subscribe() {
 
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
-    let delta_count = Arc::new(AtomicUsize::new(0));
+    let delta_count = Rc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
     let _listener_id = query.subscribe(Box::new(move |delta| {
@@ -399,7 +400,7 @@ fn incremental_query_subscribe_rows() {
 
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
-    let delta_count = Arc::new(AtomicUsize::new(0));
+    let delta_count = Rc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
     let _listener_id = query.subscribe(Box::new(move |deltas| {
@@ -558,7 +559,7 @@ fn incremental_query_join_right_table_change() {
         .unwrap();
 
     // Track changes via delta subscription
-    let delta_count = Arc::new(AtomicUsize::new(0));
+    let delta_count = Rc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
     let _listener = query.subscribe(Box::new(move |delta| {
@@ -1549,7 +1550,7 @@ fn incremental_query_as_inherits_incremental_updates() {
     assert!(alice_query.rows().is_empty());
 
     // Track changes via subscription
-    let change_count = Arc::new(AtomicUsize::new(0));
+    let change_count = Rc::new(AtomicUsize::new(0));
     let change_count_clone = change_count.clone();
     let _listener = alice_query.subscribe(Box::new(move |delta| {
         change_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
@@ -4118,9 +4119,9 @@ fn incremental_query_reverse_join_subscribe() {
     ).unwrap();
 
     // Subscribe with delta callback (like WASM does)
-    let callback_count = Arc::new(AtomicUsize::new(0));
+    let callback_count = Rc::new(AtomicUsize::new(0));
     let callback_count_clone = callback_count.clone();
-    let initial_count = Arc::new(AtomicUsize::new(0));
+    let initial_count = Rc::new(AtomicUsize::new(0));
     let initial_count_clone = initial_count.clone();
 
     let _listener = query.subscribe(Box::new(move |delta| {
@@ -4156,7 +4157,7 @@ fn migration_rename_column() {
 
     // Insert a row
     let schema = db.get_table("documents").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     let row = RowBuilder::new(desc)
         .set_string_by_name("title", "My Document")
         .build();
@@ -4209,7 +4210,7 @@ fn migration_add_column() {
 
     // Insert a row
     let schema = db.get_table("users").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     let row = RowBuilder::new(desc)
         .set_string_by_name("name", "Alice")
         .build();
@@ -4485,9 +4486,9 @@ fn incremental_query_two_reverse_joins_combined_filters() {
 
     // Also test with subscribe to match TypeScript behavior
     // The initial delta should contain all existing matching rows
-    use std::sync::{Arc, Mutex};
-    let delta_count = Arc::new(Mutex::new(0usize));
-    let delta_count_clone = Arc::clone(&delta_count);
+    use std::sync::Mutex;
+    let delta_count = Rc::new(Mutex::new(0usize));
+    let delta_count_clone = Rc::clone(&delta_count);
     let _listener = query.subscribe(Box::new(move |delta_batch| {
         eprintln!("Delta callback with {} deltas", delta_batch.len());
         for delta in delta_batch.iter() {
@@ -5035,9 +5036,9 @@ fn incremental_query_exact_typescript_sql_pattern() {
     );
 
     // Test subscribe() as well (this is what TypeScript uses)
-    use std::sync::{Arc, Mutex};
-    let delta_count = Arc::new(Mutex::new(0usize));
-    let delta_count_clone = Arc::clone(&delta_count);
+    use std::sync::Mutex;
+    let delta_count = Rc::new(Mutex::new(0usize));
+    let delta_count_clone = Rc::clone(&delta_count);
     let _listener = query.subscribe(Box::new(move |delta_batch| {
         eprintln!("Delta callback: {} deltas", delta_batch.len());
         *delta_count_clone.lock().unwrap() = delta_batch.len();
@@ -5064,7 +5065,7 @@ fn build_lens_context_for_table_after_migration() {
 
     // Insert a row
     let schema = db.get_table("documents").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     let row = RowBuilder::new(desc)
         .set_string_by_name("title", "My Document")
         .build();
@@ -5151,7 +5152,7 @@ fn insert_row_populates_column_change_metadata() {
         .unwrap();
 
     let schema = db.get_table("users").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
 
     let row = RowBuilder::new(desc)
         .set_string_by_name("name", "Alice")
@@ -5245,7 +5246,7 @@ fn update_row_populates_column_change_metadata() {
 
     // Update the row
     let schema = db.get_table("users").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     let updated_row = RowBuilder::new(desc)
         .set_string_by_name("name", "Bob")
         .set_i32_by_name("age", 30) // age unchanged
@@ -5292,7 +5293,7 @@ fn apply_synced_commits_rebuilds_column_metadata() {
 
     // Build a commit manually (simulating received from sync)
     let schema = db.get_table("documents").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     let row = RowBuilder::new(desc.clone())
         .set_string_by_name("title", "Test Doc")
         .build()
@@ -5361,7 +5362,7 @@ fn sync_applied_commits_trigger_query_updates() {
     assert_eq!(query.rows().len(), 0, "Should start with no rows");
 
     // Track callback invocations
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let _sub_id = query.subscribe(Box::new(move |_deltas| {
@@ -5400,7 +5401,7 @@ fn sync_applied_commits_trigger_query_updates() {
 
     // Build a commit manually (simulating received from sync)
     let schema = db.get_table("documents").unwrap();
-    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let desc = Rc::new(RowDescriptor::from_table_schema(&schema));
     let row = RowBuilder::new(desc.clone())
         .set_string_by_name("title", "Synced Document")
         .build()

@@ -18,7 +18,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -51,9 +50,9 @@ use super::synced_node::{SyncedNode, UpstreamId};
 /// Optionally integrates with a Database for policy-filtered sync.
 pub struct TestTransport {
     /// The sync server
-    server: Arc<RwLock<SyncServer<MemoryEnvironment>>>,
+    server: Rc<RwLock<SyncServer<MemoryEnvironment>>>,
     /// The server's storage environment
-    server_env: Arc<MemoryEnvironment>,
+    server_env: Rc<MemoryEnvironment>,
     /// Optional database for policy lookup and row data
     database: Option<Rc<Database>>,
     /// Registered client identities (token -> identity with claims)
@@ -63,11 +62,11 @@ pub struct TestTransport {
 impl TestTransport {
     /// Create a new test transport with an in-memory server.
     pub fn new() -> Self {
-        let server_env = Arc::new(MemoryEnvironment::new());
-        let validator: Arc<dyn TokenValidator> = Arc::new(AcceptAllTokens);
-        let server = SyncServer::new(Arc::clone(&server_env), validator);
+        let server_env = Rc::new(MemoryEnvironment::new());
+        let validator: Rc<dyn TokenValidator> = Rc::new(AcceptAllTokens);
+        let server = SyncServer::new(Rc::clone(&server_env), validator);
         Self {
-            server: Arc::new(RwLock::new(server)),
+            server: Rc::new(RwLock::new(server)),
             server_env,
             database: None,
             identities: RefCell::new(HashMap::new()),
@@ -79,11 +78,11 @@ impl TestTransport {
     /// When a database is present, push operations will use `broadcast_commits_with_policy()`
     /// to filter broadcasts based on SELECT policies and viewer claims.
     pub fn with_database(database: Rc<Database>) -> Self {
-        let server_env = Arc::new(MemoryEnvironment::new());
-        let validator: Arc<dyn TokenValidator> = Arc::new(AcceptAllTokens);
-        let server = SyncServer::new(Arc::clone(&server_env), validator);
+        let server_env = Rc::new(MemoryEnvironment::new());
+        let validator: Rc<dyn TokenValidator> = Rc::new(AcceptAllTokens);
+        let server = SyncServer::new(Rc::clone(&server_env), validator);
         Self {
-            server: Arc::new(RwLock::new(server)),
+            server: Rc::new(RwLock::new(server)),
             server_env,
             database: Some(database),
             identities: RefCell::new(HashMap::new()),
@@ -106,7 +105,7 @@ impl TestTransport {
     }
 
     /// Get the server's storage environment.
-    pub fn server_env(&self) -> &Arc<MemoryEnvironment> {
+    pub fn server_env(&self) -> &Rc<MemoryEnvironment> {
         &self.server_env
     }
 
@@ -463,7 +462,7 @@ impl ClientEnv for TestClientEnv {
 /// A test client with its OWN LocalNode (separate storage from server).
 pub struct TestClient {
     /// The synced node (manages upstream connections and sync)
-    pub synced_node: Arc<SyncedNode<TokioRuntime, TestClientEnv>>,
+    pub synced_node: Rc<SyncedNode<TokioRuntime, TestClientEnv>>,
     /// The upstream server ID
     pub upstream_id: UpstreamId,
     /// Client identifier
@@ -474,14 +473,13 @@ pub struct TestClient {
 
 impl TestClient {
     /// Create a new test client with its own LocalNode.
-    #[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
     fn new(transport: Rc<TestTransport>, id: impl Into<String>) -> Self {
         let id = id.into();
         let env = TestClientEnv::new(Rc::clone(&transport), &id);
         // Each client gets its OWN LocalNode - NOT shared with server
         let db = crate::sql::Database::in_memory();
         let node_arc = db.state().node_arc();
-        let synced_node = Arc::new(SyncedNode::new(node_arc, TokioRuntime));
+        let synced_node = Rc::new(SyncedNode::new(node_arc, TokioRuntime));
         let upstream_id = synced_node.add_upstream(env);
         Self {
             synced_node,
@@ -636,7 +634,7 @@ impl TestHarness {
     }
 
     /// Get the server's storage environment.
-    pub fn server_env(&self) -> &Arc<MemoryEnvironment> {
+    pub fn server_env(&self) -> &Rc<MemoryEnvironment> {
         self.transport.server_env()
     }
 
@@ -685,24 +683,22 @@ impl Default for TestHarness {
 use super::synced_node::SyncConfig;
 
 /// Create a SyncedNode for testing with a given client environment.
-#[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
 pub fn create_synced_node(
     _transport: Rc<TestTransport>,
     _id: &str,
-) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
+) -> Rc<SyncedNode<TokioRuntime, TestClientEnv>> {
     let db = Database::in_memory();
-    Arc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime))
+    Rc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime))
 }
 
 /// Create a SyncedNode with custom config for testing.
-#[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
 pub fn create_synced_node_with_config(
     _transport: Rc<TestTransport>,
     _id: &str,
     config: SyncConfig,
-) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
+) -> Rc<SyncedNode<TokioRuntime, TestClientEnv>> {
     let db = Database::in_memory();
-    Arc::new(SyncedNode::with_config(
+    Rc::new(SyncedNode::with_config(
         db.state().node_arc(),
         TokioRuntime,
         config,
@@ -718,7 +714,7 @@ pub struct TestServer {
     /// The server's transport (handles incoming requests).
     pub transport: Rc<TestTransport>,
     /// The server's SyncedNode (for upstream connections).
-    pub synced_node: Arc<SyncedNode<TokioRuntime, TestClientEnv>>,
+    pub synced_node: Rc<SyncedNode<TokioRuntime, TestClientEnv>>,
     /// The server's Database (for SQL operations).
     pub db: Database,
     /// Server name/identifier.
@@ -726,12 +722,11 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    #[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
     fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         let transport = Rc::new(TestTransport::new());
         let db = Database::in_memory();
-        let synced_node = Arc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime));
+        let synced_node = Rc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime));
         Self {
             transport,
             synced_node,
@@ -741,7 +736,7 @@ impl TestServer {
     }
 
     /// Get the server's storage environment.
-    pub fn storage(&self) -> &Arc<MemoryEnvironment> {
+    pub fn storage(&self) -> &Rc<MemoryEnvironment> {
         self.transport.server_env()
     }
 }

@@ -1,17 +1,19 @@
 //! Integration tests for ObjectListenerRegistry.
 
+use std::rc::Rc;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use groove::{
     Branch, Commit, Environment, MemoryEnvironment, ObjectId, ObjectKey, ObjectListenerRegistry,
     ObjectState,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
 
-fn make_env() -> Arc<dyn Environment> {
-    Arc::new(MemoryEnvironment::new())
+fn make_env() -> Rc<dyn Environment> {
+    Rc::new(MemoryEnvironment::new())
 }
 
-fn make_branch_with_commit(content: &[u8]) -> (Arc<RwLock<Branch>>, groove::CommitId) {
+fn make_branch_with_commit(content: &[u8]) -> (Rc<RwLock<Branch>>, groove::CommitId) {
     let mut branch = Branch::new("main");
     let commit = Commit {
         parents: vec![],
@@ -21,7 +23,7 @@ fn make_branch_with_commit(content: &[u8]) -> (Arc<RwLock<Branch>>, groove::Comm
         meta: None,
     };
     let id = branch.add_commit(commit);
-    (Arc::new(RwLock::new(branch)), id)
+    (Rc::new(RwLock::new(branch)), id)
 }
 
 #[test]
@@ -31,7 +33,7 @@ fn basic_subscribe_and_notify() {
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let listener_id = registry.subscribe(
@@ -68,7 +70,7 @@ fn new_subscriber_gets_current_state() {
     registry.notify(&key, vec![id], branch);
 
     // Second subscriber should get called immediately with current state
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
     let _id2 = registry.subscribe(
         key.clone(),
@@ -88,8 +90,8 @@ fn multiple_listeners_all_called() {
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
-    let count1 = Arc::new(AtomicUsize::new(0));
-    let count2 = Arc::new(AtomicUsize::new(0));
+    let count1 = Rc::new(AtomicUsize::new(0));
+    let count2 = Rc::new(AtomicUsize::new(0));
     let count1_clone = count1.clone();
     let count2_clone = count2.clone();
 
@@ -121,7 +123,7 @@ fn state_tracks_previous_tips() {
     let (branch, id1) = make_branch_with_commit(b"first");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
-    let has_previous = Arc::new(RwLock::new(Vec::new()));
+    let has_previous = Rc::new(RwLock::new(Vec::new()));
     let has_previous_clone = has_previous.clone();
 
     let _id = registry.subscribe(
@@ -185,7 +187,7 @@ fn unsubscribe_removes_listener() {
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
-    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count = Rc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
     let listener_id = registry.subscribe(

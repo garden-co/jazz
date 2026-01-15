@@ -5,7 +5,8 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use groove::sql::Database;
@@ -26,22 +27,21 @@ async fn settle() {
 /// Collect deltas into a shared vector for testing.
 #[allow(clippy::type_complexity)]
 fn delta_collector() -> (
-    Arc<Mutex<Vec<DeltaBatch>>>,
-    Box<dyn Fn(&DeltaBatch) + Send + Sync + 'static>,
+    Rc<RefCell<Vec<DeltaBatch>>>,
+    Box<dyn Fn(&DeltaBatch) + 'static>,
 ) {
-    let deltas = Arc::new(Mutex::new(Vec::new()));
-    let deltas_clone = Arc::clone(&deltas);
+    let deltas = Rc::new(RefCell::new(Vec::new()));
+    let deltas_clone = Rc::clone(&deltas);
     let callback = Box::new(move |batch: &DeltaBatch| {
-        deltas_clone.lock().unwrap().push(batch.clone());
+        deltas_clone.borrow_mut().push(batch.clone());
     });
     (deltas, callback)
 }
 
 /// Count Added deltas in collected batches.
-fn count_added(deltas: &Arc<Mutex<Vec<DeltaBatch>>>) -> usize {
+fn count_added(deltas: &Rc<RefCell<Vec<DeltaBatch>>>) -> usize {
     deltas
-        .lock()
-        .unwrap()
+        .borrow()
         .iter()
         .flat_map(|batch| batch.iter())
         .filter(|d| matches!(d, RowDelta::Added { .. }))
@@ -49,10 +49,9 @@ fn count_added(deltas: &Arc<Mutex<Vec<DeltaBatch>>>) -> usize {
 }
 
 /// Get all added row IDs from collected batches.
-fn added_ids(deltas: &Arc<Mutex<Vec<DeltaBatch>>>) -> Vec<ObjectId> {
+fn added_ids(deltas: &Rc<RefCell<Vec<DeltaBatch>>>) -> Vec<ObjectId> {
     deltas
-        .lock()
-        .unwrap()
+        .borrow()
         .iter()
         .flat_map(|batch| batch.iter())
         .filter_map(|d| match d {

@@ -1,7 +1,7 @@
 //! Builder for constructing query graphs programmatically.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::object::ObjectId;
 use crate::sql::catalog::DescriptorId;
@@ -59,7 +59,7 @@ pub struct QueryGraphBuilder {
     next_id: u32,
     /// Current output descriptor - evolves as array aggregates are added.
     /// None means use schema (no arrays added yet).
-    current_descriptor: Option<Arc<RowDescriptor>>,
+    current_descriptor: Option<Rc<RowDescriptor>>,
     /// JOIN state (lazily populated when join() is called)
     join_state: Option<JoinState>,
     /// Branches to read from for branch-aware queries.
@@ -152,7 +152,7 @@ impl QueryGraphBuilder {
     /// When `target_descriptor_id` is None, no lens transforms are attempted.
     /// This is the common case for single-branch queries (like reading from "main").
     fn branch_merge_scan(&mut self) -> NodeId {
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.primary_schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&self.primary_schema));
         let table = self.primary_table.clone();
         let branches: Vec<String> = self.branches.clone();
         let target_descriptor_id = self.target_descriptor_id.clone();
@@ -191,7 +191,7 @@ impl QueryGraphBuilder {
     /// Filters rows from the input node using the given predicate.
     pub fn filter(&mut self, input: NodeId, predicate: Predicate) -> NodeId {
         let id = self.alloc_id();
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(self.get_schema()));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(self.get_schema()));
         self.nodes.push(QueryNode::Filter {
             table: self.primary_table.clone(),
             input,
@@ -217,7 +217,7 @@ impl QueryGraphBuilder {
         recursive_column: impl Into<String>,
     ) -> NodeId {
         let id = self.alloc_id();
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.primary_schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&self.primary_schema));
         self.nodes.push(QueryNode::RecursiveFilter {
             table: self.primary_table.clone(),
             input,
@@ -319,7 +319,7 @@ impl QueryGraphBuilder {
                 output_cols.insert(array_column_index as usize, array_col);
                 array_column_index
             };
-        let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
+        let output_descriptor = Rc::new(RowDescriptor::new_ordered(output_cols));
 
         // Update current_descriptor so next array_aggregate builds on top of this
         self.current_descriptor = Some(output_descriptor.clone());
@@ -360,11 +360,11 @@ impl QueryGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             inner_table.to_string(),
-            Arc::new(RowDescriptor::from_table_schema(inner_schema)),
+            Rc::new(RowDescriptor::from_table_schema(inner_schema)),
         );
         table_descriptors.insert(
             target_table.to_string(),
-            Arc::new(RowDescriptor::from_table_schema(target_schema)),
+            Rc::new(RowDescriptor::from_table_schema(target_schema)),
         );
 
         self.nodes.push(QueryNode::Join {
@@ -399,7 +399,7 @@ impl QueryGraphBuilder {
         }
 
         let id = self.alloc_id();
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(self.get_schema()));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(self.get_schema()));
         self.nodes.push(QueryNode::LimitOffset {
             table: self.primary_table.clone(),
             input,
@@ -434,7 +434,7 @@ impl QueryGraphBuilder {
             .map(|col| (format!("{}.{}", table, col.name), col.name.clone()))
             .collect();
 
-        let output_descriptor = Arc::new(RowDescriptor::from_table_schema(source_schema));
+        let output_descriptor = Rc::new(RowDescriptor::from_table_schema(source_schema));
 
         self.nodes.push(QueryNode::Projection {
             table: table.to_string(),
@@ -471,7 +471,7 @@ impl QueryGraphBuilder {
             .collect();
 
         // Output descriptor uses qualified column names
-        let output_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(
+        let output_descriptor = Rc::new(RowDescriptor::from_table_schema_qualified(
             source_schema,
             table,
         ));
@@ -507,7 +507,7 @@ impl QueryGraphBuilder {
             .collect();
 
         // Output descriptor uses qualified column names
-        let output_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(
+        let output_descriptor = Rc::new(RowDescriptor::from_table_schema_qualified(
             source_schema,
             table,
         ));
@@ -614,9 +614,9 @@ impl QueryGraphBuilder {
     fn build_inner_descriptor_with_joins(
         inner_schema: &TableSchema,
         inner_joins: &[(String, String, TableSchema)],
-    ) -> Arc<RowDescriptor> {
+    ) -> Rc<RowDescriptor> {
         if inner_joins.is_empty() {
-            return Arc::new(RowDescriptor::from_table_schema(inner_schema));
+            return Rc::new(RowDescriptor::from_table_schema(inner_schema));
         }
 
         // Build columns, converting join ref columns to Array types
@@ -632,7 +632,7 @@ impl QueryGraphBuilder {
                 if let Some((_, _, target_schema)) = join_info {
                     // This is a join column - convert to Array type containing target rows
                     let target_descriptor =
-                        Arc::new(RowDescriptor::from_table_schema(target_schema));
+                        Rc::new(RowDescriptor::from_table_schema(target_schema));
                     (
                         col.name.clone(),
                         ColumnType::Array(target_descriptor),
@@ -645,7 +645,7 @@ impl QueryGraphBuilder {
             })
             .collect();
 
-        Arc::new(RowDescriptor::new_ordered(cols))
+        Rc::new(RowDescriptor::new_ordered(cols))
     }
 
     // =========================================================================
@@ -711,14 +711,14 @@ impl QueryGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             self.primary_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &self.primary_schema,
                 &self.primary_table,
             )),
         );
         table_descriptors.insert(
             right_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &right_schema,
                 &right_table,
             )),
@@ -794,14 +794,14 @@ impl QueryGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             primary_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &primary_schema,
                 &primary_table,
             )),
         );
         table_descriptors.insert(
             js.first_right_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &js.first_right_schema,
                 &js.first_right_table,
             )),
@@ -809,12 +809,12 @@ impl QueryGraphBuilder {
         for (t, schema) in &js.additional_right_tables {
             table_descriptors.insert(
                 t.clone(),
-                Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)),
+                Rc::new(RowDescriptor::from_table_schema_qualified(schema, t)),
             );
         }
         table_descriptors.insert(
             target.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &target_schema,
                 &target,
             )),
@@ -918,14 +918,14 @@ impl QueryGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             primary_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &primary_schema,
                 &primary_table,
             )),
         );
         table_descriptors.insert(
             js.first_right_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &js.first_right_schema,
                 &js.first_right_table,
             )),
@@ -933,12 +933,12 @@ impl QueryGraphBuilder {
         for (t, schema) in &js.additional_right_tables {
             table_descriptors.insert(
                 t.clone(),
-                Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)),
+                Rc::new(RowDescriptor::from_table_schema_qualified(schema, t)),
             );
         }
         table_descriptors.insert(
             target.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(
+            Rc::new(RowDescriptor::from_table_schema_qualified(
                 &target_schema,
                 &target,
             )),

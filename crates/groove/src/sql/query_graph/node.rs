@@ -1,7 +1,7 @@
 //! Query graph nodes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::branch::{ColumnChanges, SchemaBranchName};
 use crate::commit::CommitId;
@@ -96,7 +96,7 @@ pub enum QueryNode {
         input: NodeId,
         predicate: Predicate,
         /// Row descriptor for buffer format operations.
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
         /// Cached set of row IDs that pass the filter.
         cached_ids: HashSet<ObjectId>,
     },
@@ -121,7 +121,7 @@ pub enum QueryNode {
         join_schema: TableSchema,
         /// Descriptors for each table (input tables + join table).
         /// Used for buffer format conversion.
-        table_descriptors: HashMap<String, Arc<RowDescriptor>>,
+        table_descriptors: HashMap<String, Rc<RowDescriptor>>,
         /// Left index: join_key → left rows waiting for that key.
         /// For forward joins: join_key = referenced right row ID
         /// For reverse joins: join_key = left row's own ID
@@ -171,7 +171,7 @@ pub enum QueryNode {
         /// Column that references parent row in same table (e.g., parent_id)
         recursive_column: String,
         /// Row descriptor for buffer format rows.
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
         /// Currently accessible rows with their access reason
         accessible: HashMap<ObjectId, AccessReason>,
         /// Reverse index: parent_id -> set of children
@@ -205,9 +205,9 @@ pub enum QueryNode {
         /// Schema of inner table (for building Row values).
         inner_schema: TableSchema,
         /// Descriptor for inner table rows (buffer format).
-        inner_descriptor: Arc<RowDescriptor>,
+        inner_descriptor: Rc<RowDescriptor>,
         /// Descriptor for output rows (outer columns + array column).
-        output_descriptor: Arc<RowDescriptor>,
+        output_descriptor: Rc<RowDescriptor>,
         /// JOINs within the ARRAY subquery (e.g., JOIN Labels ON il.label = Labels.id).
         /// Each tuple: (ref_column_in_inner, target_table, target_schema)
         /// The ref column will be replaced by the joined table's columns.
@@ -240,7 +240,7 @@ pub enum QueryNode {
         /// Number of rows to skip from the start.
         offset: u64,
         /// Row descriptor for buffer format rows.
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
         /// All rows that passed upstream filters, sorted by ObjectId.
         /// Uses buffer format (OwnedRow) for efficient storage.
         all_rows: BTreeMap<ObjectId, OwnedRow>,
@@ -262,7 +262,7 @@ pub enum QueryNode {
         /// Columns not in this map are excluded from output.
         column_map: HashMap<String, String>,
         /// Descriptor for output rows (with renamed columns).
-        output_descriptor: Arc<RowDescriptor>,
+        output_descriptor: Rc<RowDescriptor>,
         /// Cached projected rows.
         cached_rows: HashMap<ObjectId, OwnedRow>,
     },
@@ -281,7 +281,7 @@ pub enum QueryNode {
         /// Branch names to merge from.
         branch_names: Vec<String>,
         /// Row descriptor for merged output rows (target schema).
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
         /// Target schema descriptor ID for lens lookups.
         /// When None, no lens transforms are attempted (single-schema queries).
         target_descriptor_id: Option<DescriptorId>,
@@ -744,7 +744,7 @@ impl QueryNode {
     /// Projects and renames columns from input rows.
     fn eval_projection(
         column_map: &HashMap<String, String>,
-        output_descriptor: &Arc<RowDescriptor>,
+        output_descriptor: &Rc<RowDescriptor>,
         cached_rows: &mut HashMap<ObjectId, OwnedRow>,
         input: DeltaBatch,
     ) -> DeltaBatch {
@@ -860,7 +860,7 @@ impl QueryNode {
     fn recursive_handle_insert(
         row_id: ObjectId,
         owned_row: OwnedRow,
-        descriptor: Arc<RowDescriptor>,
+        descriptor: Rc<RowDescriptor>,
         base_predicate: &Predicate,
         recursive_column: &str,
         accessible: &mut HashMap<ObjectId, AccessReason>,
@@ -923,7 +923,7 @@ impl QueryNode {
     #[allow(clippy::too_many_arguments)]
     fn propagate_access_to_children(
         parent_id: ObjectId,
-        descriptor: &Arc<RowDescriptor>,
+        descriptor: &Rc<RowDescriptor>,
         base_predicate: &Predicate,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &HashMap<ObjectId, HashSet<ObjectId>>,
@@ -1138,7 +1138,7 @@ impl QueryNode {
         join_table: &str,
         join_column: &str,
         join_schema: &TableSchema,
-        table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
+        table_descriptors: &HashMap<String, Rc<RowDescriptor>>,
         cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         reverse_filter: Option<&Predicate>,
@@ -1201,7 +1201,7 @@ impl QueryNode {
                             .get(join_table)
                             .cloned()
                             .unwrap_or_else(|| {
-                                Arc::new(RowDescriptor::from_table_schema(join_schema))
+                                Rc::new(RowDescriptor::from_table_schema(join_schema))
                             });
 
                         // Filter and collect matching right rows
@@ -1369,7 +1369,7 @@ impl QueryNode {
                             .get(join_table)
                             .cloned()
                             .unwrap_or_else(|| {
-                                Arc::new(RowDescriptor::from_table_schema(join_schema))
+                                Rc::new(RowDescriptor::from_table_schema(join_schema))
                             });
 
                         let matching_rows: Vec<_> = if let Some(filter) = reverse_filter {
@@ -1537,7 +1537,7 @@ impl QueryNode {
         join_table: &str,
         join_column: &str,
         join_schema: &TableSchema,
-        table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
+        table_descriptors: &HashMap<String, Rc<RowDescriptor>>,
         cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         reverse_filter: Option<&Predicate>,
@@ -1588,7 +1588,7 @@ impl QueryNode {
                                 .get(join_table)
                                 .cloned()
                                 .unwrap_or_else(|| {
-                                    Arc::new(RowDescriptor::from_table_schema(join_schema))
+                                    Rc::new(RowDescriptor::from_table_schema(join_schema))
                                 });
 
                             // Check if this right row passes the filter
@@ -1801,7 +1801,7 @@ impl QueryNode {
                             {
                                 let join_descriptor =
                                     table_descriptors.get(join_table).cloned().unwrap_or_else(
-                                        || Arc::new(RowDescriptor::from_table_schema(join_schema)),
+                                        || Rc::new(RowDescriptor::from_table_schema(join_schema)),
                                     );
 
                                 let passes_filter = if let Some(filter) = reverse_filter {
@@ -2013,8 +2013,8 @@ impl QueryNode {
     #[allow(clippy::too_many_arguments)]
     fn array_aggregate_handle_outer_delta<F, G>(
         delta: &RowDelta,
-        output_descriptor: &Arc<RowDescriptor>,
-        inner_descriptor: &Arc<RowDescriptor>,
+        output_descriptor: &Rc<RowDescriptor>,
+        inner_descriptor: &Rc<RowDescriptor>,
         inner_schema: &TableSchema,
         inner_joins: &[(String, String, TableSchema)],
         array_column_index: i32,
@@ -2217,7 +2217,7 @@ impl QueryNode {
                         }
                     })
                     .collect();
-                let resolved_descriptor = Arc::new(RowDescriptor::new_ordered(new_cols));
+                let resolved_descriptor = Rc::new(RowDescriptor::new_ordered(new_cols));
 
                 // Build the output row directly
                 let mut builder = RowBuilder::new(resolved_descriptor.clone());
@@ -2252,8 +2252,8 @@ impl QueryNode {
         inner_ref_column: &str,
         inner_schema: &TableSchema,
         inner_joins: &[(String, String, TableSchema)],
-        inner_descriptor: &Arc<RowDescriptor>,
-        output_descriptor: &Arc<RowDescriptor>,
+        inner_descriptor: &Rc<RowDescriptor>,
+        output_descriptor: &Rc<RowDescriptor>,
         array_column_index: i32,
         cached_arrays: &mut HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
@@ -2281,8 +2281,8 @@ impl QueryNode {
         // Helper to rebuild output row with updated array (from HashMap values)
         let rebuild_output = |base_row: &OwnedRow,
                               inner_map: &HashMap<ObjectId, OwnedRow>,
-                              out_desc: Arc<RowDescriptor>,
-                              inner_desc: Arc<RowDescriptor>|
+                              out_desc: Rc<RowDescriptor>,
+                              inner_desc: Rc<RowDescriptor>|
          -> OwnedRow {
             let array: Vec<OwnedRow> = inner_map.values().cloned().collect();
             Self::build_output_row_with_array_buffer(
@@ -2471,8 +2471,8 @@ impl QueryNode {
         outer_row: &OwnedRow,
         inner_rows: &[OwnedRow],
         array_column_index: i32,
-        output_descriptor: Arc<RowDescriptor>,
-        _inner_descriptor: Arc<RowDescriptor>,
+        output_descriptor: Rc<RowDescriptor>,
+        _inner_descriptor: Rc<RowDescriptor>,
     ) -> OwnedRow {
         use crate::sql::row_buffer::RowBuilder;
 
@@ -3120,7 +3120,7 @@ impl QueryNode {
         descriptor_lookup: F,
     ) -> DeltaBatch
     where
-        F: Fn(DescriptorId) -> Option<Arc<RowDescriptor>>,
+        F: Fn(DescriptorId) -> Option<Rc<RowDescriptor>>,
     {
         match self {
             QueryNode::BranchMerge {
@@ -3339,7 +3339,7 @@ impl QueryNode {
     /// and uses that commit's value for the column.
     fn merge_with_metadata(
         frontier_data: &[(CommitId, Vec<u8>, ColumnChanges)],
-        descriptor: &Arc<RowDescriptor>,
+        descriptor: &Rc<RowDescriptor>,
     ) -> OwnedRow {
         use crate::sql::RowBuilder;
         use crate::sql::row_buffer::RowRef;
@@ -3400,8 +3400,8 @@ mod tests {
         )
     }
 
-    fn test_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::from_table_schema(&test_schema()))
+    fn test_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::from_table_schema(&test_schema()))
     }
 
     fn make_owned_row(id: u128, name: &str, active: bool) -> (ObjectId, OwnedRow) {
@@ -3623,8 +3623,8 @@ mod tests {
     const ALICE: u128 = 100;
     const BOB: u128 = 200;
 
-    fn folder_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::from_table_schema(&folder_schema()))
+    fn folder_descriptor() -> Rc<RowDescriptor> {
+        Rc::new(RowDescriptor::from_table_schema(&folder_schema()))
     }
 
     fn make_owned_folder(
@@ -3863,12 +3863,12 @@ mod tests {
         // Create two schema versions:
         // v1: { name: String, active: Bool }
         // v2: { title: String, active: Bool }  (name renamed to title)
-        let v1_desc = Arc::new(RowDescriptor::new([
+        let v1_desc = Rc::new(RowDescriptor::new([
             ("name".to_string(), ColumnType::String, false),
             ("active".to_string(), ColumnType::Bool, false),
         ]));
 
-        let _v2_desc = Arc::new(RowDescriptor::new([
+        let _v2_desc = Rc::new(RowDescriptor::new([
             ("title".to_string(), ColumnType::String, false),
             ("active".to_string(), ColumnType::Bool, false),
         ]));
@@ -4157,21 +4157,21 @@ mod tests {
         use crate::sql::row_buffer::RowDescriptor;
         use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
         use std::collections::HashMap;
-        use std::sync::Arc;
+        use std::rc::Rc;
 
         // Two different schemas (no lens between them)
         let schema_v1 = TableSchema::new(
             "documents",
             vec![ColumnDef::required("title", ColumnType::String)],
         );
-        let desc_v1 = Arc::new(RowDescriptor::from_table_schema(&schema_v1));
+        let desc_v1 = Rc::new(RowDescriptor::from_table_schema(&schema_v1));
         let desc_v1_id = DescriptorId::new_v1(ObjectId::new(0x100));
 
         let schema_v2 = TableSchema::new(
             "documents",
             vec![ColumnDef::required("name", ColumnType::String)],
         );
-        let desc_v2 = Arc::new(RowDescriptor::from_table_schema(&schema_v2));
+        let desc_v2 = Rc::new(RowDescriptor::from_table_schema(&schema_v2));
         let desc_v2_id = DescriptorId::new_v1(ObjectId::new(0x200));
 
         // Create object with two branches (different schemas)
@@ -4266,7 +4266,7 @@ mod tests {
         let lens_context = LensContext::new();
 
         // Descriptor lookup that returns our descriptors
-        let descriptor_lookup = |id: DescriptorId| -> Option<Arc<RowDescriptor>> {
+        let descriptor_lookup = |id: DescriptorId| -> Option<Rc<RowDescriptor>> {
             if id == desc_v1_id {
                 Some(desc_v1.clone())
             } else if id == desc_v2_id {

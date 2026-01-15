@@ -1,6 +1,6 @@
 //! Integration tests for Branch.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use groove::sql::ColumnType;
 use groove::sql::row_buffer::{RowBuilder, RowDescriptor};
@@ -17,15 +17,15 @@ fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
 }
 
 /// Create a test row descriptor with name (String) and count (I32) columns.
-fn test_descriptor() -> Arc<RowDescriptor> {
-    Arc::new(RowDescriptor::new([
+fn test_descriptor() -> Rc<RowDescriptor> {
+    Rc::new(RowDescriptor::new([
         ("name".to_string(), ColumnType::String, false),
         ("count".to_string(), ColumnType::I32, false),
     ]))
 }
 
 /// Build a row buffer with the given name and count values.
-fn make_row(desc: &Arc<RowDescriptor>, name: &str, count: i32) -> Box<[u8]> {
+fn make_row(desc: &Rc<RowDescriptor>, name: &str, count: i32) -> Box<[u8]> {
     let name_idx = desc.column_index("name").unwrap();
     let count_idx = desc.column_index("count").unwrap();
 
@@ -39,7 +39,7 @@ fn make_row(desc: &Arc<RowDescriptor>, name: &str, count: i32) -> Box<[u8]> {
 
 /// Make a commit with structured row data.
 fn make_row_commit(
-    desc: &Arc<RowDescriptor>,
+    desc: &Rc<RowDescriptor>,
     name: &str,
     count: i32,
     author: &str,

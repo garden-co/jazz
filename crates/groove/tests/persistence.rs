@@ -3,7 +3,7 @@
 //! These tests verify that a Database can be created, populated,
 //! dropped, and then restored from the same Environment.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use bytes::Bytes;
 use groove::sql::row_buffer::RowValue;
@@ -20,7 +20,7 @@ fn get_inserted_id(result: ExecuteResult) -> groove::ObjectId {
 
 #[test]
 fn database_roundtrip_simple() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Create and populate database
     let catalog_id = {
@@ -69,7 +69,7 @@ fn database_roundtrip_simple() {
 
 #[test]
 fn database_roundtrip_multiple_tables() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Create and populate database
     let catalog_id = {
@@ -131,7 +131,7 @@ fn database_roundtrip_multiple_tables() {
 
 #[test]
 fn database_roundtrip_with_policies() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Create database with policies
     let catalog_id = {
@@ -201,7 +201,7 @@ fn database_roundtrip_with_policies() {
 
 #[test]
 fn database_roundtrip_after_delete() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Create, populate, then delete some rows
     let catalog_id = {
@@ -250,7 +250,7 @@ fn database_roundtrip_after_delete() {
 
 #[test]
 fn database_roundtrip_after_update() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Create, populate, then update some rows
     let catalog_id = {
@@ -296,7 +296,7 @@ fn database_roundtrip_after_update() {
 
 #[test]
 fn database_roundtrip_with_nullable() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Create table with nullable column
     let catalog_id = {
@@ -344,7 +344,7 @@ fn database_roundtrip_with_nullable() {
 
 #[test]
 fn database_roundtrip_with_inline_blob() {
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Small blob data (will be stored inline)
     let small_data: Vec<u8> = (0..100).map(|i| i as u8).collect();
@@ -360,7 +360,7 @@ fn database_roundtrip_with_inline_blob() {
 
         // Insert with blob - test row creation separately
         let schema = db.get_table("files").unwrap();
-        let descriptor = std::sync::Arc::new(
+        let descriptor = std::rc::Rc::new(
             groove::sql::row_buffer::RowDescriptor::from_table_schema(&schema),
         );
         eprintln!(
@@ -427,7 +427,7 @@ fn database_roundtrip_with_inline_blob() {
 fn database_roundtrip_with_chunked_blob() {
     use futures::executor::block_on;
 
-    let env = Arc::new(MemoryEnvironment::new());
+    let env = Rc::new(MemoryEnvironment::new());
 
     // Large blob data (will be chunked) - 2 chunks worth
     let large_data: Vec<u8> = (0..(INLINE_THRESHOLD + 1000))

@@ -9,7 +9,7 @@
 //! This module is only available on native (non-WASM) platforms.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::commit::CommitId;
@@ -401,9 +401,9 @@ impl ActiveQuery {
 /// Manages sessions, query subscriptions, and object sync state.
 pub struct SyncServer<E: Environment> {
     /// Storage environment
-    pub env: Arc<E>,
+    pub env: Rc<E>,
     /// Token validator for authentication
-    pub token_validator: Arc<dyn TokenValidator>,
+    pub token_validator: Rc<dyn TokenValidator>,
     /// Active client sessions
     pub sessions: HashMap<SessionId, ClientSession>,
     /// Reverse index: object -> sessions that have it
@@ -418,7 +418,7 @@ pub struct SyncServer<E: Environment> {
 
 impl<E: Environment> SyncServer<E> {
     /// Create a new sync server.
-    pub fn new(env: Arc<E>, token_validator: Arc<dyn TokenValidator>) -> Self {
+    pub fn new(env: Rc<E>, token_validator: Rc<dyn TokenValidator>) -> Self {
         Self {
             env,
             token_validator,
@@ -824,7 +824,7 @@ pub struct SchemaRegistry {
     /// Schema history: table → list of descriptor IDs (chronological)
     schema_history: HashMap<String, Vec<DescriptorId>>,
     /// API key validator
-    api_key_validator: Option<Arc<dyn ApiKeyValidator>>,
+    api_key_validator: Option<Rc<dyn ApiKeyValidator>>,
 }
 
 impl SchemaRegistry {
@@ -839,7 +839,7 @@ impl SchemaRegistry {
     }
 
     /// Create a schema registry with API key validation.
-    pub fn with_api_key_validator(validator: Arc<dyn ApiKeyValidator>) -> Self {
+    pub fn with_api_key_validator(validator: Rc<dyn ApiKeyValidator>) -> Self {
         Self {
             catalog: Catalog::new(),
             descriptors: HashMap::new(),
@@ -849,7 +849,7 @@ impl SchemaRegistry {
     }
 
     /// Set the API key validator.
-    pub fn set_api_key_validator(&mut self, validator: Arc<dyn ApiKeyValidator>) {
+    pub fn set_api_key_validator(&mut self, validator: Rc<dyn ApiKeyValidator>) {
         self.api_key_validator = Some(validator);
     }
 
@@ -1213,8 +1213,8 @@ mod tests {
     use crate::storage::MemoryEnvironment;
 
     fn make_server() -> SyncServer<MemoryEnvironment> {
-        let env = Arc::new(MemoryEnvironment::new());
-        let validator = Arc::new(AcceptAllTokens);
+        let env = Rc::new(MemoryEnvironment::new());
+        let validator = Rc::new(AcceptAllTokens);
         SyncServer::new(env, validator)
     }
 
@@ -1425,7 +1425,7 @@ mod tests {
             vec![ApiKeyScope::SchemaDeployDev],
         );
 
-        let mut registry = SchemaRegistry::with_api_key_validator(Arc::new(validator));
+        let mut registry = SchemaRegistry::with_api_key_validator(Rc::new(validator));
 
         // Register initial table
         let schema = TableSchema {
