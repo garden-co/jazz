@@ -60,24 +60,6 @@ impl From<&ConnectionState> for SyncState {
 }
 
 // ============================================================================
-// Internal State
-// ============================================================================
-
-/// Shared state for sync operations.
-///
-/// Uses `SyncClient` for core sync logic including:
-/// - Connection state and lifecycle (Stopping for graceful shutdown)
-/// - Server known state tracking
-/// - Pending push queue for local writes
-/// - State change and error callbacks
-struct SyncedState {
-    /// The sync client (owns DatabaseState, handles sync logic)
-    sync_client: SyncClient<WasmClientEnv>,
-    /// Database reference for SQL operations (shares Arc with sync_client)
-    db: Database,
-}
-
-// ============================================================================
 // WasmSyncedLocalNode
 // ============================================================================
 
@@ -86,9 +68,17 @@ struct SyncedState {
 /// Combines SQL database operations with real-time sync to a server.
 /// All writes are automatically pushed to the server, and incoming
 /// changes from other clients are automatically applied.
+///
+/// Wraps `SyncClient<WasmClientEnv>` with JS bindings.
 #[wasm_bindgen]
 pub struct WasmSyncedLocalNode {
-    state: Rc<RefCell<SyncedState>>,
+    /// The sync client handles all sync logic:
+    /// - Connection state and lifecycle
+    /// - Server known state tracking
+    /// - Pending push queue for local writes
+    /// - State change and error callbacks
+    /// - Database access via `database()` method
+    client: Rc<RefCell<SyncClient<WasmClientEnv>>>,
 }
 
 #[wasm_bindgen]
@@ -108,15 +98,12 @@ impl WasmSyncedLocalNode {
             Database::in_memory()
         };
 
-        // Create SyncClient with the database state
         let db_state = db.into_state();
         let env = WasmClientEnv::new(ClientEnvConfig::new(&server_url, &auth_token));
-        let sync_client = SyncClient::new(env, Arc::clone(&db_state));
-        // Recreate Database from the same state for SQL operations
-        let db = Database::from_state(db_state);
+        let client = SyncClient::new(env, db_state);
 
         Self {
-            state: Rc::new(RefCell::new(SyncedState { sync_client, db })),
+            client: Rc::new(RefCell::new(client)),
         }
     }
 
@@ -157,15 +144,12 @@ impl WasmSyncedLocalNode {
                 db
             };
 
-            // Create SyncClient with the database state
             let db_state = db.into_state();
             let client_env = WasmClientEnv::new(ClientEnvConfig::new(&server_url, &auth_token));
-            let sync_client = SyncClient::new(client_env, Arc::clone(&db_state));
-            // Recreate Database from the same state for SQL operations
-            let db = Database::from_state(db_state);
+            let client = SyncClient::new(client_env, db_state);
 
             Ok(JsValue::from(WasmSyncedLocalNode {
-                state: Rc::new(RefCell::new(SyncedState { sync_client, db })),
+                client: Rc::new(RefCell::new(client)),
             }))
         })
     }
@@ -187,7 +171,7 @@ impl WasmSyncedLocalNode {
             };
             let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(state_str));
         });
-        self.state.borrow_mut().sync_client.set_on_state_change(rust_callback);
+        self.client.borrow_mut().set_on_state_change(rust_callback);
     }
 
     /// Set callback for sync errors.
@@ -199,20 +183,20 @@ impl WasmSyncedLocalNode {
         let rust_callback: Box<dyn Fn(&str)> = Box::new(move |message: &str| {
             let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(message));
         });
-        self.state.borrow_mut().sync_client.set_on_error(rust_callback);
+        self.client.borrow_mut().set_on_error(rust_callback);
     }
 
     /// Get current sync state.
     #[wasm_bindgen(getter, js_name = syncState)]
     pub fn sync_state(&self) -> SyncState {
-        self.state.borrow().sync_client.connection_state().into()
+        self.client.borrow().connection_state().into()
     }
 
     /// Disconnect from the sync server and stop reconnection attempts.
     #[wasm_bindgen]
     pub fn disconnect(&self) {
         // Request graceful shutdown - sync loop will exit on next check
-        self.state.borrow_mut().sync_client.request_stop();
+        self.client.borrow_mut().request_stop();
     }
 
     /// Connect to the sync server and start receiving updates.
@@ -222,20 +206,19 @@ impl WasmSyncedLocalNode {
     /// automatically reconnects with exponential backoff on disconnection.
     #[wasm_bindgen]
     pub fn connect(&self, query: String) -> Promise {
-        let state = Rc::clone(&self.state);
+        let client = Rc::clone(&self.client);
 
         future_to_promise(async move {
             // Reset to Connecting state (clears any previous Stopping state)
-            state
+            client
                 .borrow_mut()
-                .sync_client
                 .set_connection_state(ConnectionState::Connecting);
 
             // Spawn the reconnecting event loop
-            let state_clone = Rc::clone(&state);
+            let client_clone = Rc::clone(&client);
             let query_clone = query.clone();
             WasmRuntime.spawn(async move {
-                sync_event_loop(&state_clone, &query_clone).await;
+                sync_event_loop(&client_clone, &query_clone).await;
             });
 
             Ok(JsValue::TRUE)
@@ -249,9 +232,9 @@ impl WasmSyncedLocalNode {
     /// Execute a SQL statement.
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
-        let mut state = self.state.borrow_mut();
+        let mut client = self.client.borrow_mut();
 
-        match state.db.execute(sql) {
+        match client.database().execute(sql) {
             Ok(result) => {
                 let js_result = match result {
                     ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
@@ -261,11 +244,11 @@ impl WasmSyncedLocalNode {
                     .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
                         // Queue for immediate push via SyncClient
-                        state.sync_client.queue_push(row_id);
+                        client.queue_push(row_id);
                         // Trigger push in background
-                        let state_clone = Rc::clone(&self.state);
+                        let client_clone = Rc::clone(&self.client);
                         WasmRuntime.spawn(async move {
-                            push_pending_objects(&state_clone).await;
+                            push_pending_objects(&client_clone).await;
                         });
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
@@ -287,8 +270,8 @@ impl WasmSyncedLocalNode {
     /// Execute a SELECT query and return results as binary Uint8Array.
     #[wasm_bindgen(js_name = selectBinary)]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
-        let state = self.state.borrow();
-        match state.db.query(sql) {
+        let client = self.client.borrow();
+        match client.database().query(sql) {
             Ok(rows) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
@@ -300,15 +283,14 @@ impl WasmSyncedLocalNode {
     /// Initialize the database schema from a SQL string.
     #[wasm_bindgen(js_name = initSchema)]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
-        let state = self.state.borrow();
+        let client = self.client.borrow();
+        let db = client.database();
         for stmt in schema
             .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
-            state
-                .db
-                .execute(stmt)
+            db.execute(stmt)
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         }
         Ok(())
@@ -328,9 +310,9 @@ impl WasmSyncedLocalNode {
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let value_owned = value.to_string();
         let column_owned = column.to_string();
-        let mut state = self.state.borrow_mut();
-        let result = state
-            .db
+        let mut client = self.client.borrow_mut();
+        let result = client
+            .database()
             .update_with(table, id, |builder| {
                 builder
                     .set_string_by_name(&column_owned, &value_owned)
@@ -340,10 +322,10 @@ impl WasmSyncedLocalNode {
 
         // Queue for immediate push if update succeeded
         if result {
-            state.sync_client.queue_push(id);
-            let state_clone = Rc::clone(&self.state);
+            client.queue_push(id);
+            let client_clone = Rc::clone(&self.client);
             WasmRuntime.spawn(async move {
-                push_pending_objects(&state_clone).await;
+                push_pending_objects(&client_clone).await;
             });
         }
         Ok(result)
@@ -362,9 +344,9 @@ impl WasmSyncedLocalNode {
             .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let column_owned = column.to_string();
-        let mut state = self.state.borrow_mut();
-        let result = state
-            .db
+        let mut client = self.client.borrow_mut();
+        let result = client
+            .database()
             .update_with(table, id, |builder| {
                 builder.set_i64_by_name(&column_owned, value).build()
             })
@@ -372,10 +354,10 @@ impl WasmSyncedLocalNode {
 
         // Queue for immediate push if update succeeded
         if result {
-            state.sync_client.queue_push(id);
-            let state_clone = Rc::clone(&self.state);
+            client.queue_push(id);
+            let client_clone = Rc::clone(&self.client);
             WasmRuntime.spawn(async move {
-                push_pending_objects(&state_clone).await;
+                push_pending_objects(&client_clone).await;
             });
         }
         Ok(result)
@@ -384,8 +366,8 @@ impl WasmSyncedLocalNode {
     /// List all tables in the database.
     #[wasm_bindgen(js_name = listTables)]
     pub fn list_tables(&self) -> JsValue {
-        let state = self.state.borrow();
-        let tables = state.db.list_tables();
+        let client = self.client.borrow();
+        let tables = client.database().list_tables();
         serde_wasm_bindgen::to_value(&tables).unwrap_or(JsValue::NULL)
     }
 
@@ -398,9 +380,9 @@ impl WasmSyncedLocalNode {
     ) -> Result<SyncedQueryHandle, JsValue> {
         use groove::sql::{encode_delta, query_graph::DeltaBatch};
 
-        let state = self.state.borrow();
-        let query = state
-            .db
+        let client = self.client.borrow();
+        let query = client
+            .database()
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -437,9 +419,9 @@ impl WasmSyncedLocalNode {
         use groove::sql::query_graph::DeltaBatch;
         use std::collections::HashMap;
 
-        let state = self.state.borrow();
-        let query = state
-            .db
+        let client = self.client.borrow();
+        let query = client
+            .database()
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -585,28 +567,28 @@ impl SyncedQueryHandle {
 ///
 /// This mirrors the native `upstream_event_loop` in SyncedNode, providing
 /// symmetric behavior between WASM and native implementations.
-async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
+async fn sync_event_loop(client: &Rc<RefCell<SyncClient<WasmClientEnv>>>, query: &str) {
     let mut reconnect_attempt: u32 = 0;
 
     loop {
         // Check if graceful shutdown was requested
-        if state.borrow().sync_client.is_stopping() {
+        if client.borrow().is_stopping() {
             web_sys::console::log_1(&JsValue::from_str("Sync loop stopped (shutdown requested)"));
             return;
         }
 
         // Set appropriate state for this connection attempt
         {
-            let mut state_ref = state.borrow_mut();
+            let mut client_ref = client.borrow_mut();
             if reconnect_attempt == 0 {
-                state_ref.sync_client.set_connection_state(ConnectionState::Connecting);
+                client_ref.set_connection_state(ConnectionState::Connecting);
             } else {
-                state_ref.sync_client.set_connection_state(ConnectionState::Reconnecting { attempt: reconnect_attempt });
+                client_ref.set_connection_state(ConnectionState::Reconnecting { attempt: reconnect_attempt });
             }
         }
 
         // Clone the env before the async operation (can't hold borrow across await)
-        let env = state.borrow().sync_client.env().clone();
+        let env = client.borrow().env().clone();
         let request = SubscribeRequest {
             query: query.to_string(),
             options: SubscriptionOptions::default(),
@@ -616,14 +598,14 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
             Ok(mut stream) => {
                 // Connection successful - reset reconnect counter
                 reconnect_attempt = 0;
-                state.borrow_mut().sync_client.set_connection_state(ConnectionState::Connected);
+                client.borrow_mut().set_connection_state(ConnectionState::Connected);
 
                 web_sys::console::log_1(&JsValue::from_str("Connected to sync server"));
 
                 // Process events until stream ends or shutdown is requested
                 while let Some(result) = stream.next().await {
                     // Check for shutdown request
-                    if state.borrow().sync_client.is_stopping() {
+                    if client.borrow().is_stopping() {
                         web_sys::console::log_1(&JsValue::from_str(
                             "Sync loop stopped (shutdown requested)",
                         ));
@@ -632,17 +614,17 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
 
                     match result {
                         Ok(event) => {
-                            handle_sse_event(state, &event);
+                            handle_sse_event(client, &event);
                         }
                         Err(e) => {
-                            state.borrow().sync_client.report_error(&format!("Stream error: {}", e.message));
+                            client.borrow().report_error(&format!("Stream error: {}", e.message));
                             break;
                         }
                     }
                 }
 
                 // Check again before reconnecting
-                if state.borrow().sync_client.is_stopping() {
+                if client.borrow().is_stopping() {
                     return;
                 }
 
@@ -653,12 +635,12 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
                     "Connection failed: {}",
                     e.message
                 )));
-                state.borrow().sync_client.report_error(&format!("Connection failed: {}", e.message));
+                client.borrow().report_error(&format!("Connection failed: {}", e.message));
             }
         }
 
         // Check before sleeping
-        if state.borrow().sync_client.is_stopping() {
+        if client.borrow().is_stopping() {
             return;
         }
 
@@ -678,7 +660,7 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
 }
 
 /// Handle an SSE event from the server.
-fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
+fn handle_sse_event(client: &Rc<RefCell<SyncClient<WasmClientEnv>>>, event: &SseEvent) {
     use groove::sync::handle_commits_event;
 
     match event {
@@ -696,9 +678,10 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
 
             // Use shared event handler for core logic (applies commits, registers rows)
             let result = {
-                let state_ref = state.borrow();
+                let client_ref = client.borrow();
+                let db = client_ref.database();
                 handle_commits_event(
-                    &state_ref.db,
+                    &db,
                     *object_id,
                     commits.clone(),
                     frontier.clone(),
@@ -708,9 +691,8 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
 
             // Update server known state with the frontier from this event
             // This prevents us from sending these commits back to the server
-            state
+            client
                 .borrow_mut()
-                .sync_client
                 .update_server_known_state(*object_id, frontier.clone());
 
             match result {
@@ -737,7 +719,7 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
                 object_id
             )));
             // Remove from server known state
-            state.borrow_mut().sync_client.server_known_state.remove(object_id);
+            client.borrow_mut().server_known_state.remove(object_id);
         }
         SseEvent::Truncate { object_id, .. } => {
             web_sys::console::log_1(&JsValue::from_str(&format!(
@@ -752,21 +734,20 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
             )));
         }
         SseEvent::Error { code, message } => {
-            state
+            client
                 .borrow()
-                .sync_client
                 .report_error(&format!("SSE error {}: {}", code, message));
         }
     }
 }
 
 /// Push pending objects to the server.
-async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
+async fn push_pending_objects(client: &Rc<RefCell<SyncClient<WasmClientEnv>>>) {
     // Get pending objects and client env
     let (pending, env) = {
-        let mut state_ref = state.borrow_mut();
-        let pending = state_ref.sync_client.drain_pending_push();
-        let env = state_ref.sync_client.env().clone();
+        let mut client_ref = client.borrow_mut();
+        let pending = client_ref.drain_pending_push();
+        let env = client_ref.env().clone();
         (pending, env)
     };
 
@@ -775,10 +756,10 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
     }
 
     for object_id in pending {
-        // Use sync_client.create_push_request() which handles all the commit logic
+        // Use create_push_request() which handles all the commit logic
         let request = {
-            let state_ref = state.borrow();
-            state_ref.sync_client.create_push_request(object_id, "main")
+            let client_ref = client.borrow();
+            client_ref.create_push_request(object_id, "main")
         };
 
         let request = match request {
@@ -800,8 +781,8 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
 
         match env.push(request).await {
             Ok(response) => {
-                // Use sync_client.handle_push_response() to update server known state
-                state.borrow_mut().sync_client.handle_push_response(&response);
+                // Use handle_push_response() to update server known state
+                client.borrow_mut().handle_push_response(&response);
 
                 if response.accepted {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
@@ -816,9 +797,8 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
                 }
             }
             Err(e) => {
-                state
+                client
                     .borrow()
-                    .sync_client
                     .report_error(&format!("Push failed: {}", e.message));
             }
         }

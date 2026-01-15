@@ -11,13 +11,14 @@ export enum ConnectionState {
 }
 
 /**
- * Connection state for the synced node.
+ * Connection state for the synced node (JS-compatible).
  */
 export enum SyncState {
   Disconnected = 0,
   Connecting = 1,
   Connected = 2,
   Reconnecting = 3,
+  Stopping = 4,
 }
 
 export class SyncedQueryHandle {

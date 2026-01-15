@@ -165,8 +165,15 @@ impl<E: ClientEnv> SyncClient<E> {
     }
 
     /// Get a reference to the database state.
-    pub fn db(&self) -> &Arc<DatabaseState> {
+    pub fn db_state(&self) -> &Arc<DatabaseState> {
         &self.db
+    }
+
+    /// Get a Database view for SQL operations.
+    ///
+    /// This creates a lightweight wrapper around the shared DatabaseState.
+    pub fn database(&self) -> crate::sql::Database {
+        crate::sql::Database::from_state(Arc::clone(&self.db))
     }
 
     /// Get a reference to the local node.
