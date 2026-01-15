@@ -173,16 +173,6 @@ function takeFromExternrefTable0(idx) {
     return value;
 }
 
-function passArrayJsValueToWasm0(array, malloc) {
-    const ptr = malloc(array.length * 4, 4) >>> 0;
-    for (let i = 0; i < array.length; i++) {
-        const add = addToExternrefTable0(array[i]);
-        getDataViewMemory0().setUint32(ptr + 4 * i, add, true);
-    }
-    WASM_VECTOR_LEN = array.length;
-    return ptr;
-}
-
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
@@ -852,6 +842,21 @@ export class SessionLog {
         wasm.__wbg_sessionlog_free(ptr, 0);
     }
     /**
+     * Commit pending transactions to the main state.
+     * If skip_validate is false, validates the signature first.
+     * If skip_validate is true, commits without validation.
+     * @param {string} new_signature_str
+     * @param {boolean} skip_validate
+     */
+    commitTransactions(new_signature_str, skip_validate) {
+        const ptr0 = passStringToWasm0(new_signature_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.sessionlog_commitTransactions(this.__wbg_ptr, ptr0, len0, skip_validate);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @param {string} changes_json
      * @param {string} signer_secret
      * @param {string} encryption_key
@@ -920,6 +925,45 @@ export class SessionLog {
         }
     }
     /**
+     * Add an existing private transaction to the staging area.
+     * The transaction is NOT committed until commitTransactions() succeeds.
+     * Note: made_at uses f64 because JavaScript's number type is f64.
+     * @param {string} encrypted_changes
+     * @param {string} key_used
+     * @param {number} made_at
+     * @param {string | null} [meta]
+     */
+    addExistingPrivateTransaction(encrypted_changes, key_used, made_at, meta) {
+        const ptr0 = passStringToWasm0(encrypted_changes, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(key_used, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(meta) ? 0 : passStringToWasm0(meta, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.sessionlog_addExistingPrivateTransaction(this.__wbg_ptr, ptr0, len0, ptr1, len1, made_at, ptr2, len2);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Add an existing trusting transaction to the staging area.
+     * The transaction is NOT committed until commitTransactions() succeeds.
+     * Note: made_at uses f64 because JavaScript's number type is f64.
+     * @param {string} changes
+     * @param {number} made_at
+     * @param {string | null} [meta]
+     */
+    addExistingTrustingTransaction(changes, made_at, meta) {
+        const ptr0 = passStringToWasm0(changes, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(meta) ? 0 : passStringToWasm0(meta, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sessionlog_addExistingTrustingTransaction(this.__wbg_ptr, ptr0, len0, made_at, ptr1, len1);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @param {number} tx_index
      * @param {string} encryption_key
      * @returns {string | undefined}
@@ -979,21 +1023,6 @@ export class SessionLog {
         this.__wbg_ptr = ret >>> 0;
         SessionLogFinalization.register(this, this.__wbg_ptr, this);
         return this;
-    }
-    /**
-     * @param {string[]} transactions_json
-     * @param {string} new_signature_str
-     * @param {boolean} skip_verify
-     */
-    tryAdd(transactions_json, new_signature_str, skip_verify) {
-        const ptr0 = passArrayJsValueToWasm0(transactions_json, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(new_signature_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.sessionlog_tryAdd(this.__wbg_ptr, ptr0, len0, ptr1, len1, skip_verify);
-        if (ret[1]) {
-            throw takeFromExternrefTable0(ret[0]);
-        }
     }
     /**
      * @returns {SessionLog}
@@ -1167,14 +1196,6 @@ function __wbg_get_imports() {
     imports.wbg.__wbindgen_memory = function() {
         const ret = wasm.memory;
         return ret;
-    };
-    imports.wbg.__wbindgen_string_get = function(arg0, arg1) {
-        const obj = arg1;
-        const ret = typeof(obj) === 'string' ? obj : undefined;
-        var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        var len1 = WASM_VECTOR_LEN;
-        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
-        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
     };
     imports.wbg.__wbindgen_string_new = function(arg0, arg1) {
         const ret = getStringFromWasm0(arg0, arg1);

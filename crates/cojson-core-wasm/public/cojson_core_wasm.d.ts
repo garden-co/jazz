@@ -188,12 +188,29 @@ export class Blake3Hasher {
 }
 export class SessionLog {
   free(): void;
+  /**
+   * Commit pending transactions to the main state.
+   * If skip_validate is false, validates the signature first.
+   * If skip_validate is true, commits without validation.
+   */
+  commitTransactions(new_signature_str: string, skip_validate: boolean): void;
   addNewPrivateTransaction(changes_json: string, signer_secret: string, encryption_key: string, key_id: string, made_at: number, meta?: string | null): string;
   addNewTrustingTransaction(changes_json: string, signer_secret: string, made_at: number, meta?: string | null): string;
+  /**
+   * Add an existing private transaction to the staging area.
+   * The transaction is NOT committed until commitTransactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
+   */
+  addExistingPrivateTransaction(encrypted_changes: string, key_used: string, made_at: number, meta?: string | null): void;
+  /**
+   * Add an existing trusting transaction to the staging area.
+   * The transaction is NOT committed until commitTransactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
+   */
+  addExistingTrustingTransaction(changes: string, made_at: number, meta?: string | null): void;
   decryptNextTransactionMetaJson(tx_index: number, encryption_key: string): string | undefined;
   decryptNextTransactionChangesJson(tx_index: number, encryption_key: string): string;
   constructor(co_id: string, session_id: string, signer_id?: string | null);
-  tryAdd(transactions_json: string[], new_signature_str: string, skip_verify: boolean): void;
   clone(): SessionLog;
 }
 
@@ -202,13 +219,15 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_sessionlog_free: (a: number, b: number) => void;
+  readonly sessionlog_addExistingPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+  readonly sessionlog_addExistingTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
   readonly sessionlog_addNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
   readonly sessionlog_addNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly sessionlog_clone: (a: number) => number;
+  readonly sessionlog_commitTransactions: (a: number, b: number, c: number, d: number) => [number, number];
   readonly sessionlog_decryptNextTransactionChangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionMetaJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly sessionlog_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
-  readonly sessionlog_tryAdd: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
   readonly ed25519Sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly ed25519SignatureFromBytes: (a: number, b: number) => [number, number, number, number];
   readonly ed25519SigningKeyFromBytes: (a: number, b: number) => [number, number, number, number];

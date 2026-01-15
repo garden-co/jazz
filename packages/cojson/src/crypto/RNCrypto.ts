@@ -222,11 +222,24 @@ class SessionLogAdapter implements SessionLogImpl {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => JSON.stringify(tx)),
-      newSignature,
-      skipVerify,
-    );
+    // Use direct calls instead of JSON.stringify for better performance
+    for (const tx of transactions) {
+      if (tx.privacy === "private") {
+        this.sessionLog.addExistingPrivateTransaction(
+          tx.encryptedChanges,
+          tx.keyUsed,
+          tx.madeAt,
+          tx.meta,
+        );
+      } else {
+        this.sessionLog.addExistingTrustingTransaction(
+          tx.changes,
+          tx.madeAt,
+          tx.meta,
+        );
+      }
+    }
+    this.sessionLog.commitTransactions(newSignature, skipVerify);
   }
 
   addNewPrivateTransaction(

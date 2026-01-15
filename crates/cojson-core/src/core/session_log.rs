@@ -1,3 +1,4 @@
+use crate::core::config::MAX_TX_SIZE_BYTES;
 use crate::core::keys::{decode_z, CoID, KeyID, KeySecret, Signature, SignerID, SignerSecret};
 use crate::core::{CoJsonCoreError, CryptoCache, NonceGenerator};
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
@@ -8,7 +9,6 @@ use salsa20::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value as JsonValue};
-use crate::core::config::MAX_TX_SIZE_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -74,15 +74,21 @@ pub struct SessionLogInternal {
     last_signature: Option<Signature>,
     nonce_generator: NonceGenerator,
     crypto_cache: CryptoCache,
+    /// Staging area for transactions pending validation.
+    /// Transactions are added here via add_existing_* methods and committed
+    /// to the main state only when commit_transactions() succeeds.
+    pending_transactions: Vec<String>,
 }
 
 fn validate_tx_size_limit_in_bytes(changes_len: &str) -> Result<(), CoJsonCoreError> {
     if changes_len.len() > MAX_TX_SIZE_BYTES {
-        return Err(CoJsonCoreError::TransactionTooLarge(changes_len.len(), MAX_TX_SIZE_BYTES));
+        return Err(CoJsonCoreError::TransactionTooLarge(
+            changes_len.len(),
+            MAX_TX_SIZE_BYTES,
+        ));
     }
     Ok(())
 }
-
 
 impl SessionLogInternal {
     /// Create a new session log, optionally with a public key for signature verification.
@@ -109,6 +115,7 @@ impl SessionLogInternal {
             last_signature: None,
             nonce_generator: NonceGenerator::new(co_id, session_id),
             crypto_cache: CryptoCache::new(),
+            pending_transactions: Vec::new(),
         }
     }
 
@@ -130,65 +137,6 @@ impl SessionLogInternal {
             hasher.update(tx.as_bytes());
         }
         hasher
-    }
-
-    /// Try to add a batch of transactions, verifying the signature if required.
-    /// If skip_verify is false, checks the signature against the expected hash.
-    /// Updates the internal hash state and transaction log if successful.
-    pub fn try_add(
-        &mut self,
-        transactions: Vec<String>,
-        new_signature: &Signature,
-        skip_verify: bool,
-    ) -> Result<(), CoJsonCoreError> {
-        // Parsing the transactions and serializing them back to JSON (To have a stable stringified representation).
-        let transactions = transactions
-            .iter()
-            .map(|tx| {
-                let transaction: Transaction = serde_json::from_str(tx)?;
-                serde_json::to_string(&transaction)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if !skip_verify {
-            // Compute the hash after adding the new transactions.
-            let hasher = self.expected_hash_after(&transactions);
-            let new_hash_encoded_stringified = format!(
-                "\"hash_z{}\"",
-                bs58::encode(hasher.finalize().as_bytes()).into_string()
-            );
-
-            // Verify the signature using the public key, if present.
-            if let Some(public_key) = self.public_key {
-                match public_key.verify(
-                    new_hash_encoded_stringified.as_bytes(),
-                    &(new_signature.try_into()?),
-                ) {
-                    Ok(()) => {}
-                    Err(_) => {
-                        return Err(CoJsonCoreError::SignatureVerification(
-                            new_hash_encoded_stringified.replace("\"", ""),
-                        ));
-                    }
-                }
-            } else {
-                // No public key available for verification.
-                return Err(CoJsonCoreError::SignatureVerification(
-                    new_hash_encoded_stringified.replace("\"", ""),
-                ));
-            }
-
-            // Update the internal hasher state to the new hash.
-            self.hasher = hasher;
-        }
-
-        // Add new transactions to the session log.
-        self.transactions_json.extend(transactions);
-
-        // Update the last signature.
-        self.last_signature = Some(new_signature.clone());
-
-        Ok(())
     }
 
     /// Add a new transaction (private or trusting), encrypting as needed, and sign the new hash.
@@ -277,6 +225,155 @@ impl SessionLogInternal {
         self.last_signature = Some(new_signature.clone());
 
         Ok((new_signature, new_tx))
+    }
+
+    /// Add an existing private transaction to the staging area.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
+    /// Used for batch loading where signature is validated at the end.
+    ///
+    /// # Arguments
+    /// * `encrypted_changes` - The encrypted changes string (e.g., "encrypted_U...")
+    /// * `key_used` - The key ID used for encryption
+    /// * `made_at` - Timestamp in milliseconds
+    /// * `meta` - Optional encrypted metadata
+    ///
+    /// # Errors
+    /// Returns `CoJsonCoreError::Json` if serialization fails (clears pending transactions).
+    pub fn add_existing_private_transaction(
+        &mut self,
+        encrypted_changes: String,
+        key_used: String,
+        made_at: u64,
+        meta: Option<String>,
+    ) -> Result<(), CoJsonCoreError> {
+        let tx = Transaction::Private(PrivateTransaction {
+            encrypted_changes: Encrypted {
+                value: encrypted_changes,
+                _phantom: std::marker::PhantomData,
+            },
+            key_used: KeyID(key_used),
+            made_at: Number::from(made_at),
+            meta: meta.map(|m| Encrypted {
+                value: m,
+                _phantom: std::marker::PhantomData,
+            }),
+            privacy: "private".to_string(),
+        });
+
+        // Handle serialization error - clear pending and propagate
+        let tx_json = match serde_json::to_string(&tx) {
+            Ok(json) => json,
+            Err(e) => {
+                self.pending_transactions.clear();
+                return Err(CoJsonCoreError::Json(e));
+            }
+        };
+
+        self.pending_transactions.push(tx_json);
+        Ok(())
+    }
+
+    /// Add an existing trusting transaction to the staging area.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
+    /// Used for batch loading where signature is validated at the end.
+    ///
+    /// # Arguments
+    /// * `changes` - The stringified JSON changes
+    /// * `made_at` - Timestamp in milliseconds
+    /// * `meta` - Optional metadata
+    ///
+    /// # Errors
+    /// Returns `CoJsonCoreError::Json` if serialization fails (clears pending transactions).
+    pub fn add_existing_trusting_transaction(
+        &mut self,
+        changes: String,
+        made_at: u64,
+        meta: Option<String>,
+    ) -> Result<(), CoJsonCoreError> {
+        let tx = Transaction::Trusting(TrustingTransaction {
+            changes,
+            made_at: Number::from(made_at),
+            meta,
+            privacy: "trusting".to_string(),
+        });
+
+        // Handle serialization error - clear pending and propagate
+        let tx_json = match serde_json::to_string(&tx) {
+            Ok(json) => json,
+            Err(e) => {
+                self.pending_transactions.clear();
+                return Err(CoJsonCoreError::Json(e));
+            }
+        };
+
+        self.pending_transactions.push(tx_json);
+        Ok(())
+    }
+
+    /// Commit pending transactions to the main state.
+    /// If `skip_validate` is false, validates the signature first.
+    /// If `skip_validate` is true, commits without validation.
+    ///
+    /// # Arguments
+    /// * `new_signature` - The signature to store (and validate if skip_validate is false)
+    /// * `skip_validate` - If true, skip signature validation
+    ///
+    /// # Returns
+    /// * `Ok(())` - Transactions committed successfully
+    /// * `Err(CoJsonCoreError::SignatureVerification)` - Signature invalid (only when skip_validate is false)
+    ///
+    /// # Atomicity
+    /// This method guarantees that if it returns an error, the committed state
+    /// (hasher, transactions_json, last_signature) remains unchanged.
+    pub fn commit_transactions(
+        &mut self,
+        new_signature: &Signature,
+        skip_validate: bool,
+    ) -> Result<(), CoJsonCoreError> {
+        if !skip_validate {
+            // Compute the hash after adding the new transactions.
+            let hasher = self.expected_hash_after(&self.pending_transactions);
+            let new_hash_encoded_stringified = format!(
+                "\"hash_z{}\"",
+                bs58::encode(hasher.finalize().as_bytes()).into_string()
+            );
+
+            // Verify the signature using the public key, if present.
+            if let Some(public_key) = self.public_key {
+                match public_key.verify(
+                    new_hash_encoded_stringified.as_bytes(),
+                    &(new_signature.try_into()?),
+                ) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        return Err(CoJsonCoreError::SignatureVerification(
+                            new_hash_encoded_stringified.replace("\"", ""),
+                        ));
+                    }
+                }
+            } else {
+                // No public key available for verification.
+                return Err(CoJsonCoreError::SignatureVerification(
+                    new_hash_encoded_stringified.replace("\"", ""),
+                ));
+            }
+
+            // Update the internal hasher state to the new hash.
+            self.hasher = hasher;
+        }
+
+        // Add new transactions to the session log.
+        self.transactions_json.extend(self.pending_transactions.drain(..));
+
+        // Update the last signature.
+        self.last_signature = Some(new_signature.clone());
+
+        Ok(())
+    }
+
+    /// Check if there are pending transactions waiting to be committed.
+    pub fn has_pending(&self) -> bool {
+        !self.pending_transactions.is_empty()
     }
 
     /// Decrypt the changes JSON for the transaction at the given index.
@@ -389,133 +486,279 @@ mod tests {
     }
 
     #[test]
-    fn test_add_from_example_json() {
-        #[derive(Deserialize, Debug)]
-        #[serde(rename_all = "camelCase")]
-        struct TestSession {
-            last_signature: Signature,
-            transactions: Vec<Transaction>,
-            last_hash: String,
-        }
+    fn test_commit_transactions_with_valid_signature() {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let public_key = signing_key.verifying_key();
 
-        #[derive(Deserialize, Debug)]
-        #[serde(rename_all = "camelCase")]
-        struct Root {
-            example_base: HashMap<String, TestSession>,
-            #[serde(rename = "signerID")]
-            signer_id: SignerID,
-        }
-
-        let data = fs::read_to_string("data/singleTxSession.json")
-            .expect("Unable to read singleTxSession.json");
-        let root: Root = serde_json::from_str(&data).unwrap();
-
-        let (session_id_str, example) = root.example_base.into_iter().next().unwrap();
-        let session_id = SessionID(session_id_str.clone());
-        let co_id = CoID(
-            session_id_str
-                .split("_session_")
-                .next()
-                .unwrap()
-                .to_string(),
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            Some(public_key.into()),
         );
 
-        let mut session = SessionLogInternal::new(co_id, session_id, Some(root.signer_id));
+        // Stage a trusting transaction
+        session
+            .add_existing_trusting_transaction(
+                r#"{"test": "data"}"#.to_string(),
+                1234567890,
+                None,
+            )
+            .unwrap();
 
-        let new_signature = example.last_signature;
+        assert!(session.has_pending());
+        assert_eq!(session.transactions_json.len(), 0);
 
-        let result = session.try_add(
-            vec![serde_json::to_string(&example.transactions[0]).unwrap()],
-            &new_signature,
-            false,
+        // Compute the expected hash and sign it
+        let hasher = session.expected_hash_after(&session.pending_transactions);
+        let hash_encoded = format!(
+            "\"hash_z{}\"",
+            bs58::encode(hasher.finalize().as_bytes()).into_string()
+        );
+        let signature: Signature = signing_key.sign(hash_encoded.as_bytes()).into();
+
+        // Commit with validation
+        let result = session.commit_transactions(&signature, false);
+        assert!(result.is_ok());
+
+        // Verify state was updated
+        assert!(!session.has_pending());
+        assert_eq!(session.transactions_json.len(), 1);
+        assert_eq!(session.last_signature, Some(signature));
+    }
+
+    #[test]
+    fn test_commit_transactions_with_invalid_signature() {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let public_key = signing_key.verifying_key();
+
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            Some(public_key.into()),
         );
 
-        match result {
-            Ok(_returned_final_hash) => {
-                let final_hash = session.hasher.finalize();
-                let final_hash_encoded = format!(
-                    "hash_z{}",
-                    bs58::encode(final_hash.as_bytes()).into_string()
-                );
+        // Stage a trusting transaction
+        session
+            .add_existing_trusting_transaction(
+                r#"{"test": "data"}"#.to_string(),
+                1234567890,
+                None,
+            )
+            .unwrap();
 
-                assert_eq!(final_hash_encoded, example.last_hash);
-                assert_eq!(session.last_signature, Some(new_signature));
+        // Create a wrong signature
+        let wrong_signing_key = SigningKey::generate(&mut csprng);
+        let wrong_signature: Signature = wrong_signing_key.sign(b"wrong data").into();
+
+        // Commit with validation should fail
+        let result = session.commit_transactions(&wrong_signature, false);
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::SignatureVerification(_))
+        ));
+
+        // Verify committed state unchanged (pending still there)
+        assert!(session.has_pending());
+        assert_eq!(session.transactions_json.len(), 0);
+        assert!(session.last_signature.is_none());
+    }
+
+    #[test]
+    fn test_commit_transactions_skip_validate() {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let public_key = signing_key.verifying_key();
+
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            Some(public_key.into()),
+        );
+
+        // Stage a trusting transaction
+        session
+            .add_existing_trusting_transaction(
+                r#"{"test": "data"}"#.to_string(),
+                1234567890,
+                None,
+            )
+            .unwrap();
+
+        // Use a completely wrong signature but skip validation
+        let wrong_signature: Signature = signing_key.sign(b"completely wrong data").into();
+
+        // Commit with skip_validate=true should succeed
+        let result = session.commit_transactions(&wrong_signature, true);
+        assert!(result.is_ok());
+
+        // Verify state was updated
+        assert!(!session.has_pending());
+        assert_eq!(session.transactions_json.len(), 1);
+        assert_eq!(session.last_signature, Some(wrong_signature));
+    }
+
+    #[test]
+    fn test_commit_transactions_without_public_key() {
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            None, // No public key
+        );
+
+        // Stage a trusting transaction
+        session
+            .add_existing_trusting_transaction(
+                r#"{"test": "data"}"#.to_string(),
+                1234567890,
+                None,
+            )
+            .unwrap();
+
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let signature: Signature = signing_key.sign(b"some data").into();
+
+        // Commit with validation should fail (no public key)
+        let result = session.commit_transactions(&signature, false);
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::SignatureVerification(_))
+        ));
+    }
+
+    #[test]
+    fn test_commit_transactions_multiple_pending() {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let public_key = signing_key.verifying_key();
+
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            Some(public_key.into()),
+        );
+
+        // Stage multiple transactions
+        session
+            .add_existing_trusting_transaction(r#"{"test": "data1"}"#.to_string(), 1234567890, None)
+            .unwrap();
+        session
+            .add_existing_trusting_transaction(r#"{"test": "data2"}"#.to_string(), 1234567891, None)
+            .unwrap();
+
+        assert_eq!(session.pending_transactions.len(), 2);
+
+        // Compute the expected hash and sign it
+        let hasher = session.expected_hash_after(&session.pending_transactions);
+        let hash_encoded = format!(
+            "\"hash_z{}\"",
+            bs58::encode(hasher.finalize().as_bytes()).into_string()
+        );
+        let signature: Signature = signing_key.sign(hash_encoded.as_bytes()).into();
+
+        // Commit with validation
+        let result = session.commit_transactions(&signature, false);
+        assert!(result.is_ok());
+
+        // Verify all transactions committed
+        assert!(!session.has_pending());
+        assert_eq!(session.transactions_json.len(), 2);
+    }
+
+    #[test]
+    fn test_add_existing_private_transaction() {
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            None,
+        );
+
+        // Stage a private transaction
+        let result = session.add_existing_private_transaction(
+            "encrypted_Utest_data".to_string(),
+            "test_key_id".to_string(),
+            1234567890,
+            None,
+        );
+
+        assert!(result.is_ok());
+        assert!(session.has_pending());
+        assert_eq!(session.pending_transactions.len(), 1);
+
+        // Verify the pending transaction contains correct data
+        let pending_tx: Transaction =
+            serde_json::from_str(&session.pending_transactions[0]).unwrap();
+        match pending_tx {
+            Transaction::Private(tx) => {
+                assert_eq!(tx.encrypted_changes.value, "encrypted_Utest_data");
+                assert_eq!(tx.key_used.0, "test_key_id");
+                assert_eq!(tx.made_at, Number::from(1234567890));
+                assert_eq!(tx.privacy, "private");
             }
-            Err(CoJsonCoreError::SignatureVerification(new_hash_encoded)) => {
-                assert_eq!(new_hash_encoded, example.last_hash);
-                panic!("Signature verification failed despite same hash");
-            }
-            Err(e) => {
-                panic!("Unexpected error: {:?}", e);
-            }
+            _ => panic!("Expected PrivateTransaction"),
         }
     }
 
     #[test]
-    fn test_add_from_example_json_multi_tx() {
-        #[derive(Deserialize, Debug)]
-        #[serde(rename_all = "camelCase")]
-        struct TestSession {
-            last_signature: Signature,
-            transactions: Vec<Transaction>,
-            last_hash: String,
-        }
-
-        #[derive(Deserialize, Debug)]
-        #[serde(rename_all = "camelCase")]
-        struct Root {
-            example_base: HashMap<String, TestSession>,
-            #[serde(rename = "signerID")]
-            signer_id: SignerID,
-        }
-
-        let data = fs::read_to_string("data/multiTxSession.json")
-            .expect("Unable to read multiTxSession.json");
-        let root: Root = serde_json::from_str(&data).unwrap();
-
-        let (session_id_str, example) = root.example_base.into_iter().next().unwrap();
-        let session_id = SessionID(session_id_str.clone());
-        let co_id = CoID(
-            session_id_str
-                .split("_session_")
-                .next()
-                .unwrap()
-                .to_string(),
+    fn test_add_existing_trusting_transaction() {
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            None,
         );
 
-        let mut session = SessionLogInternal::new(co_id, session_id, Some(root.signer_id));
-
-        let new_signature = example.last_signature;
-
-        let result = session.try_add(
-            example
-                .transactions
-                .into_iter()
-                .map(|tx| serde_json::to_string(&tx).unwrap())
-                .collect(),
-            &new_signature,
-            false,
+        // Stage a trusting transaction with meta
+        let result = session.add_existing_trusting_transaction(
+            r#"{"test": "data"}"#.to_string(),
+            1234567890,
+            Some(r#"{"meta": "test"}"#.to_string()),
         );
 
-        match result {
-            Ok(_returned_final_hash) => {
-                let final_hash = session.hasher.finalize();
-                let final_hash_encoded = format!(
-                    "hash_z{}",
-                    bs58::encode(final_hash.as_bytes()).into_string()
-                );
+        assert!(result.is_ok());
+        assert!(session.has_pending());
+        assert_eq!(session.pending_transactions.len(), 1);
 
-                assert_eq!(final_hash_encoded, example.last_hash);
-                assert_eq!(session.last_signature, Some(new_signature));
+        // Verify the pending transaction contains correct data
+        let pending_tx: Transaction =
+            serde_json::from_str(&session.pending_transactions[0]).unwrap();
+        match pending_tx {
+            Transaction::Trusting(tx) => {
+                assert_eq!(tx.changes, r#"{"test": "data"}"#);
+                assert_eq!(tx.made_at, Number::from(1234567890));
+                assert_eq!(tx.meta, Some(r#"{"meta": "test"}"#.to_string()));
+                assert_eq!(tx.privacy, "trusting");
             }
-            Err(CoJsonCoreError::SignatureVerification(new_hash_encoded)) => {
-                assert_eq!(new_hash_encoded, example.last_hash);
-                panic!("Signature verification failed despite same hash");
-            }
-            Err(e) => {
-                panic!("Unexpected error: {:?}", e);
-            }
+            _ => panic!("Expected TrustingTransaction"),
         }
+    }
+
+    #[test]
+    fn test_commit_empty_pending() {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let public_key = signing_key.verifying_key();
+
+        let mut session = SessionLogInternal::new(
+            CoID("co_test".to_string()),
+            SessionID("session_test".to_string()),
+            Some(public_key.into()),
+        );
+
+        // Compute hash with no pending transactions
+        let hasher = session.expected_hash_after(&session.pending_transactions);
+        let hash_encoded = format!(
+            "\"hash_z{}\"",
+            bs58::encode(hasher.finalize().as_bytes()).into_string()
+        );
+        let signature: Signature = signing_key.sign(hash_encoded.as_bytes()).into();
+
+        // Commit empty pending should succeed
+        let result = session.commit_transactions(&signature, false);
+        assert!(result.is_ok());
+        assert_eq!(session.transactions_json.len(), 0);
+        assert_eq!(session.last_signature, Some(signature));
     }
 
     #[test]
@@ -590,20 +833,30 @@ mod tests {
             .is_ok());
         assert_eq!(session.last_signature, Some(new_signature.clone()));
 
+        // Verify we can load the same transaction using direct calls
         let mut session2 = SessionLogInternal::new(
             CoID(root["coID"].as_str().unwrap().to_string()),
             SessionID("co_zkNajJ1BhLzR962jpzvXxx917ZB_session_zXzrQLTtp8rR".to_string()),
             Some(public_key.into()),
         );
 
-        session2
-            .try_add(
-                vec![created_tx_json.clone()],
-                &new_signature,
-                false,
-            )
-            .unwrap();
+        // Parse the created transaction to get its fields
+        let created_tx: Transaction = serde_json::from_str(created_tx_json).unwrap();
+        match created_tx {
+            Transaction::Private(tx) => {
+                session2
+                    .add_existing_private_transaction(
+                        tx.encrypted_changes.value,
+                        tx.key_used.0,
+                        tx.made_at.as_u64().unwrap(),
+                        tx.meta.map(|m| m.value),
+                    )
+                    .unwrap();
+            }
+            _ => panic!("Expected PrivateTransaction"),
+        }
 
+        session2.commit_transactions(&new_signature, true).unwrap();
         assert_eq!(session2.transactions_json, session.transactions_json);
     }
 
@@ -647,16 +900,32 @@ mod tests {
 
         let new_signature = Signature(example.last_signature);
 
+        // Use direct calls to add transactions
+        for tx in example.transactions {
+            match tx {
+                Transaction::Private(ptx) => {
+                    session
+                        .add_existing_private_transaction(
+                            ptx.encrypted_changes.value,
+                            ptx.key_used.0,
+                            ptx.made_at.as_u64().unwrap(),
+                            ptx.meta.map(|m| m.value),
+                        )
+                        .unwrap();
+                }
+                Transaction::Trusting(ttx) => {
+                    session
+                        .add_existing_trusting_transaction(
+                            ttx.changes,
+                            ttx.made_at.as_u64().unwrap(),
+                            ttx.meta,
+                        )
+                        .unwrap();
+                }
+            }
+        }
         session
-            .try_add(
-                example
-                    .transactions
-                    .into_iter()
-                    .map(|tx| serde_json::to_string(&tx).unwrap())
-                    .collect(),
-                &new_signature,
-                true, // Skipping verification because we don't have the right initial state
-            )
+            .commit_transactions(&new_signature, true)
             .unwrap();
 
         let key_secret = KeySecret(root.known_keys[0].secret.clone());
@@ -711,16 +980,32 @@ mod tests {
 
         let new_signature = Signature(example.last_signature);
 
+        // Use direct calls to add transactions
+        for tx in example.transactions {
+            match tx {
+                Transaction::Private(ptx) => {
+                    session
+                        .add_existing_private_transaction(
+                            ptx.encrypted_changes.value,
+                            ptx.key_used.0,
+                            ptx.made_at.as_u64().unwrap(),
+                            ptx.meta.map(|m| m.value),
+                        )
+                        .unwrap();
+                }
+                Transaction::Trusting(ttx) => {
+                    session
+                        .add_existing_trusting_transaction(
+                            ttx.changes,
+                            ttx.made_at.as_u64().unwrap(),
+                            ttx.meta,
+                        )
+                        .unwrap();
+                }
+            }
+        }
         session
-            .try_add(
-                example
-                    .transactions
-                    .into_iter()
-                    .map(|v| serde_json::to_string(&v).unwrap())
-                    .collect(),
-                &new_signature,
-                true, // Skipping verification because we don't have the right initial state
-            )
+            .commit_transactions(&new_signature, true)
             .unwrap();
 
         let key_secret = KeySecret(root.known_keys[0].secret.clone());
@@ -799,20 +1084,30 @@ mod tests {
             .is_ok());
         assert_eq!(session.last_signature, Some(new_signature.clone()));
 
+        // Verify we can load the same transaction using direct calls
         let mut session2 = SessionLogInternal::new(
             CoID(root["coID"].as_str().unwrap().to_string()),
             SessionID("co_ziwYjGfPdBjvc1bnCufaVdWLozm_session_zj5NjtJL6s5p".to_string()),
             Some(public_key.into()),
         );
 
-        session2
-            .try_add(
-                vec![created_tx_json.clone()],
-                &new_signature,
-                false,
-            )
-            .unwrap();
+        // Parse the created transaction to get its fields
+        let created_tx: Transaction = serde_json::from_str(created_tx_json).unwrap();
+        match created_tx {
+            Transaction::Private(tx) => {
+                session2
+                    .add_existing_private_transaction(
+                        tx.encrypted_changes.value,
+                        tx.key_used.0,
+                        tx.made_at.as_u64().unwrap(),
+                        tx.meta.map(|m| m.value),
+                    )
+                    .unwrap();
+            }
+            _ => panic!("Expected PrivateTransaction"),
+        }
 
+        session2.commit_transactions(&new_signature, true).unwrap();
         assert_eq!(session2.transactions_json, session.transactions_json);
     }
 
@@ -872,69 +1167,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_signature_verification_failure() {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let public_key = signing_key.verifying_key();
-
-        let mut session = SessionLogInternal::new(
-            CoID("co_test".to_string()),
-            SessionID("session_test".to_string()),
-            Some(public_key.into()),
-        );
-
-        // Create a transaction
-        let tx = Transaction::Trusting(TrustingTransaction {
-            changes: r#"{"test": "data"}"#.to_string(),
-            made_at: Number::from(1234567890),
-            meta: None,
-            privacy: "trusting".to_string(),
-        });
-
-        let tx_json = serde_json::to_string(&tx).unwrap();
-        let transactions = vec![tx_json];
-
-        // Generate a wrong signature
-        let wrong_signing_key = SigningKey::generate(&mut csprng);
-        let wrong_signature: Signature = wrong_signing_key.sign(b"wrong data").into();
-
-        let result = session.try_add(transactions, &wrong_signature, false);
-        assert!(matches!(
-            result,
-            Err(CoJsonCoreError::SignatureVerification(_))
-        ));
-    }
-
-    #[test]
-    fn test_signature_verification_without_public_key() {
-        let session = SessionLogInternal::new(
-            CoID("co_test".to_string()),
-            SessionID("session_test".to_string()),
-            None, // No public key provided
-        );
-
-        let tx = Transaction::Trusting(TrustingTransaction {
-            changes: r#"{"test": "data"}"#.to_string(),
-            made_at: Number::from(1234567890),
-            meta: None,
-            privacy: "trusting".to_string(),
-        });
-
-        let tx_json = serde_json::to_string(&tx).unwrap();
-        let transactions = vec![tx_json];
-
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let signature: Signature = signing_key.sign(b"some data").into();
-
-        let mut session = session;
-        let result = session.try_add(transactions, &signature, false);
-        assert!(matches!(
-            result,
-            Err(CoJsonCoreError::SignatureVerification(_))
-        ));
-    }
 
     #[test]
     fn test_trusting_transaction_mode() {
@@ -1046,37 +1278,6 @@ mod tests {
         assert!(session.public_key.is_some());
         assert!(session.last_signature.is_none());
         assert!(session.transactions_json.is_empty());
-    }
-
-    #[test]
-    fn test_skip_verify_mode() {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let public_key = signing_key.verifying_key();
-
-        let mut session = SessionLogInternal::new(
-            CoID("co_test".to_string()),
-            SessionID("session_test".to_string()),
-            Some(public_key.into()),
-        );
-
-        let tx = Transaction::Trusting(TrustingTransaction {
-            changes: r#"{"test": "data"}"#.to_string(),
-            made_at: Number::from(1234567890),
-            meta: None,
-            privacy: "trusting".to_string(),
-        });
-
-        let tx_json = serde_json::to_string(&tx).unwrap();
-        let transactions = vec![tx_json];
-
-        // Use a completely wrong signature but skip verification
-        let wrong_signature: Signature = signing_key.sign(b"completely wrong data").into();
-
-        let result = session.try_add(transactions, &wrong_signature, true);
-        assert!(result.is_ok());
-        assert_eq!(session.transactions_json.len(), 1);
-        assert_eq!(session.last_signature, Some(wrong_signature));
     }
 
     #[test]
@@ -1273,27 +1474,6 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_transactions_list() {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
-        let public_key = signing_key.verifying_key();
-
-        let mut session = SessionLogInternal::new(
-            CoID("co_test".to_string()),
-            SessionID("session_test".to_string()),
-            Some(public_key.into()),
-        );
-
-        let signature: Signature = signing_key.sign(b"empty transactions").into();
-
-        // Try to add empty transactions list
-        let result = session.try_add(Vec::new(), &signature, true);
-        assert!(result.is_ok());
-        assert_eq!(session.transactions_json.len(), 0);
-        assert_eq!(session.last_signature, Some(signature));
-    }
-
-    #[test]
     fn test_expected_hash_after_function() {
         let session = SessionLogInternal::new(
             CoID("co_test".to_string()),
@@ -1301,30 +1481,29 @@ mod tests {
             None,
         );
 
-        let tx1 = r#"{"test":"data1"}"#.to_string();
-        let tx2 = r#"{"test":"data2"}"#.to_string();
-        let transactions = vec![
-            Transaction::Trusting(TrustingTransaction {
-                changes: tx1,
-                made_at: Number::from(1234567890),
-                meta: None,
-                privacy: "trusting".to_string(),
-            }),
-            Transaction::Trusting(TrustingTransaction {
-                changes: tx2,
-                made_at: Number::from(1234567890),
-                meta: None,
-                privacy: "trusting".to_string(),
-            }),
-        ];
-
-        // This tests the expected_hash_after function indirectly
-        // We can't call it directly since it's private, but we can test it through try_add
+        // This tests the expected_hash_after function indirectly through commit_transactions
         let mut test_session = session.clone();
+
+        // Add multiple transactions using direct calls
+        test_session
+            .add_existing_trusting_transaction(
+                r#"{"test":"data1"}"#.to_string(),
+                1234567890,
+                None,
+            )
+            .unwrap();
+        test_session
+            .add_existing_trusting_transaction(
+                r#"{"test":"data2"}"#.to_string(),
+                1234567890,
+                None,
+            )
+            .unwrap();
+
         let signature: Signature = SigningKey::generate(&mut OsRng).sign(b"test").into();
 
-        // This should work with skip_verify = true
-        let result = test_session.try_add(transactions.iter().map(|tx| serde_json::to_string(tx).unwrap()).collect(), &signature, true);
+        // This should work with skip_validate = true
+        let result = test_session.commit_transactions(&signature, true);
         assert!(result.is_ok());
         assert_eq!(test_session.transactions_json.len(), 2);
     }

@@ -37,7 +37,6 @@ import {
   type UniffiRustArcPtr,
   type UnsafeMutableRawPointer,
   AbstractFfiConverterByteArray,
-  FfiConverterArray,
   FfiConverterArrayBuffer,
   FfiConverterBool,
   FfiConverterFloat64,
@@ -1737,6 +1736,27 @@ const FfiConverterTypeBlake3Hasher = new FfiConverterObject(
 );
 
 export interface SessionLogInterface {
+  /**
+   * Add an existing private transaction to the staging area.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
+   */
+  addExistingPrivateTransaction(
+    encryptedChanges: string,
+    keyUsed: string,
+    madeAt: /*f64*/ number,
+    meta: string | undefined
+  ) /*throws*/ : void;
+  /**
+   * Add an existing trusting transaction to the staging area.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
+   */
+  addExistingTrustingTransaction(
+    changes: string,
+    madeAt: /*f64*/ number,
+    meta: string | undefined
+  ) /*throws*/ : void;
   addNewPrivateTransaction(
     changesJson: string,
     signerSecret: string,
@@ -1752,6 +1772,15 @@ export interface SessionLogInterface {
     meta: string | undefined
   ) /*throws*/ : string;
   cloneSessionLog() /*throws*/ : SessionLogInterface;
+  /**
+   * Commit pending transactions to the main state.
+   * If skip_validate is false, validates the signature first.
+   * If skip_validate is true, commits without validation.
+   */
+  commitTransactions(
+    newSignatureStr: string,
+    skipValidate: boolean
+  ) /*throws*/ : void;
   decryptNextTransactionChangesJson(
     txIndex: /*u32*/ number,
     encryptionKey: string
@@ -1760,11 +1789,6 @@ export interface SessionLogInterface {
     txIndex: /*u32*/ number,
     encryptionKey: string
   ) /*throws*/ : string | undefined;
-  tryAdd(
-    transactionsJson: Array<string>,
-    newSignatureStr: string,
-    skipVerify: boolean
-  ) /*throws*/ : void;
 }
 
 export class SessionLog
@@ -1790,6 +1814,62 @@ export class SessionLog
     this[pointerLiteralSymbol] = pointer;
     this[destructorGuardSymbol] =
       uniffiTypeSessionLogObjectFactory.bless(pointer);
+  }
+
+  /**
+   * Add an existing private transaction to the staging area.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
+   */
+  public addExistingPrivateTransaction(
+    encryptedChanges: string,
+    keyUsed: string,
+    madeAt: /*f64*/ number,
+    meta: string | undefined
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+        FfiConverterTypeSessionLogError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_existing_private_transaction(
+          uniffiTypeSessionLogObjectFactory.clonePointer(this),
+          FfiConverterString.lower(encryptedChanges),
+          FfiConverterString.lower(keyUsed),
+          FfiConverterFloat64.lower(madeAt),
+          FfiConverterOptionalString.lower(meta),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
+   * Add an existing trusting transaction to the staging area.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
+   */
+  public addExistingTrustingTransaction(
+    changes: string,
+    madeAt: /*f64*/ number,
+    meta: string | undefined
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+        FfiConverterTypeSessionLogError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_existing_trusting_transaction(
+          uniffiTypeSessionLogObjectFactory.clonePointer(this),
+          FfiConverterString.lower(changes),
+          FfiConverterFloat64.lower(madeAt),
+          FfiConverterOptionalString.lower(meta),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
   }
 
   public addNewPrivateTransaction(
@@ -1865,6 +1945,31 @@ export class SessionLog
     );
   }
 
+  /**
+   * Commit pending transactions to the main state.
+   * If skip_validate is false, validates the signature first.
+   * If skip_validate is true, commits without validation.
+   */
+  public commitTransactions(
+    newSignatureStr: string,
+    skipValidate: boolean
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+        FfiConverterTypeSessionLogError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_commit_transactions(
+          uniffiTypeSessionLogObjectFactory.clonePointer(this),
+          FfiConverterString.lower(newSignatureStr),
+          FfiConverterBool.lower(skipValidate),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
   public decryptNextTransactionChangesJson(
     txIndex: /*u32*/ number,
     encryptionKey: string
@@ -1906,28 +2011,6 @@ export class SessionLog
         },
         /*liftString:*/ FfiConverterString.lift
       )
-    );
-  }
-
-  public tryAdd(
-    transactionsJson: Array<string>,
-    newSignatureStr: string,
-    skipVerify: boolean
-  ): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
-        FfiConverterTypeSessionLogError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_try_add(
-          uniffiTypeSessionLogObjectFactory.clonePointer(this),
-          FfiConverterArrayString.lower(transactionsJson),
-          FfiConverterString.lower(newSignatureStr),
-          FfiConverterBool.lower(skipVerify),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
     );
   }
 
@@ -2020,9 +2103,6 @@ const FfiConverterTypeSessionLog = new FfiConverterObject(
 
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
-
-// FfiConverter for Array<string>
-const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
 
 /**
  * This should be called before anything else.
@@ -2265,6 +2345,22 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_private_transaction() !==
+    30773
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_private_transaction'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_trusting_transaction() !==
+    44589
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_trusting_transaction'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_new_private_transaction() !==
     3753
   ) {
@@ -2289,6 +2385,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_commit_transactions() !==
+    16470
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionlog_commit_transactions'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_decrypt_next_transaction_changes_json() !==
     22072
   ) {
@@ -2302,14 +2406,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionlog_decrypt_next_transaction_meta_json'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_try_add() !==
-    21226
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_cojson_core_rn_checksum_method_sessionlog_try_add'
     );
   }
   if (
