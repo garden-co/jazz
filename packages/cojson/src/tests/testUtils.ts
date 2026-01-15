@@ -456,8 +456,7 @@ export function setupTestNode(
     ? agentAndSessionIDFromSecret(opts.secret)
     : randomAgentAndSessionID();
 
-  const syncWhen = opts.syncWhen ?? (opts.isSyncServer ? "never" : "always");
-  let node = new LocalNode(admin.agentSecret, session, Crypto, syncWhen);
+  let node = new LocalNode(admin.agentSecret, session, Crypto, opts.syncWhen);
 
   if (opts.isSyncServer) {
     syncServer.current = node;
