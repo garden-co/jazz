@@ -1,7 +1,13 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { setGarbageCollectorMaxAge } from "../config";
-import { TEST_NODE_CONFIG, setupTestAccount, setupTestNode } from "./testUtils";
+import {
+  blockMessageTypeOnOutgoingPeer,
+  TEST_NODE_CONFIG,
+  setupTestAccount,
+  setupTestNode,
+} from "./testUtils";
+import { createSyncStorage } from "./testStorage.js";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -10,6 +16,8 @@ beforeEach(() => {
   // We want to test what happens when the garbage collector kicks in and removes a coValue
   // We set the max age to -1 to make it remove everything
   setGarbageCollectorMaxAge(-1);
+
+  setupTestNode({ isSyncServer: true });
 });
 
 describe("garbage collector", () => {
@@ -19,13 +27,14 @@ describe("garbage collector", () => {
     client.addStorage({
       ourName: "client",
     });
+    client.connectToSyncServer();
     client.node.enableGarbageCollector();
 
     const group = client.node.createGroup();
     const map = group.createMap();
     map.set("hello", "world", "trusting");
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await client.node.syncManager.waitForAllCoValuesSync();
 
     client.node.garbageCollector?.collect();
 
@@ -40,6 +49,7 @@ describe("garbage collector", () => {
     client.addStorage({
       ourName: "client",
     });
+    client.connectToSyncServer();
     client.node.enableGarbageCollector();
 
     const group = client.node.createGroup();
@@ -51,7 +61,7 @@ describe("garbage collector", () => {
       // This listener keeps the coValue alive
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await client.node.syncManager.waitForAllCoValuesSync();
 
     client.node.garbageCollector?.collect();
 
@@ -66,19 +76,75 @@ describe("garbage collector", () => {
     expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
   });
 
-  test("coValues are not garbage collected if they are a group or account", async () => {
-    const client = await setupTestAccount();
+  test("coValues are not garbage collected if they are not synced with server peers", async () => {
+    const client = setupTestNode();
 
     client.addStorage({
       ourName: "client",
     });
+    client.node.enableGarbageCollector();
+    const { peer: serverPeer } = client.connectToSyncServer();
+    // Block sync with server
+    const blocker = blockMessageTypeOnOutgoingPeer(serverPeer, "content", {});
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    client.node.garbageCollector?.collect();
+
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(true);
+
+    // Resume sync with server
+    blocker.sendBlockedMessages();
+    blocker.unblock();
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // The coValue should now be collected
+    client.node.garbageCollector?.collect();
+
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
+  });
+
+  test("coValues are garbage collected if there are no server peers", async () => {
+    const client = setupTestNode();
+
+    client.addStorage({
+      ourName: "client",
+    });
+    client.node.enableGarbageCollector();
+    // Client is not connected to the sync server
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    client.node.garbageCollector?.collect();
+
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
+  });
+
+  test("group or account coValues are garbage collected if garbageCollectGroups is true", async () => {
+    const client = await setupTestAccount({
+      // Add storage before creating the account so it's persisted
+      storage: createSyncStorage({
+        nodeName: "client",
+        storageName: "storage",
+      }),
+    });
+
+    client.connectToSyncServer();
     client.node.enableGarbageCollector({
       garbageCollectGroups: true,
     });
 
     const group = client.node.createGroup();
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await client.node.syncManager.waitForAllCoValuesSync();
 
     client.node.garbageCollector?.collect();
 
@@ -86,7 +152,7 @@ describe("garbage collector", () => {
     expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(false);
   });
 
-  test("group or account coValues are garbage collected if garbageCollectGroups is true", async () => {
+  test("coValues are not garbage collected if they are a group or account", async () => {
     const client = await setupTestAccount();
 
     client.addStorage({
@@ -112,6 +178,7 @@ describe("garbage collector", () => {
     client.addStorage({
       ourName: "client",
     });
+    client.connectToSyncServer();
     client.node.enableGarbageCollector();
 
     const garbageCollector = client.node.garbageCollector;

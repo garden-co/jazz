@@ -373,7 +373,12 @@ export class CoValueCore {
     }
   }
 
-  unmount(garbageCollectGroups = false) {
+  /**
+   * Removes the CoValue from memory.
+   *
+   * @returns true if the coValue was successfully unmounted, false otherwise
+   */
+  unmount(garbageCollectGroups = false): boolean {
     if (
       !garbageCollectGroups &&
       this.verified?.header.ruleset.type === "group"
@@ -383,6 +388,10 @@ export class CoValueCore {
 
     if (this.listeners.size > 0) {
       return false; // The coValue is still in use
+    }
+
+    if (!this.node.syncManager.isSyncedToServerPeers(this.id)) {
+      return false;
     }
 
     this.counter.add(-1, { state: this.loadingState });
