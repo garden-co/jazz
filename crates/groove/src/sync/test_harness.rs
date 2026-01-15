@@ -15,8 +15,10 @@
 //! `register_identity()` to set up clients with custom claims. The transport will
 //! then use `broadcast_commits_with_policy()` to filter broadcasts based on policies.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::rc::Rc;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -53,9 +55,9 @@ pub struct TestTransport {
     /// The server's storage environment
     server_env: Arc<MemoryEnvironment>,
     /// Optional database for policy lookup and row data
-    database: Option<Arc<Database>>,
+    database: Option<Rc<Database>>,
     /// Registered client identities (token -> identity with claims)
-    identities: StdRwLock<HashMap<String, ClientIdentity>>,
+    identities: RefCell<HashMap<String, ClientIdentity>>,
 }
 
 impl TestTransport {
@@ -68,7 +70,7 @@ impl TestTransport {
             server: Arc::new(RwLock::new(server)),
             server_env,
             database: None,
-            identities: StdRwLock::new(HashMap::new()),
+            identities: RefCell::new(HashMap::new()),
         }
     }
 
@@ -76,7 +78,7 @@ impl TestTransport {
     ///
     /// When a database is present, push operations will use `broadcast_commits_with_policy()`
     /// to filter broadcasts based on SELECT policies and viewer claims.
-    pub fn with_database(database: Arc<Database>) -> Self {
+    pub fn with_database(database: Rc<Database>) -> Self {
         let server_env = Arc::new(MemoryEnvironment::new());
         let validator: Arc<dyn TokenValidator> = Arc::new(AcceptAllTokens);
         let server = SyncServer::new(Arc::clone(&server_env), validator);
@@ -84,7 +86,7 @@ impl TestTransport {
             server: Arc::new(RwLock::new(server)),
             server_env,
             database: Some(database),
-            identities: StdRwLock::new(HashMap::new()),
+            identities: RefCell::new(HashMap::new()),
         }
     }
 
@@ -94,13 +96,12 @@ impl TestTransport {
     /// instead of a simple identity. This allows testing policy filtering with claims.
     pub fn register_identity(&self, token: &str, identity: ClientIdentity) {
         self.identities
-            .write()
-            .unwrap()
+            .borrow_mut()
             .insert(token.to_string(), identity);
     }
 
     /// Get the database if one is configured.
-    pub fn database(&self) -> Option<&Arc<Database>> {
+    pub fn database(&self) -> Option<&Rc<Database>> {
         self.database.as_ref()
     }
 
@@ -117,7 +118,7 @@ impl TestTransport {
     ) -> Result<(SessionId, mpsc::Receiver<SseEvent>), ClientError> {
         // Use registered identity if available, otherwise create a simple one
         let identity = {
-            let identities = self.identities.read().unwrap();
+            let identities = self.identities.borrow();
             identities
                 .get(token)
                 .cloned()
@@ -412,12 +413,12 @@ impl Default for TestTransport {
 /// A ClientEnv implementation that routes requests through TestTransport.
 #[derive(Clone)]
 pub struct TestClientEnv {
-    transport: Arc<TestTransport>,
+    transport: Rc<TestTransport>,
     auth_token: String,
 }
 
 impl TestClientEnv {
-    pub fn new(transport: Arc<TestTransport>, auth_token: impl Into<String>) -> Self {
+    pub fn new(transport: Rc<TestTransport>, auth_token: impl Into<String>) -> Self {
         Self {
             transport,
             auth_token: auth_token.into(),
@@ -468,15 +469,15 @@ pub struct TestClient {
     /// Client identifier
     pub id: String,
     /// Reference to transport for direct operations
-    transport: Arc<TestTransport>,
+    transport: Rc<TestTransport>,
 }
 
 impl TestClient {
     /// Create a new test client with its own LocalNode.
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn new(transport: Arc<TestTransport>, id: impl Into<String>) -> Self {
+    #[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
+    fn new(transport: Rc<TestTransport>, id: impl Into<String>) -> Self {
         let id = id.into();
-        let env = TestClientEnv::new(Arc::clone(&transport), &id);
+        let env = TestClientEnv::new(Rc::clone(&transport), &id);
         // Each client gets its OWN LocalNode - NOT shared with server
         let db = crate::sql::Database::in_memory();
         let node_arc = db.state().node_arc();
@@ -612,13 +613,13 @@ impl TestClient {
 
 /// Test harness for multi-client sync integration testing.
 pub struct TestHarness {
-    transport: Arc<TestTransport>,
+    transport: Rc<TestTransport>,
 }
 
 impl TestHarness {
     pub fn new() -> Self {
         Self {
-            transport: Arc::new(TestTransport::new()),
+            transport: Rc::new(TestTransport::new()),
         }
     }
 
@@ -628,9 +629,9 @@ impl TestHarness {
     /// - Push operations use `broadcast_commits_with_policy()` to filter broadcasts
     /// - Each session's viewer context is checked against SELECT policies
     /// - Clients only receive commits they're allowed to see based on their claims
-    pub fn with_database(database: Arc<Database>) -> Self {
+    pub fn with_database(database: Rc<Database>) -> Self {
         Self {
-            transport: Arc::new(TestTransport::with_database(database)),
+            transport: Rc::new(TestTransport::with_database(database)),
         }
     }
 
@@ -640,7 +641,7 @@ impl TestHarness {
     }
 
     /// Get the database if one is configured.
-    pub fn database(&self) -> Option<&Arc<Database>> {
+    pub fn database(&self) -> Option<&Rc<Database>> {
         self.transport.database()
     }
 
@@ -667,7 +668,7 @@ impl TestHarness {
 
     /// Create a new test client with its own LocalNode.
     pub fn create_client(&self, id: impl Into<String>) -> TestClient {
-        TestClient::new(Arc::clone(&self.transport), id)
+        TestClient::new(Rc::clone(&self.transport), id)
     }
 }
 
@@ -684,9 +685,9 @@ impl Default for TestHarness {
 use super::synced_node::SyncConfig;
 
 /// Create a SyncedNode for testing with a given client environment.
-#[allow(clippy::arc_with_non_send_sync)]
+#[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
 pub fn create_synced_node(
-    _transport: Arc<TestTransport>,
+    _transport: Rc<TestTransport>,
     _id: &str,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
     let db = Database::in_memory();
@@ -694,9 +695,9 @@ pub fn create_synced_node(
 }
 
 /// Create a SyncedNode with custom config for testing.
-#[allow(clippy::arc_with_non_send_sync)]
+#[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
 pub fn create_synced_node_with_config(
-    _transport: Arc<TestTransport>,
+    _transport: Rc<TestTransport>,
     _id: &str,
     config: SyncConfig,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
@@ -712,12 +713,10 @@ pub fn create_synced_node_with_config(
 // Multi-Server Test Harness
 // ============================================================================
 
-use std::collections::HashMap;
-
 /// A server in the multi-server test harness.
 pub struct TestServer {
     /// The server's transport (handles incoming requests).
-    pub transport: Arc<TestTransport>,
+    pub transport: Rc<TestTransport>,
     /// The server's SyncedNode (for upstream connections).
     pub synced_node: Arc<SyncedNode<TokioRuntime, TestClientEnv>>,
     /// The server's Database (for SQL operations).
@@ -727,10 +726,10 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    #[allow(clippy::arc_with_non_send_sync)]
+    #[allow(clippy::arc_with_non_send_sync)] // Arc required for start_upstream_sync signature
     fn new(name: impl Into<String>) -> Self {
         let name = name.into();
-        let transport = Arc::new(TestTransport::new());
+        let transport = Rc::new(TestTransport::new());
         let db = Database::in_memory();
         let synced_node = Arc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime));
         Self {
@@ -794,7 +793,7 @@ impl MultiServerHarness {
         let to_server = self.servers.get(to)?;
 
         // Create a ClientEnv that routes to the upstream server's transport
-        let env = TestClientEnv::new(Arc::clone(&to_server.transport), format!("server:{}", from));
+        let env = TestClientEnv::new(Rc::clone(&to_server.transport), format!("server:{}", from));
 
         // Add the upstream connection
         let upstream_id = from_server.synced_node.add_upstream(env);
@@ -804,7 +803,7 @@ impl MultiServerHarness {
     /// Create a client connected to a specific server.
     pub fn create_client(&self, id: impl Into<String>, server_name: &str) -> Option<TestClient> {
         let server = self.servers.get(server_name)?;
-        Some(TestClient::new(Arc::clone(&server.transport), id))
+        Some(TestClient::new(Rc::clone(&server.transport), id))
     }
 
     /// Start upstream sync for a server connection.

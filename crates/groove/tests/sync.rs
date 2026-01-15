@@ -4,7 +4,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -502,14 +502,14 @@ async fn test_new_subscriber_receives_existing_data() {
 
 #[tokio::test]
 async fn test_synced_node_structure() {
-    let transport = Arc::new(TestTransport::new());
-    let synced_node = create_synced_node(Arc::clone(&transport), "alice");
+    let transport = Rc::new(TestTransport::new());
+    let synced_node = create_synced_node(Rc::clone(&transport), "alice");
 
     // SyncedNode should have no upstream connections initially
     assert!(!synced_node.has_upstream());
 
     // Add an upstream connection
-    let env = TestClientEnv::new(Arc::clone(&transport), "alice");
+    let env = TestClientEnv::new(Rc::clone(&transport), "alice");
     let upstream_id = synced_node.add_upstream(env);
 
     // Now we have an upstream
@@ -528,13 +528,13 @@ async fn test_synced_node_structure() {
 
 #[tokio::test]
 async fn test_synced_node_write_buffer() {
-    let transport = Arc::new(TestTransport::new());
+    let transport = Rc::new(TestTransport::new());
     let config = SyncConfig {
         write_debounce_ms: 50,
         max_batch_age_ms: 200,
         ..SyncConfig::default()
     };
-    let synced_node = create_synced_node_with_config(Arc::clone(&transport), "alice", config);
+    let synced_node = create_synced_node_with_config(Rc::clone(&transport), "alice", config);
 
     let object_id = ObjectId(1400);
 
@@ -562,13 +562,13 @@ async fn test_synced_node_write_buffer() {
 
 #[tokio::test]
 async fn test_synced_node_write_buffer_max_age() {
-    let transport = Arc::new(TestTransport::new());
+    let transport = Rc::new(TestTransport::new());
     let config = SyncConfig {
         write_debounce_ms: 1000, // Very long debounce
         max_batch_age_ms: 50,    // Short max age
         ..SyncConfig::default()
     };
-    let synced_node = create_synced_node_with_config(Arc::clone(&transport), "alice", config);
+    let synced_node = create_synced_node_with_config(Rc::clone(&transport), "alice", config);
 
     let object_id = ObjectId(1500);
 
@@ -585,11 +585,11 @@ async fn test_synced_node_write_buffer_max_age() {
 
 #[tokio::test]
 async fn test_synced_node_apply_upstream_commits() {
-    let transport = Arc::new(TestTransport::new());
-    let synced_node = create_synced_node(Arc::clone(&transport), "alice");
+    let transport = Rc::new(TestTransport::new());
+    let synced_node = create_synced_node(Rc::clone(&transport), "alice");
 
     // Add an upstream
-    let env = TestClientEnv::new(Arc::clone(&transport), "alice");
+    let env = TestClientEnv::new(Rc::clone(&transport), "alice");
     let upstream_id = synced_node.add_upstream(env);
 
     let object_id = ObjectId(1600);
@@ -620,8 +620,8 @@ async fn test_synced_node_apply_upstream_commits() {
 
 #[tokio::test]
 async fn test_synced_node_connected_clients() {
-    let transport = Arc::new(TestTransport::new());
-    let synced_node = create_synced_node(Arc::clone(&transport), "server");
+    let transport = Rc::new(TestTransport::new());
+    let synced_node = create_synced_node(Rc::clone(&transport), "server");
 
     // Create a client identity and SSE channel
     let mut identity = groove::sync::ClientIdentity::simple("client1");

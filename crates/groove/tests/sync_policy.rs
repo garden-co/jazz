@@ -8,6 +8,7 @@
 
 #![cfg(feature = "sync-server")]
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,7 +50,7 @@ fn identity_with_user_id(name: &str, user_id: ObjectId) -> ClientIdentity {
 #[tokio::test]
 async fn test_org_scoped_broadcast_e2e() {
     // Setup database with org-scoped policy
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE documents (title STRING, org_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE org_id = @viewer.claims.orgId")
@@ -65,7 +66,7 @@ async fn test_org_scoped_broadcast_e2e() {
     };
 
     // Create harness with database
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Register identities with org claims
     harness.register_identity(
@@ -116,7 +117,7 @@ async fn test_org_scoped_broadcast_e2e() {
 /// Test isolation between multiple orgs.
 #[tokio::test]
 async fn test_multiple_orgs_isolation_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE projects (name STRING, org_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON projects FOR SELECT WHERE org_id = @viewer.claims.orgId")
@@ -139,7 +140,7 @@ async fn test_multiple_orgs_isolation_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Register identities
     harness.register_identity(
@@ -215,7 +216,7 @@ async fn test_multiple_orgs_isolation_e2e() {
 /// Test that subscription tiers filter content appropriately.
 #[tokio::test]
 async fn test_subscription_tier_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE premium_content (title STRING, tier STRING)")
         .unwrap();
     db.execute(
@@ -232,7 +233,7 @@ async fn test_subscription_tier_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     harness.register_identity(
         "pro-user",
@@ -277,7 +278,7 @@ async fn test_subscription_tier_e2e() {
 /// Test that owner-based policies work correctly.
 #[tokio::test]
 async fn test_owner_policy_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
 
     // Create users table
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
@@ -316,7 +317,7 @@ async fn test_owner_policy_e2e() {
         .build();
     let doc_id = db.insert_row("documents", row).unwrap();
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Register with user_id (not claims)
     harness.register_identity("alice", identity_with_user_id("alice", alice_id));
@@ -351,7 +352,7 @@ async fn test_owner_policy_e2e() {
 /// Test that role arrays work with CONTAINS operator.
 #[tokio::test]
 async fn test_role_based_policy_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE admin_settings (key STRING, value STRING)")
         .unwrap();
     db.execute(
@@ -367,7 +368,7 @@ async fn test_role_based_policy_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Admin has roles: ["admin", "user"]
     harness.register_identity(
@@ -425,7 +426,7 @@ async fn test_role_based_policy_e2e() {
 /// Test that team membership works with IN operator.
 #[tokio::test]
 async fn test_team_membership_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE team_docs (title STRING, team_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON team_docs FOR SELECT WHERE team_id IN @viewer.claims.groups")
@@ -441,7 +442,7 @@ async fn test_team_membership_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Engineer is in team-engineering and team-platform
     harness.register_identity(
@@ -499,7 +500,7 @@ async fn test_team_membership_e2e() {
 /// Test combined org + role policies.
 #[tokio::test]
 async fn test_combined_org_and_role_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE org_settings (setting STRING, org_id STRING)")
         .unwrap();
     db.execute(
@@ -515,7 +516,7 @@ async fn test_combined_org_and_role_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Acme org admin
     harness.register_identity(
@@ -597,7 +598,7 @@ async fn test_combined_org_and_role_e2e() {
 /// Test that matching clients DO receive broadcasts.
 #[tokio::test]
 async fn test_matching_client_receives_broadcast_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE notes (content STRING, org_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON notes FOR SELECT WHERE org_id = @viewer.claims.orgId")
@@ -611,7 +612,7 @@ async fn test_matching_client_receives_broadcast_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     // Two users in the same org
     harness.register_identity(
@@ -654,7 +655,7 @@ async fn test_matching_client_receives_broadcast_e2e() {
 /// Test sender exclusion - sender doesn't get their own broadcast.
 #[tokio::test]
 async fn test_sender_excluded_e2e() {
-    let db = Arc::new(Database::in_memory());
+    let db = Rc::new(Database::in_memory());
     db.execute("CREATE TABLE notes (content STRING, org_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON notes FOR SELECT WHERE org_id = @viewer.claims.orgId")
@@ -668,7 +669,7 @@ async fn test_sender_excluded_e2e() {
         _ => panic!("expected Inserted"),
     };
 
-    let harness = TestHarness::with_database(Arc::clone(&db));
+    let harness = TestHarness::with_database(Rc::clone(&db));
 
     harness.register_identity(
         "alice",
