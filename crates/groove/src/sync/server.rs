@@ -1543,4 +1543,396 @@ mod tests {
         assert_eq!(restored.list_tables().len(), 1);
         assert!(restored.get_current_descriptor_id("users").is_some());
     }
+
+    // ==================== Policy-Filtered Sync Tests ====================
+
+    mod policy_sync_tests {
+        use super::*;
+        use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor};
+        use crate::sql::{
+            ColumnDef, ColumnType, Policy, PolicyAction, PolicyExpr, PolicyLookup, PolicyValue,
+            RowLookup, TablePolicies, TableSchema, ViewerContext,
+        };
+        use std::sync::Arc;
+
+        /// Mock implementation for policy-filtered sync tests.
+        struct MockPolicyLookup {
+            schemas: HashMap<String, TableSchema>,
+            rows: HashMap<(String, ObjectId), OwnedRow>,
+            policies: HashMap<String, TablePolicies>,
+        }
+
+        impl MockPolicyLookup {
+            fn new() -> Self {
+                MockPolicyLookup {
+                    schemas: HashMap::new(),
+                    rows: HashMap::new(),
+                    policies: HashMap::new(),
+                }
+            }
+
+            fn add_table(&mut self, name: &str, columns: Vec<(&str, ColumnType)>) {
+                let cols: Vec<ColumnDef> = columns
+                    .into_iter()
+                    .map(|(n, ty)| ColumnDef::new(n, ty, true))
+                    .collect();
+                self.schemas
+                    .insert(name.to_string(), TableSchema::new(name.to_string(), cols));
+            }
+
+            fn add_row_with<F>(&mut self, table: &str, id: ObjectId, f: F)
+            where
+                F: FnOnce(RowBuilder) -> OwnedRow,
+            {
+                let schema = self.schemas.get(table).expect("schema must exist");
+                let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+                let row = f(RowBuilder::new(descriptor));
+                self.rows.insert((table.to_string(), id), row);
+            }
+
+            fn get_row_data(&self, table: &str, id: ObjectId) -> Option<OwnedRow> {
+                self.rows.get(&(table.to_string(), id)).cloned()
+            }
+
+            fn add_policy(&mut self, policy: Policy) {
+                let table = policy.table.clone();
+                self.policies.entry(table).or_default().add(policy).unwrap();
+            }
+        }
+
+        impl RowLookup for MockPolicyLookup {
+            fn get_row(&self, table: &str, id: ObjectId) -> Option<(ObjectId, OwnedRow)> {
+                self.rows
+                    .get(&(table.to_string(), id))
+                    .map(|row| (id, row.clone()))
+            }
+
+            fn get_schema(&self, table: &str) -> Option<TableSchema> {
+                self.schemas.get(table).cloned()
+            }
+        }
+
+        impl PolicyLookup for MockPolicyLookup {
+            fn get_policies(&self, table: &str) -> Option<TablePolicies> {
+                self.policies.get(table).cloned()
+            }
+        }
+
+        #[tokio::test]
+        async fn test_broadcast_commits_with_policy_org_filter() {
+            // Test that broadcast_commits_with_policy only sends to sessions
+            // where the policy allows based on org_id claim
+
+            let mut server = make_server();
+            let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
+            let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
+
+            // Create two sessions with different org claims
+            let mut identity1 = ClientIdentity::simple("user1");
+            identity1.claims.insert(
+                "orgId".to_string(),
+                ClaimValue::String("org-alpha".to_string()),
+            );
+
+            let mut identity2 = ClientIdentity::simple("user2");
+            identity2.claims.insert(
+                "orgId".to_string(),
+                ClaimValue::String("org-beta".to_string()),
+            );
+
+            let s1 = server.create_session(identity1, tx1);
+            let s2 = server.create_session(identity2, tx2);
+
+            // Set up mock lookup with documents table and org-based policy
+            let mut lookup = MockPolicyLookup::new();
+            lookup.add_table(
+                "documents",
+                vec![
+                    ("title", ColumnType::String),
+                    ("org_id", ColumnType::String),
+                ],
+            );
+
+            // Create a document belonging to org-alpha
+            let doc_id = ObjectId::new(100);
+            lookup.add_row_with("documents", doc_id, |b| {
+                b.set_string_by_name("title", "Alpha Doc")
+                    .set_string_by_name("org_id", "org-alpha")
+                    .build()
+            });
+
+            // Add policy: org_id = @viewer.claims.orgId
+            lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
+                PolicyExpr::Eq(
+                    PolicyValue::Column("org_id".into()),
+                    PolicyValue::ViewerClaim("orgId".into()),
+                ),
+            ));
+
+            let row = lookup.get_row_data("documents", doc_id).unwrap();
+
+            // Register both sessions for the object
+            server.register_object_session(doc_id, s1);
+            server.register_object_session(doc_id, s2);
+
+            // Broadcast with policy filtering
+            let commits = vec![]; // Empty commits for test
+            let frontier = vec![];
+            server
+                .broadcast_commits_with_policy(
+                    doc_id,
+                    "documents",
+                    &row,
+                    commits,
+                    frontier,
+                    None,
+                    &lookup,
+                    &lookup,
+                    None, // no exclusion
+                )
+                .await;
+
+            // Session 1 (org-alpha) should receive the event
+            let event1 = rx1.try_recv();
+            assert!(event1.is_ok(), "org-alpha session should receive broadcast");
+
+            // Session 2 (org-beta) should NOT receive the event
+            let event2 = rx2.try_recv();
+            assert!(
+                event2.is_err(),
+                "org-beta session should not receive broadcast for org-alpha doc"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_broadcast_commits_with_policy_excludes_sender() {
+            // Test that the sender is excluded even if they pass the policy
+
+            let mut server = make_server();
+            let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
+            let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
+
+            // Both sessions in same org
+            let mut identity1 = ClientIdentity::simple("user1");
+            identity1.claims.insert(
+                "orgId".to_string(),
+                ClaimValue::String("org-alpha".to_string()),
+            );
+
+            let mut identity2 = ClientIdentity::simple("user2");
+            identity2.claims.insert(
+                "orgId".to_string(),
+                ClaimValue::String("org-alpha".to_string()),
+            );
+
+            let s1 = server.create_session(identity1, tx1);
+            let s2 = server.create_session(identity2, tx2);
+
+            // Set up mock lookup
+            let mut lookup = MockPolicyLookup::new();
+            lookup.add_table(
+                "documents",
+                vec![
+                    ("title", ColumnType::String),
+                    ("org_id", ColumnType::String),
+                ],
+            );
+
+            let doc_id = ObjectId::new(100);
+            lookup.add_row_with("documents", doc_id, |b| {
+                b.set_string_by_name("title", "Alpha Doc")
+                    .set_string_by_name("org_id", "org-alpha")
+                    .build()
+            });
+
+            // Policy allows org-alpha
+            lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
+                PolicyExpr::Eq(
+                    PolicyValue::Column("org_id".into()),
+                    PolicyValue::ViewerClaim("orgId".into()),
+                ),
+            ));
+
+            let row = lookup.get_row_data("documents", doc_id).unwrap();
+
+            server.register_object_session(doc_id, s1);
+            server.register_object_session(doc_id, s2);
+
+            // Broadcast from session 1 (should be excluded)
+            server
+                .broadcast_commits_with_policy(
+                    doc_id,
+                    "documents",
+                    &row,
+                    vec![],
+                    vec![],
+                    None,
+                    &lookup,
+                    &lookup,
+                    Some(s1), // exclude sender
+                )
+                .await;
+
+            // Session 1 (sender) should NOT receive
+            assert!(
+                rx1.try_recv().is_err(),
+                "sender should not receive own broadcast"
+            );
+
+            // Session 2 should receive (same org, not sender)
+            assert!(
+                rx2.try_recv().is_ok(),
+                "other session in same org should receive"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_check_select_policy_with_claims() {
+            // Test the check_select_policy helper method
+
+            let server = make_server();
+
+            // Set up mock lookup with claim-based policy
+            let mut lookup = MockPolicyLookup::new();
+            lookup.add_table(
+                "premium_content",
+                vec![("title", ColumnType::String), ("tier", ColumnType::String)],
+            );
+
+            let content_id = ObjectId::new(200);
+            lookup.add_row_with("premium_content", content_id, |b| {
+                b.set_string_by_name("title", "Premium Video")
+                    .set_string_by_name("tier", "pro")
+                    .build()
+            });
+
+            // Policy: tier = @viewer.claims.subscriptionTier
+            lookup.add_policy(
+                Policy::new("premium_content", PolicyAction::Select).with_where(PolicyExpr::Eq(
+                    PolicyValue::Column("tier".into()),
+                    PolicyValue::ViewerClaim("subscriptionTier".into()),
+                )),
+            );
+
+            let row = lookup.get_row_data("premium_content", content_id).unwrap();
+
+            // Pro user should have access
+            let mut pro_identity = ClientIdentity::simple("pro-user");
+            pro_identity.claims.insert(
+                "subscriptionTier".to_string(),
+                ClaimValue::String("pro".to_string()),
+            );
+            let pro_viewer = ViewerContext::from_identity(&pro_identity);
+
+            let can_access = server.check_select_policy(
+                "premium_content",
+                content_id,
+                &row,
+                pro_viewer,
+                &lookup,
+                &lookup,
+            );
+            assert!(can_access, "pro user should access pro content");
+
+            // Free user should not have access
+            let mut free_identity = ClientIdentity::simple("free-user");
+            free_identity.claims.insert(
+                "subscriptionTier".to_string(),
+                ClaimValue::String("free".to_string()),
+            );
+            let free_viewer = ViewerContext::from_identity(&free_identity);
+
+            let can_access = server.check_select_policy(
+                "premium_content",
+                content_id,
+                &row,
+                free_viewer,
+                &lookup,
+                &lookup,
+            );
+            assert!(!can_access, "free user should not access pro content");
+        }
+
+        #[tokio::test]
+        async fn test_broadcast_with_owner_policy() {
+            // Test owner-based policy (owner_id = @viewer)
+
+            let mut server = make_server();
+            let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
+            let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
+
+            // Create users with user_id set
+            let user1_obj_id = ObjectId::new(1);
+            let user2_obj_id = ObjectId::new(2);
+
+            let mut identity1 = ClientIdentity::simple("user1");
+            identity1.user_id = Some(user1_obj_id);
+
+            let mut identity2 = ClientIdentity::simple("user2");
+            identity2.user_id = Some(user2_obj_id);
+
+            let s1 = server.create_session(identity1, tx1);
+            let s2 = server.create_session(identity2, tx2);
+
+            // Set up users and documents tables
+            let mut lookup = MockPolicyLookup::new();
+            lookup.add_table("users", vec![("name", ColumnType::String)]);
+            lookup.add_table(
+                "documents",
+                vec![
+                    ("title", ColumnType::String),
+                    ("owner_id", ColumnType::Ref("users".into())),
+                ],
+            );
+
+            // Add user rows
+            lookup.add_row_with("users", user1_obj_id, |b| {
+                b.set_string_by_name("name", "User One").build()
+            });
+            lookup.add_row_with("users", user2_obj_id, |b| {
+                b.set_string_by_name("name", "User Two").build()
+            });
+
+            // Create document owned by user1
+            let doc_id = ObjectId::new(100);
+            lookup.add_row_with("documents", doc_id, |b| {
+                b.set_string_by_name("title", "User1's Doc")
+                    .set_ref_by_name("owner_id", user1_obj_id)
+                    .build()
+            });
+
+            // Policy: owner_id = @viewer
+            lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
+                PolicyExpr::Eq(PolicyValue::Column("owner_id".into()), PolicyValue::Viewer),
+            ));
+
+            let row = lookup.get_row_data("documents", doc_id).unwrap();
+
+            server.register_object_session(doc_id, s1);
+            server.register_object_session(doc_id, s2);
+
+            server
+                .broadcast_commits_with_policy(
+                    doc_id,
+                    "documents",
+                    &row,
+                    vec![],
+                    vec![],
+                    None,
+                    &lookup,
+                    &lookup,
+                    None,
+                )
+                .await;
+
+            // User1 (owner) should receive
+            assert!(rx1.try_recv().is_ok(), "owner should receive broadcast");
+
+            // User2 (not owner) should NOT receive
+            assert!(
+                rx2.try_recv().is_err(),
+                "non-owner should not receive broadcast"
+            );
+        }
+    }
 }
