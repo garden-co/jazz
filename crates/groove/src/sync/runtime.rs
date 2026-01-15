@@ -72,11 +72,11 @@ pub trait Runtime: Clone + 'static {
 /// - `tokio::spawn` for task spawning
 /// - `tokio::time::sleep` for sleeping
 /// - Hash-based PRNG for random numbers
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, Default)]
 pub struct TokioRuntime;
 
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl Runtime for TokioRuntime {
     fn spawn<F>(&self, future: F)
     where

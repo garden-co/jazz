@@ -8,7 +8,7 @@ name = "groove-server"
 path = "src/main.rs"
 
 [dependencies]
-groove = { path = "../groove", features = ["sync-server"] }
+groove = { path = "../groove" }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

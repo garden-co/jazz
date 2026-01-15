@@ -6,7 +6,7 @@
 //! - Session management with query subscriptions
 //! - Multi-query reference counting for objects
 //!
-//! This module is only available with the `sync-server` feature.
+//! This module is only available on native (non-WASM) platforms.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

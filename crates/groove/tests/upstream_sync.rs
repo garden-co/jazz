@@ -3,7 +3,7 @@
 //! These tests verify server-to-server sync (upstream connections) using
 //! incremental query deltas rather than raw SSE events.
 
-#![cfg(feature = "sync-server")]
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
