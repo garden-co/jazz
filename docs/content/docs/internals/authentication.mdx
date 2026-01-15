@@ -1,0 +1,253 @@
+---
+title: Authentication
+description: JWT-based authentication for binding @viewer in ReBAC policies
+status: partial
+implements:
+  - groove-server/src/auth.rs
+---
+
+<StatusBadge status="partial" />
+
+Authentication in Jazz2 binds the `@viewer` variable in [Access Control](/docs/internals/access-control) policies. The primary mechanism is JWT (JSON Web Token) validation, allowing integration with any OAuth/OIDC provider.
+
+## Implementation Status
+
+**Implemented:**
+- JWT validation with JWKS (JSON Web Key Set) endpoint support
+- Configurable issuer and audience validation
+- User ID extraction from configurable claim (default: `sub`)
+- Claims available in policies as `@viewer.claims.*`
+- Auto-provisioning of users on first authentication
+
+**Not yet implemented:**
+- Wiring claims to policy evaluation (claims are extracted but not passed to `PolicyEvaluator`)
+- JWKS fetching for RS256 (only HS256 secret validation works currently)
+- Session management and refresh token handling
+- Built-in OAuth flows (currently relies on external providers)
+- API key authentication (for server-to-server)
+- Anonymous/guest access with limited permissions
+
+## Goals
+
+1. **Provider agnostic** - Work with any JWT-issuing auth provider (Auth0, WorkOS, BetterAuth, Clerk, etc.)
+2. **Zero custom code** - Configure auth via TOML, no code changes needed
+3. **Claims in policies** - Use JWT claims directly in ReBAC expressions
+4. **Automatic provisioning** - Create user records on first sign-in
+
+## Configuration
+
+### groove-server.toml
+
+```toml
+[auth]
+provider = "jwt"
+
+[auth.jwt]
+# JWKS endpoint for key rotation (recommended)
+jwks_url = "https://auth.example.com/.well-known/jwks.json"
+
+# Or static key for simple setups
+# public_key = "-----BEGIN PUBLIC KEY-----\n..."
+
+# Token validation
+issuer = "https://auth.example.com/"
+audience = "my-app"  # Optional
+
+# Claim mapping
+user_id_claim = "sub"  # Which claim contains the user ID
+
+[auth.provisioning]
+auto_provision = true  # Create users on first auth
+users_table = "users"  # Table to insert new users
+```
+
+### Provider-Specific Examples
+
+#### BetterAuth
+
+```toml
+[auth.jwt]
+jwks_url = "http://localhost:3001/api/auth/jwks"
+issuer = "http://localhost:3001"
+user_id_claim = "sub"
+```
+
+#### WorkOS AuthKit
+
+```toml
+[auth.jwt]
+jwks_url = "https://api.workos.com/sso/jwks/client_XXXXX"
+issuer = "https://api.workos.com/"
+user_id_claim = "sub"
+```
+
+#### Auth0
+
+```toml
+[auth.jwt]
+jwks_url = "https://your-tenant.auth0.com/.well-known/jwks.json"
+issuer = "https://your-tenant.auth0.com/"
+audience = "https://api.example.com"
+user_id_claim = "sub"
+```
+
+## Using Claims in Policies
+
+JWT claims are available in policies via `@viewer.claims`:
+
+```sql
+-- Simple claim check
+CREATE POLICY ON documents FOR SELECT
+  WHERE owner_id = @viewer
+     OR @viewer.claims.role = 'admin';
+
+-- Organization-scoped access (WorkOS)
+CREATE POLICY ON documents FOR SELECT
+  WHERE org_id = @viewer.claims.org_id;
+
+-- Permission-based access
+CREATE POLICY ON documents FOR UPDATE
+  WHERE org_id = @viewer.claims.org_id
+    AND @viewer.claims.permissions CONTAINS 'documents:write';
+
+-- Subscription tier gating (BetterAuth custom claim)
+CREATE POLICY ON premium_features FOR SELECT
+  WHERE @viewer.claims.subscriptionTier IN ('pro', 'enterprise');
+```
+
+## Client Integration
+
+### Passing the Token
+
+Clients must include the JWT in WebSocket connection or HTTP requests:
+
+```typescript
+// WebSocket connection with token
+const client = new JazzClient({
+  syncServer: "wss://sync.example.com",
+  auth: {
+    getToken: async () => {
+      // Get token from your auth provider
+      return await authClient.getAccessToken();
+    },
+  },
+});
+```
+
+### BetterAuth Example
+
+```typescript
+import { createAuthClient } from "better-auth/client";
+import { jwtClient } from "better-auth/client/plugins";
+
+const authClient = createAuthClient({
+  baseURL: "http://localhost:3001",
+  plugins: [jwtClient()],
+});
+
+// Get token for Jazz
+async function getJazzToken() {
+  const result = await authClient.token();
+  return result.data?.token || null;
+}
+```
+
+### WorkOS AuthKit Example
+
+```typescript
+import { useAuth } from "@workos-inc/authkit-react";
+
+function App() {
+  const { getAccessToken } = useAuth();
+
+  // Get token for Jazz
+  async function getJazzToken() {
+    return await getAccessToken();
+  }
+}
+```
+
+## Auto-Provisioning
+
+When `auto_provision = true`, groove-server automatically creates a user record on first authentication:
+
+```sql
+-- Generated INSERT on first auth
+INSERT INTO users (id, email, created_at)
+VALUES (@viewer, @viewer.claims.email, NOW());
+```
+
+The provisioning behavior can be customized:
+
+```toml
+[auth.provisioning]
+auto_provision = true
+users_table = "users"
+
+# Map claims to columns
+[auth.provisioning.column_mapping]
+id = "@viewer"
+email = "@viewer.claims.email"
+name = "@viewer.claims.name"
+```
+
+## Token Validation Flow
+
+```
+Client                    groove-server                    JWKS Endpoint
+   |                            |                               |
+   |-- WS Connect + JWT ------->|                               |
+   |                            |-- Fetch JWKS (cached) ------->|
+   |                            |<-- Public Keys ---------------|
+   |                            |                               |
+   |                            |-- Validate JWT signature      |
+   |                            |-- Check issuer/audience       |
+   |                            |-- Extract user_id claim       |
+   |                            |-- Bind @viewer + claims       |
+   |                            |                               |
+   |<-- Connection accepted ----|                               |
+```
+
+## Security Considerations
+
+### Token Expiration
+
+JWTs have expiration times. groove-server validates `exp` claim and rejects expired tokens. Clients should refresh tokens before expiration.
+
+### Key Rotation
+
+Using JWKS endpoints enables key rotation without server restarts. groove-server caches JWKS with configurable TTL.
+
+### Claim Trust
+
+Only trust claims from verified tokens. Never use client-provided claims directly - they must come from the validated JWT payload.
+
+## Common Claim Patterns
+
+| Provider | User ID Claim | Common Claims |
+|----------|---------------|---------------|
+| BetterAuth | `sub` | `email`, `name`, custom claims via plugin |
+| WorkOS | `sub` | `org_id`, `role`, `permissions`, `sid` |
+| Auth0 | `sub` | `email`, `name`, custom claims in namespace |
+| Clerk | `sub` | `email`, `org_id`, `org_role` |
+| Firebase | `sub` (uid) | `email`, `name`, custom claims |
+
+## Files
+
+- `groove-server/src/auth.rs` - JWT validation and claims extraction
+- `groove-server/src/config.rs` - Auth configuration parsing
+
+## Related Specs
+
+- [Access Control](/docs/internals/access-control) - How `@viewer` and claims are used in policies
+
+## Open Questions
+
+### Refresh Token Handling
+Should groove-server support refresh token flows, or leave that entirely to the client?
+
+### Anonymous Access
+How to support unauthenticated access with limited permissions? Perhaps a special `@anonymous` viewer?
+
+### Multi-Tenancy
+Best practices for tenant isolation using org_id claims vs separate databases?

@@ -52,6 +52,7 @@ Source of truth. Linear references specs, not vice versa.
 | [Storage](docs/content/docs/internals/storage.mdx) | Partial |
 | [Schema Evolution](docs/content/docs/internals/schema-evolution.mdx) | Implemented |
 | [Access Control](docs/content/docs/internals/access-control.mdx) | Partial |
+| [Authentication](docs/content/docs/internals/authentication.mdx) | Partial |
 | [Deletes](docs/content/docs/internals/deletes.mdx) | Implemented |
 | [Indices](docs/content/docs/internals/indices.mdx) | Future |
 | [Transactions](docs/content/docs/internals/transactions.mdx) | Future |

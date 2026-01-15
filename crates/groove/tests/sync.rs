@@ -624,10 +624,8 @@ async fn test_synced_node_connected_clients() {
     let synced_node = create_synced_node(Arc::clone(&transport), "server");
 
     // Create a client identity and SSE channel
-    let identity = groove::sync::ClientIdentity {
-        id: "client1".to_string(),
-        name: Some("Test Client".to_string()),
-    };
+    let mut identity = groove::sync::ClientIdentity::simple("client1");
+    identity.name = Some("Test Client".to_string());
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
 
     // Accept the client

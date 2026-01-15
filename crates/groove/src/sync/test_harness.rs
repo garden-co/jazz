@@ -70,10 +70,7 @@ impl TestTransport {
         token: &str,
         request: SubscribeRequest,
     ) -> Result<(SessionId, mpsc::Receiver<SseEvent>), ClientError> {
-        let identity = ClientIdentity {
-            id: token.to_string(),
-            name: None,
-        };
+        let identity = ClientIdentity::simple(token);
 
         let (tx, rx) = mpsc::channel::<SseEvent>(32);
 

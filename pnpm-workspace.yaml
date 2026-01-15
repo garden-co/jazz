@@ -2,6 +2,8 @@ packages:
   - "packages/*"
   - "examples/demo-app"
   - "examples/sync-demo"
+  - "examples/auth-betterauth"
+  - "examples/auth-workos"
   - "crates/groove-wasm/pkg"
   - "docs"
   - "examples/docs/react"

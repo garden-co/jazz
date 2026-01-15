@@ -887,3 +887,237 @@ fn parse_create_table_with_blob() {
         _ => panic!("expected CreateTable"),
     }
 }
+
+// ========== Policy Parsing Tests: Claims and CONTAINS/IN ==========
+
+#[test]
+fn parse_policy_viewer_external_id() {
+    let sql = "CREATE POLICY ON users FOR SELECT WHERE external_id = @viewer.external_id";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Select);
+
+            match policy.where_clause {
+                Some(PolicyExpr::Eq(left, right)) => {
+                    assert_eq!(left, PolicyValue::Column("external_id".into()));
+                    assert_eq!(right, PolicyValue::ViewerExternalId);
+                }
+                _ => panic!("expected Eq expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_viewer_claim() {
+    let sql = "CREATE POLICY ON premium_features FOR SELECT WHERE @viewer.claims.subscriptionTier = 'pro'";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Select);
+
+            match policy.where_clause {
+                Some(PolicyExpr::Eq(left, right)) => {
+                    assert_eq!(left, PolicyValue::ViewerClaim("subscriptionTier".into()));
+                    assert_eq!(
+                        right,
+                        PolicyValue::Literal(PredicateValue::String("pro".into()))
+                    );
+                }
+                _ => panic!("expected Eq expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_viewer_claim_org_id() {
+    let sql = "CREATE POLICY ON org_documents FOR SELECT WHERE org_id = @viewer.claims.orgId";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => match policy.where_clause {
+            Some(PolicyExpr::Eq(left, right)) => {
+                assert_eq!(left, PolicyValue::Column("org_id".into()));
+                assert_eq!(right, PolicyValue::ViewerClaim("orgId".into()));
+            }
+            _ => panic!("expected Eq expression"),
+        },
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_contains() {
+    let sql =
+        "CREATE POLICY ON admin_settings FOR UPDATE WHERE @viewer.claims.roles CONTAINS 'admin'";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Update);
+
+            match policy.where_clause {
+                Some(PolicyExpr::Contains(left, right)) => {
+                    assert_eq!(left, PolicyValue::ViewerClaim("roles".into()));
+                    assert_eq!(
+                        right,
+                        PolicyValue::Literal(PredicateValue::String("admin".into()))
+                    );
+                }
+                _ => panic!("expected Contains expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_in() {
+    let sql = "CREATE POLICY ON team_docs FOR SELECT WHERE team_id IN @viewer.claims.groups";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Select);
+
+            match policy.where_clause {
+                Some(PolicyExpr::In(left, right)) => {
+                    assert_eq!(left, PolicyValue::Column("team_id".into()));
+                    assert_eq!(right, PolicyValue::ViewerClaim("groups".into()));
+                }
+                _ => panic!("expected In expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_combined_org_and_role() {
+    let sql = "CREATE POLICY ON org_settings FOR UPDATE WHERE org_id = @viewer.claims.orgId AND @viewer.claims.roles CONTAINS 'org_admin'";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Update);
+
+            match policy.where_clause {
+                Some(PolicyExpr::And(exprs)) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    // org_id = @viewer.claims.orgId
+                    match &exprs[0] {
+                        PolicyExpr::Eq(left, right) => {
+                            assert_eq!(*left, PolicyValue::Column("org_id".into()));
+                            assert_eq!(*right, PolicyValue::ViewerClaim("orgId".into()));
+                        }
+                        _ => panic!("expected Eq"),
+                    }
+
+                    // @viewer.claims.roles CONTAINS 'org_admin'
+                    match &exprs[1] {
+                        PolicyExpr::Contains(left, right) => {
+                            assert_eq!(*left, PolicyValue::ViewerClaim("roles".into()));
+                            assert_eq!(
+                                *right,
+                                PolicyValue::Literal(PredicateValue::String("org_admin".into()))
+                            );
+                        }
+                        _ => panic!("expected Contains"),
+                    }
+                }
+                _ => panic!("expected And expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_permissions_array() {
+    // WorkOS-style permissions array check
+    let sql = "CREATE POLICY ON documents FOR SELECT WHERE org_id = @viewer.claims.org_id AND @viewer.claims.permissions CONTAINS 'documents:read'";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Select);
+
+            match policy.where_clause {
+                Some(PolicyExpr::And(exprs)) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    // org_id = @viewer.claims.org_id
+                    match &exprs[0] {
+                        PolicyExpr::Eq(left, right) => {
+                            assert_eq!(*left, PolicyValue::Column("org_id".into()));
+                            assert_eq!(*right, PolicyValue::ViewerClaim("org_id".into()));
+                        }
+                        _ => panic!("expected Eq"),
+                    }
+
+                    // @viewer.claims.permissions CONTAINS 'documents:read'
+                    match &exprs[1] {
+                        PolicyExpr::Contains(left, right) => {
+                            assert_eq!(*left, PolicyValue::ViewerClaim("permissions".into()));
+                            assert_eq!(
+                                *right,
+                                PolicyValue::Literal(PredicateValue::String(
+                                    "documents:read".into()
+                                ))
+                            );
+                        }
+                        _ => panic!("expected Contains"),
+                    }
+                }
+                _ => panic!("expected And expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_multiple_claims_or() {
+    // Multiple subscription tier checks
+    let sql = "CREATE POLICY ON premium_features FOR SELECT WHERE @viewer.claims.subscriptionTier = 'pro' OR @viewer.claims.subscriptionTier = 'enterprise'";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => match policy.where_clause {
+            Some(PolicyExpr::Or(exprs)) => {
+                assert_eq!(exprs.len(), 2);
+
+                match &exprs[0] {
+                    PolicyExpr::Eq(left, right) => {
+                        assert_eq!(*left, PolicyValue::ViewerClaim("subscriptionTier".into()));
+                        assert_eq!(
+                            *right,
+                            PolicyValue::Literal(PredicateValue::String("pro".into()))
+                        );
+                    }
+                    _ => panic!("expected Eq"),
+                }
+
+                match &exprs[1] {
+                    PolicyExpr::Eq(left, right) => {
+                        assert_eq!(*left, PolicyValue::ViewerClaim("subscriptionTier".into()));
+                        assert_eq!(
+                            *right,
+                            PolicyValue::Literal(PredicateValue::String("enterprise".into()))
+                        );
+                    }
+                    _ => panic!("expected Eq"),
+                }
+            }
+            _ => panic!("expected Or expression"),
+        },
+        _ => panic!("expected CreatePolicy"),
+    }
+}

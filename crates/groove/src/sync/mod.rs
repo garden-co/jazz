@@ -24,25 +24,25 @@
 //! # Layer Separation
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────────────┐
-//! │  Database Layer (SQL, schema, queries)                  │
-//! │  - Marks objects with metadata (type, priority, etc.)   │
-//! │  - Observes synced objects via on_objects_received      │
-//! └─────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  Database Layer (SQL, schema, queries)                      │
+//! │  - Marks objects with metadata (type, priority, etc.)       │
+//! │  - Observes synced objects via on_objects_received          │
+//! └─────────────────────────────────────────────────────────────┘
 //!                           │ uses
 //!                           ▼
-//! ┌─────────────────────────────────────────────────────────┐
-//! │  Sync Layer (this module)                               │
-//! │  - Wraps LocalNode for sync capabilities                │
-//! │  - Respects node_private flag                           │
-//! │  - Passes metadata through opaquely                     │
-//! └─────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  Sync Layer (this module)                                   │
+//! │  - Wraps LocalNode for sync capabilities                    │
+//! │  - Respects node_private flag                               │
+//! │  - Passes metadata through opaquely                         │
+//! └─────────────────────────────────────────────────────────────┘
 //!                           │ uses
 //!                           ▼
-//! ┌─────────────────────────────────────────────────────────┐
-//! │  ObjectStore (LocalNode)                                │
-//! │  - Pure storage with object metadata                    │
-//! └─────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  ObjectStore (LocalNode)                                    │
+//! │  - Pure storage with object metadata                        │
+//! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Crate Organization
@@ -67,6 +67,13 @@ mod server;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod test_harness;
+
+#[cfg(all(
+    feature = "jwt-auth",
+    feature = "sync-server",
+    not(target_arch = "wasm32")
+))]
+pub mod jwt;
 
 pub use env::*;
 pub use negotiation::*;
