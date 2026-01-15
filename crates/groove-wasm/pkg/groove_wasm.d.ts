@@ -18,7 +18,6 @@ export enum SyncState {
   Connecting = 1,
   Connected = 2,
   Reconnecting = 3,
-  Stopping = 4,
 }
 
 export class SyncedQueryHandle {
@@ -319,22 +318,6 @@ export class WasmSyncedLocalNode {
    */
   static withIndexedDb(server_url: string, auth_token: string, db_name?: string | null): Promise<any>;
   /**
-   * Set callback for sync state changes.
-   *
-   * Callback receives: (state: string)
-   */
-  setOnStateChange(callback: Function): void;
-  /**
-   * Set callback for sync errors.
-   *
-   * Callback receives: (message: string)
-   */
-  setOnError(callback: Function): void;
-  /**
-   * Disconnect from the sync server and stop reconnection attempts.
-   */
-  disconnect(): void;
-  /**
    * Connect to the sync server and start receiving updates.
    *
    * This subscribes to the given query and starts an SSE stream
@@ -453,13 +436,21 @@ export interface InitOutput {
   readonly init: () => void;
   readonly object_id_to_string: (a: number, b: number) => [number, number, number, number];
   readonly object_id_from_string: (a: number, b: number) => [number, number, number];
+  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
+  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
+  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
+  readonly wasmsyncclient_connectionState: (a: number) => number;
+  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
+  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_disconnect: (a: number) => void;
   readonly __wbg_wasmsyncedlocalnode_free: (a: number, b: number) => void;
   readonly wasmsyncedlocalnode_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
-  readonly wasmsyncedlocalnode_setOnStateChange: (a: number, b: any) => void;
-  readonly wasmsyncedlocalnode_setOnError: (a: number, b: any) => void;
   readonly wasmsyncedlocalnode_syncState: (a: number) => number;
-  readonly wasmsyncedlocalnode_disconnect: (a: number) => void;
   readonly wasmsyncedlocalnode_connect: (a: number, b: number, c: number) => any;
   readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];
@@ -473,17 +464,6 @@ export interface InitOutput {
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
   readonly syncedqueryhandle_diagram: (a: number) => [number, number];
   readonly syncedqueryhandle_free: (a: number) => void;
-  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
-  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
-  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
-  readonly wasmsyncclient_connectionState: (a: number) => number;
-  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
-  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
-  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
-  readonly wasmsyncclient_disconnect: (a: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h783d3c595025ae9c: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h28952e7d8d6ac40d: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;

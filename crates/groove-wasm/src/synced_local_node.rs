@@ -1,14 +1,16 @@
 //! WasmSyncedLocalNode - A synced database for browser environments.
 //!
-//! This module provides a WASM-friendly wrapper that integrates:
-//! - `Database` for SQL operations
-//! - `SyncClient` for real-time collaboration
+//! This module provides a WASM-friendly wrapper around `SyncedNode` that integrates:
+//! - SQL database operations via `Database`
+//! - Real-time sync to upstream servers
+//! - Write batching/debouncing
 //!
 //! Usage from JavaScript:
 //! ```javascript
-//! const node = await WasmSyncedLocalNode.create("http://localhost:8080", "auth-token");
+//! const node = new WasmSyncedLocalNode("http://localhost:8080", "auth-token");
 //! node.execute("CREATE TABLE users (id, name TEXT, email TEXT)");
 //! node.execute("INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com')");
+//! node.connect("SELECT * FROM users");  // Start syncing
 //! // Changes are automatically synced to the server and other clients
 //! ```
 
@@ -16,7 +18,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use js_sys::{Array, Function, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -24,8 +25,7 @@ use wasm_bindgen_futures::future_to_promise;
 use groove::ObjectId;
 use groove::sql::{Database, ExecuteResult, encode_rows};
 use groove::sync::{
-    ClientEnv, ClientEnvConfig, ConnectionState, ReconnectConfig, Runtime, SseEvent,
-    SubscribeRequest, SubscriptionOptions, SyncClient, calculate_reconnect_delay_with_jitter,
+    ClientEnvConfig, Shared, SubscriptionOptions, SyncedNode, UpstreamId, UpstreamState,
 };
 
 use crate::indexeddb::IndexedDbEnvironment;
@@ -44,17 +44,15 @@ pub enum SyncState {
     Connecting,
     Connected,
     Reconnecting,
-    Stopping,
 }
 
-impl From<&ConnectionState> for SyncState {
-    fn from(state: &ConnectionState) -> Self {
+impl From<&UpstreamState> for SyncState {
+    fn from(state: &UpstreamState) -> Self {
         match state {
-            ConnectionState::Disconnected => SyncState::Disconnected,
-            ConnectionState::Connecting => SyncState::Connecting,
-            ConnectionState::Connected => SyncState::Connected,
-            ConnectionState::Reconnecting { .. } => SyncState::Reconnecting,
-            ConnectionState::Stopping => SyncState::Stopping,
+            UpstreamState::Disconnected => SyncState::Disconnected,
+            UpstreamState::Connecting => SyncState::Connecting,
+            UpstreamState::Connected => SyncState::Connected,
+            UpstreamState::Reconnecting { .. } => SyncState::Reconnecting,
         }
     }
 }
@@ -65,20 +63,16 @@ impl From<&ConnectionState> for SyncState {
 
 /// A synced local database for browser environments.
 ///
-/// Combines SQL database operations with real-time sync to a server.
-/// All writes are automatically pushed to the server, and incoming
-/// changes from other clients are automatically applied.
-///
-/// Wraps `SyncClient<WasmClientEnv>` with JS bindings.
+/// This is a thin wrapper around `SyncedNode<WasmRuntime, WasmClientEnv>` that:
+/// - Provides JS-friendly bindings for SQL operations
+/// - Manages a single upstream server connection
+/// - Exposes sync state for UI updates
 #[wasm_bindgen]
 pub struct WasmSyncedLocalNode {
-    /// The sync client handles all sync logic:
-    /// - Connection state and lifecycle
-    /// - Server known state tracking
-    /// - Pending push queue for local writes
-    /// - State change and error callbacks
-    /// - Database access via `database()` method
-    client: Rc<RefCell<SyncClient<WasmClientEnv>>>,
+    /// The underlying SyncedNode (shared for async access)
+    node: Shared<SyncedNode<WasmRuntime, WasmClientEnv>>,
+    /// The upstream server ID (we connect to exactly one server)
+    upstream_id: UpstreamId,
 }
 
 #[wasm_bindgen]
@@ -99,11 +93,15 @@ impl WasmSyncedLocalNode {
         };
 
         let db_state = db.into_state();
+        let node = SyncedNode::new(db_state, WasmRuntime);
+
+        // Add the upstream server
         let env = WasmClientEnv::new(ClientEnvConfig::new(&server_url, &auth_token));
-        let client = SyncClient::new(env, db_state);
+        let upstream_id = node.add_upstream(env);
 
         Self {
-            client: Rc::new(RefCell::new(client)),
+            node: Shared::new(node),
+            upstream_id,
         }
     }
 
@@ -145,58 +143,27 @@ impl WasmSyncedLocalNode {
             };
 
             let db_state = db.into_state();
+            let node = SyncedNode::new(db_state, WasmRuntime);
+
+            // Add the upstream server
             let client_env = WasmClientEnv::new(ClientEnvConfig::new(&server_url, &auth_token));
-            let client = SyncClient::new(client_env, db_state);
+            let upstream_id = node.add_upstream(client_env);
 
             Ok(JsValue::from(WasmSyncedLocalNode {
-                client: Rc::new(RefCell::new(client)),
+                node: Shared::new(node),
+                upstream_id,
             }))
         })
-    }
-
-    /// Set callback for sync state changes.
-    ///
-    /// Callback receives: (state: string)
-    #[wasm_bindgen(js_name = setOnStateChange)]
-    pub fn set_on_state_change(&self, callback: Function) {
-        // Wrap JS Function in a Rust closure that converts ConnectionState to SyncState string
-        let rust_callback: Box<dyn Fn(&ConnectionState)> = Box::new(move |state: &ConnectionState| {
-            let sync_state: SyncState = state.into();
-            let state_str = match sync_state {
-                SyncState::Disconnected => "disconnected",
-                SyncState::Connecting => "connecting",
-                SyncState::Connected => "connected",
-                SyncState::Reconnecting => "reconnecting",
-                SyncState::Stopping => "stopping",
-            };
-            let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(state_str));
-        });
-        self.client.borrow_mut().set_on_state_change(rust_callback);
-    }
-
-    /// Set callback for sync errors.
-    ///
-    /// Callback receives: (message: string)
-    #[wasm_bindgen(js_name = setOnError)]
-    pub fn set_on_error(&self, callback: Function) {
-        // Wrap JS Function in a Rust closure
-        let rust_callback: Box<dyn Fn(&str)> = Box::new(move |message: &str| {
-            let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(message));
-        });
-        self.client.borrow_mut().set_on_error(rust_callback);
     }
 
     /// Get current sync state.
     #[wasm_bindgen(getter, js_name = syncState)]
     pub fn sync_state(&self) -> SyncState {
-        self.client.borrow().connection_state().into()
-    }
-
-    /// Disconnect from the sync server and stop reconnection attempts.
-    #[wasm_bindgen]
-    pub fn disconnect(&self) {
-        // Request graceful shutdown - sync loop will exit on next check
-        self.client.borrow_mut().request_stop();
+        self.node
+            .read()
+            .upstream_state(self.upstream_id)
+            .map(|s| SyncState::from(&s))
+            .unwrap_or(SyncState::Disconnected)
     }
 
     /// Connect to the sync server and start receiving updates.
@@ -206,20 +173,15 @@ impl WasmSyncedLocalNode {
     /// automatically reconnects with exponential backoff on disconnection.
     #[wasm_bindgen]
     pub fn connect(&self, query: String) -> Promise {
-        let client = Rc::clone(&self.client);
+        let node = self.node.clone();
+        let upstream_id = self.upstream_id;
 
         future_to_promise(async move {
-            // Reset to Connecting state (clears any previous Stopping state)
-            client
-                .borrow_mut()
-                .set_connection_state(ConnectionState::Connecting);
+            // Create queries list with default options
+            let queries = vec![(query, SubscriptionOptions::default())];
 
-            // Spawn the reconnecting event loop
-            let client_clone = Rc::clone(&client);
-            let query_clone = query.clone();
-            WasmRuntime.spawn(async move {
-                sync_event_loop(&client_clone, &query_clone).await;
-            });
+            // Run the upstream event loop (handles reconnection automatically)
+            node.read().upstream_event_loop(upstream_id, queries).await;
 
             Ok(JsValue::TRUE)
         })
@@ -232,9 +194,10 @@ impl WasmSyncedLocalNode {
     /// Execute a SQL statement.
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
-        let mut client = self.client.borrow_mut();
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
 
-        match client.database().execute(sql) {
+        match db.execute(sql) {
             Ok(result) => {
                 let js_result = match result {
                     ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
@@ -243,21 +206,14 @@ impl WasmSyncedLocalNode {
                     )
                     .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
-                        // Queue for immediate push via SyncClient
-                        client.queue_push(row_id);
-                        // Trigger push in background
-                        let client_clone = Rc::clone(&self.client);
-                        WasmRuntime.spawn(async move {
-                            push_pending_objects(&client_clone).await;
-                        });
+                        // Queue for push via write buffer
+                        node.queue_for_push(row_id, "main");
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
                     ExecuteResult::Updated(count) => {
-                        // TODO: Track updated objects for sync
                         serde_wasm_bindgen::to_value(&format!("updated:{}", count)).unwrap()
                     }
                     ExecuteResult::Deleted(count) => {
-                        // TODO: Track deleted objects for sync
                         serde_wasm_bindgen::to_value(&format!("deleted:{}", count)).unwrap()
                     }
                 };
@@ -270,8 +226,10 @@ impl WasmSyncedLocalNode {
     /// Execute a SELECT query and return results as binary Uint8Array.
     #[wasm_bindgen(js_name = selectBinary)]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
-        let client = self.client.borrow();
-        match client.database().query(sql) {
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+
+        match db.query(sql) {
             Ok(rows) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
@@ -283,8 +241,9 @@ impl WasmSyncedLocalNode {
     /// Initialize the database schema from a SQL string.
     #[wasm_bindgen(js_name = initSchema)]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
-        let client = self.client.borrow();
-        let db = client.database();
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+
         for stmt in schema
             .split(';')
             .map(|s| s.trim())
@@ -310,9 +269,11 @@ impl WasmSyncedLocalNode {
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let value_owned = value.to_string();
         let column_owned = column.to_string();
-        let mut client = self.client.borrow_mut();
-        let result = client
-            .database()
+
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+
+        let result = db
             .update_with(table, id, |builder| {
                 builder
                     .set_string_by_name(&column_owned, &value_owned)
@@ -320,13 +281,9 @@ impl WasmSyncedLocalNode {
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
-        // Queue for immediate push if update succeeded
+        // Queue for push if update succeeded
         if result {
-            client.queue_push(id);
-            let client_clone = Rc::clone(&self.client);
-            WasmRuntime.spawn(async move {
-                push_pending_objects(&client_clone).await;
-            });
+            node.queue_for_push(id, "main");
         }
         Ok(result)
     }
@@ -344,21 +301,19 @@ impl WasmSyncedLocalNode {
             .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let column_owned = column.to_string();
-        let mut client = self.client.borrow_mut();
-        let result = client
-            .database()
+
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+
+        let result = db
             .update_with(table, id, |builder| {
                 builder.set_i64_by_name(&column_owned, value).build()
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
-        // Queue for immediate push if update succeeded
+        // Queue for push if update succeeded
         if result {
-            client.queue_push(id);
-            let client_clone = Rc::clone(&self.client);
-            WasmRuntime.spawn(async move {
-                push_pending_objects(&client_clone).await;
-            });
+            node.queue_for_push(id, "main");
         }
         Ok(result)
     }
@@ -366,8 +321,9 @@ impl WasmSyncedLocalNode {
     /// List all tables in the database.
     #[wasm_bindgen(js_name = listTables)]
     pub fn list_tables(&self) -> JsValue {
-        let client = self.client.borrow();
-        let tables = client.database().list_tables();
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+        let tables = db.list_tables();
         serde_wasm_bindgen::to_value(&tables).unwrap_or(JsValue::NULL)
     }
 
@@ -376,13 +332,14 @@ impl WasmSyncedLocalNode {
     pub fn subscribe_delta(
         &self,
         sql: &str,
-        callback: js_sys::Function,
+        callback: Function,
     ) -> Result<SyncedQueryHandle, JsValue> {
         use groove::sql::{encode_delta, query_graph::DeltaBatch};
 
-        let client = self.client.borrow();
-        let query = client
-            .database()
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+
+        let query = db
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -414,14 +371,15 @@ impl WasmSyncedLocalNode {
     pub fn subscribe_rows(
         &self,
         sql: &str,
-        callback: js_sys::Function,
+        callback: Function,
     ) -> Result<SyncedQueryHandle, JsValue> {
         use groove::sql::query_graph::DeltaBatch;
         use std::collections::HashMap;
 
-        let client = self.client.borrow();
-        let query = client
-            .database()
+        let node = self.node.read();
+        let db = Database::from_state(node.db_arc());
+
+        let query = db
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -558,250 +516,3 @@ impl SyncedQueryHandle {
         // Resources are freed when the handle is dropped
     }
 }
-
-// ============================================================================
-// Sync Helpers
-// ============================================================================
-
-/// Main sync event loop with automatic reconnection.
-///
-/// This mirrors the native `upstream_event_loop` in SyncedNode, providing
-/// symmetric behavior between WASM and native implementations.
-async fn sync_event_loop(client: &Rc<RefCell<SyncClient<WasmClientEnv>>>, query: &str) {
-    let mut reconnect_attempt: u32 = 0;
-
-    loop {
-        // Check if graceful shutdown was requested
-        if client.borrow().is_stopping() {
-            web_sys::console::log_1(&JsValue::from_str("Sync loop stopped (shutdown requested)"));
-            return;
-        }
-
-        // Set appropriate state for this connection attempt
-        {
-            let mut client_ref = client.borrow_mut();
-            if reconnect_attempt == 0 {
-                client_ref.set_connection_state(ConnectionState::Connecting);
-            } else {
-                client_ref.set_connection_state(ConnectionState::Reconnecting { attempt: reconnect_attempt });
-            }
-        }
-
-        // Clone the env before the async operation (can't hold borrow across await)
-        let env = client.borrow().env().clone();
-        let request = SubscribeRequest {
-            query: query.to_string(),
-            options: SubscriptionOptions::default(),
-        };
-
-        match env.subscribe(request).await {
-            Ok(mut stream) => {
-                // Connection successful - reset reconnect counter
-                reconnect_attempt = 0;
-                client.borrow_mut().set_connection_state(ConnectionState::Connected);
-
-                web_sys::console::log_1(&JsValue::from_str("Connected to sync server"));
-
-                // Process events until stream ends or shutdown is requested
-                while let Some(result) = stream.next().await {
-                    // Check for shutdown request
-                    if client.borrow().is_stopping() {
-                        web_sys::console::log_1(&JsValue::from_str(
-                            "Sync loop stopped (shutdown requested)",
-                        ));
-                        return;
-                    }
-
-                    match result {
-                        Ok(event) => {
-                            handle_sse_event(client, &event);
-                        }
-                        Err(e) => {
-                            client.borrow().report_error(&format!("Stream error: {}", e.message));
-                            break;
-                        }
-                    }
-                }
-
-                // Check again before reconnecting
-                if client.borrow().is_stopping() {
-                    return;
-                }
-
-                web_sys::console::log_1(&JsValue::from_str("Sync stream ended, will reconnect"));
-            }
-            Err(e) => {
-                web_sys::console::log_1(&JsValue::from_str(&format!(
-                    "Connection failed: {}",
-                    e.message
-                )));
-                client.borrow().report_error(&format!("Connection failed: {}", e.message));
-            }
-        }
-
-        // Check before sleeping
-        if client.borrow().is_stopping() {
-            return;
-        }
-
-        // Calculate delay with jitter and wait before reconnecting
-        let runtime = WasmRuntime;
-        let config = ReconnectConfig::default();
-        let delay = calculate_reconnect_delay_with_jitter(reconnect_attempt, &config, runtime.random_f64());
-        web_sys::console::log_1(&JsValue::from_str(&format!(
-            "Reconnecting in {}ms (attempt {})",
-            delay,
-            reconnect_attempt + 1
-        )));
-
-        runtime.sleep(delay).await;
-        reconnect_attempt = reconnect_attempt.saturating_add(1);
-    }
-}
-
-/// Handle an SSE event from the server.
-fn handle_sse_event(client: &Rc<RefCell<SyncClient<WasmClientEnv>>>, event: &SseEvent) {
-    use groove::sync::handle_commits_event;
-
-    match event {
-        SseEvent::Commits {
-            object_id,
-            commits,
-            frontier,
-            object_meta,
-        } => {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "Received {} commits for object {}",
-                commits.len(),
-                object_id
-            )));
-
-            // Use shared event handler for core logic (applies commits, registers rows)
-            let result = {
-                let client_ref = client.borrow();
-                let db = client_ref.database();
-                handle_commits_event(
-                    &db,
-                    *object_id,
-                    commits.clone(),
-                    frontier.clone(),
-                    object_meta.clone(),
-                )
-            };
-
-            // Update server known state with the frontier from this event
-            // This prevents us from sending these commits back to the server
-            client
-                .borrow_mut()
-                .update_server_known_state(*object_id, frontier.clone());
-
-            match result {
-                Ok(Some(table)) => {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Row {} registered with table {}",
-                        object_id, table
-                    )));
-                }
-                Ok(None) => {
-                    // No table metadata - handled by shared handler
-                }
-                Err(e) => {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Failed to handle commits: {}",
-                        e
-                    )));
-                }
-            }
-        }
-        SseEvent::Excluded { object_id } => {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "Object {} excluded from subscription",
-                object_id
-            )));
-            // Remove from server known state
-            client.borrow_mut().server_known_state.remove(object_id);
-        }
-        SseEvent::Truncate { object_id, .. } => {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "Truncate event for object {}",
-                object_id
-            )));
-        }
-        SseEvent::Request { object_id, .. } => {
-            web_sys::console::log_1(&JsValue::from_str(&format!(
-                "Request event for object {}",
-                object_id
-            )));
-        }
-        SseEvent::Error { code, message } => {
-            client
-                .borrow()
-                .report_error(&format!("SSE error {}: {}", code, message));
-        }
-    }
-}
-
-/// Push pending objects to the server.
-async fn push_pending_objects(client: &Rc<RefCell<SyncClient<WasmClientEnv>>>) {
-    // Get pending objects and client env
-    let (pending, env) = {
-        let mut client_ref = client.borrow_mut();
-        let pending = client_ref.drain_pending_push();
-        let env = client_ref.env().clone();
-        (pending, env)
-    };
-
-    if pending.is_empty() {
-        return;
-    }
-
-    for object_id in pending {
-        // Use create_push_request() which handles all the commit logic
-        let request = {
-            let client_ref = client.borrow();
-            client_ref.create_push_request(object_id, "main")
-        };
-
-        let request = match request {
-            Some(req) => req,
-            None => {
-                web_sys::console::log_1(&JsValue::from_str(&format!(
-                    "No commits to push for object {}",
-                    object_id
-                )));
-                continue;
-            }
-        };
-
-        web_sys::console::log_1(&JsValue::from_str(&format!(
-            "Pushing {} commits for object {}",
-            request.commits.len(),
-            object_id
-        )));
-
-        match env.push(request).await {
-            Ok(response) => {
-                // Use handle_push_response() to update server known state
-                client.borrow_mut().handle_push_response(&response);
-
-                if response.accepted {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Push accepted for object {}",
-                        object_id
-                    )));
-                } else {
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Push rejected for object {}",
-                        object_id
-                    )));
-                }
-            }
-            Err(e) => {
-                client
-                    .borrow()
-                    .report_error(&format!("Push failed: {}", e.message));
-            }
-        }
-    }
-}
-

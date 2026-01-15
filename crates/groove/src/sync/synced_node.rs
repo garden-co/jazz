@@ -11,8 +11,14 @@
 //! incremental query notifications when data arrives from upstream.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
+
+// Platform-agnostic Instant
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -24,6 +30,7 @@ use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
 use super::runtime::{ReconnectConfig, Runtime, calculate_reconnect_delay_with_jitter};
+use super::shared::Shared;
 
 #[cfg(not(target_arch = "wasm32"))]
 use super::server::{ClientIdentity, ClientSession, SessionId, SseSender, TokenValidator};
@@ -587,14 +594,14 @@ pub struct SyncedNode<R: Runtime, E: ClientEnv> {
     runtime: R,
 
     /// Connections to upstream servers.
-    upstream_servers: RwLock<UpstreamServers<E>>,
+    upstream_servers: Shared<UpstreamServers<E>>,
 
     /// Connected client sessions (server-side).
     #[cfg(not(target_arch = "wasm32"))]
-    connected_clients: RwLock<ConnectedClients>,
+    connected_clients: Shared<ConnectedClients>,
 
     /// Write buffer for batching upstream pushes.
-    write_buffer: RwLock<WriteBuffer>,
+    write_buffer: Shared<WriteBuffer>,
 
     /// Sync configuration.
     config: SyncConfig,
@@ -606,10 +613,10 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         Self {
             db,
             runtime,
-            upstream_servers: RwLock::new(UpstreamServers::new()),
+            upstream_servers: Shared::new(UpstreamServers::new()),
             #[cfg(not(target_arch = "wasm32"))]
-            connected_clients: RwLock::new(ConnectedClients::new()),
-            write_buffer: RwLock::new(WriteBuffer::new()),
+            connected_clients: Shared::new(ConnectedClients::new()),
+            write_buffer: Shared::new(WriteBuffer::new()),
             config: SyncConfig::default(),
         }
     }
@@ -619,10 +626,10 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         Self {
             db,
             runtime,
-            upstream_servers: RwLock::new(UpstreamServers::new()),
+            upstream_servers: Shared::new(UpstreamServers::new()),
             #[cfg(not(target_arch = "wasm32"))]
-            connected_clients: RwLock::new(ConnectedClients::new()),
-            write_buffer: RwLock::new(WriteBuffer::new()),
+            connected_clients: Shared::new(ConnectedClients::new()),
+            write_buffer: Shared::new(WriteBuffer::new()),
             config,
         }
     }
@@ -658,29 +665,28 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     ///
     /// Returns the UpstreamId for the new connection.
     pub fn add_upstream(&self, env: E) -> UpstreamId {
-        self.upstream_servers.write().unwrap().add(env)
+        self.upstream_servers.write().add(env)
     }
 
     /// Remove an upstream server connection.
     pub fn remove_upstream(&self, id: UpstreamId) -> bool {
-        self.upstream_servers.write().unwrap().remove(id).is_some()
+        self.upstream_servers.write().remove(id).is_some()
     }
 
     /// Get all upstream server IDs.
     pub fn upstream_ids(&self) -> Vec<UpstreamId> {
-        self.upstream_servers.read().unwrap().ids().collect()
+        self.upstream_servers.read().ids().collect()
     }
 
     /// Check if there are any upstream connections.
     pub fn has_upstream(&self) -> bool {
-        !self.upstream_servers.read().unwrap().is_empty()
+        !self.upstream_servers.read().is_empty()
     }
 
     /// Get the state of an upstream connection.
     pub fn upstream_state(&self, id: UpstreamId) -> Option<UpstreamState> {
         self.upstream_servers
             .read()
-            .unwrap()
             .get(id)
             .map(|u| u.state().clone())
     }
@@ -692,7 +698,6 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     pub fn set_token_validator(&self, validator: Arc<dyn TokenValidator>) {
         self.connected_clients
             .write()
-            .unwrap()
             .set_token_validator(validator);
     }
 
@@ -701,7 +706,6 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     pub fn accept_client(&self, identity: ClientIdentity, sse_sender: SseSender) -> SessionId {
         self.connected_clients
             .write()
-            .unwrap()
             .accept_session(identity, sse_sender)
     }
 
@@ -710,7 +714,6 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     pub fn remove_client(&self, session_id: SessionId) {
         self.connected_clients
             .write()
-            .unwrap()
             .remove_session(session_id);
     }
 
@@ -718,20 +721,19 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
 
     /// Queue an object for upstream push.
     pub fn queue_for_push(&self, object_id: ObjectId, branch: &str) {
-        self.write_buffer.write().unwrap().add(object_id, branch);
+        self.write_buffer.write().add(object_id, branch);
     }
 
     /// Get objects ready to push.
     pub fn ready_to_push(&self) -> Vec<ObjectId> {
         self.write_buffer
             .read()
-            .unwrap()
             .ready_to_push(self.config.write_debounce_ms, self.config.max_batch_age_ms)
     }
 
     /// Mark an object as pushed (remove from buffer).
     pub fn mark_pushed(&self, object_id: &ObjectId) {
-        self.write_buffer.write().unwrap().remove(object_id);
+        self.write_buffer.write().remove(object_id);
     }
 
     // ========== High-level Operations ==========
@@ -762,7 +764,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         );
 
         // Update upstream's known state
-        if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
+        if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
             upstream.update_server_known_state(object_id, frontier.clone());
         }
 
@@ -782,7 +784,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     #[cfg(not(target_arch = "wasm32"))]
     /// Broadcast an event to all clients tracking an object.
     pub fn broadcast_to_clients(&self, object_id: ObjectId, event: &SseEvent) {
-        let clients = self.connected_clients.read().unwrap();
+        let clients = self.connected_clients.read();
         let session_ids = clients.sessions_for_object(&object_id);
 
         for session_id in session_ids {
@@ -799,7 +801,6 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         if let Some(session) = self
             .connected_clients
             .write()
-            .unwrap()
             .get_session_mut(&session_id)
         {
             session.touch();
@@ -826,7 +827,7 @@ impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
                 tokio::time::sleep(check_interval).await;
 
                 let expired = {
-                    let mut clients = node.connected_clients.write().unwrap();
+                    let mut clients = node.connected_clients.write();
                     let expired = clients.check_timeouts(timeout);
                     for session_id in &expired {
                         clients.remove_session(*session_id);
@@ -871,6 +872,11 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
     /// - Re-subscribes to all queries after reconnect
     ///
     /// The `queries` parameter specifies the initial queries to subscribe to.
+    ///
+    /// Note: This method requires `Arc<Self>` for the spawn. On platforms where
+    /// this isn't available (e.g., WASM), use `upstream_event_loop` directly
+    /// with your own spawn pattern.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_upstream_sync(
         self: &Arc<Self>,
         upstream_id: UpstreamId,
@@ -883,7 +889,13 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
     }
 
     /// Main upstream event loop with reconnection handling.
-    async fn upstream_event_loop(
+    ///
+    /// This method runs the sync loop for a single upstream connection,
+    /// handling subscriptions, event processing, and reconnection.
+    ///
+    /// On native platforms, use `start_upstream_sync` which spawns this
+    /// in a background task. On WASM, spawn this manually using the runtime.
+    pub async fn upstream_event_loop(
         &self,
         upstream_id: UpstreamId,
         initial_queries: Vec<(String, SubscriptionOptions)>,
@@ -901,7 +913,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                     attempt = 0;
 
                     // Update state to connected
-                    if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id)
+                    if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id)
                     {
                         upstream.set_state(UpstreamState::Connected);
                     }
@@ -932,7 +944,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                 if attempt >= max {
                     // Give up
                     if let Some(upstream) =
-                        self.upstream_servers.write().unwrap().get_mut(upstream_id)
+                        self.upstream_servers.write().get_mut(upstream_id)
                     {
                         upstream.set_state(UpstreamState::Disconnected);
                     }
@@ -948,7 +960,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
             );
 
             // Update state to reconnecting
-            if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
+            if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
                 upstream.set_state(UpstreamState::Reconnecting {
                     attempt,
                     next_delay_ms: delay_ms,
@@ -978,7 +990,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
 
         // Clear old subscriptions and set state
         {
-            let mut servers = self.upstream_servers.write().unwrap();
+            let mut servers = self.upstream_servers.write();
             if let Some(upstream) = servers.get_mut(upstream_id) {
                 upstream.clear_subscriptions();
                 upstream.set_state(UpstreamState::Connecting);
@@ -989,7 +1001,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
         for (query, options) in queries {
             // Get the env clone outside the lock
             let env = {
-                let servers = self.upstream_servers.read().unwrap();
+                let servers = self.upstream_servers.read();
                 let upstream = servers
                     .get(upstream_id)
                     .ok_or(ClientError::new(0, "Upstream not connected"))?;
@@ -1007,7 +1019,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
 
             // Update subscription tracking
             {
-                let mut servers = self.upstream_servers.write().unwrap();
+                let mut servers = self.upstream_servers.write();
                 if let Some(upstream) = servers.get_mut(upstream_id) {
                     let sub_id = upstream.add_subscription(query.clone(), options.clone());
                     upstream.set_state(UpstreamState::Connected);
@@ -1062,7 +1074,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                 object_meta,
             } => {
                 // Track this object in the subscription
-                if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id)
+                if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id)
                 {
                     upstream.track_object(sub_id, object_id);
                 }
@@ -1115,7 +1127,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
         ),
         ClientError,
     > {
-        let mut servers = self.upstream_servers.write().unwrap();
+        let mut servers = self.upstream_servers.write();
         let upstream = servers
             .get_mut(upstream_id)
             .ok_or(ClientError::new(0, "Upstream not connected"))?;
@@ -1128,7 +1140,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
         upstream_id: UpstreamId,
         request: PushRequest,
     ) -> Result<PushResponse, ClientError> {
-        let mut servers = self.upstream_servers.write().unwrap();
+        let mut servers = self.upstream_servers.write();
         let upstream = servers
             .get_mut(upstream_id)
             .ok_or(ClientError::new(0, "Upstream not connected"))?;
