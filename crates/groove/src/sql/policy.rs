@@ -11,7 +11,7 @@ use crate::sql::row_buffer::OwnedRow;
 use std::collections::HashMap;
 
 #[cfg(feature = "sync-server")]
-use crate::sync::ClaimValue;
+use crate::sync::{ClaimValue, ClientIdentity};
 
 /// Policy action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1051,6 +1051,18 @@ impl ViewerContext {
             user_id,
             external_id,
             claims,
+        }
+    }
+
+    /// Create a viewer context from a ClientIdentity.
+    ///
+    /// Uses `effective_user_id()` to get the user ID, which handles the case
+    /// where `user_id` is None (user not yet provisioned).
+    pub fn from_identity(identity: &ClientIdentity) -> Self {
+        Self {
+            user_id: identity.effective_user_id(),
+            external_id: identity.external_id.clone(),
+            claims: identity.claims.clone(),
         }
     }
 }
@@ -2347,5 +2359,61 @@ mod tests {
             "non-owner should not be able to delete: {:?}",
             result
         );
+    }
+
+    #[cfg(feature = "sync-server")]
+    #[test]
+    fn test_viewer_context_from_identity() {
+        use crate::sync::{ClaimValue, ClientIdentity};
+        use std::collections::HashMap;
+
+        // Test with full identity (user_id set)
+        let mut claims = HashMap::new();
+        claims.insert(
+            "orgId".to_string(),
+            ClaimValue::String("org_123".to_string()),
+        );
+        claims.insert(
+            "roles".to_string(),
+            ClaimValue::Array(vec![
+                ClaimValue::String("admin".to_string()),
+                ClaimValue::String("editor".to_string()),
+            ]),
+        );
+
+        let user_id = ObjectId::new(1);
+        let identity = ClientIdentity {
+            external_id: "ext_user_456".to_string(),
+            user_id: Some(user_id),
+            name: Some("Test User".to_string()),
+            claims: claims.clone(),
+            expires_at: Some(9999999999),
+        };
+
+        let context = ViewerContext::from_identity(&identity);
+
+        assert_eq!(context.user_id, user_id);
+        assert_eq!(context.external_id, "ext_user_456");
+        assert_eq!(context.claims.len(), 2);
+        assert_eq!(
+            context.claims.get("orgId"),
+            Some(&ClaimValue::String("org_123".to_string()))
+        );
+
+        // Test with identity where user_id is None (uses effective_user_id)
+        let identity_no_user = ClientIdentity {
+            external_id: "ext_user_789".to_string(),
+            user_id: None,
+            name: None,
+            claims: HashMap::new(),
+            expires_at: None,
+        };
+
+        let context2 = ViewerContext::from_identity(&identity_no_user);
+
+        // effective_user_id creates a deterministic ID from external_id
+        assert_eq!(context2.external_id, "ext_user_789");
+        // The user_id should be deterministic (not the same as user_id since it's derived from external_id)
+        assert_ne!(context2.user_id, ObjectId::default());
     }
 }

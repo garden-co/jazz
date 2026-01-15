@@ -39,6 +39,8 @@ pub use parser::{
     Projection, QualifiedColumn, Select, SelectExpr, Statement, Update, parse,
 };
 // Policy types are also re-exported from parser for convenience (via Statement::CreatePolicy)
+#[cfg(feature = "sync-server")]
+pub use policy::ViewerContext;
 pub use policy::{
     EvalContext, Policy, PolicyAction, PolicyColumnRef, PolicyConfig, PolicyError, PolicyEvaluator,
     PolicyExpr, PolicyLookup, PolicyResult, PolicyValue, RowLookup, TablePolicies,

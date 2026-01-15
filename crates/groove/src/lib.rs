@@ -38,3 +38,7 @@ pub use storage::{
     ChunkHash, ChunkStore, CommitMeta, CommitStore, ContentRef, Environment, INLINE_THRESHOLD,
     MemoryContentStore, MemoryEnvironment, Storage, SyncStateStore,
 };
+
+// Re-export ViewerContext for policy evaluation with JWT claims
+#[cfg(feature = "sync-server")]
+pub use sql::ViewerContext;

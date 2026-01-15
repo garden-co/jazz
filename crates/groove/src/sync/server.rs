@@ -669,6 +669,104 @@ impl<E: Environment> SyncServer<E> {
             let _ = session.sse_sender.send(event.clone()).await;
         }
     }
+
+    /// Broadcast commits to sessions where policy allows SELECT for the object.
+    ///
+    /// This method checks the SELECT policy for each session's viewer context
+    /// and only sends the event to sessions where the policy allows.
+    ///
+    /// # Arguments
+    /// * `object_id` - The object being updated
+    /// * `table` - The table name (for policy lookup)
+    /// * `row` - The current row data (after applying commits)
+    /// * `commits` - The commits to broadcast
+    /// * `frontier` - The new frontier after commits
+    /// * `object_meta` - Optional object metadata
+    /// * `row_lookup` - Implementation for row lookups (typically Database)
+    /// * `policy_lookup` - Implementation for policy lookups (typically Database)
+    /// * `exclude_session` - Optional session to exclude (typically the sender)
+    #[allow(clippy::too_many_arguments)]
+    pub async fn broadcast_commits_with_policy<R, P>(
+        &self,
+        object_id: ObjectId,
+        table: &str,
+        row: &crate::sql::row_buffer::OwnedRow,
+        commits: Vec<crate::commit::Commit>,
+        frontier: Vec<CommitId>,
+        object_meta: Option<std::collections::BTreeMap<String, String>>,
+        row_lookup: &R,
+        policy_lookup: &P,
+        exclude_session: Option<SessionId>,
+    ) where
+        R: crate::sql::PolicyLookup + crate::sql::RowLookup,
+        P: crate::sql::PolicyLookup,
+    {
+        use crate::sql::{PolicyConfig, PolicyEvaluator, PolicyResult, ViewerContext};
+
+        let event = SseEvent::Commits {
+            object_id,
+            commits,
+            frontier,
+            object_meta,
+        };
+
+        for (session_id, session) in &self.sessions {
+            // Skip the sender session
+            if Some(*session_id) == exclude_session {
+                continue;
+            }
+
+            // Check SELECT policy for this session's viewer
+            let viewer_context = ViewerContext::from_identity(&session.identity);
+            let config = PolicyConfig::default();
+            let mut evaluator = PolicyEvaluator::new_with_context(
+                row_lookup,
+                policy_lookup,
+                viewer_context,
+                config,
+            );
+
+            let result = evaluator.check_select(table, object_id, row);
+
+            match result {
+                PolicyResult::Allowed { .. } => {
+                    // Policy allows - send the event
+                    let _ = session.sse_sender.send(event.clone()).await;
+                }
+                PolicyResult::Denied { .. } => {
+                    // Policy denies - skip this session
+                }
+            }
+        }
+    }
+
+    /// Check SELECT policy for an object and a specific viewer context.
+    ///
+    /// Returns true if the viewer is allowed to see the object, false otherwise.
+    pub fn check_select_policy<R, P>(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        row: &crate::sql::row_buffer::OwnedRow,
+        viewer_context: crate::sql::ViewerContext,
+        row_lookup: &R,
+        policy_lookup: &P,
+    ) -> bool
+    where
+        R: crate::sql::PolicyLookup + crate::sql::RowLookup,
+        P: crate::sql::PolicyLookup,
+    {
+        use crate::sql::{PolicyConfig, PolicyEvaluator, PolicyResult};
+
+        let config = PolicyConfig::default();
+        let mut evaluator =
+            PolicyEvaluator::new_with_context(row_lookup, policy_lookup, viewer_context, config);
+
+        matches!(
+            evaluator.check_select(table, object_id, row),
+            PolicyResult::Allowed { .. }
+        )
+    }
 }
 
 // ==================== Schema Registry ====================
