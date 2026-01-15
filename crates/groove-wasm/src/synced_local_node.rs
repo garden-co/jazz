@@ -13,7 +13,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use js_sys::{Array, Function, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use groove::ObjectId;
+use groove::{CommitId, ObjectId};
 use groove::sql::{Database, ExecuteResult, encode_rows};
 use groove::sync::{
     ClientEnv, ClientEnvConfig, PushRequest, ReconnectConfig, Runtime, SseEvent, SubscribeRequest,
@@ -63,6 +63,8 @@ struct SyncedState {
     sync_state: SyncState,
     /// Objects we're tracking for sync (have pending writes)
     pending_objects: HashSet<ObjectId>,
+    /// Server's known frontier per object (to avoid re-sending commits)
+    server_known_state: HashMap<ObjectId, Vec<CommitId>>,
     /// Callback for state changes
     on_state_change: Option<Function>,
     /// Callback for sync errors
@@ -137,6 +139,7 @@ impl WasmSyncedLocalNode {
                 auth_token,
                 sync_state: SyncState::Disconnected,
                 pending_objects: HashSet::new(),
+                server_known_state: HashMap::new(),
                 on_state_change: None,
                 on_error: None,
                 should_disconnect: false,
@@ -188,6 +191,7 @@ impl WasmSyncedLocalNode {
                     auth_token,
                     sync_state: SyncState::Disconnected,
                     pending_objects: HashSet::new(),
+                    server_known_state: HashMap::new(),
                     on_state_change: None,
                     on_error: None,
                     should_disconnect: false,
@@ -702,14 +706,25 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
             )));
 
             // Use shared event handler for core logic
-            let state_ref = state.borrow();
-            match handle_commits_event(
-                &state_ref.db,
-                *object_id,
-                commits.clone(),
-                frontier.clone(),
-                object_meta.clone(),
-            ) {
+            let result = {
+                let state_ref = state.borrow();
+                handle_commits_event(
+                    &state_ref.db,
+                    *object_id,
+                    commits.clone(),
+                    frontier.clone(),
+                    object_meta.clone(),
+                )
+            };
+
+            // Update server known state with the frontier from this event
+            // This prevents us from sending these commits back to the server
+            state
+                .borrow_mut()
+                .server_known_state
+                .insert(*object_id, frontier.clone());
+
+            match result {
                 Ok(Some(table)) => {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
                         "Row {} registered with table {}",
@@ -769,9 +784,17 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
 
     for object_id in pending {
         // Get commits to push from the LocalNode
-        let commits = {
+        let (commits, server_frontier_was_empty) = {
             let state_ref = state.borrow();
             let node = state_ref.db.node();
+
+            // Get server's known frontier for this object
+            let server_frontier = state_ref
+                .server_known_state
+                .get(&object_id)
+                .cloned()
+                .unwrap_or_default();
+            let server_frontier_was_empty = server_frontier.is_empty();
 
             // Get object and branch to find commits to send
             let obj = match node.get_object(object_id) {
@@ -800,10 +823,8 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
             let branch_read = branch_ref.read().unwrap();
             let local_frontier = branch_read.frontier().to_vec();
 
-            // For new objects, server frontier is empty
-            let server_frontier: Vec<groove::CommitId> = vec![];
-
-            commits_to_send(&branch_read, &local_frontier, &server_frontier)
+            let commits = commits_to_send(&branch_read, &local_frontier, &server_frontier);
+            (commits, server_frontier_was_empty)
         };
 
         if commits.is_empty() {
@@ -820,8 +841,8 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
             object_id
         )));
 
-        // Get object metadata for first push
-        let object_meta = {
+        // Get object metadata only for first push (when server has no known state)
+        let object_meta = if server_frontier_was_empty {
             let state_ref = state.borrow();
             let node = state_ref.db.node();
             if let Some(obj) = node.get_object(object_id) {
@@ -833,6 +854,8 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
             } else {
                 None
             }
+        } else {
+            None
         };
 
         let request = PushRequest {
@@ -844,6 +867,11 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
         match env.push(request).await {
             Ok(response) => {
                 if response.accepted {
+                    // Update server known state with the new frontier
+                    state
+                        .borrow_mut()
+                        .server_known_state
+                        .insert(object_id, response.frontier.clone());
                     web_sys::console::log_1(&JsValue::from_str(&format!(
                         "Push accepted for object {}",
                         object_id
