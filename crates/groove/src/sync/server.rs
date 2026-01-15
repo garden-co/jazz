@@ -151,6 +151,8 @@ impl ClientIdentity {
 }
 
 /// Trait for validating authentication tokens.
+///
+/// Send+Sync required because validators are shared via Arc on multi-threaded server.
 pub trait TokenValidator: Send + Sync {
     /// Validate a bearer token and return the client identity if valid.
     fn validate(&self, token: &str) -> Option<ClientIdentity>;
@@ -239,6 +241,8 @@ impl ApiKeyIdentity {
 }
 
 /// Trait for validating API keys.
+///
+/// Send+Sync required because validators are shared via Arc on multi-threaded server.
 pub trait ApiKeyValidator: Send + Sync {
     /// Validate an API key and return its identity with scopes.
     fn validate_api_key(&self, key: &str) -> Option<ApiKeyIdentity>;
