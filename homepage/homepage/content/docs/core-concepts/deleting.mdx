@@ -20,7 +20,9 @@ Deleted values are not deleted from storage immediately, but are marked with a t
 
 The physical deletion of the data from storage is done asynchronously in the background, and is dependent on the sync server's configuration.
 
-Jazz Cloud and `jazz-run sync` have delete enabled by default. If you're running a custom self-hosted sync server, you need to enable this feature.
+Jazz Cloud and `jazz-run sync` have delete enabled by default on a one minute schedule. If you're running a custom self-hosted sync server, you need to enable this feature.
+
+Deleted CoValues stored in Jazz Cloud may persist in back-ups until they are overwritten. These back-ups undergo no additional processing, and will only be restored for disaster recovery purposes.
 
 ## Basic Usage
 
