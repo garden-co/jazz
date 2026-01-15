@@ -76,7 +76,7 @@ pub struct SessionLogInternal {
     crypto_cache: CryptoCache,
     /// Staging area for transactions pending validation.
     /// Transactions are added here via add_existing_* methods and committed
-    /// to the main state only when validate_signature() succeeds.
+    /// to the main state only when commit_transactions() succeeds.
     pending_transactions: Vec<String>,
 }
 
@@ -228,7 +228,7 @@ impl SessionLogInternal {
     }
 
     /// Add an existing private transaction to the staging area.
-    /// The transaction is NOT committed until validate_signature() succeeds.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
     /// Used for batch loading where signature is validated at the end.
     ///
     /// # Arguments
@@ -274,7 +274,7 @@ impl SessionLogInternal {
     }
 
     /// Add an existing trusting transaction to the staging area.
-    /// The transaction is NOT committed until validate_signature() succeeds.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
     /// Used for batch loading where signature is validated at the end.
     ///
     /// # Arguments
