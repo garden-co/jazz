@@ -638,10 +638,10 @@ impl LocalNode {
         drop(obj);
 
         // Invoke the commits-applied callback if set (used by Database for query graph updates)
-        if !commits_to_persist.is_empty() {
-            if let Some(callback) = self.on_commits_applied.borrow().as_ref() {
-                callback(object_id, branch, &commits_to_persist);
-            }
+        if !commits_to_persist.is_empty()
+            && let Some(callback) = self.on_commits_applied.borrow().as_ref()
+        {
+            callback(object_id, branch, &commits_to_persist);
         }
 
         // Persist asynchronously in background

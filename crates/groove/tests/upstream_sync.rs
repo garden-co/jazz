@@ -24,6 +24,7 @@ async fn settle() {
 }
 
 /// Collect deltas into a shared vector for testing.
+#[allow(clippy::type_complexity)]
 fn delta_collector() -> (
     Arc<Mutex<Vec<DeltaBatch>>>,
     Box<dyn Fn(&DeltaBatch) + Send + Sync + 'static>,

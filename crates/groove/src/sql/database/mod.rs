@@ -228,43 +228,43 @@ impl DatabaseState {
             // Try to read the descriptor from "main" branch
             // TODO: For schema migrations, we may need to read from version branches
             // and sync them properly. For now, "main" always has the latest descriptor.
-            if let Ok(Some(desc_bytes)) = self.node.read(desc_object_id, "main") {
-                if let Ok(descriptor) = TableDescriptor::from_bytes(&desc_bytes) {
-                    let schema_id: SchemaId = desc_object_id;
+            if let Ok(Some(desc_bytes)) = self.node.read(desc_object_id, "main")
+                && let Ok(descriptor) = TableDescriptor::from_bytes(&desc_bytes)
+            {
+                let schema_id: SchemaId = desc_object_id;
 
-                    self.tables
-                        .write()
-                        .unwrap()
-                        .insert(table_name.clone(), schema_id);
-                    self.schemas
-                        .write()
-                        .unwrap()
-                        .insert(schema_id, descriptor.schema.clone());
-                    self.descriptor_objects
-                        .write()
-                        .unwrap()
-                        .insert(table_name.clone(), desc_object_id);
+                self.tables
+                    .write()
+                    .unwrap()
+                    .insert(table_name.clone(), schema_id);
+                self.schemas
+                    .write()
+                    .unwrap()
+                    .insert(schema_id, descriptor.schema.clone());
+                self.descriptor_objects
+                    .write()
+                    .unwrap()
+                    .insert(table_name.clone(), desc_object_id);
 
-                    // Load table rows object ID and ensure the object exists locally.
-                    // NOTE: table_rows is local state - each node tracks which rows it knows about.
-                    // We don't sync the table_rows content, but we use the same object ID
-                    // (from the descriptor) so all nodes store their local row set consistently.
-                    self.table_rows_objects
+                // Load table rows object ID and ensure the object exists locally.
+                // NOTE: table_rows is local state - each node tracks which rows it knows about.
+                // We don't sync the table_rows content, but we use the same object ID
+                // (from the descriptor) so all nodes store their local row set consistently.
+                self.table_rows_objects
+                    .write()
+                    .unwrap()
+                    .insert(table_name.clone(), descriptor.rows_object_id);
+                self.node.ensure_object(
+                    descriptor.rows_object_id,
+                    format!("table_rows:{}", table_name),
+                );
+
+                // Load policies if present
+                if !descriptor.policies.is_empty() {
+                    self.policies
                         .write()
                         .unwrap()
-                        .insert(table_name.clone(), descriptor.rows_object_id);
-                    self.node.ensure_object(
-                        descriptor.rows_object_id,
-                        &format!("table_rows:{}", table_name),
-                    );
-
-                    // Load policies if present
-                    if !descriptor.policies.is_empty() {
-                        self.policies
-                            .write()
-                            .unwrap()
-                            .insert(table_name.clone(), descriptor.policies.clone());
-                    }
+                        .insert(table_name.clone(), descriptor.policies.clone());
                 }
             }
         }
@@ -272,6 +272,7 @@ impl DatabaseState {
         Ok(())
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(env: Arc<dyn Environment>) -> Self {
         let node = Arc::new(LocalNode::new(env));
 
@@ -303,6 +304,7 @@ impl DatabaseState {
         }
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory() -> Self {
         let node = Arc::new(LocalNode::in_memory());
 
@@ -337,6 +339,7 @@ impl DatabaseState {
     /// Create in-memory database state with a specific catalog ID.
     /// If the catalog already exists in the node, it will be reused.
     /// This allows multiple clients to share the same catalog via sync.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory_with_catalog(catalog_object_id: ObjectId) -> Self {
         let node = Arc::new(LocalNode::in_memory());
 
@@ -375,6 +378,7 @@ impl DatabaseState {
     /// Unlike `in_memory_with_catalog`, this does NOT write an initial empty catalog.
     /// The replica expects to receive the catalog via sync from an upstream server.
     /// Use `has_catalog()` or `await_catalog()` to check/wait for catalog arrival.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory_replica(catalog_object_id: ObjectId) -> Self {
         let node = Arc::new(LocalNode::in_memory());
 
@@ -1013,6 +1017,7 @@ impl Database {
     /// Unlike `in_memory_with_catalog`, this does NOT write an initial empty catalog.
     /// The replica expects to receive the catalog via sync from an upstream server.
     /// Use `has_catalog()` to check if the catalog has arrived, then `reload_catalog()`.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_replica(catalog_id: ObjectId) -> Self {
         let state = Arc::new(DatabaseState::in_memory_replica(catalog_id));
         DatabaseState::setup_sync_callback(Arc::clone(&state));

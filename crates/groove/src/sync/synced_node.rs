@@ -743,12 +743,11 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// should never be synced (e.g., table_rows objects, index objects).
     pub fn queue_for_push(&self, object_id: ObjectId, branch: &str) {
         // Check if object is node_private - skip sync for private objects
-        if let Some(obj) = self.node.get_object(object_id) {
-            if let Ok(obj_guard) = obj.read() {
-                if obj_guard.is_node_private() {
-                    return; // Don't sync node_private objects
-                }
-            }
+        if let Some(obj) = self.node.get_object(object_id)
+            && let Ok(obj_guard) = obj.read()
+            && obj_guard.is_node_private()
+        {
+            return; // Don't sync node_private objects
         }
         self.write_buffer.write().add(object_id, branch);
     }
@@ -790,12 +789,11 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
 
         // If object already existed but we have new metadata, update it
-        if let Some(ref meta) = object_meta {
-            if let Some(obj) = self.node.get_object(object_id) {
-                if let Ok(mut obj_write) = obj.write() {
-                    obj_write.set_meta(meta.clone());
-                }
-            }
+        if let Some(ref meta) = object_meta
+            && let Some(obj) = self.node.get_object(object_id)
+            && let Ok(mut obj_write) = obj.write()
+        {
+            obj_write.set_meta(meta.clone());
         }
 
         // Apply commits to the object's main branch
@@ -980,14 +978,14 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
             }
 
             // Check if max attempts exceeded
-            if let Some(max) = self.config.reconnect.max_attempts {
-                if attempt >= max {
-                    // Give up
-                    if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
-                        upstream.set_state(UpstreamState::Disconnected);
-                    }
-                    return;
+            if let Some(max) = self.config.reconnect.max_attempts
+                && attempt >= max
+            {
+                // Give up
+                if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
+                    upstream.set_state(UpstreamState::Disconnected);
                 }
+                return;
             }
 
             // Calculate delay with jitter using runtime's random
@@ -1111,10 +1109,11 @@ pub async fn run_upstream_event_loop<R: Runtime, E: ClientEnv>(
         };
 
         // Wait before retry (no borrow held during sleep)
-        {
+        let sleep_future = {
             let node = synced_node.read();
-            node.runtime.sleep(delay_ms).await;
-        }
+            node.runtime.sleep(delay_ms)
+        };
+        sleep_future.await;
 
         attempt += 1;
     }
@@ -1454,6 +1453,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     ///
     /// This is a convenience method for subscribing to a single query
     /// without using the full event loop.
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn subscribe_upstream(
         &self,
         upstream_id: UpstreamId,
@@ -1474,6 +1474,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     }
 
     /// Push commits to an upstream server.
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn push_upstream(
         &self,
         upstream_id: UpstreamId,
@@ -1490,6 +1491,8 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     ///
     /// This creates the push request automatically by computing the delta
     /// between local and server-known commits.
+    #[allow(clippy::await_holding_refcell_ref)]
+    #[allow(clippy::await_holding_lock)]
     pub async fn push_object(
         &self,
         upstream_id: UpstreamId,
