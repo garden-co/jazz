@@ -18,7 +18,7 @@ The `deleteCoValues` function allows you to permanently delete CoValues from Jaz
 
 Deleted values are not deleted from storage immediately, but are marked with a tombstone.
 
-The physical deletion of the data from storage is done asynchronously in the background, and is dependent on the sync server's configuration.
+To balance performance considerations, the actual physical deletion of the data from storage is done asynchronously in the background, and is dependent on the sync server's configuration.
 
 Jazz Cloud and `jazz-run sync` have delete enabled by default on a one minute schedule. If you're running a custom self-hosted sync server, you need to enable this feature.
 
