@@ -9,7 +9,7 @@ This design implements configurable storage size limits with a hybrid LRU + size
 1. **Hard limit enforcement** - Storage must NEVER exceed `maxStorageBytes`
 2. **Check before write** - Validate space availability before storing
 3. **Protect active data** - Never evict in-memory or unsynced CoValues
-4. **Reuse existing infrastructure** - Leverage `GarbageCollector.lastAccessed` and `UnsyncedCoValuesTracker`
+4. **Separate persistence timestamps** - Use `Date.now()` epoch timestamps for storage eviction (independent from GarbageCollector's `performance.now()` tracking)
 5. **Minimize overhead** - Efficient size tracking, batched operations
 
 ---
@@ -24,17 +24,17 @@ This design implements configurable storage size limits with a hybrid LRU + size
 │  │ (in-memory GC)  │  │ (storage eviction)  │  │ (sync tracking)          │  │
 │  │                 │  │                     │  │                          │  │
 │  │ tracks:         │  │ enforces:           │  │ tracks:                  │  │
-│  │ lastAccessed    │◄─┤ - hard limit        │──►│ - unsynced CoValue IDs   │  │
-│  │                 │  │ - eviction scoring  │  │                          │  │
-│  └────────┬────────┘  └──────────┬──────────┘  └──────────────────────────┘  │
-│           │                      │                                            │
-│           │ unmount callback     │ evict/store                                │
-│           ▼                      ▼                                            │
+│  │ lastAccessed    │  │ - hard limit        │──►│ - unsynced CoValue IDs   │  │
+│  │ (perf.now())    │  │ - eviction scoring  │  │                          │  │
+│  └─────────────────┘  └──────────┬──────────┘  └──────────────────────────┘  │
+│                                  │                                            │
+│                                  │ evict/store                                │
+│                                  ▼                                            │
 │  ┌───────────────────────────────────────────────────────────────────────┐   │
 │  │                         StorageAPI                                     │   │
 │  │  ┌─────────────────────────────────────────────────────────────────┐  │   │
 │  │  │                    Eviction Metadata                             │  │   │
-│  │  │  - last_accessed (persisted from verified.lastAccessed)         │  │   │
+│  │  │  - last_accessed_epoch (Date.now() - independent from GC)       │  │   │
 │  │  │  - size_bytes (per CoValue)                                     │  │   │
 │  │  └─────────────────────────────────────────────────────────────────┘  │   │
 │  │  ┌─────────────────────────────────────────────────────────────────┐  │   │
@@ -44,6 +44,8 @@ This design implements configurable storage size limits with a hybrid LRU + size
 │  └───────────────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Important:** The `last_accessed_epoch` in storage uses `Date.now()` (Unix epoch milliseconds), which is independent from the `GarbageCollector.lastAccessed` field that uses `performance.now()` (milliseconds since page load). This separation ensures eviction scoring works correctly across app restarts.
 
 ---
 
@@ -73,11 +75,13 @@ class StorageEvictionManager {
   private config: StorageEvictionConfig;
   private storage: StorageAPI;
   private inMemoryCoValues: Map<RawCoID, CoValueCore>;  // Reference to LocalNode.coValues
+  private unsyncedTracker: UnsyncedCoValuesTracker;     // Reference to in-memory tracker
   private interval: ReturnType<typeof setInterval> | undefined;
   
   constructor(
     storage: StorageAPI,
     inMemoryCoValues: Map<RawCoID, CoValueCore>,
+    unsyncedTracker: UnsyncedCoValuesTracker,
     config: Partial<StorageEvictionConfig>
   );
   
@@ -88,7 +92,7 @@ class StorageEvictionManager {
   stop(): void;
   
   // Check if a write of given size can proceed, evict if necessary
-  // Returns true if write can proceed, throws StorageLimitExceededError if not
+  // Returns true if write can proceed, false to skip storage (memory-only mode)
   ensureSpaceForWrite(bytesToWrite: number): Promise<boolean>;
   
   // Get current storage size
@@ -98,18 +102,16 @@ class StorageEvictionManager {
   evictToFreeSpace(bytesNeeded: number): Promise<number>;
   
   // Get eviction candidates sorted by score (highest first)
+  // Only returns CoValues that are NOT in memory and ARE synced
   getEvictionCandidates(): Promise<EvictionCandidate[]>;
   
   // Calculate eviction score for a CoValue (uses logarithmic formula)
   calculateEvictionScore(candidate: EvictionCandidate): number;
-  
-  // Persist lastAccessed when CoValue is unmounted from memory
-  persistLastAccessed(id: RawCoID, lastAccessed: number): void;
 }
 
 interface EvictionCandidate {
   id: RawCoID;
-  lastAccessed: number;
+  lastAccessedEpoch: number;  // Unix timestamp ms (Date.now())
   sizeBytes: number;
 }
 
@@ -132,7 +134,7 @@ export interface StorageAPI {
   // Get eviction metadata for a CoValue
   getEvictionMetadata(id: RawCoID): Promise<EvictionMetadata | undefined> | EvictionMetadata | undefined;
   
-  // Update eviction metadata (lastAccessed and/or sizeBytes)
+  // Update eviction metadata (lastAccessedEpoch and/or sizeBytes)
   updateEvictionMetadata(id: RawCoID, metadata: Partial<EvictionMetadata>): Promise<void> | void;
   
   // Get all eviction candidates (CoValues with metadata, excluding unsynced)
@@ -146,53 +148,22 @@ export interface StorageAPI {
 }
 
 interface EvictionMetadata {
-  lastAccessed: number;  // Unix timestamp ms
+  lastAccessedEpoch: number;  // Unix timestamp ms from Date.now()
   sizeBytes: number;
 }
 ```
 
-### 3. Extended GarbageCollector
+### 3. GarbageCollector (No Changes Required)
 
 **Location:** `packages/cojson/src/GarbageCollector.ts`
 
-Add callback to persist `lastAccessed` when unmounting:
+The `GarbageCollector` remains unchanged. It uses `performance.now()` for in-memory tracking, which is appropriate for its purpose (tracking which CoValues to unmount from memory).
 
-```typescript
-export class GarbageCollector {
-  private readonly interval: ReturnType<typeof setInterval>;
-  private onUnmount?: (id: RawCoID, lastAccessed: number) => void;  // NEW
+The storage eviction system uses a **separate** `lastAccessedEpoch` field (using `Date.now()`) that is updated on store and load operations, independent of the GarbageCollector. This separation ensures:
 
-  constructor(
-    private readonly coValues: Map<RawCoID, CoValueCore>,
-    private readonly garbageCollectGroups: boolean,
-    onUnmount?: (id: RawCoID, lastAccessed: number) => void,  // NEW
-  ) {
-    this.onUnmount = onUnmount;
-    // ... existing code ...
-  }
-
-  collect() {
-    const currentTime = this.getCurrentTime();
-    for (const coValue of this.coValues.values()) {
-      const { verified } = coValue;
-
-      if (!verified?.lastAccessed) {
-        continue;
-      }
-
-      const timeSinceLastAccessed = currentTime - verified.lastAccessed;
-
-      if (timeSinceLastAccessed > GARBAGE_COLLECTOR_CONFIG.MAX_AGE) {
-        // NEW: Persist lastAccessed before unmounting
-        if (this.onUnmount) {
-          this.onUnmount(coValue.id, verified.lastAccessed);
-        }
-        coValue.unmount(this.garbageCollectGroups);
-      }
-    }
-  }
-}
-```
+1. **Correct persistence** - `Date.now()` timestamps work correctly across app restarts
+2. **No coupling** - Storage eviction doesn't depend on GC timing or behavior
+3. **Simpler implementation** - No need to modify the existing GarbageCollector
 
 ---
 
@@ -209,11 +180,11 @@ export const migrations: Record<number, string[]> = {
   5: [
     `CREATE TABLE IF NOT EXISTS covalue_eviction_metadata (
       covalue_id TEXT PRIMARY KEY,
-      last_accessed INTEGER NOT NULL,
+      last_accessed_epoch INTEGER NOT NULL,
       size_bytes INTEGER NOT NULL
     );`,
-    `CREATE INDEX IF NOT EXISTS idx_eviction_last_accessed 
-     ON covalue_eviction_metadata(last_accessed);`,
+    `CREATE INDEX IF NOT EXISTS idx_eviction_last_accessed_epoch 
+     ON covalue_eviction_metadata(last_accessed_epoch);`,
     `CREATE INDEX IF NOT EXISTS idx_eviction_size 
      ON covalue_eviction_metadata(size_bytes);`,
   ],
@@ -230,7 +201,7 @@ if (ev.oldVersion <= 5) {
   const evictionMetadata = db.createObjectStore("evictionMetadata", {
     keyPath: "coValueId",
   });
-  evictionMetadata.createIndex("byLastAccessed", "lastAccessed");
+  evictionMetadata.createIndex("byLastAccessedEpoch", "lastAccessedEpoch");
   evictionMetadata.createIndex("bySizeBytes", "sizeBytes");
 }
 ```
@@ -284,7 +255,8 @@ function calculateEvictionScore(
   ageWeight: number = 0.8,   // 80% weight for age (recency)
   sizeWeight: number = 0.2,  // 20% weight for size
 ): number {
-  const ageMs = Date.now() - candidate.lastAccessed;
+  // lastAccessedEpoch is a Unix timestamp from Date.now()
+  const ageMs = Date.now() - candidate.lastAccessedEpoch;
   
   // Use log10 to compress values into comparable ranges:
   // - log10(1 day in ms) ≈ 7.9
@@ -322,49 +294,42 @@ function calculateEvictionScore(
 → **A is evicted first** (score 8.0) - age dominates with 80% weight
 → Large but recent CoValues (C) are preserved longer
 
-### 3. Tiered Eviction Candidate Selection
+### 3. Eviction Candidate Selection
 
-The system uses a tiered priority for eviction to maximize safety:
+The system uses strict criteria to determine which CoValues can be safely evicted:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     Eviction Priority Tiers                          │
+│                     Eviction Eligibility                             │
 │                                                                      │
-│  Tier 1 (SAFEST): NOT in memory + synced                            │
+│  EVICTABLE: NOT in memory AND synced                                │
 │  - Data exists in storage only (not actively used)                   │
-│  - Can be re-fetched from server if needed later                    │
+│  - Data has been synced to server (can be re-fetched if needed)     │
+│  - Safe to delete from local storage                                │
 │                                                                      │
-│  Tier 2 (SAFE): IN memory + synced                                  │
-│  - Data exists in memory (app continues working)                    │
-│  - Data exists on server (can recover after crash)                  │
-│  - Only evict from storage, keep in memory                          │
-│                                                                      │
-│  Tier 3 (NEVER): Unsynced (in-memory or not)                        │
-│  - Data would be LOST if app crashes                                │
-│  - NEVER evict until synced to server                               │
+│  PROTECTED (NEVER evict):                                           │
+│  - IN memory: Would break incremental storage writes                │
+│  - Unsynced: Data would be LOST if not on server                    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-```typescript
-interface TieredEvictionCandidate extends EvictionCandidate {
-  tier: 1 | 2;  // Tier 3 (unsynced) is never returned
-  inMemory: boolean;
-}
+**Why we don't evict in-memory CoValues:**
 
+Evicting storage for a CoValue that's still in memory would break the incremental storage model. The storage layer assumes it can append transactions to existing sessions. If we delete storage while the CoValue is in memory:
+1. Next store would try to find existing session → not found
+2. Would create a new session starting from current index
+3. Would lose all transaction history before that point
+
+This would cause data corruption when the CoValue is later reloaded from storage.
+
+```typescript
 async function getEvictionCandidates(
   storage: StorageAPI,
   inMemoryCoValues: Map<RawCoID, CoValueCore>,
-): Promise<TieredEvictionCandidate[]> {
-  // Get unsynced IDs - these are NEVER evictable
-  const unsyncedIds = new Set<RawCoID>();
-  await new Promise<void>(resolve => {
-    storage.getUnsyncedCoValueIDs((ids) => {
-      for (const id of ids) {
-        unsyncedIds.add(id);
-      }
-      resolve();
-    });
-  });
+  unsyncedTracker: UnsyncedCoValuesTracker,
+): Promise<EvictionCandidate[]> {
+  // Get unsynced IDs from in-memory tracker (authoritative source)
+  const unsyncedIds = new Set<RawCoID>(unsyncedTracker.getAll());
   
   // Get in-memory IDs (with loaded state)
   const inMemoryIds = new Set<RawCoID>();
@@ -374,23 +339,18 @@ async function getEvictionCandidates(
     }
   }
   
-  // Get all candidates from storage (excluding unsynced only)
-  const allCandidates = await storage.getEvictionCandidates(unsyncedIds);
+  // Combine all protected IDs
+  const protectedIds = new Set<RawCoID>([...unsyncedIds, ...inMemoryIds]);
   
-  // Assign tiers and sort
-  const tieredCandidates: TieredEvictionCandidate[] = allCandidates.map(c => ({
-    ...c,
-    inMemory: inMemoryIds.has(c.id),
-    tier: inMemoryIds.has(c.id) ? 2 : 1,
-  }));
+  // Get candidates from storage, excluding all protected IDs
+  const candidates = await storage.getEvictionCandidates(protectedIds);
   
-  // Sort by: tier ASC (1 before 2), then score DESC (within each tier)
-  tieredCandidates.sort((a, b) => {
-    if (a.tier !== b.tier) return a.tier - b.tier;
-    return calculateEvictionScore(b) - calculateEvictionScore(a);
-  });
+  // Sort by eviction score (highest first = evict first)
+  candidates.sort((a, b) => 
+    calculateEvictionScore(b) - calculateEvictionScore(a)
+  );
   
-  return tieredCandidates;
+  return candidates;
 }
 ```
 
@@ -415,7 +375,7 @@ function updateSizeOnStore(
   
   storage.updateEvictionMetadata(id, {
     sizeBytes: (currentMetadata?.sizeBytes ?? 0) + addedSize,
-    lastAccessed: Date.now(),
+    lastAccessedEpoch: Date.now(),  // Always use Date.now() for persistence
   });
 }
 ```
@@ -433,22 +393,15 @@ class LocalNode {
   garbageCollector: GarbageCollector | undefined = undefined;
   storageEvictionManager: StorageEvictionManager | undefined = undefined;  // NEW
   
+  // GarbageCollector remains unchanged - no modifications needed
   enableGarbageCollector(opts?: { garbageCollectGroups?: boolean }) {
     if (this.garbageCollector) {
       return;
     }
 
-    // Create onUnmount callback for storage eviction
-    const onUnmount = this.storageEvictionManager
-      ? (id: RawCoID, lastAccessed: number) => {
-          this.storageEvictionManager!.persistLastAccessed(id, lastAccessed);
-        }
-      : undefined;
-
     this.garbageCollector = new GarbageCollector(
       this.coValues,
       opts?.garbageCollectGroups ?? false,
-      onUnmount,  // NEW
     );
   }
 
@@ -461,6 +414,7 @@ class LocalNode {
       this.storageEvictionManager = new StorageEvictionManager(
         storage,
         this.coValues,
+        this.syncManager.unsyncedTracker,  // Pass the in-memory tracker
         evictionConfig,
       );
       this.storageEvictionManager.start();
@@ -513,12 +467,12 @@ private estimateWriteSize(msg: NewContentMessage): number {
 }
 ```
 
-### 3. Load Operation with Metadata Restore
+### 3. Load Operation with Metadata Update
 
 **Location:** `packages/cojson/src/storage/storageSync.ts` and `storageAsync.ts`
 
 ```typescript
-// In loadCoValue(), restore lastAccessed after loading:
+// In loadCoValue(), update lastAccessedEpoch after loading:
 
 loadCoValue(
   id: string,
@@ -532,14 +486,12 @@ loadCoValue(
     return;
   }
 
-  // NEW: Get eviction metadata to restore lastAccessed
-  const metadata = this.dbClient.getEvictionMetadata(id);
-  
   // ... existing load logic ...
 
-  // NEW: Update lastAccessed in storage (we're accessing it now)
+  // NEW: Update lastAccessedEpoch in storage (we're accessing it now)
+  const metadata = this.dbClient.getEvictionMetadata(id);
   this.dbClient.updateEvictionMetadata(id, {
-    lastAccessed: Date.now(),
+    lastAccessedEpoch: Date.now(),  // Always use Date.now() for persistence
     sizeBytes: metadata?.sizeBytes ?? this.calculateCoValueSize(coValueRow),
   });
 
@@ -559,17 +511,13 @@ The system **does NOT throw errors** when storage is full. Instead, it gracefull
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Storage Pressure Handling                         │
 │                                                                      │
-│  1. Try to evict Tier 1 candidates (not in memory, synced)          │
+│  1. Try to evict eligible candidates (not in memory + synced)       │
 │     ↓ If not enough space freed                                     │
-│  2. Try to evict Tier 2 candidates (in memory, synced)              │
-│     - Data stays in memory, only removed from storage               │
-│     - Safe because data exists on server                            │
-│     ↓ If still not enough (only unsynced data remains)              │
-│  3. Graceful degradation to memory-only mode                        │
+│  2. Graceful degradation to memory-only mode                        │
 │     - Skip storage write                                            │
 │     - Data stays in memory + syncs to server                        │
 │     - Log warning for debugging                                     │
-│     - Resume storage when sync completes                            │
+│     - Resume storage when space becomes available                   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -583,7 +531,7 @@ async ensureSpaceForWrite(bytesToWrite: number): Promise<boolean> {
     return true;  // Enough space, proceed with store
   }
   
-  // Try to evict (will try Tier 1 first, then Tier 2)
+  // Try to evict (only CoValues not in memory and synced)
   const bytesNeeded = bytesToWrite - availableSpace;
   const freedBytes = await this.evictToFreeSpace(bytesNeeded);
   
@@ -591,13 +539,13 @@ async ensureSpaceForWrite(bytesToWrite: number): Promise<boolean> {
     return true;  // Eviction succeeded, proceed with store
   }
   
-  // Only unsynced data remains - graceful degradation
+  // No more evictable candidates - graceful degradation
   logger.warn("Storage limit reached, operating in memory-only mode", {
     currentSize,
     maxSize: this.config.maxStorageBytes,
     bytesNeeded: bytesToWrite,
     freedBytes,
-    reason: "Only unsynced CoValues remain - waiting for sync to complete",
+    reason: "No evictable CoValues (all are in-memory or unsynced)",
   });
   
   return false;  // Signal to skip storage write, keep in memory only
@@ -625,11 +573,11 @@ async store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
 ```
 
 **Why this approach works:**
-- **Tier 1 eviction**: Safest - data not in use, exists on server
-- **Tier 2 eviction**: Safe - app keeps working (in memory), data recoverable from server
-- **Memory-only fallback**: Only for unsynced data - preserves data integrity
-- **Self-healing**: Once sync completes, unsynced → synced → evictable → storage resumes
+- **Eviction only targets safe candidates**: CoValues not in memory (won't break incremental writes) and synced (can be re-fetched)
+- **Memory-only fallback**: When no candidates available, data stays in memory and syncs normally
+- **Self-healing**: As CoValues are unmounted from memory or synced, they become evictable
 - **No user-facing errors**: Application continues to work seamlessly
+- **Data integrity preserved**: Never evict data that could be lost
 
 ---
 
@@ -641,16 +589,17 @@ async store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
    - Eviction score calculation with various age/size combinations
    - Candidate filtering (excludes in-memory and unsynced)
    - Batch eviction respects batch size limits
-   - Hard limit enforcement blocks writes when necessary
+   - Graceful degradation when no candidates available
 
 2. **Storage Size Tracking**
    - SQLite PRAGMA returns correct size
    - Size updates on store
    - Size calculation for existing CoValues
 
-3. **GarbageCollector Integration**
-   - onUnmount callback fires with correct lastAccessed
-   - lastAccessed persisted to storage
+3. **Timestamp Handling**
+   - `lastAccessedEpoch` uses `Date.now()` correctly
+   - Timestamps persist correctly across app restarts
+   - Age calculation works correctly with persisted timestamps
 
 ### Integration Tests
 
@@ -658,16 +607,17 @@ async store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
    - Fill storage to limit
    - Verify eviction triggers
    - Verify correct CoValues are evicted (by score)
-   - Verify protected CoValues are not evicted
+   - Verify in-memory CoValues are NOT evicted
+   - Verify unsynced CoValues are NOT evicted
 
 2. **Limit Enforcement**
    - Write that would exceed limit triggers eviction
-   - Write rejected when all candidates protected
-   - StorageLimitExceededError contains correct info
+   - Memory-only mode activates when no candidates available
+   - Storage resumes when candidates become available
 
 3. **Recovery After Eviction**
    - Evicted CoValue can be re-fetched from server
-   - Re-fetched CoValue has fresh lastAccessed
+   - Re-fetched CoValue has fresh `lastAccessedEpoch`
 
 ### Performance Tests
 
@@ -702,7 +652,7 @@ const DEFAULT_EVICTION_CONFIG: StorageEvictionConfig = {
 
 | File | Type | Changes |
 |------|------|---------|
-| `packages/cojson/src/storage/StorageEvictionManager.ts` | NEW | Core eviction logic with tiered priority |
+| `packages/cojson/src/storage/StorageEvictionManager.ts` | NEW | Core eviction logic |
 | `packages/cojson/src/storage/types.ts` | MODIFY | Add eviction methods to StorageAPI |
 | `packages/cojson/src/storage/storageSync.ts` | MODIFY | Add limit checks, metadata tracking |
 | `packages/cojson/src/storage/storageAsync.ts` | MODIFY | Add limit checks, metadata tracking |
@@ -711,6 +661,7 @@ const DEFAULT_EVICTION_CONFIG: StorageEvictionConfig = {
 | `packages/cojson/src/storage/sqliteAsync/client.ts` | MODIFY | Implement eviction methods |
 | `packages/cojson-storage-indexeddb/src/idbClient.ts` | MODIFY | Implement eviction methods |
 | `packages/cojson-storage-indexeddb/src/idbNode.ts` | MODIFY | Add schema migration |
-| `packages/cojson/src/GarbageCollector.ts` | MODIFY | Add onUnmount callback |
 | `packages/cojson/src/localNode.ts` | MODIFY | Initialize eviction manager |
 | `packages/cojson/src/config.ts` | MODIFY | Add eviction config |
+
+**Note:** `GarbageCollector.ts` does NOT need modification. The storage eviction system uses a separate `lastAccessedEpoch` field (with `Date.now()`) that is updated on store/load operations, independent of the GC's `performance.now()`-based tracking.
