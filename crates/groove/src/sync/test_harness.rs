@@ -425,7 +425,7 @@ impl TestClientEnv {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl ClientEnv for TestClientEnv {
     async fn subscribe(
         &self,

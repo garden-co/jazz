@@ -95,31 +95,9 @@ impl ClientEnvConfig {
 ///     // ... other methods
 /// }
 /// ```
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
-pub trait ClientEnv: Send + Sync + Clone {
-    /// Subscribe to a query, returning a stream of SSE events.
-    ///
-    /// The stream stays open for real-time updates until dropped or disconnected.
-    async fn subscribe(
-        &self,
-        request: SubscribeRequest,
-    ) -> Result<BoxStream<'static, Result<SseEvent, ClientError>>, ClientError>;
-
-    /// Push commits to the server.
-    async fn push(&self, request: PushRequest) -> Result<PushResponse, ClientError>;
-
-    /// Request reconciliation for an object.
-    ///
-    /// Returns commits the client is missing.
-    async fn reconcile(&self, request: ReconcileRequest) -> Result<SseEvent, ClientError>;
-
-    /// Unsubscribe from a query.
-    async fn unsubscribe(&self, subscription_id: u32) -> Result<(), ClientError>;
-}
-
-/// Transport abstraction for sync client (WASM version without Send + Sync).
-#[cfg(target_arch = "wasm32")]
+///
+/// No Send+Sync bounds - the sync layer is single-threaded on all platforms.
+/// SyncedNode uses Rc<RefCell> internally and spawns with spawn_local.
 #[async_trait(?Send)]
 pub trait ClientEnv: Clone {
     /// Subscribe to a query, returning a stream of SSE events.
