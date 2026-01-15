@@ -120,6 +120,23 @@ This document outlines the coding tasks to optimize `tryAdd` by replacing JSON s
 
 ---
 
+## Phase 7: Benchmarking
+
+### Task 7.1: Create performance benchmark
+**File:** `bench/cojson/transaction-direct-calls.bench.ts`
+
+- [x] Create benchmark using cronometro
+- [x] Compare OLD approach (JSON.stringify) vs NEW approach (direct calls)
+- [x] Test with private, trusting, and mixed transactions
+- [x] Test with varying transaction counts (10, 100, 500)
+
+### Task 7.2: Add benchmark script
+**File:** `bench/package.json`
+
+- [x] Add `bench:direct-calls` script to run the benchmark
+
+---
+
 ## Summary
 
 | Phase | Tasks | Status |
@@ -130,7 +147,8 @@ This document outlines the coding tasks to optimize `tryAdd` by replacing JSON s
 | 4. Uniffi Binding | 1 task | ✅ Complete |
 | 5. TypeScript Integration | 3 tasks | ✅ Complete |
 | 6. Build & Verify | 2 tasks | ⏳ Pending build |
-| **Total** | **13 tasks** | **✅ Code Complete** |
+| 7. Benchmarking | 2 tasks | ✅ Complete |
+| **Total** | **15 tasks** | **✅ Code Complete** |
 
 ## API Summary
 
@@ -169,3 +187,7 @@ tryAdd(transactions, signature, skipVerify) {
 - `packages/cojson/src/crypto/NapiCrypto.ts` - NAPI adapter with optimized `tryAdd`
 - `packages/cojson/src/crypto/WasmCrypto.ts` - WASM adapter with optimized `tryAdd`
 - `packages/cojson/src/crypto/RNCrypto.ts` - React Native adapter with optimized `tryAdd`
+
+### Benchmarks
+- `bench/cojson/transaction-direct-calls.bench.ts` - Performance benchmark comparing approaches
+- `bench/package.json` - Added `bench:direct-calls` script
