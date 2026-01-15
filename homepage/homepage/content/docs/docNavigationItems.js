@@ -33,6 +33,11 @@ export const docNavigationItems = [
         },
       },
       {
+        name: "API Reference",
+        href: "/docs/api-reference",
+        done: 100,
+      },
+      {
         name: "Troubleshooting",
         href: "/docs/troubleshooting",
         done: 100,
