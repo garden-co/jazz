@@ -122,21 +122,20 @@ async function main() {
         ? pick(data.targets.fileIds, rng)
         : pick(data.targets.mapIds, rng);
 
-    const v = await node.loadCoValueCore(id as RawCoID);
+    const v = await node.loadCoValueCore(id as RawCoID, undefined, true);
 
     opsDone++;
-    if (!v.isAvailable()) {
-      console.error("coValue unavailable", id);
-      await sleep(50 + Math.floor(rng() * 50));
-    } else {
+    if (v.isAvailable()) {
       if (kind === "file") {
+        v.waitForFullStreaming().finally(() => {
+          v.unmount();
+        });
         fileOpsDone++;
       } else {
+        v.unmount();
         mapOpsDone++;
       }
     }
-
-    v.unmount();
   }
 
   while (Date.now() < deadline) {
@@ -144,10 +143,10 @@ async function main() {
 
     const p = doOneOp().finally(() => {
       sem.release();
+      inFlight.delete(p);
     });
 
     inFlight.add(p);
-    p.finally(() => inFlight.delete(p));
 
     // Periodically emit stats.
     if (opsDone % 20 === 0) {

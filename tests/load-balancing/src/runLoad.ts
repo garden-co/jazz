@@ -172,15 +172,11 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
     const opsPerSec = elapsedMs > 0 ? ops / (elapsedMs / 1000) : 0;
 
     console.log(
-      JSON.stringify(
-        {
-          elapsedMs,
-          workers: { total: workers, done: doneCount },
-          ops: { total: ops, fileOps, mapOps, errors, opsPerSec },
-        },
-        null,
-        2,
-      ),
+      JSON.stringify({
+        elapsedMs,
+        workers: { total: workers, done: doneCount },
+        ops: { total: ops, fileOps, mapOps, errors, opsPerSec },
+      }),
     );
   };
 
