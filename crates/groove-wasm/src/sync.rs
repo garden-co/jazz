@@ -24,6 +24,7 @@ use groove::{Commit, CommitId, ObjectId};
 // ============================================================================
 
 /// Browser-based implementation of ClientEnv using fetch and EventSource.
+#[derive(Clone)]
 pub struct WasmClientEnv {
     config: ClientEnvConfig,
 }

@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::commit::CommitId;
-use crate::node::LocalNode;
 use crate::object::ObjectId;
+use crate::sql::DatabaseState;
 
 use super::env::{ClientEnv, ClientError};
 use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers};
@@ -69,6 +69,22 @@ pub enum ConnectionState {
     Reconnecting { attempt: u32 },
 }
 
+/// Callback type for state change notifications (native).
+#[cfg(not(target_arch = "wasm32"))]
+pub type StateChangeCallback = Box<dyn Fn(&ConnectionState) + Send + Sync>;
+
+/// Callback type for state change notifications (WASM).
+#[cfg(target_arch = "wasm32")]
+pub type StateChangeCallback = Box<dyn Fn(&ConnectionState)>;
+
+/// Callback type for error notifications (native).
+#[cfg(not(target_arch = "wasm32"))]
+pub type ErrorCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Callback type for error notifications (WASM).
+#[cfg(target_arch = "wasm32")]
+pub type ErrorCallback = Box<dyn Fn(&str)>;
+
 /// The sync client.
 ///
 /// Manages connection to server, query subscriptions, and sync state.
@@ -79,10 +95,10 @@ pub enum ConnectionState {
 pub struct SyncClient<E: ClientEnv> {
     /// Transport environment for HTTP/SSE operations
     env: E,
-    /// Local node for reading/writing objects
-    node: Arc<LocalNode>,
+    /// Database state for storage and SQL operations
+    db: Arc<DatabaseState>,
     /// Current connection state
-    pub connection_state: ConnectionState,
+    connection_state: ConnectionState,
     /// Active query subscriptions by ID
     pub subscriptions: HashMap<u32, QuerySubscription>,
     /// Next subscription ID
@@ -91,6 +107,10 @@ pub struct SyncClient<E: ClientEnv> {
     pub server_known_state: HashMap<ObjectId, Vec<CommitId>>,
     /// Reconnection configuration
     pub reconnect_config: ReconnectConfig,
+    /// Callback for connection state changes
+    on_state_change: Option<StateChangeCallback>,
+    /// Callback for sync errors
+    on_error: Option<ErrorCallback>,
 }
 
 impl<E: ClientEnv> SyncClient<E> {
@@ -99,33 +119,37 @@ impl<E: ClientEnv> SyncClient<E> {
     /// # Arguments
     ///
     /// * `env` - The transport environment (implements ClientEnv)
-    /// * `node` - The local node for object storage
-    pub fn new(env: E, node: Arc<LocalNode>) -> Self {
+    /// * `db` - The database state for storage and SQL operations
+    pub fn new(env: E, db: Arc<DatabaseState>) -> Self {
         Self {
             env,
-            node,
+            db,
             connection_state: ConnectionState::Disconnected,
             subscriptions: HashMap::new(),
             next_subscription_id: 1,
             server_known_state: HashMap::new(),
             reconnect_config: ReconnectConfig::default(),
+            on_state_change: None,
+            on_error: None,
         }
     }
 
     /// Create a new sync client with custom reconnection configuration.
     pub fn with_reconnect_config(
         env: E,
-        node: Arc<LocalNode>,
+        db: Arc<DatabaseState>,
         reconnect_config: ReconnectConfig,
     ) -> Self {
         Self {
             env,
-            node,
+            db,
             connection_state: ConnectionState::Disconnected,
             subscriptions: HashMap::new(),
             next_subscription_id: 1,
             server_known_state: HashMap::new(),
             reconnect_config,
+            on_state_change: None,
+            on_error: None,
         }
     }
 
@@ -134,9 +158,14 @@ impl<E: ClientEnv> SyncClient<E> {
         &self.env
     }
 
+    /// Get a reference to the database state.
+    pub fn db(&self) -> &Arc<DatabaseState> {
+        &self.db
+    }
+
     /// Get a reference to the local node.
-    pub fn node(&self) -> &Arc<LocalNode> {
-        &self.node
+    pub fn node(&self) -> &crate::node::LocalNode {
+        self.db.node()
     }
 
     /// Allocate a new subscription ID.
@@ -196,7 +225,7 @@ impl<E: ClientEnv> SyncClient<E> {
     /// Returns None if there are no commits to push.
     pub fn create_push_request(&self, object_id: ObjectId, branch: &str) -> Option<PushRequest> {
         // Get local frontier
-        let local_frontier = self.node.frontier(object_id, branch).ok()??;
+        let local_frontier = self.node().frontier(object_id, branch).ok()??;
 
         // Get server's known frontier (empty if unknown)
         let server_frontier = self
@@ -211,7 +240,7 @@ impl<E: ClientEnv> SyncClient<E> {
         }
 
         // Get the branch to find commits to send
-        let obj = self.node.get_object(object_id)?;
+        let obj = self.node().get_object(object_id)?;
         let obj_read = obj.read().ok()?;
         let branch_ref = obj_read.branch_ref(branch)?;
         let branch_read = branch_ref.read().ok()?;
@@ -260,11 +289,11 @@ impl<E: ClientEnv> SyncClient<E> {
                 object_meta,
             } => {
                 // Apply commits to local node
-                self.node.apply_commits(*object_id, branch, commits.clone());
+                self.node().apply_commits(*object_id, branch, commits.clone());
 
                 // If we received object metadata, store it on the object
                 if let Some(meta) = object_meta
-                    && let Some(obj) = self.node.get_object(*object_id)
+                    && let Some(obj) = self.node().get_object(*object_id)
                     && let Ok(mut obj_write) = obj.write()
                 {
                     obj_write.set_meta(meta.clone());
@@ -307,21 +336,46 @@ impl<E: ClientEnv> SyncClient<E> {
         object_id: ObjectId,
         branch: &str,
     ) -> Option<ReconcileRequest> {
-        let local_frontier = self.node.frontier(object_id, branch).ok()??;
+        let local_frontier = self.node().frontier(object_id, branch).ok()??;
         Some(ReconcileRequest {
             object_id,
             local_frontier,
         })
     }
 
-    /// Set connection state.
+    /// Set connection state and notify callback.
     pub fn set_connection_state(&mut self, state: ConnectionState) {
-        self.connection_state = state;
+        self.connection_state = state.clone();
+        if let Some(ref cb) = self.on_state_change {
+            cb(&state);
+        }
+    }
+
+    /// Get current connection state.
+    pub fn connection_state(&self) -> &ConnectionState {
+        &self.connection_state
     }
 
     /// Check if connected.
     pub fn is_connected(&self) -> bool {
         self.connection_state == ConnectionState::Connected
+    }
+
+    /// Set callback for connection state changes.
+    pub fn set_on_state_change(&mut self, callback: StateChangeCallback) {
+        self.on_state_change = Some(callback);
+    }
+
+    /// Set callback for sync errors.
+    pub fn set_on_error(&mut self, callback: ErrorCallback) {
+        self.on_error = Some(callback);
+    }
+
+    /// Report an error via the callback.
+    pub fn report_error(&self, message: &str) {
+        if let Some(ref cb) = self.on_error {
+            cb(message);
+        }
     }
 
     // ========================================================================
@@ -371,7 +425,7 @@ impl<E: ClientEnv> SyncClient<E> {
 
         // On successful push, clear unsynced flag via storage
         if response.accepted {
-            self.node.env().clear_unsynced(&object_id).await;
+            self.node().env().clear_unsynced(&object_id).await;
         }
 
         Ok(response)
@@ -407,7 +461,7 @@ impl<E: ClientEnv> SyncClient<E> {
         &mut self,
         branch: &str,
     ) -> Vec<(ObjectId, Result<PushResponse, ClientError>)> {
-        let unsynced = self.node.env().get_unsynced_objects().await;
+        let unsynced = self.node().env().get_unsynced_objects().await;
         let mut results = Vec::new();
         for object_id in unsynced {
             let result = self.push(object_id, branch).await;
@@ -418,12 +472,12 @@ impl<E: ClientEnv> SyncClient<E> {
 
     /// Mark an object as having unsynced local changes via storage.
     pub async fn mark_unsynced(&self, object_id: ObjectId) {
-        self.node.env().mark_unsynced(object_id).await;
+        self.node().env().mark_unsynced(object_id).await;
     }
 
     /// Check if an object has unsynced changes via storage.
     pub async fn is_unsynced(&self, object_id: &ObjectId) -> bool {
-        self.node.env().is_unsynced(object_id).await
+        self.node().env().is_unsynced(object_id).await
     }
 }
 
@@ -460,8 +514,8 @@ mod tests {
     }
 
     fn make_client() -> SyncClient<MockClientEnv> {
-        let node = Arc::new(LocalNode::in_memory());
-        SyncClient::new(MockClientEnv, node)
+        let db = crate::sql::Database::in_memory();
+        SyncClient::new(MockClientEnv, db.into_state())
     }
 
     #[test]

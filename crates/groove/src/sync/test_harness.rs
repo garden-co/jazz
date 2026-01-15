@@ -370,19 +370,19 @@ pub struct TestClient {
 }
 
 impl TestClient {
-    /// Create a new test client with its own LocalNode.
+    /// Create a new test client with its own Database.
     fn new(transport: Arc<TestTransport>, id: impl Into<String>) -> Self {
         let id = id.into();
         let env = TestClientEnv::new(Arc::clone(&transport), &id);
-        // Each client gets its OWN MemoryEnvironment - NOT shared with server
-        let client_env = Arc::new(MemoryEnvironment::new());
-        let node = Arc::new(LocalNode::new(client_env));
-        let sync_client = super::client::SyncClient::new(env, node);
+        // Each client gets its OWN Database - NOT shared with server
+        let db = crate::sql::Database::in_memory();
+        let db_state = db.into_state();
+        let sync_client = super::client::SyncClient::new(env, db_state);
         Self { sync_client, id }
     }
 
     /// Get the client's LocalNode.
-    pub fn node(&self) -> &Arc<LocalNode> {
+    pub fn node(&self) -> &LocalNode {
         self.sync_client.node()
     }
 
