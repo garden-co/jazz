@@ -30,3 +30,6 @@ __screenshots__/
 
 # Turborepo
 .turbo
+
+# Internal docs (not for public repo)
+internal/

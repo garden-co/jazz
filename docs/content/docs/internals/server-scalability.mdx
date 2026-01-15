@@ -1,0 +1,208 @@
+---
+title: Server Scalability
+description: Design requirements for scalable groove-server deployments
+status: future
+implements:
+  - groove/src/sync/server.rs
+  - groove-server/src/lib.rs
+---
+
+<StatusBadge status="future" />
+
+This document describes the architectural requirements for groove-server to support scalable deployments. The current `groove-server` implementation operates as a single node combining all responsibilities. These requirements ensure the core sync logic can be extended to distributed deployments.
+
+## Design Principles
+
+### Same Protocol Everywhere
+
+groove-server should be able to act as both a sync **client** (connecting upstream to other servers) and a sync **server** (accepting downstream connections). This enables:
+
+- Hierarchical deployments (edge → core → storage)
+- Server-to-server synchronization
+- Caching layers that proxy upstream
+
+The same sync protocol (subscribe, push, reconcile, SSE events) works at every layer.
+
+### Everything is an Object
+
+All system data uses the same sync and storage mechanisms as user data:
+
+| Object Type | Description |
+|-------------|-------------|
+| User data | Application table rows |
+| Schemas | Table schemas, policies, lenses |
+| Indices | Chunked sorted index entries |
+
+This unifies the consistency model. Schema changes and index updates propagate via normal sync, not special-case code paths.
+
+### Per-Object Consistency
+
+Each object has its own frontier (set of tip commits). This allows:
+
+- Independent sync per object
+- No global coordination for most operations
+- Horizontal scaling by partitioning objects
+
+Objects can be sharded across multiple storage nodes using consistent hashing.
+
+## Server Capabilities
+
+### Upstream Connections
+
+groove-server needs to connect upstream to other groove-servers:
+
+```rust
+// Server can connect to upstream servers using the same sync protocol
+impl SyncServer {
+    async fn connect_upstream(&mut self, url: &str) -> Result<UpstreamConnection>;
+    async fn subscribe_upstream(&mut self, conn: &mut UpstreamConnection, object_id: ObjectId);
+    async fn push_upstream(&mut self, conn: &mut UpstreamConnection, push: PushRequest) -> Vec<CommitId>;
+}
+```
+
+This enables caching layers that subscribe to upstream for objects their clients need.
+
+### Subscription Aggregation
+
+When multiple downstream clients subscribe to the same object, the server should maintain a single upstream subscription:
+
+```rust
+struct SubscriptionAggregator {
+    // Object → which downstream sessions need it
+    object_to_downstream: HashMap<ObjectId, HashSet<SessionId>>,
+    // Reference counting for upstream subscriptions
+    upstream_ref_count: HashMap<ObjectId, usize>,
+}
+```
+
+This prevents subscription fan-out from overwhelming upstream servers.
+
+### Object Routing
+
+For sharded deployments, servers need to route objects to the correct storage node:
+
+```rust
+trait ObjectRouter {
+    /// Get storage node(s) for an object
+    fn nodes_for_object(&self, object_id: ObjectId) -> Vec<NodeId>;
+}
+```
+
+Implementations might use consistent hashing, rendezvous hashing, or other partitioning schemes.
+
+## Index Maintenance
+
+Indices are objects with special merge semantics. Concurrent index updates should:
+
+1. Create branches in the index object (like any concurrent edit)
+2. Merge using a custom strategy that understands index structure
+3. Produce a unified sorted result
+
+For chunked sorted indices, this means merge-sort style combination of ordered entries.
+
+### Cooperative Maintenance
+
+Multiple servers may update the same index concurrently:
+
+- Each server computes its index update locally
+- Pushes index commits to storage
+- Storage merges concurrent updates
+- Merged result syncs back to all servers
+
+No central coordinator needed - the commit graph handles concurrent updates.
+
+## Schema Propagation
+
+Schemas are objects that sync via the normal protocol:
+
+1. Schema deploy writes new schema object
+2. Schema syncs to servers via normal subscription
+3. Servers validate operations against local schema cache
+4. Stale schema → reject operation, client refreshes and retries
+
+Eventually consistent schema propagation is acceptable because:
+- Validation happens at operation time
+- Stale rejection provides correctness
+- Clients retry with fresh schema
+
+## Failure Handling
+
+### Reconnection
+
+Servers should handle upstream disconnection gracefully:
+
+- Exponential backoff with jitter on reconnect
+- Re-subscribe to all needed objects after reconnect
+- Reconcile frontiers to catch up on missed updates
+
+### Backpressure
+
+When overloaded, servers should:
+
+- Reject new work (503) rather than queue unboundedly
+- Preserve existing connections and subscriptions
+- Shed load gracefully
+
+### Tenant Isolation
+
+Servers should isolate tenants to prevent cascade failures:
+
+```rust
+struct TenantLimits {
+    max_connections: usize,
+    max_subscriptions: usize,
+    max_push_rate: Rate,
+}
+```
+
+One tenant's load spike should not affect others.
+
+## Health and Observability
+
+### Health Endpoint
+
+Simple `/health` endpoint for load balancer integration:
+
+```
+GET /health
+→ 200 OK (healthy)
+→ 503 Service Unavailable (unhealthy)
+```
+
+### Metrics
+
+Key metrics for monitoring:
+
+| Metric | Description |
+|--------|-------------|
+| `connections_active` | Current client connections |
+| `subscriptions_active` | Current object subscriptions |
+| `push_latency` | Time to process push requests |
+| `sync_lag` | Time since last upstream sync |
+
+## Current Implementation
+
+The current `groove-server` is a single-node implementation suitable for:
+
+- Development and testing
+- Small deployments
+- Self-hosted single-tenant use
+
+It combines edge (client-facing), core (routing), and storage (persistence) in one process.
+
+## Files
+
+**Core sync logic** (`groove/src/sync/`):
+- `server.rs` - SyncServer with session management
+- `client.rs` - SyncClient for upstream connections (to be extended)
+- `protocol.rs` - Wire protocol shared across all deployments
+
+**Server binary** (`groove-server/src/`):
+- `lib.rs` - Axum HTTP handlers
+- `handlers.rs` - Endpoint implementations
+
+## Related
+
+- [Sync](/docs/internals/sync) - Sync protocol details
+- [Indices](/docs/internals/indices) - Index structure and maintenance
+- [Storage](/docs/internals/storage) - Persistence layer
