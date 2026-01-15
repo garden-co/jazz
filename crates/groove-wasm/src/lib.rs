@@ -31,10 +31,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
 pub mod indexeddb;
+pub mod runtime;
 pub mod sync;
 pub mod synced_local_node;
 
 pub use indexeddb::IndexedDbEnvironment;
+pub use runtime::WasmRuntime;
 pub use sync::WasmSyncClient;
 pub use synced_local_node::WasmSyncedLocalNode;
 

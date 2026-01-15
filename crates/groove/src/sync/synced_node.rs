@@ -1,27 +1,40 @@
-//! SyncedNode - LocalNode with sync capabilities.
+//! SyncedNode - Object storage with sync capabilities.
 //!
-//! SyncedNode wraps a LocalNode and adds:
+//! SyncedNode wraps a LocalNode (object store) and adds:
 //! - Upstream server connections (servers we sync TO)
 //! - Connected client sessions (clients that sync FROM us)
 //! - Automatic write batching/debouncing
 //! - Automatic SSE event application
+//!
+//! SyncedNode knows NOTHING about databases, SQL, schemas, or tables.
+//! It operates purely at the object/commit level. The database layer
+//! can observe incoming objects by registering a callback.
+//!
+//! Objects marked as `node_private` in their metadata are never synced.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::commit::CommitId;
+// Platform-agnostic Instant
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+use crate::commit::{Commit, CommitId};
 use crate::node::LocalNode;
 use crate::object::ObjectId;
 
-use super::client::ReconnectConfig;
 use super::env::{ClientEnv, ClientError};
+use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers};
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
-use super::runtime::Runtime;
+use super::runtime::{ReconnectConfig, Runtime, calculate_reconnect_delay_with_jitter};
+use super::shared::Shared;
 
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 use super::server::{ClientIdentity, ClientSession, SessionId, SseSender, TokenValidator};
 
 // ============================================================================
@@ -207,6 +220,62 @@ impl<E: ClientEnv> UpstreamServer<E> {
     pub async fn reconcile(&mut self, request: ReconcileRequest) -> Result<SseEvent, ClientError> {
         self.env.reconcile(request).await
     }
+
+    /// Get all active subscriptions for reconnection.
+    ///
+    /// Returns (query, options) pairs that should be re-subscribed after reconnect.
+    pub fn active_subscriptions(&self) -> Vec<(String, SubscriptionOptions)> {
+        self.subscriptions
+            .values()
+            .map(|s| (s.query.clone(), s.options.clone()))
+            .collect()
+    }
+
+    /// Get all objects tracked via subscriptions.
+    ///
+    /// Returns deduplicated list of object IDs from all subscriptions.
+    pub fn tracked_objects(&self) -> Vec<ObjectId> {
+        self.subscriptions
+            .values()
+            .flat_map(|s| s.objects.iter().copied())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Record that an object was received via a subscription.
+    pub fn track_object(&mut self, subscription_id: u32, object_id: ObjectId) {
+        if let Some(sub) = self.subscriptions.get_mut(&subscription_id) {
+            sub.objects.insert(object_id);
+        }
+    }
+
+    /// Clear all subscriptions (for reconnection).
+    pub fn clear_subscriptions(&mut self) {
+        self.subscriptions.clear();
+        self.next_subscription_id = 1;
+    }
+
+    /// Check if any subscriptions exist.
+    pub fn has_subscriptions(&self) -> bool {
+        !self.subscriptions.is_empty()
+    }
+
+    /// Add a subscription (for use when subscribe was called externally).
+    ///
+    /// Returns the subscription ID.
+    pub fn add_subscription(&mut self, query: String, options: SubscriptionOptions) -> u32 {
+        let sub_id = self.next_subscription_id();
+        self.subscriptions.insert(
+            sub_id,
+            UpstreamSubscription {
+                query,
+                options,
+                objects: std::collections::HashSet::new(),
+            },
+        );
+        sub_id
+    }
 }
 
 /// Manager for upstream server connections.
@@ -271,7 +340,7 @@ impl<E: ClientEnv> UpstreamServers<E> {
 // Connected Clients (Server-side)
 // ============================================================================
 
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 /// Manager for connected client sessions (clients that sync FROM us).
 pub struct ConnectedClients {
     /// Active client sessions.
@@ -293,7 +362,7 @@ pub struct ConnectedClients {
     stale_states: HashMap<String, StaleClientState>,
 }
 
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 /// Stale client state kept for grace period after disconnect.
 pub struct StaleClientState {
     /// The client's known state at disconnect.
@@ -302,14 +371,14 @@ pub struct StaleClientState {
     pub removed_at: Instant,
 }
 
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for ConnectedClients {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl ConnectedClients {
     /// Create a new connected clients manager.
     pub fn new() -> Self {
@@ -511,45 +580,63 @@ impl WriteBuffer {
 // SyncedNode
 // ============================================================================
 
-/// A LocalNode with sync capabilities.
+/// Callback type for observing objects received from sync.
+/// The callback receives (object_id, commits, object_meta).
 ///
-/// SyncedNode wraps a LocalNode and adds:
+/// No Send + Sync bounds - the sync layer is single-threaded.
+pub type OnObjectsReceivedCallback =
+    std::rc::Rc<dyn Fn(ObjectId, &[Commit], Option<&std::collections::BTreeMap<String, String>>)>;
+
+/// Object storage with sync capabilities.
+///
+/// SyncedNode wraps a LocalNode (object store) and adds:
 /// - Connections to upstream servers (servers we sync TO)
 /// - Sessions from connected clients (clients that sync FROM us)
 /// - Automatic write batching and debouncing
 /// - Automatic SSE event application
+///
+/// SyncedNode knows NOTHING about databases, SQL, schemas, or tables.
+/// It operates purely at the object/commit level. Higher layers (e.g., Database)
+/// can observe incoming objects by registering a callback via `set_on_objects_received`.
+///
+/// Objects marked as `node_private: true` in their metadata are never synced.
 pub struct SyncedNode<R: Runtime, E: ClientEnv> {
-    /// The underlying LocalNode.
+    /// The underlying object store.
     node: Arc<LocalNode>,
 
     /// Runtime for spawning async tasks.
     runtime: R,
 
     /// Connections to upstream servers.
-    upstream_servers: RwLock<UpstreamServers<E>>,
+    upstream_servers: Shared<UpstreamServers<E>>,
 
     /// Connected client sessions (server-side).
-    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
-    connected_clients: RwLock<ConnectedClients>,
+    #[cfg(not(target_arch = "wasm32"))]
+    connected_clients: Shared<ConnectedClients>,
 
     /// Write buffer for batching upstream pushes.
-    write_buffer: RwLock<WriteBuffer>,
+    write_buffer: Shared<WriteBuffer>,
 
     /// Sync configuration.
     config: SyncConfig,
+
+    /// Callback for when objects are received from upstream.
+    /// Higher layers (e.g., Database) register here to observe synced objects.
+    on_objects_received: std::cell::RefCell<Option<OnObjectsReceivedCallback>>,
 }
 
 impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
-    /// Create a new SyncedNode.
+    /// Create a new SyncedNode from a LocalNode.
     pub fn new(node: Arc<LocalNode>, runtime: R) -> Self {
         Self {
             node,
             runtime,
-            upstream_servers: RwLock::new(UpstreamServers::new()),
-            #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
-            connected_clients: RwLock::new(ConnectedClients::new()),
-            write_buffer: RwLock::new(WriteBuffer::new()),
+            upstream_servers: Shared::new(UpstreamServers::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            connected_clients: Shared::new(ConnectedClients::new()),
+            write_buffer: Shared::new(WriteBuffer::new()),
             config: SyncConfig::default(),
+            on_objects_received: std::cell::RefCell::new(None),
         }
     }
 
@@ -558,17 +645,23 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         Self {
             node,
             runtime,
-            upstream_servers: RwLock::new(UpstreamServers::new()),
-            #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
-            connected_clients: RwLock::new(ConnectedClients::new()),
-            write_buffer: RwLock::new(WriteBuffer::new()),
+            upstream_servers: Shared::new(UpstreamServers::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            connected_clients: Shared::new(ConnectedClients::new()),
+            write_buffer: Shared::new(WriteBuffer::new()),
             config,
+            on_objects_received: std::cell::RefCell::new(None),
         }
     }
 
     /// Get a reference to the underlying LocalNode.
-    pub fn inner(&self) -> &Arc<LocalNode> {
+    pub fn node(&self) -> &LocalNode {
         &self.node
+    }
+
+    /// Get the underlying LocalNode as an Arc.
+    pub fn node_arc(&self) -> Arc<LocalNode> {
+        Arc::clone(&self.node)
     }
 
     /// Get the runtime.
@@ -581,86 +674,97 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         &self.config
     }
 
+    /// Set the callback for when objects are received from upstream.
+    ///
+    /// Higher layers (e.g., Database) register here to observe synced objects.
+    /// The callback receives (object_id, commits, object_meta).
+    pub fn set_on_objects_received(&self, callback: OnObjectsReceivedCallback) {
+        *self.on_objects_received.borrow_mut() = Some(callback);
+    }
+
     // ========== Upstream Server API ==========
 
     /// Add an upstream server connection.
     ///
     /// Returns the UpstreamId for the new connection.
     pub fn add_upstream(&self, env: E) -> UpstreamId {
-        self.upstream_servers.write().unwrap().add(env)
+        self.upstream_servers.write().add(env)
     }
 
     /// Remove an upstream server connection.
     pub fn remove_upstream(&self, id: UpstreamId) -> bool {
-        self.upstream_servers.write().unwrap().remove(id).is_some()
+        self.upstream_servers.write().remove(id).is_some()
     }
 
     /// Get all upstream server IDs.
     pub fn upstream_ids(&self) -> Vec<UpstreamId> {
-        self.upstream_servers.read().unwrap().ids().collect()
+        self.upstream_servers.read().ids().collect()
     }
 
     /// Check if there are any upstream connections.
     pub fn has_upstream(&self) -> bool {
-        !self.upstream_servers.read().unwrap().is_empty()
+        !self.upstream_servers.read().is_empty()
     }
 
     /// Get the state of an upstream connection.
     pub fn upstream_state(&self, id: UpstreamId) -> Option<UpstreamState> {
         self.upstream_servers
             .read()
-            .unwrap()
             .get(id)
             .map(|u| u.state().clone())
     }
 
     // ========== Connected Clients API (Server-side) ==========
 
-    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Set the token validator for accepting client connections.
     pub fn set_token_validator(&self, validator: Arc<dyn TokenValidator>) {
         self.connected_clients
             .write()
-            .unwrap()
             .set_token_validator(validator);
     }
 
-    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Accept a new client session.
     pub fn accept_client(&self, identity: ClientIdentity, sse_sender: SseSender) -> SessionId {
         self.connected_clients
             .write()
-            .unwrap()
             .accept_session(identity, sse_sender)
     }
 
-    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Remove a client session.
     pub fn remove_client(&self, session_id: SessionId) {
-        self.connected_clients
-            .write()
-            .unwrap()
-            .remove_session(session_id);
+        self.connected_clients.write().remove_session(session_id);
     }
 
     // ========== Write Buffer API ==========
 
     /// Queue an object for upstream push.
+    ///
+    /// Objects marked as `node_private` in their metadata are skipped - they
+    /// should never be synced (e.g., table_rows objects, index objects).
     pub fn queue_for_push(&self, object_id: ObjectId, branch: &str) {
-        self.write_buffer.write().unwrap().add(object_id, branch);
+        // Check if object is node_private - skip sync for private objects
+        if let Some(obj) = self.node.get_object(object_id)
+            && let Ok(obj_guard) = obj.read()
+            && obj_guard.is_node_private()
+        {
+            return; // Don't sync node_private objects
+        }
+        self.write_buffer.write().add(object_id, branch);
     }
 
     /// Get objects ready to push.
     pub fn ready_to_push(&self) -> Vec<ObjectId> {
         self.write_buffer
             .read()
-            .unwrap()
             .ready_to_push(self.config.write_debounce_ms, self.config.max_batch_age_ms)
     }
 
     /// Mark an object as pushed (remove from buffer).
     pub fn mark_pushed(&self, object_id: &ObjectId) {
-        self.write_buffer.write().unwrap().remove(object_id);
+        self.write_buffer.write().remove(object_id);
     }
 
     // ========== High-level Operations ==========
@@ -668,38 +772,65 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Apply commits received from an upstream server.
     ///
     /// This is called automatically by the SSE event loop.
+    /// Commits are applied directly to LocalNode, then observers are notified.
     pub fn apply_upstream_commits(
         &self,
         upstream_id: UpstreamId,
         object_id: ObjectId,
-        commits: Vec<crate::commit::Commit>,
+        commits: Vec<Commit>,
         frontier: Vec<CommitId>,
+        object_meta: Option<std::collections::BTreeMap<String, String>>,
     ) {
-        // Apply to local storage
-        self.node.apply_commits(object_id, "main", commits.clone());
+        // Ensure object exists with metadata (if provided)
+        // The metadata must be set BEFORE apply_commits so that the
+        // on_commits_applied callback can access it (e.g., to find table name)
+        if let Some(ref meta) = object_meta {
+            self.node
+                .ensure_object_with_meta(object_id, "synced", meta.clone());
+        } else {
+            self.node.ensure_object(object_id, "synced");
+        }
+
+        // If object already existed but we have new metadata, update it
+        if let Some(ref meta) = object_meta
+            && let Some(obj) = self.node.get_object(object_id)
+            && let Ok(mut obj_write) = obj.write()
+        {
+            obj_write.set_meta(meta.clone());
+        }
+
+        // Apply commits to the object's main branch
+        if !commits.is_empty() {
+            self.node.apply_commits(object_id, "main", commits.clone());
+        }
+
+        // Notify observers (e.g., database layer) that new commits arrived
+        if let Some(callback) = self.on_objects_received.borrow().as_ref() {
+            callback(object_id, &commits, object_meta.as_ref());
+        }
 
         // Update upstream's known state
-        if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
+        if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
             upstream.update_server_known_state(object_id, frontier.clone());
         }
 
         // Broadcast to connected clients (for edge server scenario)
-        #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
             let event = SseEvent::Commits {
                 object_id,
                 commits,
                 frontier,
-                object_meta: None, // TODO: Include metadata for first sync
+                object_meta,
             };
             self.broadcast_to_clients(object_id, &event);
         }
     }
 
-    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Broadcast an event to all clients tracking an object.
     pub fn broadcast_to_clients(&self, object_id: ObjectId, event: &SseEvent) {
-        let clients = self.connected_clients.read().unwrap();
+        let clients = self.connected_clients.read();
         let session_ids = clients.sessions_for_object(&object_id);
 
         for session_id in session_ids {
@@ -710,22 +841,17 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
     }
 
-    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     /// Update last activity for a session (call on any client interaction).
     pub fn touch_session(&self, session_id: SessionId) {
-        if let Some(session) = self
-            .connected_clients
-            .write()
-            .unwrap()
-            .get_session_mut(&session_id)
-        {
+        if let Some(session) = self.connected_clients.write().get_session_mut(&session_id) {
             session.touch();
         }
     }
 }
 
 // Methods that spawn background tasks require 'static bounds
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
     /// Start the session timeout monitoring loop.
     ///
@@ -743,7 +869,7 @@ impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
                 tokio::time::sleep(check_interval).await;
 
                 let expired = {
-                    let mut clients = node.connected_clients.write().unwrap();
+                    let mut clients = node.connected_clients.write();
                     let expired = clients.check_timeouts(timeout);
                     for session_id in &expired {
                         clients.remove_session(*session_id);
@@ -763,11 +889,706 @@ impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
 }
 
 // ============================================================================
-// Reconnection Logic
+// Upstream Sync Event Loop
 // ============================================================================
 
-/// Calculate the next reconnection delay with exponential backoff.
-pub fn calculate_reconnect_delay(attempt: u32, config: &ReconnectConfig) -> u64 {
-    let delay = (config.initial_delay_ms as f64) * config.backoff_multiplier.powi(attempt as i32);
-    (delay as u64).min(config.max_delay_ms)
+/// Result of processing upstream events.
+#[derive(Debug)]
+pub enum UpstreamEventResult {
+    /// Event processed successfully.
+    Ok,
+    /// Stream ended (server closed connection).
+    StreamEnded,
+    /// Error occurred.
+    Error(ClientError),
+}
+
+// Methods for upstream sync with reconnection
+impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
+    /// Start the upstream sync event loop for a connection.
+    ///
+    /// Spawns a background task that:
+    /// - Subscribes to the configured queries
+    /// - Processes incoming SSE events
+    /// - Handles disconnection with exponential backoff + jitter
+    /// - Re-subscribes to all queries after reconnect
+    ///
+    /// The `queries` parameter specifies the initial queries to subscribe to.
+    ///
+    /// Note: This method requires `Arc<Self>` for the spawn. On platforms where
+    /// this isn't available (e.g., WASM), use `upstream_event_loop` directly
+    /// with your own spawn pattern.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start_upstream_sync(
+        self: &Arc<Self>,
+        upstream_id: UpstreamId,
+        queries: Vec<(String, SubscriptionOptions)>,
+    ) {
+        let node = Arc::clone(self);
+        self.runtime.spawn(async move {
+            node.upstream_event_loop(upstream_id, queries).await;
+        });
+    }
+
+    /// Main upstream event loop with reconnection handling.
+    ///
+    /// This method runs the sync loop for a single upstream connection,
+    /// handling subscriptions, event processing, and reconnection.
+    ///
+    /// On native platforms, use `start_upstream_sync` which spawns this
+    /// in a background task. On WASM, spawn this manually using the runtime.
+    pub async fn upstream_event_loop(
+        &self,
+        upstream_id: UpstreamId,
+        initial_queries: Vec<(String, SubscriptionOptions)>,
+    ) {
+        let mut attempt: u32 = 0;
+
+        loop {
+            // Try to connect and subscribe
+            match self
+                .connect_and_subscribe(upstream_id, &initial_queries)
+                .await
+            {
+                Ok(streams) => {
+                    // Reset attempt counter on successful connection
+                    attempt = 0;
+
+                    // Update state to connected
+                    if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
+                        upstream.set_state(UpstreamState::Connected);
+                    }
+
+                    // Process events until stream ends or error
+                    let result = self.process_upstream_streams(upstream_id, streams).await;
+
+                    match result {
+                        UpstreamEventResult::Ok => {
+                            // Normal completion - shouldn't happen in practice
+                            continue;
+                        }
+                        UpstreamEventResult::StreamEnded => {
+                            // Server closed connection - reconnect
+                        }
+                        UpstreamEventResult::Error(_err) => {
+                            // Error occurred - reconnect
+                        }
+                    }
+                }
+                Err(_err) => {
+                    // Connection failed - will retry
+                }
+            }
+
+            // Check if max attempts exceeded
+            if let Some(max) = self.config.reconnect.max_attempts
+                && attempt >= max
+            {
+                // Give up
+                if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
+                    upstream.set_state(UpstreamState::Disconnected);
+                }
+                return;
+            }
+
+            // Calculate delay with jitter using runtime's random
+            let delay_ms = calculate_reconnect_delay_with_jitter(
+                attempt,
+                &self.config.reconnect,
+                self.runtime.random_f64(),
+            );
+
+            // Update state to reconnecting
+            if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
+                upstream.set_state(UpstreamState::Reconnecting {
+                    attempt,
+                    next_delay_ms: delay_ms,
+                });
+            }
+
+            // Wait before retry using runtime's sleep
+            self.runtime.sleep(delay_ms).await;
+
+            attempt += 1;
+        }
+    }
+}
+
+// ============================================================================
+// WASM-safe event loop (avoids holding RefCell borrows across await points)
+// ============================================================================
+
+/// Run the upstream event loop without holding a persistent borrow.
+///
+/// This is designed for WASM where RefCell borrows cannot be held across
+/// await points without blocking other operations on the same SyncedNode.
+pub async fn run_upstream_event_loop<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    initial_queries: Vec<(String, SubscriptionOptions)>,
+) {
+    let mut attempt: u32 = 0;
+
+    loop {
+        // Try to connect and subscribe (borrow released between operations)
+        let connect_result =
+            connect_and_subscribe_standalone(synced_node.clone(), upstream_id, &initial_queries)
+                .await;
+
+        match connect_result {
+            Ok(streams) => {
+                // Reset attempt counter on successful connection
+                attempt = 0;
+
+                // Update state to connected
+                {
+                    let node = synced_node.read();
+                    if let Some(upstream) = node.upstream_servers.write().get_mut(upstream_id) {
+                        upstream.set_state(UpstreamState::Connected);
+                    }
+                }
+
+                // Process events until stream ends or error
+                let result =
+                    process_upstream_streams_standalone(synced_node.clone(), upstream_id, streams)
+                        .await;
+
+                match result {
+                    UpstreamEventResult::Ok => {
+                        continue;
+                    }
+                    UpstreamEventResult::StreamEnded => {
+                        // Server closed connection - reconnect
+                    }
+                    UpstreamEventResult::Error(_err) => {
+                        // Error occurred - reconnect
+                    }
+                }
+            }
+            Err(_err) => {
+                // Connection failed - will retry
+            }
+        }
+
+        // Check if max attempts exceeded
+        let should_give_up = {
+            let node = synced_node.read();
+            if let Some(max) = node.config.reconnect.max_attempts {
+                if attempt >= max {
+                    if let Some(upstream) = node.upstream_servers.write().get_mut(upstream_id) {
+                        upstream.set_state(UpstreamState::Disconnected);
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if should_give_up {
+            return;
+        }
+
+        // Calculate delay with jitter
+        let delay_ms = {
+            let node = synced_node.read();
+            let delay = calculate_reconnect_delay_with_jitter(
+                attempt,
+                &node.config.reconnect,
+                node.runtime.random_f64(),
+            );
+
+            // Update state to reconnecting
+            if let Some(upstream) = node.upstream_servers.write().get_mut(upstream_id) {
+                upstream.set_state(UpstreamState::Reconnecting {
+                    attempt,
+                    next_delay_ms: delay,
+                });
+            }
+
+            delay
+        };
+
+        // Wait before retry (no borrow held during sleep)
+        let sleep_future = {
+            let node = synced_node.read();
+            node.runtime.sleep(delay_ms)
+        };
+        sleep_future.await;
+
+        attempt += 1;
+    }
+}
+
+/// Connect and subscribe to all queries without holding a persistent borrow.
+async fn connect_and_subscribe_standalone<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    queries: &[(String, SubscriptionOptions)],
+) -> Result<
+    Vec<(
+        u32,
+        futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+    )>,
+    ClientError,
+> {
+    let mut streams = Vec::new();
+
+    // Clear old subscriptions and set state
+    {
+        let node = synced_node.read();
+        let mut servers = node.upstream_servers.write();
+        if let Some(upstream) = servers.get_mut(upstream_id) {
+            upstream.clear_subscriptions();
+            upstream.set_state(UpstreamState::Connecting);
+        }
+    }
+
+    // Subscribe to each query
+    for (query, options) in queries {
+        // Get the env clone outside the lock
+        let env = {
+            let node = synced_node.read();
+            let servers = node.upstream_servers.read();
+            let upstream = servers
+                .get(upstream_id)
+                .ok_or(ClientError::new(0, "Upstream not connected"))?;
+            upstream.env().clone()
+        };
+
+        // Create subscribe request
+        let request = SubscribeRequest {
+            query: query.clone(),
+            options: options.clone(),
+        };
+
+        // Make the subscribe call without holding any locks
+        let stream = env.subscribe(request).await?;
+
+        // Update subscription tracking
+        {
+            let node = synced_node.read();
+            let mut servers = node.upstream_servers.write();
+            if let Some(upstream) = servers.get_mut(upstream_id) {
+                let sub_id = upstream.add_subscription(query.clone(), options.clone());
+                upstream.set_state(UpstreamState::Connected);
+                streams.push((sub_id, stream));
+            }
+        }
+    }
+
+    Ok(streams)
+}
+
+/// Push an object to upstream without holding a persistent borrow.
+///
+/// This is designed for WASM where RefCell borrows cannot be held across
+/// await points.
+pub async fn push_object_standalone<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    object_id: ObjectId,
+    branch: &str,
+) -> Result<PushResponse, ClientError> {
+    // Get server's known frontier and env (all in one borrow)
+    let (server_frontier, env) = {
+        let node = synced_node.read();
+        let servers = node.upstream_servers.read();
+        let upstream = servers
+            .get(upstream_id)
+            .ok_or(ClientError::new(0, "Upstream not connected"))?;
+        (
+            upstream
+                .server_known_state(&object_id)
+                .cloned()
+                .unwrap_or_default(),
+            upstream.env().clone(),
+        )
+    };
+
+    // Get local frontier and commits to send
+    let (_local_frontier, commits, object_meta) = {
+        let node = synced_node.read();
+        let local_frontier = node
+            .node
+            .frontier(object_id, branch)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        // Check if we need to push anything
+        if compare_frontiers(&local_frontier, &server_frontier) == FrontierComparison::Identical {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Get the branch to find commits to send
+        let obj = node
+            .node
+            .get_object(object_id)
+            .ok_or(ClientError::new(0, "Object not found"))?;
+        let obj_read = obj
+            .read()
+            .map_err(|_| ClientError::new(0, "Object lock poisoned"))?;
+        let branch_ref = obj_read
+            .branch_ref(branch)
+            .ok_or(ClientError::new(0, "Branch not found"))?;
+        let branch_read = branch_ref
+            .read()
+            .map_err(|_| ClientError::new(0, "Branch lock poisoned"))?;
+
+        let commits = commits_to_send(&branch_read, &local_frontier, &server_frontier);
+
+        if commits.is_empty() {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Include object metadata on first push (when server has no known state)
+        let object_meta = if server_frontier.is_empty() {
+            obj_read.meta.clone()
+        } else {
+            None
+        };
+
+        (local_frontier, commits, object_meta)
+    };
+
+    let request = PushRequest {
+        object_id,
+        commits,
+        object_meta,
+    };
+
+    // Send push request (no synced_node borrow held during the async call)
+    let response = env.push(request).await?;
+
+    // Update server known state on success
+    if response.accepted {
+        let node = synced_node.read();
+        let mut servers = node.upstream_servers.write();
+        if let Some(upstream) = servers.get_mut(upstream_id) {
+            upstream.update_server_known_state(object_id, response.frontier.clone());
+        }
+    }
+
+    Ok(response)
+}
+
+/// Process upstream streams without holding a persistent borrow.
+async fn process_upstream_streams_standalone<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    streams: Vec<(
+        u32,
+        futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+    )>,
+) -> UpstreamEventResult {
+    use futures::StreamExt;
+
+    // Merge all streams into one
+    let mut merged = futures::stream::select_all(
+        streams
+            .into_iter()
+            .map(|(sub_id, stream)| stream.map(move |r| (sub_id, r))),
+    );
+
+    while let Some((sub_id, result)) = merged.next().await {
+        match result {
+            Ok(event) => {
+                // Handle event with a scoped borrow
+                let node = synced_node.read();
+                node.handle_upstream_event(upstream_id, sub_id, event);
+            }
+            Err(e) => {
+                return UpstreamEventResult::Error(e);
+            }
+        }
+    }
+
+    UpstreamEventResult::StreamEnded
+}
+
+impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
+    /// Connect and subscribe to all queries.
+    async fn connect_and_subscribe(
+        &self,
+        upstream_id: UpstreamId,
+        queries: &[(String, SubscriptionOptions)],
+    ) -> Result<
+        Vec<(
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        )>,
+        ClientError,
+    > {
+        let mut streams = Vec::new();
+
+        // Clear old subscriptions and set state
+        {
+            let mut servers = self.upstream_servers.write();
+            if let Some(upstream) = servers.get_mut(upstream_id) {
+                upstream.clear_subscriptions();
+                upstream.set_state(UpstreamState::Connecting);
+            }
+        }
+
+        // Subscribe to each query
+        for (query, options) in queries {
+            // Get the env clone outside the lock
+            let env = {
+                let servers = self.upstream_servers.read();
+                let upstream = servers
+                    .get(upstream_id)
+                    .ok_or(ClientError::new(0, "Upstream not connected"))?;
+                upstream.env().clone()
+            };
+
+            // Create subscribe request
+            let request = SubscribeRequest {
+                query: query.clone(),
+                options: options.clone(),
+            };
+
+            // Make the subscribe call without holding any locks
+            let stream = env.subscribe(request).await?;
+
+            // Update subscription tracking
+            {
+                let mut servers = self.upstream_servers.write();
+                if let Some(upstream) = servers.get_mut(upstream_id) {
+                    let sub_id = upstream.add_subscription(query.clone(), options.clone());
+                    upstream.set_state(UpstreamState::Connected);
+                    streams.push((sub_id, stream));
+                }
+            }
+        }
+
+        Ok(streams)
+    }
+
+    /// Process events from all subscription streams.
+    async fn process_upstream_streams(
+        &self,
+        upstream_id: UpstreamId,
+        streams: Vec<(
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        )>,
+    ) -> UpstreamEventResult {
+        use futures::StreamExt;
+
+        // Merge all streams into one
+        let mut merged = futures::stream::select_all(
+            streams
+                .into_iter()
+                .map(|(sub_id, stream)| stream.map(move |r| (sub_id, r))),
+        );
+
+        while let Some((sub_id, result)) = merged.next().await {
+            match result {
+                Ok(event) => {
+                    self.handle_upstream_event(upstream_id, sub_id, event);
+                }
+                Err(e) => {
+                    return UpstreamEventResult::Error(e);
+                }
+            }
+        }
+
+        // All streams ended
+        UpstreamEventResult::StreamEnded
+    }
+
+    /// Handle a single SSE event from upstream.
+    fn handle_upstream_event(&self, upstream_id: UpstreamId, sub_id: u32, event: SseEvent) {
+        match event {
+            SseEvent::Commits {
+                object_id,
+                commits,
+                frontier,
+                object_meta,
+            } => {
+                // Track this object in the subscription
+                if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
+                    upstream.track_object(sub_id, object_id);
+                }
+
+                // Apply commits (ensure_object is called inside apply_upstream_commits)
+                self.apply_upstream_commits(upstream_id, object_id, commits, frontier, object_meta);
+            }
+            SseEvent::Excluded { object_id } => {
+                // Object no longer matches query - could clean up local tracking
+                let _ = object_id;
+            }
+            SseEvent::Truncate {
+                object_id,
+                truncate_at: _,
+            } => {
+                // Handle truncation if needed
+                let _ = object_id;
+            }
+            SseEvent::Request {
+                object_id: _,
+                commit_ids: _,
+            } => {
+                // Server requesting specific commits - push them
+                // TODO: Implement push response
+            }
+            SseEvent::Error {
+                message: _,
+                code: _,
+            } => {
+                // Log error
+            }
+        }
+    }
+
+    /// Subscribe to a query on an upstream server.
+    ///
+    /// This is a convenience method for subscribing to a single query
+    /// without using the full event loop.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn subscribe_upstream(
+        &self,
+        upstream_id: UpstreamId,
+        query: String,
+        options: SubscriptionOptions,
+    ) -> Result<
+        (
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        ),
+        ClientError,
+    > {
+        let mut servers = self.upstream_servers.write();
+        let upstream = servers
+            .get_mut(upstream_id)
+            .ok_or(ClientError::new(0, "Upstream not connected"))?;
+        upstream.subscribe(query, options).await
+    }
+
+    /// Push commits to an upstream server.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn push_upstream(
+        &self,
+        upstream_id: UpstreamId,
+        request: PushRequest,
+    ) -> Result<PushResponse, ClientError> {
+        let mut servers = self.upstream_servers.write();
+        let upstream = servers
+            .get_mut(upstream_id)
+            .ok_or(ClientError::new(0, "Upstream not connected"))?;
+        upstream.push(request).await
+    }
+
+    /// Push an object's commits to an upstream server.
+    ///
+    /// This creates the push request automatically by computing the delta
+    /// between local and server-known commits.
+    #[allow(clippy::await_holding_refcell_ref)]
+    #[allow(clippy::await_holding_lock)]
+    pub async fn push_object(
+        &self,
+        upstream_id: UpstreamId,
+        object_id: ObjectId,
+        branch: &str,
+    ) -> Result<PushResponse, ClientError> {
+        // Get server's known frontier (empty if unknown)
+        let server_frontier = {
+            let servers = self.upstream_servers.read();
+            let upstream = servers
+                .get(upstream_id)
+                .ok_or(ClientError::new(0, "Upstream not connected"))?;
+            upstream
+                .server_known_state(&object_id)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Get local frontier
+        let local_frontier = self
+            .node
+            .frontier(object_id, branch)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        // Check if we need to push anything
+        if compare_frontiers(&local_frontier, &server_frontier) == FrontierComparison::Identical {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Get the branch to find commits to send
+        let obj = self
+            .node
+            .get_object(object_id)
+            .ok_or(ClientError::new(0, "Object not found"))?;
+        let obj_read = obj
+            .read()
+            .map_err(|_| ClientError::new(0, "Object lock poisoned"))?;
+        let branch_ref = obj_read
+            .branch_ref(branch)
+            .ok_or(ClientError::new(0, "Branch not found"))?;
+        let branch_read = branch_ref
+            .read()
+            .map_err(|_| ClientError::new(0, "Branch lock poisoned"))?;
+
+        let commits = commits_to_send(&branch_read, &local_frontier, &server_frontier);
+
+        if commits.is_empty() {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Include object metadata on first push (when server has no known state)
+        let object_meta = if server_frontier.is_empty() {
+            obj_read.meta.clone()
+        } else {
+            None
+        };
+
+        let request = PushRequest {
+            object_id,
+            commits,
+            object_meta,
+        };
+
+        drop(branch_read);
+        drop(obj_read);
+
+        // Send push request
+        let response = {
+            let mut servers = self.upstream_servers.write();
+            let upstream = servers
+                .get_mut(upstream_id)
+                .ok_or(ClientError::new(0, "Upstream not connected"))?;
+            upstream.push(request).await?
+        };
+
+        // Update server known state on success
+        if response.accepted {
+            let mut servers = self.upstream_servers.write();
+            if let Some(upstream) = servers.get_mut(upstream_id) {
+                upstream.update_server_known_state(object_id, response.frontier.clone());
+            }
+        }
+
+        Ok(response)
+    }
 }

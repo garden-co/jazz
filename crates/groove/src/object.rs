@@ -299,6 +299,42 @@ impl Object {
         self.meta = Some(meta);
     }
 
+    /// Check if this object is node-private (should not be synced).
+    ///
+    /// Node-private objects are local to each node and should never participate
+    /// in sync. Examples: table_rows objects, index objects.
+    pub fn is_node_private(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.get("node_private"))
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
+
+    /// Set whether this object is node-private.
+    ///
+    /// Node-private objects are local to each node and should never participate
+    /// in sync. Examples: table_rows objects, index objects.
+    pub fn set_node_private(&mut self, private: bool) {
+        if private {
+            let meta = self.meta.get_or_insert_with(BTreeMap::new);
+            meta.insert("node_private".to_string(), "true".to_string());
+        } else if let Some(meta) = &mut self.meta {
+            meta.remove("node_private");
+        }
+    }
+
+    /// Get a metadata value.
+    pub fn get_meta(&self, key: &str) -> Option<&str> {
+        self.meta.as_ref()?.get(key).map(|s| s.as_str())
+    }
+
+    /// Set a metadata value.
+    pub fn set_meta_value(&mut self, key: &str, value: &str) {
+        let meta = self.meta.get_or_insert_with(BTreeMap::new);
+        meta.insert(key.to_string(), value.to_string());
+    }
+
     /// Get a reference to a branch (Arc<RwLock<Branch>>).
     /// Use this when you need to share the branch with signals.
     pub fn branch_ref(&self, name: &str) -> Option<Arc<RwLock<Branch>>> {

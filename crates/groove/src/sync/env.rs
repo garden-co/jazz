@@ -97,7 +97,7 @@ impl ClientEnvConfig {
 /// ```
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
-pub trait ClientEnv: Send + Sync {
+pub trait ClientEnv: Send + Sync + Clone {
     /// Subscribe to a query, returning a stream of SSE events.
     ///
     /// The stream stays open for real-time updates until dropped or disconnected.
@@ -121,7 +121,7 @@ pub trait ClientEnv: Send + Sync {
 /// Transport abstraction for sync client (WASM version without Send + Sync).
 #[cfg(target_arch = "wasm32")]
 #[async_trait(?Send)]
-pub trait ClientEnv {
+pub trait ClientEnv: Clone {
     /// Subscribe to a query, returning a stream of SSE events.
     ///
     /// The stream stays open for real-time updates until dropped or disconnected.
@@ -148,7 +148,7 @@ pub trait ClientEnv {
 
 /// Marker type for SSE events that have been encoded for transport.
 /// This is the item type that SSE streams should yield.
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SseEncodedEvent {
     /// The encoded event data (typically base64-encoded binary)
     pub data: String,
@@ -174,7 +174,7 @@ pub struct SseEncodedEvent {
 ///
 /// This separation allows the associated type to be expressible without
 /// including framework-internal wrapper types.
-#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 pub trait ServerEnv: Send + Sync + 'static {
     /// Request type from the transport layer.
