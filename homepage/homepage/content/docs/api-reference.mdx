@@ -42,7 +42,7 @@ If you have any questions, we'd be happy to chat on our [Discord server](https:/
     </tr>
     <tr>
       <td><code>string</code></td>
-      <td><strong>CoText</strong></td>
+      <td><strong>CoPlainText/CoRichText</strong></td>
       <td>Collaborative text</td>
     </tr>
     <tr>
@@ -167,7 +167,7 @@ Once you have a schema, you can create new CoValue instances using that schema u
       <td><code>TaskList.create([task1, task2])</code></td>
     </tr>
     <tr>
-      <td><strong>CoText</strong></td>
+      <td><strong>CoPlainText/CoRichText</strong></td>
       <td><code>Description.create("Hello World")</code></td>
     </tr>
     <tr>
@@ -244,7 +244,7 @@ Behaves like a TypeScript array **when reading**.
 
 [Read more &rarr;](/docs/core-concepts/covalues/colists)
 
-### CoText
+### CoPlainText/CoRichText
 Behaves like a TypeScript string **when reading**.
 
 <CodeGroup preferWrap>
@@ -254,7 +254,7 @@ Behaves like a TypeScript string **when reading**.
 
 [Read more &rarr;](/docs/core-concepts/covalues/cotexts)
 
-**Note**: Although CoTexts behave the same as strings in most circumstances, they are not strings. If you need an actual string type, you can use the `toString()` method.
+**Note**: Although CoPlainTexts/CoRichTexts behave the same as strings in most circumstances, they are not strings. If you need an actual string type, you can use the `toString()` method.
 
 ### CoFeed
 CoFeeds do not correspond neatly to a TypeScript type. They are collaborative streams of entries split by session/account, and so there are various ways to access the underlying data.
@@ -363,7 +363,7 @@ After loading a `DiscriminatedUnion`, you will be able to read any property that
 [Read more &rarr;](/docs/core-concepts/schemas/schemaunions)
 
 ## Updating CoValues
-Most CoValues are updated using mutation methods in the `.$jazz` namespace. Some CoValues, such as `CoText`, have methods available directly on the instance itself.
+Most CoValues are updated using mutation methods in the `.$jazz` namespace. Some CoValues, such as `CoPlainText` and `CoRichText`, have methods available directly on the instance itself.
 
 ### Updating CoMaps (and the CoRecord sub-type)
 CoRecords will allow you to arbitrarily set and delete keys, while CoMaps will only allow you to set and delete keys defined in the schema.
@@ -401,8 +401,8 @@ CoLists implement most of the usual array mutation methods under the `.$jazz` na
 
 [Read more &rarr;](/docs/core-concepts/covalues/colists)
 
-### Updating CoTexts
-CoText methods are mostly available directly on the instance.
+### Updating CoPlainTexts/CoRichTexts
+CoPlainText and CoRichText methods are mostly available directly on the instance.
 
 *   **`insertAfter(after: number, text: string): void`**
 *   **`insertBefore(before: number, text: string): void`**

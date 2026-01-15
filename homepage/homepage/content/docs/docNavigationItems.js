@@ -32,6 +32,11 @@ export const docNavigationItems = [
         },
       },
       {
+        name: "API Reference",
+        href: "/docs/api-reference",
+        done: 100,
+      },
+      {
         name: "Troubleshooting",
         href: "/docs/troubleshooting",
         done: 100,
@@ -143,11 +148,6 @@ export const docNavigationItems = [
           {
             name: "Overview",
             href: "/docs/core-concepts/covalues/overview",
-            done: 100,
-          },
-          {
-            name: "API Reference",
-            href: "/docs/core-concepts/covalues/api-reference",
             done: 100,
           },
           {
