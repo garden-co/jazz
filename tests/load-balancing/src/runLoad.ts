@@ -8,6 +8,7 @@ import type { ParsedArgs } from "./utils/args.ts";
 import { getFlagNumber, getFlagString } from "./utils/args.ts";
 import { parseMixSpec } from "./utils/mix.ts";
 import { readAllCoValues } from "./utils/sqliteCoValues.ts";
+import { setupMetrics } from "./metrics.ts";
 
 type HeaderRow = { id: string; header: CoValueHeader };
 
@@ -86,6 +87,7 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
     inMemory: false,
     db: dbPath,
     crypto: await NapiCrypto.create(),
+    middleware: setupMetrics().middleware,
   });
 
   const addr = server.address();
@@ -97,6 +99,7 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
   console.log(
     JSON.stringify(
       {
+        metrics: `http://${addr.address}:${addr.port}/metrics`,
         db: dbPath,
         peer,
         workers,
@@ -152,7 +155,7 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
     }
   });
 
-  const printInterval = setInterval(() => {
+  const printStats = () => {
     let ops = 0;
     let fileOps = 0;
     let mapOps = 0;
@@ -179,16 +182,22 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
         2,
       ),
     );
-  }, 2_000);
+  };
+
+  const printInterval = setInterval(printStats, 2_000);
 
   try {
     await allDone;
   } finally {
     clearInterval(printInterval);
+    printStats();
     for (const w of ws) {
       // Ensure workers are not left running if the parent exits early.
       await w.terminate();
     }
     server.close();
   }
+
+  console.log("Done");
+  process.exit(0);
 }

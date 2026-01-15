@@ -10,6 +10,9 @@
     "all": "node --experimental-strip-types ./src/cli.ts all"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-prometheus": "^0.200.0",
+    "@opentelemetry/sdk-metrics": "^2.0.0",
     "better-sqlite3": "^12.2.0",
     "cojson": "workspace:*",
     "cojson-storage-sqlite": "workspace:*",
