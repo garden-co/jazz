@@ -37,11 +37,12 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_persist<F>(future: F)
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: std::future::Future<Output = ()> + 'static,
 {
     // For native, we run synchronously since MemoryEnvironment is instant.
     // This ensures tests can verify persistence immediately.
     // Real async backends (RocksDB, SQLite) would use a proper async runtime.
+    // No Send bound needed - block_on runs the future on the current thread.
     futures::executor::block_on(future);
 }
 

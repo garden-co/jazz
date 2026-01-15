@@ -335,7 +335,9 @@ pub fn compute_change_ranges(old: &[u8], new: &[u8]) -> Vec<DiffRange> {
 }
 
 /// Type alias for object listener callbacks.
-pub type ObjectCallback = Box<dyn Fn(Arc<ObjectState>) + Send + Sync>;
+///
+/// No Send+Sync bounds - the listener system is single-threaded.
+pub type ObjectCallback = Box<dyn Fn(Arc<ObjectState>)>;
 
 /// Internal state for a single object key.
 struct ObjectListenerState {
