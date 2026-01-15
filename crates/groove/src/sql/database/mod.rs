@@ -138,7 +138,9 @@ impl Drop for IncrementalQuery {
 /// Shared database state that can be held by queries for re-evaluation.
 /// This is the core data that queries need access to.
 pub struct DatabaseState {
-    node: LocalNode,
+    /// Shared reference to the underlying object store.
+    /// This can be shared with SyncedNode for sync operations.
+    node: Arc<LocalNode>,
     /// Object ID for the database catalog.
     catalog_object_id: ObjectId,
     /// Map from table name to schema object ID.
@@ -174,6 +176,11 @@ impl DatabaseState {
     /// Get a reference to the underlying LocalNode.
     pub fn node(&self) -> &LocalNode {
         &self.node
+    }
+
+    /// Get the underlying LocalNode as an Arc (for sharing with SyncedNode).
+    pub fn node_arc(&self) -> Arc<LocalNode> {
+        Arc::clone(&self.node)
     }
 
     /// Get the catalog object ID.
@@ -265,7 +272,7 @@ impl DatabaseState {
     }
 
     fn new(env: Arc<dyn Environment>) -> Self {
-        let node = LocalNode::new(env);
+        let node = Arc::new(LocalNode::new(env));
 
         // Create catalog object
         let catalog_object_id = node.create_object("catalog");
@@ -296,7 +303,7 @@ impl DatabaseState {
     }
 
     fn in_memory() -> Self {
-        let node = LocalNode::in_memory();
+        let node = Arc::new(LocalNode::in_memory());
 
         // Create catalog object
         let catalog_object_id = node.create_object("catalog");
@@ -330,7 +337,7 @@ impl DatabaseState {
     /// If the catalog already exists in the node, it will be reused.
     /// This allows multiple clients to share the same catalog via sync.
     fn in_memory_with_catalog(catalog_object_id: ObjectId) -> Self {
-        let node = LocalNode::in_memory();
+        let node = Arc::new(LocalNode::in_memory());
 
         // Ensure catalog object exists (creates if new, reuses if exists)
         let is_new = node.ensure_object(catalog_object_id, "catalog");
@@ -368,7 +375,7 @@ impl DatabaseState {
     /// The replica expects to receive the catalog via sync from an upstream server.
     /// Use `has_catalog()` or `await_catalog()` to check/wait for catalog arrival.
     fn in_memory_replica(catalog_object_id: ObjectId) -> Self {
-        let node = LocalNode::in_memory();
+        let node = Arc::new(LocalNode::in_memory());
 
         // Create the catalog object but don't write to it
         node.ensure_object(catalog_object_id, "catalog");
@@ -1058,7 +1065,7 @@ impl Database {
         env: Arc<dyn Environment>,
         catalog_object_id: ObjectId,
     ) -> Result<Self, DatabaseError> {
-        let node = LocalNode::new(env);
+        let node = Arc::new(LocalNode::new(env));
 
         // Load catalog object from Environment
         node.load_object(catalog_object_id, "catalog", "main")
@@ -1340,10 +1347,15 @@ impl Database {
             .write(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
-        // Create table rows object with deterministic ID (for multi-client sync)
+        // Create table rows object with deterministic ID
+        // NOTE: table_rows is node_private - each node tracks its own set of known rows
         let rows_key = format!("rows:{}", schema.name);
         let rows_id = crate::ObjectId::from_key(&rows_key);
-        self.state.node.ensure_object(rows_id, &rows_key);
+        let mut rows_meta = std::collections::BTreeMap::new();
+        rows_meta.insert("node_private".to_string(), "true".to_string());
+        self.state
+            .node
+            .ensure_object_with_meta(rows_id, &rows_key, rows_meta);
         let empty_rows = TableRows::new();
         self.state
             .node
@@ -1362,13 +1374,18 @@ impl Database {
             .insert(schema.name.clone(), rows_id);
 
         // Create index objects for Ref columns with deterministic IDs
+        // NOTE: index objects are node_private - each node maintains its own indexes
         let mut index_object_ids: HashMap<String, ObjectId> = HashMap::new();
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
                 let index_key = format!("index:{}:{}", schema.name, col.name);
                 let index_id = crate::ObjectId::from_key(&index_key);
-                self.state.node.ensure_object(index_id, &index_key);
+                let mut index_meta = std::collections::BTreeMap::new();
+                index_meta.insert("node_private".to_string(), "true".to_string());
+                self.state
+                    .node
+                    .ensure_object_with_meta(index_id, &index_key, index_meta);
 
                 // Initialize with empty index
                 let empty_index = RefIndex::new();
@@ -1646,10 +1663,12 @@ impl Database {
                 .node
                 .create_object(format!("row:{}:{}", table, generate_object_id()));
 
-        // Set object metadata with table name for sync purposes
+        // Set object metadata to identify this as a row object
+        // NOTE: The table is identified via the branch name convention (env-descriptorId-branch)
+        // The sync layer passes through metadata without interpreting it
         {
             let mut meta = std::collections::BTreeMap::new();
-            meta.insert("table".to_string(), table.to_string());
+            meta.insert("type".to_string(), "row".to_string());
             if let Some(obj) = self.state.node.get_object(row_id)
                 && let Ok(mut obj_write) = obj.write()
             {

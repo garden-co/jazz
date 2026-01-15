@@ -501,7 +501,7 @@ pub fn create_synced_node(
     _id: &str,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
     let db = Database::in_memory();
-    Arc::new(SyncedNode::new(db.into_state(), TokioRuntime))
+    Arc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime))
 }
 
 /// Create a SyncedNode with custom config for testing.
@@ -511,7 +511,7 @@ pub fn create_synced_node_with_config(
     config: SyncConfig,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
     let db = Database::in_memory();
-    Arc::new(SyncedNode::with_config(db.into_state(), TokioRuntime, config))
+    Arc::new(SyncedNode::with_config(db.state().node_arc(), TokioRuntime, config))
 }
 
 // ============================================================================
@@ -527,6 +527,8 @@ pub struct TestServer {
     pub transport: Arc<TestTransport>,
     /// The server's SyncedNode (for upstream connections).
     pub synced_node: Arc<SyncedNode<TokioRuntime, TestClientEnv>>,
+    /// The server's Database (for SQL operations).
+    pub db: Database,
     /// Server name/identifier.
     pub name: String,
 }
@@ -536,10 +538,11 @@ impl TestServer {
         let name = name.into();
         let transport = Arc::new(TestTransport::new());
         let db = Database::in_memory();
-        let synced_node = Arc::new(SyncedNode::new(db.into_state(), TokioRuntime));
+        let synced_node = Arc::new(SyncedNode::new(db.state().node_arc(), TokioRuntime));
         Self {
             transport,
             synced_node,
+            db,
             name,
         }
     }

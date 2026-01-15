@@ -605,7 +605,7 @@ async fn test_synced_node_apply_upstream_commits() {
     let commit_id = commit.compute_id();
 
     // Ensure object exists
-    synced_node.inner().ensure_object(object_id, "");
+    synced_node.node().ensure_object(object_id, "");
 
     // Apply commits from upstream (no table name - this is raw object sync)
     synced_node.apply_upstream_commits(upstream_id, object_id, vec![commit], vec![commit_id], None);
@@ -613,12 +613,12 @@ async fn test_synced_node_apply_upstream_commits() {
     // The commit should be in LocalNode
     assert!(
         synced_node
-            .inner()
+            .node()
             .has_commit(object_id, "main", &commit_id)
     );
 
     // Can read the content
-    let content = synced_node.inner().read(object_id, "main").unwrap();
+    let content = synced_node.node().read(object_id, "main").unwrap();
     assert_eq!(content, Some(b"synced data".to_vec()));
 }
 

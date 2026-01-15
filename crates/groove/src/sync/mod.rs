@@ -16,6 +16,11 @@
 //!   - `ConnectedClients`: Sessions from clients that sync FROM us
 //!   - `WriteBuffer`: Batching/debouncing for upstream pushes
 //!
+//! **Important**: The sync layer knows NOTHING about databases, SQL, schemas, or tables.
+//! It operates purely at the object/commit level. Objects marked as `node_private` in
+//! their metadata are never synced. Higher layers (e.g., Database) observe incoming
+//! objects via the `set_on_objects_received` callback.
+//!
 //! # Crate Organization
 //!
 //! - **groove** (this crate): Core sync logic and traits
@@ -28,7 +33,6 @@
 
 mod client;
 mod env;
-mod event_handler;
 mod negotiation;
 mod protocol;
 mod runtime;
@@ -43,7 +47,6 @@ pub mod test_harness;
 
 pub use client::*;
 pub use env::*;
-pub use event_handler::*;
 pub use negotiation::*;
 pub use protocol::*;
 pub use runtime::*;

@@ -235,6 +235,25 @@ impl LocalNode {
         }
     }
 
+    /// Create or get an object with a specific ID and metadata.
+    /// If the object already exists, returns false. If created, returns true.
+    /// Useful for creating node-private objects that should not sync.
+    pub fn ensure_object_with_meta(
+        &self,
+        id: ObjectId,
+        prefix: impl Into<String>,
+        meta: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let mut objects = self.objects.write().unwrap();
+        if let std::collections::btree_map::Entry::Vacant(e) = objects.entry(id) {
+            let object = Object::new_with_meta(id, prefix, Some(meta));
+            e.insert(Arc::new(RwLock::new(object)));
+            true
+        } else {
+            false
+        }
+    }
+
     /// Get an object by ID.
     pub fn get_object(&self, id: ObjectId) -> Option<Arc<RwLock<Object>>> {
         self.objects.read().unwrap().get(&id).cloned()

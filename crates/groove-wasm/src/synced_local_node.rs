@@ -63,14 +63,17 @@ impl From<&UpstreamState> for SyncState {
 
 /// A synced local database for browser environments.
 ///
-/// This is a thin wrapper around `SyncedNode<WasmRuntime, WasmClientEnv>` that:
-/// - Provides JS-friendly bindings for SQL operations
-/// - Manages a single upstream server connection
-/// - Exposes sync state for UI updates
+/// This is a thin wrapper that combines:
+/// - `Database` for SQL operations
+/// - `SyncedNode<WasmRuntime, WasmClientEnv>` for sync
+///
+/// Both share the same underlying `LocalNode` for storage.
 #[wasm_bindgen]
 pub struct WasmSyncedLocalNode {
-    /// The underlying SyncedNode (shared for async access)
-    node: Shared<SyncedNode<WasmRuntime, WasmClientEnv>>,
+    /// The database for SQL operations
+    db: Arc<groove::sql::DatabaseState>,
+    /// The underlying SyncedNode for sync (shared for async access)
+    synced_node: Shared<SyncedNode<WasmRuntime, WasmClientEnv>>,
     /// The upstream server ID (we connect to exactly one server)
     upstream_id: UpstreamId,
 }
@@ -92,15 +95,18 @@ impl WasmSyncedLocalNode {
             Database::in_memory()
         };
 
+        // Get shared LocalNode for both Database and SyncedNode
         let db_state = db.into_state();
-        let node = SyncedNode::new(db_state, WasmRuntime);
+        let node_arc = db_state.node_arc();
+        let synced_node = SyncedNode::new(node_arc, WasmRuntime);
 
         // Add the upstream server
         let env = WasmClientEnv::new(ClientEnvConfig::new(&server_url, &auth_token));
-        let upstream_id = node.add_upstream(env);
+        let upstream_id = synced_node.add_upstream(env);
 
         Self {
-            node: Shared::new(node),
+            db: db_state,
+            synced_node: Shared::new(synced_node),
             upstream_id,
         }
     }
@@ -142,15 +148,18 @@ impl WasmSyncedLocalNode {
                 db
             };
 
+            // Get shared LocalNode for both Database and SyncedNode
             let db_state = db.into_state();
-            let node = SyncedNode::new(db_state, WasmRuntime);
+            let node_arc = db_state.node_arc();
+            let synced_node = SyncedNode::new(node_arc, WasmRuntime);
 
             // Add the upstream server
             let client_env = WasmClientEnv::new(ClientEnvConfig::new(&server_url, &auth_token));
-            let upstream_id = node.add_upstream(client_env);
+            let upstream_id = synced_node.add_upstream(client_env);
 
             Ok(JsValue::from(WasmSyncedLocalNode {
-                node: Shared::new(node),
+                db: db_state,
+                synced_node: Shared::new(synced_node),
                 upstream_id,
             }))
         })
@@ -159,7 +168,7 @@ impl WasmSyncedLocalNode {
     /// Get current sync state.
     #[wasm_bindgen(getter, js_name = syncState)]
     pub fn sync_state(&self) -> SyncState {
-        self.node
+        self.synced_node
             .read()
             .upstream_state(self.upstream_id)
             .map(|s| SyncState::from(&s))
@@ -173,7 +182,7 @@ impl WasmSyncedLocalNode {
     /// automatically reconnects with exponential backoff on disconnection.
     #[wasm_bindgen]
     pub fn connect(&self, query: String) -> Promise {
-        let node = self.node.clone();
+        let synced_node = self.synced_node.clone();
         let upstream_id = self.upstream_id;
 
         future_to_promise(async move {
@@ -181,7 +190,7 @@ impl WasmSyncedLocalNode {
             let queries = vec![(query, SubscriptionOptions::default())];
 
             // Run the upstream event loop (handles reconnection automatically)
-            node.read().upstream_event_loop(upstream_id, queries).await;
+            synced_node.read().upstream_event_loop(upstream_id, queries).await;
 
             Ok(JsValue::TRUE)
         })
@@ -191,15 +200,15 @@ impl WasmSyncedLocalNode {
     // SQL Operations
     // ========================================================================
 
-    /// Execute a SQL statement with automatic sync queueing.
+    /// Execute a SQL statement.
     ///
-    /// INSERT/UPDATE/DELETE operations automatically queue affected rows
-    /// for sync to upstream servers.
+    /// Note: In the current architecture, sync queueing happens automatically
+    /// when the sync layer observes writes to the LocalNode.
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
-        let node = self.node.read();
+        let db = Database::from_state(Arc::clone(&self.db));
 
-        match node.execute(sql) {
+        match db.execute(sql) {
             Ok(result) => {
                 let js_result = match result {
                     ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
@@ -226,9 +235,9 @@ impl WasmSyncedLocalNode {
     /// Execute a SELECT query and return results as binary Uint8Array.
     #[wasm_bindgen(js_name = selectBinary)]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
-        let node = self.node.read();
+        let db = Database::from_state(Arc::clone(&self.db));
 
-        match node.query(sql) {
+        match db.query(sql) {
             Ok(rows) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
@@ -240,14 +249,14 @@ impl WasmSyncedLocalNode {
     /// Initialize the database schema from a SQL string.
     #[wasm_bindgen(js_name = initSchema)]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
-        let node = self.node.read();
+        let db = Database::from_state(Arc::clone(&self.db));
 
         for stmt in schema
             .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
-            node.execute(stmt)
+            db.execute(stmt)
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         }
         Ok(())
@@ -256,8 +265,7 @@ impl WasmSyncedLocalNode {
     /// List all tables in the database.
     #[wasm_bindgen(js_name = listTables)]
     pub fn list_tables(&self) -> JsValue {
-        let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
+        let db = Database::from_state(Arc::clone(&self.db));
         let tables = db.list_tables();
         serde_wasm_bindgen::to_value(&tables).unwrap_or(JsValue::NULL)
     }
@@ -271,8 +279,7 @@ impl WasmSyncedLocalNode {
     ) -> Result<SyncedQueryHandle, JsValue> {
         use groove::sql::{encode_delta, query_graph::DeltaBatch};
 
-        let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
+        let db = Database::from_state(Arc::clone(&self.db));
 
         let query = db
             .incremental_query(sql)
@@ -311,8 +318,7 @@ impl WasmSyncedLocalNode {
         use groove::sql::query_graph::DeltaBatch;
         use std::collections::HashMap;
 
-        let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
+        let db = Database::from_state(Arc::clone(&self.db));
 
         let query = db
             .incremental_query(sql)

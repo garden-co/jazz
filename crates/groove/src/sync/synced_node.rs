@@ -1,14 +1,16 @@
-//! SyncedNode - Database with sync capabilities.
+//! SyncedNode - Object storage with sync capabilities.
 //!
-//! SyncedNode wraps a DatabaseState and adds:
+//! SyncedNode wraps a LocalNode (object store) and adds:
 //! - Upstream server connections (servers we sync TO)
 //! - Connected client sessions (clients that sync FROM us)
 //! - Automatic write batching/debouncing
 //! - Automatic SSE event application
 //!
-//! By wrapping DatabaseState instead of LocalNode, sync-applied commits
-//! automatically update the same storage that the SQL layer uses, enabling
-//! incremental query notifications when data arrives from upstream.
+//! SyncedNode knows NOTHING about databases, SQL, schemas, or tables.
+//! It operates purely at the object/commit level. The database layer
+//! can observe incoming objects by registering a callback.
+//!
+//! Objects marked as `node_private` in their metadata are never synced.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,12 +22,11 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::commit::CommitId;
+use crate::commit::{Commit, CommitId};
+use crate::node::LocalNode;
 use crate::object::ObjectId;
-use crate::sql::{Database, DatabaseError, DatabaseState, ExecuteResult};
 
 use super::env::{ClientEnv, ClientError};
-use super::event_handler::handle_commits_event;
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
@@ -575,20 +576,29 @@ impl WriteBuffer {
 // SyncedNode
 // ============================================================================
 
-/// A DatabaseState with sync capabilities.
+/// Callback type for observing objects received from sync.
+/// The callback receives (object_id, commits, object_meta).
+#[cfg(not(target_arch = "wasm32"))]
+pub type OnObjectsReceivedCallback = Box<
+    dyn Fn(ObjectId, &[Commit], Option<&std::collections::BTreeMap<String, String>>) + Send + Sync,
+>;
+
+/// Object storage with sync capabilities.
 ///
-/// SyncedNode wraps a DatabaseState (which contains LocalNode + SQL schema) and adds:
+/// SyncedNode wraps a LocalNode (object store) and adds:
 /// - Connections to upstream servers (servers we sync TO)
 /// - Sessions from connected clients (clients that sync FROM us)
 /// - Automatic write batching and debouncing
 /// - Automatic SSE event application
 ///
-/// By wrapping DatabaseState instead of just LocalNode, sync-applied commits
-/// update the same storage that the SQL layer uses, enabling incremental
-/// query notifications when data arrives from upstream.
+/// SyncedNode knows NOTHING about databases, SQL, schemas, or tables.
+/// It operates purely at the object/commit level. Higher layers (e.g., Database)
+/// can observe incoming objects by registering a callback via `set_on_objects_received`.
+///
+/// Objects marked as `node_private: true` in their metadata are never synced.
 pub struct SyncedNode<R: Runtime, E: ClientEnv> {
-    /// The underlying DatabaseState (contains LocalNode + SQL schema).
-    db: Arc<DatabaseState>,
+    /// The underlying object store.
+    node: Arc<LocalNode>,
 
     /// Runtime for spawning async tasks.
     runtime: R,
@@ -605,48 +615,52 @@ pub struct SyncedNode<R: Runtime, E: ClientEnv> {
 
     /// Sync configuration.
     config: SyncConfig,
+
+    /// Callback for when objects are received from upstream.
+    /// Higher layers (e.g., Database) register here to observe synced objects.
+    #[cfg(not(target_arch = "wasm32"))]
+    on_objects_received: std::sync::RwLock<Option<OnObjectsReceivedCallback>>,
 }
 
 impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
-    /// Create a new SyncedNode from a DatabaseState.
-    pub fn new(db: Arc<DatabaseState>, runtime: R) -> Self {
+    /// Create a new SyncedNode from a LocalNode.
+    pub fn new(node: Arc<LocalNode>, runtime: R) -> Self {
         Self {
-            db,
+            node,
             runtime,
             upstream_servers: Shared::new(UpstreamServers::new()),
             #[cfg(not(target_arch = "wasm32"))]
             connected_clients: Shared::new(ConnectedClients::new()),
             write_buffer: Shared::new(WriteBuffer::new()),
             config: SyncConfig::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            on_objects_received: std::sync::RwLock::new(None),
         }
     }
 
     /// Create a new SyncedNode with custom configuration.
-    pub fn with_config(db: Arc<DatabaseState>, runtime: R, config: SyncConfig) -> Self {
+    pub fn with_config(node: Arc<LocalNode>, runtime: R, config: SyncConfig) -> Self {
         Self {
-            db,
+            node,
             runtime,
             upstream_servers: Shared::new(UpstreamServers::new()),
             #[cfg(not(target_arch = "wasm32"))]
             connected_clients: Shared::new(ConnectedClients::new()),
             write_buffer: Shared::new(WriteBuffer::new()),
             config,
+            #[cfg(not(target_arch = "wasm32"))]
+            on_objects_received: std::sync::RwLock::new(None),
         }
     }
 
-    /// Get a reference to the underlying DatabaseState.
-    pub fn db(&self) -> &DatabaseState {
-        &self.db
+    /// Get a reference to the underlying LocalNode.
+    pub fn node(&self) -> &LocalNode {
+        &self.node
     }
 
-    /// Get the underlying DatabaseState as an Arc.
-    pub fn db_arc(&self) -> Arc<DatabaseState> {
-        Arc::clone(&self.db)
-    }
-
-    /// Get a reference to the underlying LocalNode (through DatabaseState).
-    pub fn inner(&self) -> &crate::node::LocalNode {
-        self.db.node()
+    /// Get the underlying LocalNode as an Arc.
+    pub fn node_arc(&self) -> Arc<LocalNode> {
+        Arc::clone(&self.node)
     }
 
     /// Get the runtime.
@@ -659,47 +673,13 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         &self.config
     }
 
-    // ========== Sync-Aware Database API ==========
-
-    /// Execute a SQL statement with automatic sync queueing.
+    /// Set the callback for when objects are received from upstream.
     ///
-    /// This wraps `Database::execute()` and automatically queues any modified
-    /// rows for sync to upstream servers. Use this instead of accessing the
-    /// database directly when sync is desired.
-    pub fn execute(&self, sql: &str) -> Result<ExecuteResult, DatabaseError> {
-        let db = Database::from_state(Arc::clone(&self.db));
-        let result = db.execute(sql)?;
-
-        // Queue affected rows for sync
-        match &result {
-            ExecuteResult::Inserted { row_id, .. } => {
-                self.queue_for_push(*row_id, "main");
-            }
-            ExecuteResult::Updated(count) => {
-                // TODO: ExecuteResult::Updated should include row IDs
-                // For now, updates via execute() don't auto-sync
-                let _ = count;
-            }
-            ExecuteResult::Deleted(count) => {
-                // TODO: ExecuteResult::Deleted should include row IDs
-                // For now, deletes via execute() don't auto-sync
-                let _ = count;
-            }
-            ExecuteResult::Created(_) | ExecuteResult::PolicyCreated { .. } => {
-                // Schema changes don't need sync queueing
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Execute a SELECT query.
-    ///
-    /// Convenience wrapper around `Database::query()`.
-    /// Returns rows as (ObjectId, OwnedRow) tuples.
-    pub fn query(&self, sql: &str) -> Result<Vec<(ObjectId, crate::sql::OwnedRow)>, DatabaseError> {
-        let db = Database::from_state(Arc::clone(&self.db));
-        db.query(sql)
+    /// Higher layers (e.g., Database) register here to observe synced objects.
+    /// The callback receives (object_id, commits, object_meta).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_on_objects_received(&self, callback: OnObjectsReceivedCallback) {
+        *self.on_objects_received.write().unwrap() = Some(callback);
     }
 
     // ========== Upstream Server API ==========
@@ -763,7 +743,18 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     // ========== Write Buffer API ==========
 
     /// Queue an object for upstream push.
+    ///
+    /// Objects marked as `node_private` in their metadata are skipped - they
+    /// should never be synced (e.g., table_rows objects, index objects).
     pub fn queue_for_push(&self, object_id: ObjectId, branch: &str) {
+        // Check if object is node_private - skip sync for private objects
+        if let Some(obj) = self.node.get_object(object_id) {
+            if let Ok(obj_guard) = obj.read() {
+                if obj_guard.is_node_private() {
+                    return; // Don't sync node_private objects
+                }
+            }
+        }
         self.write_buffer.write().add(object_id, branch);
     }
 
@@ -784,27 +775,31 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Apply commits received from an upstream server.
     ///
     /// This is called automatically by the SSE event loop.
-    /// The commits are applied via the shared event handler, and then
-    /// SyncedNode-specific logic (known state tracking, broadcast) is done.
+    /// Commits are applied directly to LocalNode, then observers are notified.
     pub fn apply_upstream_commits(
         &self,
         upstream_id: UpstreamId,
         object_id: ObjectId,
-        commits: Vec<crate::commit::Commit>,
+        commits: Vec<Commit>,
         frontier: Vec<CommitId>,
         object_meta: Option<std::collections::BTreeMap<String, String>>,
     ) {
-        // Use shared event handler for core logic:
-        // - Apply commits to local storage
-        // - Register with Database for incremental query notifications
-        let db = crate::sql::Database::from_state(self.db_arc());
-        let _ = handle_commits_event(
-            &db,
-            object_id,
-            commits.clone(),
-            frontier.clone(),
-            object_meta.clone(),
-        );
+        // Ensure object exists with a generic prefix
+        // (the prefix is just for display/debugging, sync doesn't interpret it)
+        self.node.ensure_object(object_id, "synced");
+
+        // Apply commits to the object's main branch
+        if !commits.is_empty() {
+            self.node.apply_commits(object_id, "main", commits.clone());
+        }
+
+        // Notify observers (e.g., database layer) that new commits arrived
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(callback) = self.on_objects_received.read().unwrap().as_ref() {
+                callback(object_id, &commits, object_meta.as_ref());
+            }
+        }
 
         // Update upstream's known state
         if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
@@ -1122,12 +1117,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                     upstream.track_object(sub_id, object_id);
                 }
 
-                // Ensure the object exists locally with table name hint
-                if let Some(table) = object_meta.as_ref().and_then(|m| m.get("table")) {
-                    self.db.node().ensure_object(object_id, table);
-                }
-
-                // Apply commits using shared event handler, then do SyncedNode-specific logic
+                // Apply commits (ensure_object is called inside apply_upstream_commits)
                 self.apply_upstream_commits(upstream_id, object_id, commits, frontier, object_meta);
             }
             SseEvent::Excluded { object_id } => {

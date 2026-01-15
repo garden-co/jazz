@@ -285,7 +285,7 @@ async fn test_two_tier_sync_with_incremental_query() {
 
     // Create table on edge's database
     let edge = harness.get_server("edge").unwrap();
-    let edge_db = Database::from_state(edge.synced_node.db_arc());
+    let edge_db = &edge.db;
 
     edge_db
         .execute("CREATE TABLE items (name STRING NOT NULL)")
@@ -319,7 +319,7 @@ async fn test_client_insert_triggers_incremental_query() {
 
     // Get server's database
     let server = harness.get_server("server").unwrap();
-    let server_db = Database::from_state(server.synced_node.db_arc());
+    let server_db = &server.db;
 
     // Create table
     server_db
