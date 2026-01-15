@@ -20,6 +20,8 @@ Authentication in Jazz2 binds the `@viewer` variable in [Access Control](/docs/i
 - Auto-provisioning of users on first authentication
 
 **Not yet implemented:**
+- Wiring claims to policy evaluation (claims are extracted but not passed to `PolicyEvaluator`)
+- JWKS fetching for RS256 (only HS256 secret validation works currently)
 - Session management and refresh token handling
 - Built-in OAuth flows (currently relies on external providers)
 - API key authentication (for server-to-server)
