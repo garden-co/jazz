@@ -739,34 +739,6 @@ impl<E: Environment> SyncServer<E> {
             }
         }
     }
-
-    /// Check SELECT policy for an object and a specific viewer context.
-    ///
-    /// Returns true if the viewer is allowed to see the object, false otherwise.
-    pub fn check_select_policy<R, P>(
-        &self,
-        table: &str,
-        object_id: ObjectId,
-        row: &crate::sql::row_buffer::OwnedRow,
-        viewer_context: crate::sql::ViewerContext,
-        row_lookup: &R,
-        policy_lookup: &P,
-    ) -> bool
-    where
-        R: crate::sql::PolicyLookup + crate::sql::RowLookup,
-        P: crate::sql::PolicyLookup,
-    {
-        use crate::sql::{PolicyConfig, PolicyEvaluator, PolicyResult};
-
-        let config = PolicyConfig::default();
-        let mut evaluator =
-            PolicyEvaluator::new_with_context(row_lookup, policy_lookup, viewer_context, config);
-
-        matches!(
-            evaluator.check_select(table, object_id, row),
-            PolicyResult::Allowed { .. }
-        )
-    }
 }
 
 // ==================== Schema Registry ====================

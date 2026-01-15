@@ -8,9 +8,15 @@
 //! - Clients apply received commits to their LocalNode via apply_commits()
 //!
 //! This tests the complete sync flow including LocalNode integration.
+//!
+//! ## Policy-Filtered Sync
+//!
+//! For testing policy-filtered sync, use `TestTransport::with_database()` and
+//! `register_identity()` to set up clients with custom claims. The transport will
+//! then use `broadcast_commits_with_policy()` to filter broadcasts based on policies.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -20,6 +26,7 @@ use tokio::sync::{RwLock, mpsc};
 use crate::commit::CommitId;
 use crate::node::LocalNode;
 use crate::object::ObjectId;
+use crate::sql::Database;
 use crate::storage::MemoryEnvironment;
 
 use super::env::{ClientEnv, ClientError};
@@ -37,11 +44,16 @@ use super::server::{
 /// A test transport that routes requests directly to a SyncServer.
 ///
 /// The server has its own storage, separate from client storage.
+/// Optionally integrates with a Database for policy-filtered sync.
 pub struct TestTransport {
     /// The sync server
     server: Arc<RwLock<SyncServer<MemoryEnvironment>>>,
     /// The server's storage environment
     server_env: Arc<MemoryEnvironment>,
+    /// Optional database for policy lookup and row data
+    database: Option<Arc<Database>>,
+    /// Registered client identities (token -> identity with claims)
+    identities: StdRwLock<HashMap<String, ClientIdentity>>,
 }
 
 impl TestTransport {
@@ -53,7 +65,41 @@ impl TestTransport {
         Self {
             server: Arc::new(RwLock::new(server)),
             server_env,
+            database: None,
+            identities: StdRwLock::new(HashMap::new()),
         }
+    }
+
+    /// Create a new test transport with a Database for policy-filtered sync.
+    ///
+    /// When a database is present, push operations will use `broadcast_commits_with_policy()`
+    /// to filter broadcasts based on SELECT policies and viewer claims.
+    pub fn with_database(database: Arc<Database>) -> Self {
+        let server_env = Arc::new(MemoryEnvironment::new());
+        let validator: Arc<dyn TokenValidator> = Arc::new(AcceptAllTokens);
+        let server = SyncServer::new(Arc::clone(&server_env), validator);
+        Self {
+            server: Arc::new(RwLock::new(server)),
+            server_env,
+            database: Some(database),
+            identities: StdRwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a client identity with custom claims.
+    ///
+    /// When the client connects with this token, the registered identity will be used
+    /// instead of a simple identity. This allows testing policy filtering with claims.
+    pub fn register_identity(&self, token: &str, identity: ClientIdentity) {
+        self.identities
+            .write()
+            .unwrap()
+            .insert(token.to_string(), identity);
+    }
+
+    /// Get the database if one is configured.
+    pub fn database(&self) -> Option<&Arc<Database>> {
+        self.database.as_ref()
     }
 
     /// Get the server's storage environment.
@@ -67,7 +113,14 @@ impl TestTransport {
         token: &str,
         request: SubscribeRequest,
     ) -> Result<(SessionId, mpsc::Receiver<SseEvent>), ClientError> {
-        let identity = ClientIdentity::simple(token);
+        // Use registered identity if available, otherwise create a simple one
+        let identity = {
+            let identities = self.identities.read().unwrap();
+            identities
+                .get(token)
+                .cloned()
+                .unwrap_or_else(|| ClientIdentity::simple(token))
+        };
 
         let (tx, rx) = mpsc::channel::<SseEvent>(32);
 
@@ -194,18 +247,65 @@ impl TestTransport {
             }
         }
 
-        // Broadcast to other sessions
+        // Broadcast to other sessions (with policy filtering if database is present)
         {
             let server = self.server.read().await;
-            server
-                .broadcast_commits(
-                    request.object_id,
-                    request.commits.clone(),
-                    frontier.clone(),
-                    request.object_meta.clone(),
-                    sender_session,
-                )
-                .await;
+
+            // If we have a database, use policy-filtered broadcast
+            if let Some(db) = &self.database {
+                // Look up which table this object belongs to
+                if let Some(table) = db.table_for_row(request.object_id) {
+                    // Get the row data for policy evaluation
+                    if let Ok(Some((_, row))) = db.get(&table, request.object_id) {
+                        server
+                            .broadcast_commits_with_policy(
+                                request.object_id,
+                                &table,
+                                &row,
+                                request.commits.clone(),
+                                frontier.clone(),
+                                request.object_meta.clone(),
+                                db.as_ref(),
+                                db.as_ref(),
+                                sender_session,
+                            )
+                            .await;
+                    } else {
+                        // Row not found in database, use regular broadcast
+                        server
+                            .broadcast_commits(
+                                request.object_id,
+                                request.commits.clone(),
+                                frontier.clone(),
+                                request.object_meta.clone(),
+                                sender_session,
+                            )
+                            .await;
+                    }
+                } else {
+                    // Object not a database row, use regular broadcast
+                    server
+                        .broadcast_commits(
+                            request.object_id,
+                            request.commits.clone(),
+                            frontier.clone(),
+                            request.object_meta.clone(),
+                            sender_session,
+                        )
+                        .await;
+                }
+            } else {
+                // No database, use regular broadcast
+                server
+                    .broadcast_commits(
+                        request.object_id,
+                        request.commits.clone(),
+                        frontier.clone(),
+                        request.object_meta.clone(),
+                        sender_session,
+                    )
+                    .await;
+            }
         }
 
         // Update sender's known state
@@ -362,6 +462,8 @@ pub struct TestClient {
     pub sync_client: super::client::SyncClient<TestClientEnv>,
     /// Client identifier
     pub id: String,
+    /// Reference to transport for direct operations
+    transport: Arc<TestTransport>,
 }
 
 impl TestClient {
@@ -373,7 +475,11 @@ impl TestClient {
         let client_env = Arc::new(MemoryEnvironment::new());
         let node = Arc::new(LocalNode::new(client_env));
         let sync_client = super::client::SyncClient::new(env, node);
-        Self { sync_client, id }
+        Self {
+            sync_client,
+            id,
+            transport,
+        }
     }
 
     /// Get the client's LocalNode.
@@ -388,6 +494,21 @@ impl TestClient {
         self.sync_client
             .subscribe("*".to_string(), SubscriptionOptions::default())
             .await
+    }
+
+    /// Subscribe and return the raw receiver for easier testing.
+    ///
+    /// Unlike `subscribe_all`, this returns the underlying mpsc receiver
+    /// which supports `try_recv()` for non-blocking checks.
+    pub async fn subscribe_with_receiver(
+        &mut self,
+    ) -> Result<mpsc::Receiver<SseEvent>, ClientError> {
+        let request = SubscribeRequest {
+            query: "*".to_string(),
+            options: SubscriptionOptions::default(),
+        };
+        let (_, receiver) = self.transport.subscribe(&self.id, request).await?;
+        Ok(receiver)
     }
 
     /// Write to LocalNode and push to server.
@@ -466,9 +587,47 @@ impl TestHarness {
         }
     }
 
+    /// Create a new test harness with a Database for policy-filtered sync.
+    ///
+    /// When a database is present:
+    /// - Push operations use `broadcast_commits_with_policy()` to filter broadcasts
+    /// - Each session's viewer context is checked against SELECT policies
+    /// - Clients only receive commits they're allowed to see based on their claims
+    pub fn with_database(database: Arc<Database>) -> Self {
+        Self {
+            transport: Arc::new(TestTransport::with_database(database)),
+        }
+    }
+
     /// Get the server's storage environment.
     pub fn server_env(&self) -> &Arc<MemoryEnvironment> {
         self.transport.server_env()
+    }
+
+    /// Get the database if one is configured.
+    pub fn database(&self) -> Option<&Arc<Database>> {
+        self.transport.database()
+    }
+
+    /// Register a client identity with custom claims.
+    ///
+    /// When a client connects with the given token (id), the registered identity
+    /// will be used for policy evaluation instead of a simple identity.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let harness = TestHarness::with_database(db);
+    /// harness.register_identity("alice", ClientIdentity {
+    ///     external_id: "alice".to_string(),
+    ///     user_id: None,
+    ///     claims: [("orgId".into(), "org1".into())].into(),
+    /// });
+    /// let alice = harness.create_client("alice");
+    /// // Alice's subscriptions and broadcasts will use her claims
+    /// ```
+    pub fn register_identity(&self, token: &str, identity: ClientIdentity) {
+        self.transport.register_identity(token, identity);
     }
 
     /// Create a new test client with its own LocalNode.

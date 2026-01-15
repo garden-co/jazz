@@ -17,6 +17,7 @@ import {
   signOut,
   signUp,
 } from "./auth";
+import { SyncTest } from "./SyncTest";
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -146,6 +147,8 @@ function App() {
             <br />
             <button onClick={handleSignOut}>Sign Out</button>
           </div>
+
+          {token && <SyncTest token={token} userId={user.id} />}
 
           {token && (
             <div className="card">

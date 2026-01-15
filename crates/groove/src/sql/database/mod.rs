@@ -1145,6 +1145,13 @@ impl Database {
             .copied()
     }
 
+    /// Get the table name for a row object ID.
+    ///
+    /// Returns None if the object ID is not a known row.
+    pub fn table_for_row(&self, row_id: ObjectId) -> Option<String> {
+        self.state.row_table.read().unwrap().get(&row_id).cloned()
+    }
+
     /// Create a new table from schema.
     pub fn create_table(&self, schema: TableSchema) -> Result<SchemaId, DatabaseError> {
         {

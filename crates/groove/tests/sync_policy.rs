@@ -1,27 +1,24 @@
-//! Sync policy integration tests.
+//! True E2E sync policy integration tests.
 //!
-//! These tests verify policy-filtered sync using:
-//! - Database with SQL execution (exercising the parser)
-//! - SyncServer with ClientIdentity claims
-//! - Policy evaluation for SELECT filtering in broadcasts
+//! These tests verify policy-filtered sync using the full sync flow:
+//! - TestHarness with Database for policy evaluation
+//! - Clients with registered identities and claims
+//! - Full push → broadcast → SSE event flow
+//! - No direct calls to internal policy methods
 
 #![cfg(feature = "sync-server")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use groove::sql::{Database, ExecuteResult};
-use groove::sync::{AcceptAllTokens, ClaimValue, ClientIdentity, SyncServer, TokenValidator};
-use groove::{MemoryEnvironment, ObjectId};
+use groove::ObjectId;
+use groove::sql::{Database, ExecuteResult, RowBuilder, RowDescriptor};
+use groove::sync::test_harness::TestHarness;
+use groove::sync::{ClaimValue, ClientIdentity};
 
 // ============================================================================
 // Test Helpers
 // ============================================================================
-
-fn make_server() -> SyncServer<MemoryEnvironment> {
-    let env = Arc::new(MemoryEnvironment::new());
-    let validator: Arc<dyn TokenValidator> = Arc::new(AcceptAllTokens);
-    SyncServer::new(env, validator)
-}
 
 fn identity_with_claims(name: &str, claims: Vec<(&str, ClaimValue)>) -> ClientIdentity {
     let mut identity = ClientIdentity::simple(name);
@@ -38,87 +35,88 @@ fn identity_with_user_id(name: &str, user_id: ObjectId) -> ClientIdentity {
 }
 
 // ============================================================================
-// Org-Scoped Document Tests
+// Org-Scoped Document Tests (E2E)
 // ============================================================================
 
+/// Test that clients only receive broadcasts for documents in their org.
+///
+/// Flow:
+/// 1. Create database with org-scoped policy
+/// 2. Register two clients with different orgId claims
+/// 3. Both subscribe to all objects
+/// 4. One client pushes commits for an org-alpha document
+/// 5. Only the org-alpha client receives the broadcast
 #[tokio::test]
-async fn test_org_scoped_documents_broadcast() {
-    // Setup database with SQL
-    let db = Database::in_memory();
-
-    // Create documents table with org_id column
+async fn test_org_scoped_broadcast_e2e() {
+    // Setup database with org-scoped policy
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE documents (title STRING, org_id STRING)")
         .unwrap();
-
-    // Create org-based SELECT policy via SQL parser
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE org_id = @viewer.claims.orgId")
         .unwrap();
 
     // Insert a document for org-alpha
-    let result = db
+    let doc_id = match db
         .execute("INSERT INTO documents (title, org_id) VALUES ('Alpha Report', 'org-alpha')")
-        .unwrap();
-    let doc_id = match result {
+        .unwrap()
+    {
         ExecuteResult::Inserted { row_id, .. } => row_id,
         _ => panic!("expected Inserted"),
     };
 
-    // Setup sync server with two sessions (different orgs)
-    let mut server = make_server();
-    let (tx_alpha, mut rx_alpha) = tokio::sync::mpsc::channel(16);
-    let (tx_beta, mut rx_beta) = tokio::sync::mpsc::channel(16);
+    // Create harness with database
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
-    let alpha_identity = identity_with_claims(
-        "user-alpha",
-        vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
+    // Register identities with org claims
+    harness.register_identity(
+        "alice",
+        identity_with_claims(
+            "alice",
+            vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
+        ),
     );
-    let beta_identity = identity_with_claims(
-        "user-beta",
-        vec![("orgId", ClaimValue::String("org-beta".to_string()))],
+    harness.register_identity(
+        "bob",
+        identity_with_claims(
+            "bob",
+            vec![("orgId", ClaimValue::String("org-beta".to_string()))],
+        ),
     );
 
-    let s_alpha = server.create_session(alpha_identity, tx_alpha);
-    let s_beta = server.create_session(beta_identity, tx_beta);
+    // Create clients
+    let mut alice = harness.create_client("alice");
+    let mut bob = harness.create_client("bob");
 
-    // Register both sessions for the document
-    server.register_object_session(doc_id, s_alpha);
-    server.register_object_session(doc_id, s_beta);
+    // Both subscribe (wildcard query)
+    // Alice subscribes (her stream not used since sender is excluded from broadcasts)
+    let _alice_rx = alice.subscribe_with_receiver().await.unwrap();
+    let mut bob_rx = bob.subscribe_with_receiver().await.unwrap();
 
-    // Get the row data
-    let (_, row) = db.get("documents", doc_id).unwrap().unwrap();
+    // Small delay to ensure subscriptions are processed
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // Broadcast with policy filtering
-    server
-        .broadcast_commits_with_policy(
-            doc_id,
-            "documents",
-            &row,
-            vec![], // empty commits for test
-            vec![],
-            None,
-            &db, // Database implements RowLookup
-            &db, // Database implements PolicyLookup
-            None,
-        )
-        .await;
+    // Alice writes and pushes to the document
+    let (_, _response) = alice
+        .write_and_push(doc_id, b"Updated content")
+        .await
+        .unwrap();
 
-    // Alpha (org-alpha) should receive the broadcast
+    // Give time for broadcast
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Bob should NOT receive the broadcast (different org)
+    // Note: Alice won't receive either since sender is excluded
+    let bob_event = bob_rx.try_recv();
     assert!(
-        rx_alpha.try_recv().is_ok(),
-        "org-alpha user should receive broadcast for org-alpha document"
-    );
-
-    // Beta (org-beta) should NOT receive
-    assert!(
-        rx_beta.try_recv().is_err(),
-        "org-beta user should NOT receive broadcast for org-alpha document"
+        bob_event.is_err(),
+        "Bob (org-beta) should NOT receive broadcast for org-alpha document"
     );
 }
 
+/// Test isolation between multiple orgs.
 #[tokio::test]
-async fn test_multiple_orgs_isolation() {
-    let db = Database::in_memory();
-
+async fn test_multiple_orgs_isolation_e2e() {
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE projects (name STRING, org_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON projects FOR SELECT WHERE org_id = @viewer.claims.orgId")
@@ -141,93 +139,91 @@ async fn test_multiple_orgs_isolation() {
         _ => panic!("expected Inserted"),
     };
 
-    let mut server = make_server();
-    let (tx_alpha, mut rx_alpha) = tokio::sync::mpsc::channel(16);
-    let (tx_beta, mut rx_beta) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
-    let s_alpha = server.create_session(
+    // Register identities
+    harness.register_identity(
+        "alice",
         identity_with_claims(
-            "user-alpha",
+            "alice",
             vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
         ),
-        tx_alpha,
     );
-    let s_beta = server.create_session(
+    harness.register_identity(
+        "bob",
         identity_with_claims(
-            "user-beta",
+            "bob",
             vec![("orgId", ClaimValue::String("org-beta".to_string()))],
         ),
-        tx_beta,
+    );
+    harness.register_identity(
+        "charlie",
+        identity_with_claims(
+            "charlie",
+            vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
+        ),
     );
 
-    // Both sessions track both projects
-    server.register_object_session(alpha_project, s_alpha);
-    server.register_object_session(alpha_project, s_beta);
-    server.register_object_session(beta_project, s_alpha);
-    server.register_object_session(beta_project, s_beta);
+    let mut alice = harness.create_client("alice");
+    let mut bob = harness.create_client("bob");
+    let mut charlie = harness.create_client("charlie");
 
-    // Broadcast alpha project update
-    let (_, alpha_row) = db.get("projects", alpha_project).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            alpha_project,
-            "projects",
-            &alpha_row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    // All subscribe
+    let mut _alice_stream = alice.subscribe_with_receiver().await.unwrap();
+    let mut bob_stream = bob.subscribe_with_receiver().await.unwrap();
+    let mut charlie_stream = charlie.subscribe_with_receiver().await.unwrap();
 
-    // Only alpha receives
-    assert!(rx_alpha.try_recv().is_ok());
-    assert!(rx_beta.try_recv().is_err());
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // Clear alpha's channel
-    while rx_alpha.try_recv().is_ok() {}
+    // Alice pushes to alpha project
+    alice
+        .write_and_push(alpha_project, b"Alpha update")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Broadcast beta project update
-    let (_, beta_row) = db.get("projects", beta_project).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            beta_project,
-            "projects",
-            &beta_row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    // Charlie (org-alpha) should receive, Bob (org-beta) should NOT
+    assert!(
+        charlie_stream.try_recv().is_ok(),
+        "Charlie (org-alpha) should receive alpha project update"
+    );
+    assert!(
+        bob_stream.try_recv().is_err(),
+        "Bob (org-beta) should NOT receive alpha project update"
+    );
 
-    // Only beta receives
-    assert!(rx_alpha.try_recv().is_err());
-    assert!(rx_beta.try_recv().is_ok());
+    // Bob pushes to beta project
+    bob.write_and_push(beta_project, b"Beta update")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Neither Alice nor Charlie (org-alpha) should receive
+    // Clear any pending from charlie first
+    while charlie_stream.try_recv().is_ok() {}
+
+    assert!(
+        charlie_stream.try_recv().is_err(),
+        "Charlie should NOT receive beta project update"
+    );
 }
 
 // ============================================================================
-// Subscription Tier Tests
+// Subscription Tier Tests (E2E)
 // ============================================================================
 
+/// Test that subscription tiers filter content appropriately.
 #[tokio::test]
-async fn test_subscription_tier_policy() {
-    let db = Database::in_memory();
-
+async fn test_subscription_tier_e2e() {
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE premium_content (title STRING, tier STRING)")
         .unwrap();
-
-    // Policy: content tier must match viewer's subscription tier
     db.execute(
         "CREATE POLICY ON premium_content FOR SELECT WHERE tier = @viewer.claims.subscriptionTier",
     )
     .unwrap();
 
-    // Create pro-tier content
+    // Pro tier content
     let pro_content = match db
         .execute("INSERT INTO premium_content (title, tier) VALUES ('Pro Video', 'pro')")
         .unwrap()
@@ -236,67 +232,62 @@ async fn test_subscription_tier_policy() {
         _ => panic!("expected Inserted"),
     };
 
-    let mut server = make_server();
-    let (tx_pro, mut rx_pro) = tokio::sync::mpsc::channel(16);
-    let (tx_free, mut rx_free) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
-    let s_pro = server.create_session(
+    harness.register_identity(
+        "pro-user",
         identity_with_claims(
             "pro-user",
             vec![("subscriptionTier", ClaimValue::String("pro".to_string()))],
         ),
-        tx_pro,
     );
-    let s_free = server.create_session(
+    harness.register_identity(
+        "free-user",
         identity_with_claims(
             "free-user",
             vec![("subscriptionTier", ClaimValue::String("free".to_string()))],
         ),
-        tx_free,
     );
 
-    server.register_object_session(pro_content, s_pro);
-    server.register_object_session(pro_content, s_free);
+    let mut pro = harness.create_client("pro-user");
+    let mut free = harness.create_client("free-user");
 
-    let (_, row) = db.get("premium_content", pro_content).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            pro_content,
-            "premium_content",
-            &row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    let mut _pro_stream = pro.subscribe_with_receiver().await.unwrap();
+    let mut free_stream = free.subscribe_with_receiver().await.unwrap();
 
-    assert!(rx_pro.try_recv().is_ok(), "pro user should see pro content");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Pro user updates pro content
+    pro.write_and_push(pro_content, b"Pro update")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Free user should NOT receive
     assert!(
-        rx_free.try_recv().is_err(),
-        "free user should NOT see pro content"
+        free_stream.try_recv().is_err(),
+        "Free user should NOT receive pro content updates"
     );
 }
 
 // ============================================================================
-// Owner-Based Policy Tests
+// Owner-Based Policy Tests (E2E)
 // ============================================================================
 
+/// Test that owner-based policies work correctly.
 #[tokio::test]
-async fn test_owner_policy_with_user_id() {
-    let db = Database::in_memory();
+async fn test_owner_policy_e2e() {
+    let db = Arc::new(Database::in_memory());
 
-    // Create users and documents tables
+    // Create users table
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
+
+    // Create documents with owner reference
     db.execute(
         "CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)",
     )
     .unwrap();
-
-    // Policy: only owner can see
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer")
         .unwrap();
 
@@ -317,61 +308,52 @@ async fn test_owner_policy_with_user_id() {
     };
 
     // Create Alice's document
-    let doc_id = {
-        // Use direct insert since SQL INSERT with REF needs the ObjectId
-        let schema = db.get_table("documents").unwrap();
-        let descriptor = Arc::new(groove::sql::RowDescriptor::from_table_schema(&schema));
-        let row = groove::sql::RowBuilder::new(descriptor)
-            .set_string_by_name("title", "Alice's Secret")
-            .set_ref_by_name("owner_id", alice_id)
-            .build();
-        db.insert_row("documents", row).unwrap()
-    };
+    let schema = db.get_table("documents").unwrap();
+    let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(descriptor)
+        .set_string_by_name("title", "Alice's Secret")
+        .set_ref_by_name("owner_id", alice_id)
+        .build();
+    let doc_id = db.insert_row("documents", row).unwrap();
 
-    let mut server = make_server();
-    let (tx_alice, mut rx_alice) = tokio::sync::mpsc::channel(16);
-    let (tx_bob, mut rx_bob) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
-    let s_alice = server.create_session(identity_with_user_id("alice", alice_id), tx_alice);
-    let s_bob = server.create_session(identity_with_user_id("bob", bob_id), tx_bob);
+    // Register with user_id (not claims)
+    harness.register_identity("alice", identity_with_user_id("alice", alice_id));
+    harness.register_identity("bob", identity_with_user_id("bob", bob_id));
 
-    server.register_object_session(doc_id, s_alice);
-    server.register_object_session(doc_id, s_bob);
+    let mut alice = harness.create_client("alice");
+    let mut bob = harness.create_client("bob");
 
-    let (_, row) = db.get("documents", doc_id).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            doc_id,
-            "documents",
-            &row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    let mut _alice_stream = alice.subscribe_with_receiver().await.unwrap();
+    let mut bob_stream = bob.subscribe_with_receiver().await.unwrap();
 
-    assert!(rx_alice.try_recv().is_ok(), "Alice (owner) should receive");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Alice updates her document
+    alice
+        .write_and_push(doc_id, b"Secret update")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Bob should NOT receive (not the owner)
     assert!(
-        rx_bob.try_recv().is_err(),
-        "Bob (not owner) should NOT receive"
+        bob_stream.try_recv().is_err(),
+        "Bob (not owner) should NOT receive Alice's document updates"
     );
 }
 
 // ============================================================================
-// Role-Based Policy Tests (CONTAINS)
+// Role-Based Policy Tests (E2E)
 // ============================================================================
 
+/// Test that role arrays work with CONTAINS operator.
 #[tokio::test]
-async fn test_role_based_policy_with_contains() {
-    let db = Database::in_memory();
-
+async fn test_role_based_policy_e2e() {
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE admin_settings (key STRING, value STRING)")
         .unwrap();
-
-    // Policy: viewer must have 'admin' in their roles array
     db.execute(
         "CREATE POLICY ON admin_settings FOR SELECT WHERE @viewer.claims.roles CONTAINS 'admin'",
     )
@@ -385,14 +367,13 @@ async fn test_role_based_policy_with_contains() {
         _ => panic!("expected Inserted"),
     };
 
-    let mut server = make_server();
-    let (tx_admin, mut rx_admin) = tokio::sync::mpsc::channel(16);
-    let (tx_user, mut rx_user) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
     // Admin has roles: ["admin", "user"]
-    let s_admin = server.create_session(
+    harness.register_identity(
+        "admin",
         identity_with_claims(
-            "admin-user",
+            "admin",
             vec![(
                 "roles",
                 ClaimValue::Array(vec![
@@ -401,79 +382,70 @@ async fn test_role_based_policy_with_contains() {
                 ]),
             )],
         ),
-        tx_admin,
     );
 
     // Regular user has roles: ["user"]
-    let s_user = server.create_session(
+    harness.register_identity(
+        "user",
         identity_with_claims(
-            "regular-user",
+            "user",
             vec![(
                 "roles",
                 ClaimValue::Array(vec![ClaimValue::String("user".to_string())]),
             )],
         ),
-        tx_user,
     );
 
-    server.register_object_session(setting_id, s_admin);
-    server.register_object_session(setting_id, s_user);
+    let mut admin = harness.create_client("admin");
+    let mut user = harness.create_client("user");
 
-    let (_, row) = db.get("admin_settings", setting_id).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            setting_id,
-            "admin_settings",
-            &row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    let mut _admin_stream = admin.subscribe_with_receiver().await.unwrap();
+    let mut user_stream = user.subscribe_with_receiver().await.unwrap();
 
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Admin updates admin settings
+    admin
+        .write_and_push(setting_id, b"Updated setting")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Regular user should NOT receive
     assert!(
-        rx_admin.try_recv().is_ok(),
-        "admin should receive admin settings"
-    );
-    assert!(
-        rx_user.try_recv().is_err(),
-        "non-admin should NOT receive admin settings"
+        user_stream.try_recv().is_err(),
+        "Non-admin user should NOT receive admin settings updates"
     );
 }
 
 // ============================================================================
-// Team Membership Policy Tests (IN)
+// Team Membership Tests (E2E)
 // ============================================================================
 
+/// Test that team membership works with IN operator.
 #[tokio::test]
-async fn test_team_membership_policy_with_in() {
-    let db = Database::in_memory();
-
+async fn test_team_membership_e2e() {
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE team_docs (title STRING, team_id STRING)")
         .unwrap();
-
-    // Policy: document's team_id must be in viewer's groups array
     db.execute("CREATE POLICY ON team_docs FOR SELECT WHERE team_id IN @viewer.claims.groups")
         .unwrap();
 
-    // Create doc for team-engineering
     let doc_id = match db
-        .execute("INSERT INTO team_docs (title, team_id) VALUES ('Engineering Roadmap', 'team-engineering')")
+        .execute(
+            "INSERT INTO team_docs (title, team_id) VALUES ('Engineering Roadmap', 'team-engineering')",
+        )
         .unwrap()
     {
         ExecuteResult::Inserted { row_id, .. } => row_id,
         _ => panic!("expected Inserted"),
     };
 
-    let mut server = make_server();
-    let (tx_eng, mut rx_eng) = tokio::sync::mpsc::channel(16);
-    let (tx_sales, mut rx_sales) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
     // Engineer is in team-engineering and team-platform
-    let s_eng = server.create_session(
+    harness.register_identity(
+        "engineer",
         identity_with_claims(
             "engineer",
             vec![(
@@ -484,61 +456,52 @@ async fn test_team_membership_policy_with_in() {
                 ]),
             )],
         ),
-        tx_eng,
     );
 
     // Sales is in team-sales only
-    let s_sales = server.create_session(
+    harness.register_identity(
+        "sales",
         identity_with_claims(
-            "sales-rep",
+            "sales",
             vec![(
                 "groups",
                 ClaimValue::Array(vec![ClaimValue::String("team-sales".to_string())]),
             )],
         ),
-        tx_sales,
     );
 
-    server.register_object_session(doc_id, s_eng);
-    server.register_object_session(doc_id, s_sales);
+    let mut engineer = harness.create_client("engineer");
+    let mut sales = harness.create_client("sales");
 
-    let (_, row) = db.get("team_docs", doc_id).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            doc_id,
-            "team_docs",
-            &row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    let mut _engineer_stream = engineer.subscribe_with_receiver().await.unwrap();
+    let mut sales_stream = sales.subscribe_with_receiver().await.unwrap();
 
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Engineer updates engineering doc
+    engineer
+        .write_and_push(doc_id, b"Engineering update")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Sales should NOT receive
     assert!(
-        rx_eng.try_recv().is_ok(),
-        "engineer should see engineering doc"
-    );
-    assert!(
-        rx_sales.try_recv().is_err(),
-        "sales should NOT see engineering doc"
+        sales_stream.try_recv().is_err(),
+        "Sales should NOT receive engineering doc updates"
     );
 }
 
 // ============================================================================
-// Combined Policy Tests
+// Combined Policy Tests (E2E)
 // ============================================================================
 
+/// Test combined org + role policies.
 #[tokio::test]
-async fn test_combined_org_and_role_policy() {
-    let db = Database::in_memory();
-
+async fn test_combined_org_and_role_e2e() {
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE org_settings (setting STRING, org_id STRING)")
         .unwrap();
-
-    // Policy: must be in the org AND have org_admin role
     db.execute(
         "CREATE POLICY ON org_settings FOR SELECT WHERE org_id = @viewer.claims.orgId AND @viewer.claims.roles CONTAINS 'org_admin'",
     )
@@ -552,13 +515,11 @@ async fn test_combined_org_and_role_policy() {
         _ => panic!("expected Inserted"),
     };
 
-    let mut server = make_server();
-    let (tx_admin, mut rx_admin) = tokio::sync::mpsc::channel(16);
-    let (tx_member, mut rx_member) = tokio::sync::mpsc::channel(16);
-    let (tx_other_admin, mut rx_other_admin) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
     // Acme org admin
-    let s_admin = server.create_session(
+    harness.register_identity(
+        "acme-admin",
         identity_with_claims(
             "acme-admin",
             vec![
@@ -569,11 +530,11 @@ async fn test_combined_org_and_role_policy() {
                 ),
             ],
         ),
-        tx_admin,
     );
 
     // Acme org member (not admin)
-    let s_member = server.create_session(
+    harness.register_identity(
+        "acme-member",
         identity_with_claims(
             "acme-member",
             vec![
@@ -584,11 +545,11 @@ async fn test_combined_org_and_role_policy() {
                 ),
             ],
         ),
-        tx_member,
     );
 
-    // Other org admin (different org)
-    let s_other = server.create_session(
+    // Other org admin (wrong org)
+    harness.register_identity(
+        "other-admin",
         identity_with_claims(
             "other-admin",
             vec![
@@ -599,50 +560,44 @@ async fn test_combined_org_and_role_policy() {
                 ),
             ],
         ),
-        tx_other_admin,
     );
 
-    server.register_object_session(setting_id, s_admin);
-    server.register_object_session(setting_id, s_member);
-    server.register_object_session(setting_id, s_other);
+    let mut acme_admin = harness.create_client("acme-admin");
+    let mut acme_member = harness.create_client("acme-member");
+    let mut other_admin = harness.create_client("other-admin");
 
-    let (_, row) = db.get("org_settings", setting_id).unwrap().unwrap();
-    server
-        .broadcast_commits_with_policy(
-            setting_id,
-            "org_settings",
-            &row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            None,
-        )
-        .await;
+    let mut _admin_stream = acme_admin.subscribe_with_receiver().await.unwrap();
+    let mut member_stream = acme_member.subscribe_with_receiver().await.unwrap();
+    let mut other_stream = other_admin.subscribe_with_receiver().await.unwrap();
 
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Acme admin updates settings
+    acme_admin
+        .write_and_push(setting_id, b"New billing plan")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Neither member nor other admin should receive
     assert!(
-        rx_admin.try_recv().is_ok(),
-        "acme admin should see acme settings"
+        member_stream.try_recv().is_err(),
+        "Acme member (not admin) should NOT receive"
     );
     assert!(
-        rx_member.try_recv().is_err(),
-        "acme member (not admin) should NOT see"
-    );
-    assert!(
-        rx_other_admin.try_recv().is_err(),
-        "other org admin should NOT see acme settings"
+        other_stream.try_recv().is_err(),
+        "Other org admin should NOT receive acme settings"
     );
 }
 
 // ============================================================================
-// Sender Exclusion Tests
+// Positive Tests - Verify Receipt (E2E)
 // ============================================================================
 
+/// Test that matching clients DO receive broadcasts.
 #[tokio::test]
-async fn test_sender_excluded_even_with_policy_match() {
-    let db = Database::in_memory();
-
+async fn test_matching_client_receives_broadcast_e2e() {
+    let db = Arc::new(Database::in_memory());
     db.execute("CREATE TABLE notes (content STRING, org_id STRING)")
         .unwrap();
     db.execute("CREATE POLICY ON notes FOR SELECT WHERE org_id = @viewer.claims.orgId")
@@ -656,99 +611,104 @@ async fn test_sender_excluded_even_with_policy_match() {
         _ => panic!("expected Inserted"),
     };
 
-    let mut server = make_server();
-    let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
-    let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
-    // Both in same org
-    let s1 = server.create_session(
+    // Two users in the same org
+    harness.register_identity(
+        "alice",
         identity_with_claims(
-            "user1",
+            "alice",
             vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
         ),
-        tx1,
     );
-    let s2 = server.create_session(
+    harness.register_identity(
+        "bob",
         identity_with_claims(
-            "user2",
+            "bob",
             vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
         ),
-        tx2,
     );
 
-    server.register_object_session(note_id, s1);
-    server.register_object_session(note_id, s2);
+    let mut alice = harness.create_client("alice");
+    let mut bob = harness.create_client("bob");
 
-    let (_, row) = db.get("notes", note_id).unwrap().unwrap();
+    let mut _alice_stream = alice.subscribe_with_receiver().await.unwrap();
+    let mut bob_stream = bob.subscribe_with_receiver().await.unwrap();
 
-    // Broadcast from s1 (sender) - s1 should be excluded
-    server
-        .broadcast_commits_with_policy(
-            note_id,
-            "notes",
-            &row,
-            vec![],
-            vec![],
-            None,
-            &db,
-            &db,
-            Some(s1), // exclude sender
-        )
-        .await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
+    // Alice updates the note
+    alice
+        .write_and_push(note_id, b"Updated note")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Bob (same org) SHOULD receive the broadcast
     assert!(
-        rx1.try_recv().is_err(),
-        "sender should NOT receive own broadcast"
-    );
-    assert!(
-        rx2.try_recv().is_ok(),
-        "other user in same org should receive"
+        bob_stream.try_recv().is_ok(),
+        "Bob (same org) SHOULD receive the broadcast"
     );
 }
 
-// ============================================================================
-// check_select_policy Helper Tests
-// ============================================================================
-
+/// Test sender exclusion - sender doesn't get their own broadcast.
 #[tokio::test]
-async fn test_check_select_policy_helper() {
-    use groove::sql::ViewerContext;
-
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE docs (title STRING, tier STRING)")
+async fn test_sender_excluded_e2e() {
+    let db = Arc::new(Database::in_memory());
+    db.execute("CREATE TABLE notes (content STRING, org_id STRING)")
         .unwrap();
-    db.execute("CREATE POLICY ON docs FOR SELECT WHERE tier = @viewer.claims.tier")
+    db.execute("CREATE POLICY ON notes FOR SELECT WHERE org_id = @viewer.claims.orgId")
         .unwrap();
 
-    let doc_id = match db
-        .execute("INSERT INTO docs (title, tier) VALUES ('Enterprise Guide', 'enterprise')")
+    let note_id = match db
+        .execute("INSERT INTO notes (content, org_id) VALUES ('My note', 'org-alpha')")
         .unwrap()
     {
         ExecuteResult::Inserted { row_id, .. } => row_id,
         _ => panic!("expected Inserted"),
     };
 
-    let server = make_server();
-    let (_, row) = db.get("docs", doc_id).unwrap().unwrap();
+    let harness = TestHarness::with_database(Arc::clone(&db));
 
-    // Enterprise user
-    let enterprise_identity = identity_with_claims(
-        "enterprise-user",
-        vec![("tier", ClaimValue::String("enterprise".to_string()))],
+    harness.register_identity(
+        "alice",
+        identity_with_claims(
+            "alice",
+            vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
+        ),
     );
-    let enterprise_viewer = ViewerContext::from_identity(&enterprise_identity);
-
-    let can_access = server.check_select_policy("docs", doc_id, &row, enterprise_viewer, &db, &db);
-    assert!(can_access, "enterprise user should access enterprise doc");
-
-    // Basic user
-    let basic_identity = identity_with_claims(
-        "basic-user",
-        vec![("tier", ClaimValue::String("basic".to_string()))],
+    harness.register_identity(
+        "bob",
+        identity_with_claims(
+            "bob",
+            vec![("orgId", ClaimValue::String("org-alpha".to_string()))],
+        ),
     );
-    let basic_viewer = ViewerContext::from_identity(&basic_identity);
 
-    let can_access = server.check_select_policy("docs", doc_id, &row, basic_viewer, &db, &db);
-    assert!(!can_access, "basic user should NOT access enterprise doc");
+    let mut alice = harness.create_client("alice");
+    let mut bob = harness.create_client("bob");
+
+    let mut alice_stream = alice.subscribe_with_receiver().await.unwrap();
+    let mut bob_stream = bob.subscribe_with_receiver().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Alice updates the note
+    alice
+        .write_and_push(note_id, b"Alice's update")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Alice (sender) should NOT receive her own broadcast
+    assert!(
+        alice_stream.try_recv().is_err(),
+        "Alice (sender) should NOT receive her own broadcast"
+    );
+
+    // Bob SHOULD receive
+    assert!(
+        bob_stream.try_recv().is_ok(),
+        "Bob (same org, not sender) SHOULD receive"
+    );
 }

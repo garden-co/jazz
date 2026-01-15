@@ -30,5 +30,13 @@ export default defineConfig({
       url: "http://localhost:5173",
       reuseExistingServer: !process.env.CI,
     },
+    {
+      // groove-server for sync tests (JWT validation with BetterAuth)
+      command:
+        "cd ../../crates && cargo run -p groove-server -- --config ../examples/auth-betterauth/groove-server.toml",
+      port: 8080, // groove-server listens on this port
+      reuseExistingServer: !process.env.CI,
+      timeout: 120000, // Cargo build can take time
+    },
   ],
 });
