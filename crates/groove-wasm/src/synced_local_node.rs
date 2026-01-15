@@ -13,7 +13,6 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,6 +44,7 @@ pub enum SyncState {
     Connecting,
     Connected,
     Reconnecting,
+    Stopping,
 }
 
 impl From<&ConnectionState> for SyncState {
@@ -54,6 +54,7 @@ impl From<&ConnectionState> for SyncState {
             ConnectionState::Connecting => SyncState::Connecting,
             ConnectionState::Connected => SyncState::Connected,
             ConnectionState::Reconnecting { .. } => SyncState::Reconnecting,
+            ConnectionState::Stopping => SyncState::Stopping,
         }
     }
 }
@@ -64,18 +65,16 @@ impl From<&ConnectionState> for SyncState {
 
 /// Shared state for sync operations.
 ///
-/// Uses `SyncClient` for core sync logic. WASM-specific additions:
-/// - `pending_objects`: tracks objects needing immediate push
-/// - `should_disconnect`: flag to stop reconnection loop
+/// Uses `SyncClient` for core sync logic including:
+/// - Connection state and lifecycle (Stopping for graceful shutdown)
+/// - Server known state tracking
+/// - Pending push queue for local writes
+/// - State change and error callbacks
 struct SyncedState {
-    /// The sync client (owns DatabaseState, handles server state tracking, callbacks)
+    /// The sync client (owns DatabaseState, handles sync logic)
     sync_client: SyncClient<WasmClientEnv>,
     /// Database reference for SQL operations (shares Arc with sync_client)
     db: Database,
-    /// Objects we're tracking for immediate push (local writes)
-    pending_objects: HashSet<ObjectId>,
-    /// Flag to stop reconnection loop
-    should_disconnect: bool,
 }
 
 // ============================================================================
@@ -117,12 +116,7 @@ impl WasmSyncedLocalNode {
         let db = Database::from_state(db_state);
 
         Self {
-            state: Rc::new(RefCell::new(SyncedState {
-                sync_client,
-                db,
-                pending_objects: HashSet::new(),
-                should_disconnect: false,
-            })),
+            state: Rc::new(RefCell::new(SyncedState { sync_client, db })),
         }
     }
 
@@ -171,12 +165,7 @@ impl WasmSyncedLocalNode {
             let db = Database::from_state(db_state);
 
             Ok(JsValue::from(WasmSyncedLocalNode {
-                state: Rc::new(RefCell::new(SyncedState {
-                    sync_client,
-                    db,
-                    pending_objects: HashSet::new(),
-                    should_disconnect: false,
-                })),
+                state: Rc::new(RefCell::new(SyncedState { sync_client, db })),
             }))
         })
     }
@@ -194,6 +183,7 @@ impl WasmSyncedLocalNode {
                 SyncState::Connecting => "connecting",
                 SyncState::Connected => "connected",
                 SyncState::Reconnecting => "reconnecting",
+                SyncState::Stopping => "stopping",
             };
             let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(state_str));
         });
@@ -221,9 +211,8 @@ impl WasmSyncedLocalNode {
     /// Disconnect from the sync server and stop reconnection attempts.
     #[wasm_bindgen]
     pub fn disconnect(&self) {
-        let mut state = self.state.borrow_mut();
-        state.should_disconnect = true;
-        state.sync_client.set_connection_state(ConnectionState::Disconnected);
+        // Request graceful shutdown - sync loop will exit on next check
+        self.state.borrow_mut().sync_client.request_stop();
     }
 
     /// Connect to the sync server and start receiving updates.
@@ -236,11 +225,11 @@ impl WasmSyncedLocalNode {
         let state = Rc::clone(&self.state);
 
         future_to_promise(async move {
-            {
-                let mut state_ref = state.borrow_mut();
-                state_ref.should_disconnect = false;
-                state_ref.sync_client.set_connection_state(ConnectionState::Connecting);
-            }
+            // Reset to Connecting state (clears any previous Stopping state)
+            state
+                .borrow_mut()
+                .sync_client
+                .set_connection_state(ConnectionState::Connecting);
 
             // Spawn the reconnecting event loop
             let state_clone = Rc::clone(&state);
@@ -271,8 +260,8 @@ impl WasmSyncedLocalNode {
                     )
                     .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
-                        // Track only the row object for sync (table_rows is private per-node)
-                        state.pending_objects.insert(row_id);
+                        // Queue for immediate push via SyncClient
+                        state.sync_client.queue_push(row_id);
                         // Trigger push in background
                         let state_clone = Rc::clone(&self.state);
                         WasmRuntime.spawn(async move {
@@ -349,9 +338,9 @@ impl WasmSyncedLocalNode {
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
-        // Track for sync if update succeeded
+        // Queue for immediate push if update succeeded
         if result {
-            state.pending_objects.insert(id);
+            state.sync_client.queue_push(id);
             let state_clone = Rc::clone(&self.state);
             WasmRuntime.spawn(async move {
                 push_pending_objects(&state_clone).await;
@@ -381,9 +370,9 @@ impl WasmSyncedLocalNode {
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
-        // Track for sync if update succeeded
+        // Queue for immediate push if update succeeded
         if result {
-            state.pending_objects.insert(id);
+            state.sync_client.queue_push(id);
             let state_clone = Rc::clone(&self.state);
             WasmRuntime.spawn(async move {
                 push_pending_objects(&state_clone).await;
@@ -600,9 +589,9 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
     let mut reconnect_attempt: u32 = 0;
 
     loop {
-        // Check if we should stop reconnecting
-        if state.borrow().should_disconnect {
-            web_sys::console::log_1(&JsValue::from_str("Sync loop stopped (disconnect requested)"));
+        // Check if graceful shutdown was requested
+        if state.borrow().sync_client.is_stopping() {
+            web_sys::console::log_1(&JsValue::from_str("Sync loop stopped (shutdown requested)"));
             return;
         }
 
@@ -631,12 +620,12 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
 
                 web_sys::console::log_1(&JsValue::from_str("Connected to sync server"));
 
-                // Process events until stream ends or disconnect is requested
+                // Process events until stream ends or shutdown is requested
                 while let Some(result) = stream.next().await {
-                    // Check for disconnect request
-                    if state.borrow().should_disconnect {
+                    // Check for shutdown request
+                    if state.borrow().sync_client.is_stopping() {
                         web_sys::console::log_1(&JsValue::from_str(
-                            "Sync loop stopped (disconnect requested)",
+                            "Sync loop stopped (shutdown requested)",
                         ));
                         return;
                     }
@@ -653,7 +642,7 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
                 }
 
                 // Check again before reconnecting
-                if state.borrow().should_disconnect {
+                if state.borrow().sync_client.is_stopping() {
                     return;
                 }
 
@@ -669,7 +658,7 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
         }
 
         // Check before sleeping
-        if state.borrow().should_disconnect {
+        if state.borrow().sync_client.is_stopping() {
             return;
         }
 
@@ -776,7 +765,7 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
     // Get pending objects and client env
     let (pending, env) = {
         let mut state_ref = state.borrow_mut();
-        let pending: Vec<ObjectId> = state_ref.pending_objects.drain().collect();
+        let pending = state_ref.sync_client.drain_pending_push();
         let env = state_ref.sync_client.env().clone();
         (pending, env)
     };

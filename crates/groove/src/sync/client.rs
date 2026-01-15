@@ -67,6 +67,8 @@ pub enum ConnectionState {
     Connected,
     /// Reconnecting after disconnect
     Reconnecting { attempt: u32 },
+    /// Graceful shutdown requested (stop reconnecting)
+    Stopping,
 }
 
 /// Callback type for state change notifications (native).
@@ -105,6 +107,8 @@ pub struct SyncClient<E: ClientEnv> {
     next_subscription_id: u32,
     /// Server's assumed known state per object
     pub server_known_state: HashMap<ObjectId, Vec<CommitId>>,
+    /// Objects pending immediate push (local writes)
+    pending_push: HashSet<ObjectId>,
     /// Reconnection configuration
     pub reconnect_config: ReconnectConfig,
     /// Callback for connection state changes
@@ -128,6 +132,7 @@ impl<E: ClientEnv> SyncClient<E> {
             subscriptions: HashMap::new(),
             next_subscription_id: 1,
             server_known_state: HashMap::new(),
+            pending_push: HashSet::new(),
             reconnect_config: ReconnectConfig::default(),
             on_state_change: None,
             on_error: None,
@@ -147,6 +152,7 @@ impl<E: ClientEnv> SyncClient<E> {
             subscriptions: HashMap::new(),
             next_subscription_id: 1,
             server_known_state: HashMap::new(),
+            pending_push: HashSet::new(),
             reconnect_config,
             on_state_change: None,
             on_error: None,
@@ -376,6 +382,41 @@ impl<E: ClientEnv> SyncClient<E> {
         if let Some(ref cb) = self.on_error {
             cb(message);
         }
+    }
+
+    /// Request graceful shutdown (stop reconnecting).
+    ///
+    /// Sets state to `Stopping` which signals the sync loop to exit.
+    pub fn request_stop(&mut self) {
+        self.set_connection_state(ConnectionState::Stopping);
+    }
+
+    /// Check if shutdown has been requested.
+    pub fn is_stopping(&self) -> bool {
+        self.connection_state == ConnectionState::Stopping
+    }
+
+    // ========================================================================
+    // Pending push management
+    // ========================================================================
+
+    /// Queue an object for immediate push to the server.
+    ///
+    /// Call this after local writes (INSERT, UPDATE) to trigger sync.
+    pub fn queue_push(&mut self, object_id: ObjectId) {
+        self.pending_push.insert(object_id);
+    }
+
+    /// Check if there are objects pending push.
+    pub fn has_pending_push(&self) -> bool {
+        !self.pending_push.is_empty()
+    }
+
+    /// Drain all pending push objects.
+    ///
+    /// Returns the objects and clears the pending set.
+    pub fn drain_pending_push(&mut self) -> Vec<ObjectId> {
+        self.pending_push.drain().collect()
     }
 
     // ========================================================================
