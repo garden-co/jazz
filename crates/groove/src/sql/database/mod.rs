@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use crate::listener::ListenerId;
@@ -396,7 +397,11 @@ impl DatabaseState {
 
     /// Check if the catalog has been synced (has exactly one tip).
     pub fn has_catalog(&self) -> bool {
-        self.node.read(self.catalog_object_id, "main").ok().flatten().is_some()
+        self.node
+            .read(self.catalog_object_id, "main")
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     /// Set up the callback for sync-applied commits.
@@ -410,11 +415,9 @@ impl DatabaseState {
     /// 2. Rebuilds column change metadata for proper per-column LWW merge
     /// 3. Notifies query graphs of the change
     ///
-    /// Only available in native builds (not WASM).
-    #[cfg(not(feature = "wasm"))]
     fn setup_sync_callback(state: Arc<DatabaseState>) {
         let state_clone = Arc::clone(&state);
-        let callback = Arc::new(
+        let callback = Rc::new(
             move |object_id: ObjectId, branch: &str, _commits: &[crate::commit::Commit]| {
                 // Look up table name from object metadata
                 let table = {
@@ -454,9 +457,6 @@ impl DatabaseState {
     ///
     /// This is similar to notify_object_changed_internal but doesn't require
     /// going through Database since we're already in the callback context.
-    ///
-    /// Only available in native builds (not WASM).
-    #[cfg(not(feature = "wasm"))]
     fn notify_object_changed_sync(&self, table: &str, object_id: ObjectId) {
         if let Some(obj_lock) = self.node.get_object(object_id)
             && let Ok(obj) = obj_lock.read()
@@ -986,7 +986,6 @@ impl Database {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(env: Arc<dyn Environment>) -> Self {
         let state = Arc::new(DatabaseState::new(env));
-        #[cfg(not(feature = "wasm"))]
         DatabaseState::setup_sync_callback(Arc::clone(&state));
         Database { state }
     }
@@ -995,7 +994,6 @@ impl Database {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
         let state = Arc::new(DatabaseState::in_memory());
-        #[cfg(not(feature = "wasm"))]
         DatabaseState::setup_sync_callback(Arc::clone(&state));
         Database { state }
     }
@@ -1006,7 +1004,6 @@ impl Database {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
         let state = Arc::new(DatabaseState::in_memory_with_catalog(catalog_id));
-        #[cfg(not(feature = "wasm"))]
         DatabaseState::setup_sync_callback(Arc::clone(&state));
         Database { state }
     }
@@ -1018,7 +1015,6 @@ impl Database {
     /// Use `has_catalog()` to check if the catalog has arrived, then `reload_catalog()`.
     pub fn in_memory_replica(catalog_id: ObjectId) -> Self {
         let state = Arc::new(DatabaseState::in_memory_replica(catalog_id));
-        #[cfg(not(feature = "wasm"))]
         DatabaseState::setup_sync_callback(Arc::clone(&state));
         Database { state }
     }
@@ -1190,7 +1186,6 @@ impl Database {
         };
 
         let state = Arc::new(state);
-        #[cfg(not(feature = "wasm"))]
         DatabaseState::setup_sync_callback(Arc::clone(&state));
         Ok(Database { state })
     }

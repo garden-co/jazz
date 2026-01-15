@@ -8,8 +8,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use groove::sql::query_graph::{DeltaBatch, RowDelta};
 use groove::sql::Database;
+use groove::sql::query_graph::{DeltaBatch, RowDelta};
 use groove::sync::test_harness::MultiServerHarness;
 use groove::sync::{SubscriptionOptions, UpstreamState};
 use groove::{LocalNode, ObjectId};
@@ -177,7 +177,8 @@ async fn test_incremental_query_local_insert() {
     // Test that local inserts trigger incremental query deltas
     let db = Database::in_memory();
 
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
 
     // Create incremental query
     let query = db.incremental_query("SELECT * FROM users").unwrap();
@@ -271,45 +272,51 @@ async fn test_incremental_query_synced_insert() {
 // Multi-Server Sync with Incremental Queries
 // ============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_two_tier_sync_with_incremental_query() {
-    let mut harness = MultiServerHarness::new();
-    harness.create_server("origin");
-    harness.create_server("edge");
+    // This test uses start_upstream_sync which calls spawn_local, so we need a LocalSet
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut harness = MultiServerHarness::new();
+            harness.create_server("origin");
+            harness.create_server("edge");
 
-    // Connect edge -> origin
-    let upstream_id = harness.connect_upstream("edge", "origin").unwrap();
+            // Connect edge -> origin
+            let upstream_id = harness.connect_upstream("edge", "origin").unwrap();
 
-    // Start the upstream sync (background event loop)
-    harness.start_upstream_sync("edge", upstream_id, "*");
+            // Start the upstream sync (background event loop)
+            harness.start_upstream_sync("edge", upstream_id, "*");
 
-    // Create table on edge's database
-    let edge = harness.get_server("edge").unwrap();
-    let edge_db = &edge.db;
+            // Create table on edge's database
+            let edge = harness.get_server("edge").unwrap();
+            let edge_db = &edge.db;
 
-    edge_db
-        .execute("CREATE TABLE items (name STRING NOT NULL)")
-        .unwrap();
+            edge_db
+                .execute("CREATE TABLE items (name STRING NOT NULL)")
+                .unwrap();
 
-    // Set up incremental query on edge
-    let query = edge_db.incremental_query("SELECT * FROM items").unwrap();
+            // Set up incremental query on edge
+            let query = edge_db.incremental_query("SELECT * FROM items").unwrap();
 
-    let (deltas, callback) = delta_collector();
-    let _listener_id = query.subscribe(callback);
+            let (deltas, callback) = delta_collector();
+            let _listener_id = query.subscribe(callback);
 
-    // Initially empty
-    assert_eq!(count_added(&deltas), 0);
+            // Initially empty
+            assert_eq!(count_added(&deltas), 0);
 
-    // Insert directly on edge
-    edge_db
-        .execute("INSERT INTO items (name) VALUES ('Local item')")
-        .unwrap();
+            // Insert directly on edge
+            edge_db
+                .execute("INSERT INTO items (name) VALUES ('Local item')")
+                .unwrap();
 
-    // Should have the local insert
-    assert_eq!(count_added(&deltas), 1);
+            // Should have the local insert
+            assert_eq!(count_added(&deltas), 1);
 
-    // Allow sync to propagate
-    settle().await;
+            // Allow sync to propagate
+            settle().await;
+        })
+        .await;
 }
 
 #[tokio::test]

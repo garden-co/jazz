@@ -3,9 +3,9 @@
 //! This module provides a test ensemble where:
 //! - Each client has its OWN LocalNode with its OWN storage
 //! - The server has its own storage
-//! - Writes go through LocalNode::write() → SyncClient::push() → server
+//! - Writes go through LocalNode::write() → SyncedNode::push_object() → server
 //! - Server broadcasts to other clients via SSE
-//! - Clients apply received commits to their LocalNode via apply_commits()
+//! - Clients apply received commits to their LocalNode via apply_upstream_commits()
 //!
 //! This tests the complete sync flow including LocalNode integration.
 
@@ -27,9 +27,11 @@ use super::env::{ClientEnv, ClientError};
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
+use super::runtime::TokioRuntime;
 use super::server::{
     AcceptAllTokens, ActiveQuery, ClientIdentity, SessionId, SseSender, SyncServer, TokenValidator,
 };
+use super::synced_node::{SyncedNode, UpstreamId};
 
 // ============================================================================
 // Test Transport (Server-side)
@@ -363,36 +365,50 @@ impl ClientEnv for TestClientEnv {
 
 /// A test client with its OWN LocalNode (separate storage from server).
 pub struct TestClient {
-    /// The sync client
-    pub sync_client: super::client::SyncClient<TestClientEnv>,
+    /// The synced node (manages upstream connections and sync)
+    pub synced_node: Arc<SyncedNode<TokioRuntime, TestClientEnv>>,
+    /// The upstream server ID
+    pub upstream_id: UpstreamId,
     /// Client identifier
     pub id: String,
 }
 
 impl TestClient {
     /// Create a new test client with its own LocalNode.
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(transport: Arc<TestTransport>, id: impl Into<String>) -> Self {
         let id = id.into();
         let env = TestClientEnv::new(Arc::clone(&transport), &id);
         // Each client gets its OWN LocalNode - NOT shared with server
         let db = crate::sql::Database::in_memory();
         let node_arc = db.state().node_arc();
-        let sync_client = super::client::SyncClient::new(env, node_arc);
-        Self { sync_client, id }
+        let synced_node = Arc::new(SyncedNode::new(node_arc, TokioRuntime));
+        let upstream_id = synced_node.add_upstream(env);
+        Self {
+            synced_node,
+            upstream_id,
+            id,
+        }
     }
 
     /// Get the client's LocalNode.
     pub fn node(&self) -> &LocalNode {
-        self.sync_client.node()
+        self.synced_node.node()
     }
 
     /// Subscribe to all objects (query = "*").
     pub async fn subscribe_all(
         &mut self,
     ) -> Result<BoxStream<'static, Result<SseEvent, ClientError>>, ClientError> {
-        self.sync_client
-            .subscribe("*".to_string(), SubscriptionOptions::default())
-            .await
+        let (_subscription_id, stream) = self
+            .synced_node
+            .subscribe_upstream(
+                self.upstream_id,
+                "*".to_string(),
+                SubscriptionOptions::default(),
+            )
+            .await?;
+        Ok(stream)
     }
 
     /// Write to LocalNode and push to server.
@@ -418,14 +434,35 @@ impl TestClient {
             .map_err(|e| ClientError::new(500, format!("Write failed: {:?}", e)))?;
 
         // Push to server
-        let response = self.sync_client.push(object_id, "main").await?;
+        let response = self
+            .synced_node
+            .push_object(self.upstream_id, object_id, "main")
+            .await?;
 
         Ok((commit_id, response))
     }
 
     /// Apply an SSE event to this client's LocalNode.
     pub fn apply_event(&mut self, event: &SseEvent) {
-        self.sync_client.handle_sse_event(event, "main");
+        match event {
+            SseEvent::Commits {
+                object_id,
+                commits,
+                frontier,
+                object_meta,
+            } => {
+                self.synced_node.apply_upstream_commits(
+                    self.upstream_id,
+                    *object_id,
+                    commits.clone(),
+                    frontier.clone(),
+                    object_meta.clone(),
+                );
+            }
+            _ => {
+                // Other events don't need special handling in tests
+            }
+        }
     }
 
     /// Check if client has a specific commit.
@@ -492,10 +529,10 @@ impl Default for TestHarness {
 // SyncedNode Test Support
 // ============================================================================
 
-use super::runtime::TokioRuntime;
-use super::synced_node::{SyncConfig, SyncedNode};
+use super::synced_node::SyncConfig;
 
 /// Create a SyncedNode for testing with a given client environment.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn create_synced_node(
     _transport: Arc<TestTransport>,
     _id: &str,
@@ -505,20 +542,24 @@ pub fn create_synced_node(
 }
 
 /// Create a SyncedNode with custom config for testing.
+#[allow(clippy::arc_with_non_send_sync)]
 pub fn create_synced_node_with_config(
     _transport: Arc<TestTransport>,
     _id: &str,
     config: SyncConfig,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
     let db = Database::in_memory();
-    Arc::new(SyncedNode::with_config(db.state().node_arc(), TokioRuntime, config))
+    Arc::new(SyncedNode::with_config(
+        db.state().node_arc(),
+        TokioRuntime,
+        config,
+    ))
 }
 
 // ============================================================================
 // Multi-Server Test Harness
 // ============================================================================
 
-use super::synced_node::UpstreamId;
 use std::collections::HashMap;
 
 /// A server in the multi-server test harness.
@@ -534,6 +575,7 @@ pub struct TestServer {
 }
 
 impl TestServer {
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         let transport = Arc::new(TestTransport::new());

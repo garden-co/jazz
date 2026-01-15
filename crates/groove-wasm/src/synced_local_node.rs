@@ -26,6 +26,7 @@ use groove::ObjectId;
 use groove::sql::{Database, ExecuteResult, encode_rows};
 use groove::sync::{
     ClientEnvConfig, Shared, SubscriptionOptions, SyncedNode, UpstreamId, UpstreamState,
+    push_object_standalone, run_upstream_event_loop,
 };
 
 use crate::indexeddb::IndexedDbEnvironment;
@@ -76,6 +77,10 @@ pub struct WasmSyncedLocalNode {
     synced_node: Shared<SyncedNode<WasmRuntime, WasmClientEnv>>,
     /// The upstream server ID (we connect to exactly one server)
     upstream_id: UpstreamId,
+    /// Callback for sync state changes
+    on_state_change: Option<js_sys::Function>,
+    /// Callback for sync errors
+    on_error: Option<js_sys::Function>,
 }
 
 #[wasm_bindgen]
@@ -108,6 +113,8 @@ impl WasmSyncedLocalNode {
             db: db_state,
             synced_node: Shared::new(synced_node),
             upstream_id,
+            on_state_change: None,
+            on_error: None,
         }
     }
 
@@ -161,8 +168,31 @@ impl WasmSyncedLocalNode {
                 db: db_state,
                 synced_node: Shared::new(synced_node),
                 upstream_id,
+                on_state_change: None,
+                on_error: None,
             }))
         })
+    }
+
+    // ========================================================================
+    // Callbacks
+    // ========================================================================
+
+    /// Set callback for sync state changes.
+    ///
+    /// Callback signature: (state: string) => void
+    /// States: "Disconnected", "Connecting", "Connected", "Reconnecting"
+    #[wasm_bindgen(js_name = setOnStateChange)]
+    pub fn set_on_state_change(&mut self, callback: js_sys::Function) {
+        self.on_state_change = Some(callback);
+    }
+
+    /// Set callback for sync errors.
+    ///
+    /// Callback signature: (message: string) => void
+    #[wasm_bindgen(js_name = setOnError)]
+    pub fn set_on_error(&mut self, callback: js_sys::Function) {
+        self.on_error = Some(callback);
     }
 
     /// Get current sync state.
@@ -180,19 +210,45 @@ impl WasmSyncedLocalNode {
     /// This subscribes to the given query and starts an SSE stream
     /// to receive real-time updates from other clients. The connection
     /// automatically reconnects with exponential backoff on disconnection.
+    ///
+    /// The promise resolves once the initial connection is established.
+    /// The event loop continues running in the background.
     #[wasm_bindgen]
     pub fn connect(&self, query: String) -> Promise {
         let synced_node = self.synced_node.clone();
         let upstream_id = self.upstream_id;
 
-        future_to_promise(async move {
+        // Spawn the event loop in the background - it runs forever
+        // Use the standalone function that doesn't hold RefCell borrows across await points
+        let synced_node_for_loop = synced_node.clone();
+        wasm_bindgen_futures::spawn_local(async move {
             // Create queries list with default options
             let queries = vec![(query, SubscriptionOptions::default())];
 
-            // Run the upstream event loop (handles reconnection automatically)
-            synced_node.read().upstream_event_loop(upstream_id, queries).await;
+            // Run the WASM-safe event loop that manages borrows explicitly
+            run_upstream_event_loop(synced_node_for_loop, upstream_id, queries).await;
+        });
 
-            Ok(JsValue::TRUE)
+        // Return a promise that resolves when connected (or times out)
+        future_to_promise(async move {
+            // Poll until connected (or give up after ~10 seconds)
+            for _ in 0..100 {
+                let state = synced_node
+                    .read()
+                    .upstream_state(upstream_id)
+                    .map(|s| SyncState::from(&s))
+                    .unwrap_or(SyncState::Disconnected);
+
+                if state == SyncState::Connected {
+                    return Ok(JsValue::TRUE);
+                }
+
+                // Wait 100ms before checking again
+                gloo_timers::future::TimeoutFuture::new(100).await;
+            }
+
+            // Timeout - but the event loop is still running in background
+            Err(JsValue::from_str("Connection timeout"))
         })
     }
 
@@ -202,24 +258,39 @@ impl WasmSyncedLocalNode {
 
     /// Execute a SQL statement.
     ///
-    /// Note: In the current architecture, sync queueing happens automatically
-    /// when the sync layer observes writes to the LocalNode.
+    /// For INSERT/UPDATE operations, this automatically pushes the affected
+    /// objects to upstream servers.
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
         let db = Database::from_state(Arc::clone(&self.db));
 
         match db.execute(sql) {
             Ok(result) => {
-                let js_result = match result {
+                let js_result = match &result {
                     ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
                     ExecuteResult::PolicyCreated { table, action } => serde_wasm_bindgen::to_value(
                         &format!("policy_created:{}:{}", table, action),
                     )
                     .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
+                        // Push the inserted row to upstream using standalone function
+                        // (avoids holding RefCell borrow across await points)
+                        let synced_node = self.synced_node.clone();
+                        let upstream_id = self.upstream_id;
+                        let row_id_copy = *row_id;
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let _ = push_object_standalone(
+                                synced_node,
+                                upstream_id,
+                                row_id_copy,
+                                "main",
+                            )
+                            .await;
+                        });
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
                     ExecuteResult::Updated(count) => {
+                        // TODO: Push updated rows (need row_ids from result)
                         serde_wasm_bindgen::to_value(&format!("updated:{}", count)).unwrap()
                     }
                     ExecuteResult::Deleted(count) => {

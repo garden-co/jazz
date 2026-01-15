@@ -97,7 +97,7 @@ impl ClientEnvConfig {
 /// ```
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
-pub trait ClientEnv: Send + Sync {
+pub trait ClientEnv: Send + Sync + Clone {
     /// Subscribe to a query, returning a stream of SSE events.
     ///
     /// The stream stays open for real-time updates until dropped or disconnected.
@@ -121,7 +121,7 @@ pub trait ClientEnv: Send + Sync {
 /// Transport abstraction for sync client (WASM version without Send + Sync).
 #[cfg(target_arch = "wasm32")]
 #[async_trait(?Send)]
-pub trait ClientEnv {
+pub trait ClientEnv: Clone {
     /// Subscribe to a query, returning a stream of SSE events.
     ///
     /// The stream stays open for real-time updates until dropped or disconnected.

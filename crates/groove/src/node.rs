@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
@@ -19,10 +21,8 @@ use crate::storage::{Environment, MemoryEnvironment};
 /// This is used by the Database layer to be notified when sync applies commits,
 /// allowing it to update query graphs and column change metadata.
 ///
-/// Only available in native builds (not WASM) because it requires Send + Sync.
-#[cfg(not(feature = "wasm"))]
-pub type CommitsAppliedCallback =
-    Arc<dyn Fn(ObjectId, &str, &[crate::commit::Commit]) + Send + Sync>;
+/// Single-threaded: no Send/Sync bounds. The sync layer is single-threaded on all platforms.
+pub type CommitsAppliedCallback = Rc<dyn Fn(ObjectId, &str, &[crate::commit::Commit])>;
 
 /// Spawn an async task for background persistence.
 /// In WASM, uses spawn_local. In native, uses block_on (for now).
@@ -76,9 +76,8 @@ pub struct LocalNode {
     env: Arc<dyn Environment>,
     /// Optional callback invoked when commits are applied via `apply_commits`.
     /// Used by Database to be notified of sync-applied commits.
-    /// Only available in native builds (not WASM).
-    #[cfg(not(feature = "wasm"))]
-    on_commits_applied: RwLock<Option<CommitsAppliedCallback>>,
+    /// Single-threaded: uses RefCell on all platforms.
+    on_commits_applied: RefCell<Option<CommitsAppliedCallback>>,
 }
 
 impl Default for LocalNode {
@@ -103,8 +102,7 @@ impl LocalNode {
             objects: RwLock::new(BTreeMap::new()),
             listeners: ObjectListenerRegistry::new(),
             env,
-            #[cfg(not(feature = "wasm"))]
-            on_commits_applied: RwLock::new(None),
+            on_commits_applied: RefCell::new(None),
         }
     }
 
@@ -114,11 +112,8 @@ impl LocalNode {
     /// allowing it to update query graphs and rebuild column change metadata.
     ///
     /// The callback receives (object_id, branch, commits) after commits are successfully applied.
-    ///
-    /// Only available in native builds (not WASM).
-    #[cfg(not(feature = "wasm"))]
     pub fn set_on_commits_applied(&self, callback: Option<CommitsAppliedCallback>) {
-        *self.on_commits_applied.write().unwrap() = callback;
+        *self.on_commits_applied.borrow_mut() = callback;
     }
 
     /// Create a new LocalNode with an in-memory environment (for testing).
@@ -643,10 +638,8 @@ impl LocalNode {
         drop(obj);
 
         // Invoke the commits-applied callback if set (used by Database for query graph updates)
-        // Only available in native builds (not WASM).
-        #[cfg(not(feature = "wasm"))]
         if !commits_to_persist.is_empty() {
-            if let Some(callback) = self.on_commits_applied.read().unwrap().as_ref() {
+            if let Some(callback) = self.on_commits_applied.borrow().as_ref() {
                 callback(object_id, branch, &commits_to_persist);
             }
         }

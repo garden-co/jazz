@@ -49,14 +49,12 @@
 //!
 //! - **groove** (this crate): Core sync logic and traits
 //!   - `SyncedNode<R, E>`: LocalNode with sync capabilities
-//!   - `SyncClient<E>`: Client-side sync (subscriptions, push, reconnect)
 //!   - `Runtime`: Trait for async task spawning (TokioRuntime, WasmRuntime)
 //!   - `ClientEnv`: Transport abstraction for upstream connections
 //!
 //! - **groove-server**: Axum-based HTTP server implementation
 //!   - HTTP handlers and router
 
-mod client;
 mod env;
 mod negotiation;
 mod protocol;
@@ -70,7 +68,6 @@ mod server;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod test_harness;
 
-pub use client::*;
 pub use env::*;
 pub use negotiation::*;
 pub use protocol::*;

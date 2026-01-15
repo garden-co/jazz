@@ -27,6 +27,7 @@ use crate::node::LocalNode;
 use crate::object::ObjectId;
 
 use super::env::{ClientEnv, ClientError};
+use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers};
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
@@ -578,10 +579,10 @@ impl WriteBuffer {
 
 /// Callback type for observing objects received from sync.
 /// The callback receives (object_id, commits, object_meta).
-#[cfg(not(target_arch = "wasm32"))]
-pub type OnObjectsReceivedCallback = Box<
-    dyn Fn(ObjectId, &[Commit], Option<&std::collections::BTreeMap<String, String>>) + Send + Sync,
->;
+///
+/// No Send + Sync bounds - the sync layer is single-threaded.
+pub type OnObjectsReceivedCallback =
+    std::rc::Rc<dyn Fn(ObjectId, &[Commit], Option<&std::collections::BTreeMap<String, String>>)>;
 
 /// Object storage with sync capabilities.
 ///
@@ -618,8 +619,7 @@ pub struct SyncedNode<R: Runtime, E: ClientEnv> {
 
     /// Callback for when objects are received from upstream.
     /// Higher layers (e.g., Database) register here to observe synced objects.
-    #[cfg(not(target_arch = "wasm32"))]
-    on_objects_received: std::sync::RwLock<Option<OnObjectsReceivedCallback>>,
+    on_objects_received: std::cell::RefCell<Option<OnObjectsReceivedCallback>>,
 }
 
 impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
@@ -633,8 +633,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
             connected_clients: Shared::new(ConnectedClients::new()),
             write_buffer: Shared::new(WriteBuffer::new()),
             config: SyncConfig::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            on_objects_received: std::sync::RwLock::new(None),
+            on_objects_received: std::cell::RefCell::new(None),
         }
     }
 
@@ -648,8 +647,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
             connected_clients: Shared::new(ConnectedClients::new()),
             write_buffer: Shared::new(WriteBuffer::new()),
             config,
-            #[cfg(not(target_arch = "wasm32"))]
-            on_objects_received: std::sync::RwLock::new(None),
+            on_objects_received: std::cell::RefCell::new(None),
         }
     }
 
@@ -677,9 +675,8 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     ///
     /// Higher layers (e.g., Database) register here to observe synced objects.
     /// The callback receives (object_id, commits, object_meta).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_on_objects_received(&self, callback: OnObjectsReceivedCallback) {
-        *self.on_objects_received.write().unwrap() = Some(callback);
+        *self.on_objects_received.borrow_mut() = Some(callback);
     }
 
     // ========== Upstream Server API ==========
@@ -735,9 +732,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     #[cfg(not(target_arch = "wasm32"))]
     /// Remove a client session.
     pub fn remove_client(&self, session_id: SessionId) {
-        self.connected_clients
-            .write()
-            .remove_session(session_id);
+        self.connected_clients.write().remove_session(session_id);
     }
 
     // ========== Write Buffer API ==========
@@ -784,9 +779,24 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         frontier: Vec<CommitId>,
         object_meta: Option<std::collections::BTreeMap<String, String>>,
     ) {
-        // Ensure object exists with a generic prefix
-        // (the prefix is just for display/debugging, sync doesn't interpret it)
-        self.node.ensure_object(object_id, "synced");
+        // Ensure object exists with metadata (if provided)
+        // The metadata must be set BEFORE apply_commits so that the
+        // on_commits_applied callback can access it (e.g., to find table name)
+        if let Some(ref meta) = object_meta {
+            self.node
+                .ensure_object_with_meta(object_id, "synced", meta.clone());
+        } else {
+            self.node.ensure_object(object_id, "synced");
+        }
+
+        // If object already existed but we have new metadata, update it
+        if let Some(ref meta) = object_meta {
+            if let Some(obj) = self.node.get_object(object_id) {
+                if let Ok(mut obj_write) = obj.write() {
+                    obj_write.set_meta(meta.clone());
+                }
+            }
+        }
 
         // Apply commits to the object's main branch
         if !commits.is_empty() {
@@ -794,11 +804,8 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
 
         // Notify observers (e.g., database layer) that new commits arrived
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(callback) = self.on_objects_received.read().unwrap().as_ref() {
-                callback(object_id, &commits, object_meta.as_ref());
-            }
+        if let Some(callback) = self.on_objects_received.borrow().as_ref() {
+            callback(object_id, &commits, object_meta.as_ref());
         }
 
         // Update upstream's known state
@@ -836,11 +843,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     #[cfg(not(target_arch = "wasm32"))]
     /// Update last activity for a session (call on any client interaction).
     pub fn touch_session(&self, session_id: SessionId) {
-        if let Some(session) = self
-            .connected_clients
-            .write()
-            .get_session_mut(&session_id)
-        {
+        if let Some(session) = self.connected_clients.write().get_session_mut(&session_id) {
             session.touch();
         }
     }
@@ -951,8 +954,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                     attempt = 0;
 
                     // Update state to connected
-                    if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id)
-                    {
+                    if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
                         upstream.set_state(UpstreamState::Connected);
                     }
 
@@ -981,9 +983,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
             if let Some(max) = self.config.reconnect.max_attempts {
                 if attempt >= max {
                     // Give up
-                    if let Some(upstream) =
-                        self.upstream_servers.write().get_mut(upstream_id)
-                    {
+                    if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
                         upstream.set_state(UpstreamState::Disconnected);
                     }
                     return;
@@ -1011,7 +1011,311 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
             attempt += 1;
         }
     }
+}
 
+// ============================================================================
+// WASM-safe event loop (avoids holding RefCell borrows across await points)
+// ============================================================================
+
+/// Run the upstream event loop without holding a persistent borrow.
+///
+/// This is designed for WASM where RefCell borrows cannot be held across
+/// await points without blocking other operations on the same SyncedNode.
+pub async fn run_upstream_event_loop<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    initial_queries: Vec<(String, SubscriptionOptions)>,
+) {
+    let mut attempt: u32 = 0;
+
+    loop {
+        // Try to connect and subscribe (borrow released between operations)
+        let connect_result =
+            connect_and_subscribe_standalone(synced_node.clone(), upstream_id, &initial_queries)
+                .await;
+
+        match connect_result {
+            Ok(streams) => {
+                // Reset attempt counter on successful connection
+                attempt = 0;
+
+                // Update state to connected
+                {
+                    let node = synced_node.read();
+                    if let Some(upstream) = node.upstream_servers.write().get_mut(upstream_id) {
+                        upstream.set_state(UpstreamState::Connected);
+                    }
+                }
+
+                // Process events until stream ends or error
+                let result =
+                    process_upstream_streams_standalone(synced_node.clone(), upstream_id, streams)
+                        .await;
+
+                match result {
+                    UpstreamEventResult::Ok => {
+                        continue;
+                    }
+                    UpstreamEventResult::StreamEnded => {
+                        // Server closed connection - reconnect
+                    }
+                    UpstreamEventResult::Error(_err) => {
+                        // Error occurred - reconnect
+                    }
+                }
+            }
+            Err(_err) => {
+                // Connection failed - will retry
+            }
+        }
+
+        // Check if max attempts exceeded
+        let should_give_up = {
+            let node = synced_node.read();
+            if let Some(max) = node.config.reconnect.max_attempts {
+                if attempt >= max {
+                    if let Some(upstream) = node.upstream_servers.write().get_mut(upstream_id) {
+                        upstream.set_state(UpstreamState::Disconnected);
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if should_give_up {
+            return;
+        }
+
+        // Calculate delay with jitter
+        let delay_ms = {
+            let node = synced_node.read();
+            let delay = calculate_reconnect_delay_with_jitter(
+                attempt,
+                &node.config.reconnect,
+                node.runtime.random_f64(),
+            );
+
+            // Update state to reconnecting
+            if let Some(upstream) = node.upstream_servers.write().get_mut(upstream_id) {
+                upstream.set_state(UpstreamState::Reconnecting {
+                    attempt,
+                    next_delay_ms: delay,
+                });
+            }
+
+            delay
+        };
+
+        // Wait before retry (no borrow held during sleep)
+        {
+            let node = synced_node.read();
+            node.runtime.sleep(delay_ms).await;
+        }
+
+        attempt += 1;
+    }
+}
+
+/// Connect and subscribe to all queries without holding a persistent borrow.
+async fn connect_and_subscribe_standalone<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    queries: &[(String, SubscriptionOptions)],
+) -> Result<
+    Vec<(
+        u32,
+        futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+    )>,
+    ClientError,
+> {
+    let mut streams = Vec::new();
+
+    // Clear old subscriptions and set state
+    {
+        let node = synced_node.read();
+        let mut servers = node.upstream_servers.write();
+        if let Some(upstream) = servers.get_mut(upstream_id) {
+            upstream.clear_subscriptions();
+            upstream.set_state(UpstreamState::Connecting);
+        }
+    }
+
+    // Subscribe to each query
+    for (query, options) in queries {
+        // Get the env clone outside the lock
+        let env = {
+            let node = synced_node.read();
+            let servers = node.upstream_servers.read();
+            let upstream = servers
+                .get(upstream_id)
+                .ok_or(ClientError::new(0, "Upstream not connected"))?;
+            upstream.env().clone()
+        };
+
+        // Create subscribe request
+        let request = SubscribeRequest {
+            query: query.clone(),
+            options: options.clone(),
+        };
+
+        // Make the subscribe call without holding any locks
+        let stream = env.subscribe(request).await?;
+
+        // Update subscription tracking
+        {
+            let node = synced_node.read();
+            let mut servers = node.upstream_servers.write();
+            if let Some(upstream) = servers.get_mut(upstream_id) {
+                let sub_id = upstream.add_subscription(query.clone(), options.clone());
+                upstream.set_state(UpstreamState::Connected);
+                streams.push((sub_id, stream));
+            }
+        }
+    }
+
+    Ok(streams)
+}
+
+/// Push an object to upstream without holding a persistent borrow.
+///
+/// This is designed for WASM where RefCell borrows cannot be held across
+/// await points.
+pub async fn push_object_standalone<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    object_id: ObjectId,
+    branch: &str,
+) -> Result<PushResponse, ClientError> {
+    // Get server's known frontier and env (all in one borrow)
+    let (server_frontier, env) = {
+        let node = synced_node.read();
+        let servers = node.upstream_servers.read();
+        let upstream = servers
+            .get(upstream_id)
+            .ok_or(ClientError::new(0, "Upstream not connected"))?;
+        (
+            upstream
+                .server_known_state(&object_id)
+                .cloned()
+                .unwrap_or_default(),
+            upstream.env().clone(),
+        )
+    };
+
+    // Get local frontier and commits to send
+    let (_local_frontier, commits, object_meta) = {
+        let node = synced_node.read();
+        let local_frontier = node
+            .node
+            .frontier(object_id, branch)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        // Check if we need to push anything
+        if compare_frontiers(&local_frontier, &server_frontier) == FrontierComparison::Identical {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Get the branch to find commits to send
+        let obj = node
+            .node
+            .get_object(object_id)
+            .ok_or(ClientError::new(0, "Object not found"))?;
+        let obj_read = obj
+            .read()
+            .map_err(|_| ClientError::new(0, "Object lock poisoned"))?;
+        let branch_ref = obj_read
+            .branch_ref(branch)
+            .ok_or(ClientError::new(0, "Branch not found"))?;
+        let branch_read = branch_ref
+            .read()
+            .map_err(|_| ClientError::new(0, "Branch lock poisoned"))?;
+
+        let commits = commits_to_send(&branch_read, &local_frontier, &server_frontier);
+
+        if commits.is_empty() {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Include object metadata on first push (when server has no known state)
+        let object_meta = if server_frontier.is_empty() {
+            obj_read.meta.clone()
+        } else {
+            None
+        };
+
+        (local_frontier, commits, object_meta)
+    };
+
+    let request = PushRequest {
+        object_id,
+        commits,
+        object_meta,
+    };
+
+    // Send push request (no synced_node borrow held during the async call)
+    let response = env.push(request).await?;
+
+    // Update server known state on success
+    if response.accepted {
+        let node = synced_node.read();
+        let mut servers = node.upstream_servers.write();
+        if let Some(upstream) = servers.get_mut(upstream_id) {
+            upstream.update_server_known_state(object_id, response.frontier.clone());
+        }
+    }
+
+    Ok(response)
+}
+
+/// Process upstream streams without holding a persistent borrow.
+async fn process_upstream_streams_standalone<R: Runtime, E: ClientEnv>(
+    synced_node: Shared<SyncedNode<R, E>>,
+    upstream_id: UpstreamId,
+    streams: Vec<(
+        u32,
+        futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+    )>,
+) -> UpstreamEventResult {
+    use futures::StreamExt;
+
+    // Merge all streams into one
+    let mut merged = futures::stream::select_all(
+        streams
+            .into_iter()
+            .map(|(sub_id, stream)| stream.map(move |r| (sub_id, r))),
+    );
+
+    while let Some((sub_id, result)) = merged.next().await {
+        match result {
+            Ok(event) => {
+                // Handle event with a scoped borrow
+                let node = synced_node.read();
+                node.handle_upstream_event(upstream_id, sub_id, event);
+            }
+            Err(e) => {
+                return UpstreamEventResult::Error(e);
+            }
+        }
+    }
+
+    UpstreamEventResult::StreamEnded
+}
+
+impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Connect and subscribe to all queries.
     async fn connect_and_subscribe(
         &self,
@@ -1112,8 +1416,7 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                 object_meta,
             } => {
                 // Track this object in the subscription
-                if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id)
-                {
+                if let Some(upstream) = self.upstream_servers.write().get_mut(upstream_id) {
                     upstream.track_object(sub_id, object_id);
                 }
 
@@ -1138,7 +1441,10 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                 // Server requesting specific commits - push them
                 // TODO: Implement push response
             }
-            SseEvent::Error { message: _, code: _ } => {
+            SseEvent::Error {
+                message: _,
+                code: _,
+            } => {
                 // Log error
             }
         }
@@ -1179,5 +1485,104 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
             .ok_or(ClientError::new(0, "Upstream not connected"))?;
         upstream.push(request).await
     }
-}
 
+    /// Push an object's commits to an upstream server.
+    ///
+    /// This creates the push request automatically by computing the delta
+    /// between local and server-known commits.
+    pub async fn push_object(
+        &self,
+        upstream_id: UpstreamId,
+        object_id: ObjectId,
+        branch: &str,
+    ) -> Result<PushResponse, ClientError> {
+        // Get server's known frontier (empty if unknown)
+        let server_frontier = {
+            let servers = self.upstream_servers.read();
+            let upstream = servers
+                .get(upstream_id)
+                .ok_or(ClientError::new(0, "Upstream not connected"))?;
+            upstream
+                .server_known_state(&object_id)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Get local frontier
+        let local_frontier = self
+            .node
+            .frontier(object_id, branch)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        // Check if we need to push anything
+        if compare_frontiers(&local_frontier, &server_frontier) == FrontierComparison::Identical {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Get the branch to find commits to send
+        let obj = self
+            .node
+            .get_object(object_id)
+            .ok_or(ClientError::new(0, "Object not found"))?;
+        let obj_read = obj
+            .read()
+            .map_err(|_| ClientError::new(0, "Object lock poisoned"))?;
+        let branch_ref = obj_read
+            .branch_ref(branch)
+            .ok_or(ClientError::new(0, "Branch not found"))?;
+        let branch_read = branch_ref
+            .read()
+            .map_err(|_| ClientError::new(0, "Branch lock poisoned"))?;
+
+        let commits = commits_to_send(&branch_read, &local_frontier, &server_frontier);
+
+        if commits.is_empty() {
+            return Ok(PushResponse {
+                object_id,
+                accepted: true,
+                frontier: local_frontier,
+            });
+        }
+
+        // Include object metadata on first push (when server has no known state)
+        let object_meta = if server_frontier.is_empty() {
+            obj_read.meta.clone()
+        } else {
+            None
+        };
+
+        let request = PushRequest {
+            object_id,
+            commits,
+            object_meta,
+        };
+
+        drop(branch_read);
+        drop(obj_read);
+
+        // Send push request
+        let response = {
+            let mut servers = self.upstream_servers.write();
+            let upstream = servers
+                .get_mut(upstream_id)
+                .ok_or(ClientError::new(0, "Upstream not connected"))?;
+            upstream.push(request).await?
+        };
+
+        // Update server known state on success
+        if response.accepted {
+            let mut servers = self.upstream_servers.write();
+            if let Some(upstream) = servers.get_mut(upstream_id) {
+                upstream.update_server_known_state(object_id, response.frontier.clone());
+            }
+        }
+
+        Ok(response)
+    }
+}

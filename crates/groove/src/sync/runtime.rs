@@ -3,6 +3,9 @@
 //! This module provides a platform-agnostic way to perform async operations,
 //! allowing sync code to work with both tokio (native) and browser APIs (WASM).
 //!
+//! The sync layer is single-threaded on all platforms - no Send/Sync bounds.
+//! On native, use `tokio::task::LocalSet` to run the sync code.
+//!
 //! The `Runtime` trait abstracts:
 //! - Task spawning (`spawn`)
 //! - Async sleeping (`sleep`)
@@ -11,38 +14,13 @@
 use std::future::Future;
 use std::pin::Pin;
 
-/// Runtime abstraction for async operations (native version).
+/// Runtime abstraction for async operations.
 ///
 /// Implementations provide platform-specific async primitives:
-/// - `TokioRuntime`: Uses tokio for native environments
+/// - `TokioRuntime`: Uses tokio for native environments (with LocalSet)
 /// - `WasmRuntime`: Uses browser APIs for WASM environments
 ///
-/// Native version requires `Send + Sync` bounds for thread safety.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait Runtime: Clone + Send + Sync + 'static {
-    /// Spawn an async task to run in the background.
-    ///
-    /// The task runs independently and the caller does not wait for completion.
-    fn spawn<F>(&self, future: F)
-    where
-        F: Future<Output = ()> + Send + 'static;
-
-    /// Sleep for the given duration.
-    ///
-    /// Returns a future that completes after `duration_ms` milliseconds.
-    fn sleep(&self, duration_ms: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
-    /// Generate a random f64 in the range [0.0, 1.0).
-    ///
-    /// Used for jitter calculations in reconnection logic.
-    fn random_f64(&self) -> f64;
-}
-
-/// Runtime abstraction for async operations (WASM version).
-///
-/// In WASM, futures don't need to be `Send` since everything runs
-/// on a single thread.
-#[cfg(target_arch = "wasm32")]
+/// No Send/Sync bounds - the sync layer is single-threaded on all platforms.
 pub trait Runtime: Clone + 'static {
     /// Spawn an async task to run in the background.
     ///
@@ -69,9 +47,11 @@ pub trait Runtime: Clone + 'static {
 /// Tokio-based runtime for native environments.
 ///
 /// Uses tokio for async operations:
-/// - `tokio::spawn` for task spawning
+/// - `tokio::task::spawn_local` for task spawning (single-threaded)
 /// - `tokio::time::sleep` for sleeping
 /// - Hash-based PRNG for random numbers
+///
+/// **Important**: Must be run within a `tokio::task::LocalSet` context.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, Default)]
 pub struct TokioRuntime;
@@ -80,12 +60,12 @@ pub struct TokioRuntime;
 impl Runtime for TokioRuntime {
     fn spawn<F>(&self, future: F)
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + 'static,
     {
-        tokio::spawn(future);
+        tokio::task::spawn_local(future);
     }
 
-    fn sleep(&self, duration_ms: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    fn sleep(&self, duration_ms: u64) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
         Box::pin(tokio::time::sleep(std::time::Duration::from_millis(
             duration_ms,
         )))
@@ -128,14 +108,14 @@ pub struct TestRuntime;
 impl Runtime for TestRuntime {
     fn spawn<F>(&self, future: F)
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + 'static,
     {
         // In tests, we don't actually spawn - the test controls execution
         // This is a no-op; tests manually drive the async code
         drop(future);
     }
 
-    fn sleep(&self, _duration_ms: u64) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    fn sleep(&self, _duration_ms: u64) -> Pin<Box<dyn Future<Output = ()> + 'static>> {
         // Immediate completion for tests
         Box::pin(async {})
     }

@@ -611,11 +611,7 @@ async fn test_synced_node_apply_upstream_commits() {
     synced_node.apply_upstream_commits(upstream_id, object_id, vec![commit], vec![commit_id], None);
 
     // The commit should be in LocalNode
-    assert!(
-        synced_node
-            .node()
-            .has_commit(object_id, "main", &commit_id)
-    );
+    assert!(synced_node.node().has_commit(object_id, "main", &commit_id));
 
     // Can read the content
     let content = synced_node.node().read(object_id, "main").unwrap();

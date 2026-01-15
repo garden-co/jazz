@@ -318,18 +318,34 @@ export class WasmSyncedLocalNode {
    */
   static withIndexedDb(server_url: string, auth_token: string, db_name?: string | null): Promise<any>;
   /**
+   * Set callback for sync state changes.
+   *
+   * Callback signature: (state: string) => void
+   * States: "Disconnected", "Connecting", "Connected", "Reconnecting"
+   */
+  setOnStateChange(callback: Function): void;
+  /**
+   * Set callback for sync errors.
+   *
+   * Callback signature: (message: string) => void
+   */
+  setOnError(callback: Function): void;
+  /**
    * Connect to the sync server and start receiving updates.
    *
    * This subscribes to the given query and starts an SSE stream
    * to receive real-time updates from other clients. The connection
    * automatically reconnects with exponential backoff on disconnection.
+   *
+   * The promise resolves once the initial connection is established.
+   * The event loop continues running in the background.
    */
   connect(query: string): Promise<any>;
   /**
-   * Execute a SQL statement with automatic sync queueing.
+   * Execute a SQL statement.
    *
-   * INSERT/UPDATE/DELETE operations automatically queue affected rows
-   * for sync to upstream servers.
+   * For INSERT/UPDATE operations, this automatically pushes the affected
+   * objects to upstream servers.
    */
   execute(sql: string): any;
   /**
@@ -445,6 +461,8 @@ export interface InitOutput {
   readonly __wbg_wasmsyncedlocalnode_free: (a: number, b: number) => void;
   readonly wasmsyncedlocalnode_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+  readonly wasmsyncedlocalnode_setOnStateChange: (a: number, b: any) => void;
+  readonly wasmsyncedlocalnode_setOnError: (a: number, b: any) => void;
   readonly wasmsyncedlocalnode_syncState: (a: number) => number;
   readonly wasmsyncedlocalnode_connect: (a: number, b: number, c: number) => any;
   readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
@@ -457,10 +475,12 @@ export interface InitOutput {
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
   readonly syncedqueryhandle_diagram: (a: number) => [number, number];
   readonly syncedqueryhandle_free: (a: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h75fee8fd0bca4be8: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h06b1f0a7a7e3a424: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__ha88fd06ec3374ffb: (a: number, b: number) => void;
+  readonly wasm_bindgen__closure__destroy__hd30a2cb8baf489cb: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h783d3c595025ae9c: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h28952e7d8d6ac40d: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
