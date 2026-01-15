@@ -90,6 +90,8 @@ import {
   setMaxOutgoingMessagesChunkBytes,
   setOutgoingMessagesChunkDelay,
   setMaxRecommendedTxSize,
+  setGarbageCollectorInterval,
+  setGarbageCollectorMaxAge,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
@@ -141,6 +143,8 @@ export const cojsonInternals = {
   WEBSOCKET_CONFIG,
   setMaxOutgoingMessagesChunkBytes,
   setOutgoingMessagesChunkDelay,
+  setGarbageCollectorInterval,
+  setGarbageCollectorMaxAge,
 };
 
 export {

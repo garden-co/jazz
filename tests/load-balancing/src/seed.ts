@@ -79,7 +79,7 @@ export async function seedDb(args: ParsedArgs): Promise<SeedResult> {
   const toSync = [];
 
   for (let i = 1; i <= items; i++) {
-    if (i % 2 === 0) {
+    if (i % 5 === 0) {
       const stream = group.createBinaryStream();
       stream.startBinaryStream(
         {

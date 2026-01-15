@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 
 import type { CoValueHeader } from "cojson";
+import { cojsonInternals } from "cojson";
 import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { startSyncServer } from "jazz-run/startSyncServer";
 
@@ -48,6 +49,13 @@ type WorkerStats = {
 type WorkerDone = { type: "done"; workerId: number };
 type WorkerMessage = WorkerHello | WorkerStats | WorkerDone;
 
+// Seed DB: pnpm seed --items 10000
+// Configure GC to run every 1s
+cojsonInternals.setGarbageCollectorInterval(1000);
+cojsonInternals.setGarbageCollectorMaxAge(-1);
+// Run 1 worker: pnpm run run --workers 8 --durationMs 60000 --inflight 8 --mix 1f:1m
+// Profile using the Chrome profiler (the `run` command already uses `--inspect`)
+
 export async function runLoad(args: ParsedArgs): Promise<void> {
   const dbPath = assertNonEmptyString(
     getFlagString(args, "db") ?? "./seed.db",
@@ -86,6 +94,9 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
     inMemory: false,
     db: dbPath,
     crypto: await NapiCrypto.create(),
+  });
+  server.localNode.enableGarbageCollector({
+    // garbageCollectGroups: true,
   });
 
   const addr = server.address();
