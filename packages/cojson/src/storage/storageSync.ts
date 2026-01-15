@@ -450,6 +450,10 @@ export class StorageApiSync implements StorageAPI {
     this.dbClient.stopTrackingSyncState(id);
   }
 
+  onCoValueUnmounted(id: RawCoID): void {
+    this.loadedCoValues.delete(id);
+  }
+
   close() {
     return undefined;
   }

@@ -130,6 +130,7 @@ export class LocalNode {
 
   internalDeleteCoValue(id: RawCoID) {
     this.coValues.delete(id);
+    this.storage?.onCoValueUnmounted(id);
   }
 
   getCurrentAccountOrAgentID(): RawAccountID | AgentID {

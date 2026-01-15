@@ -69,6 +69,48 @@ describe("sync after the garbage collector has run", () => {
     `);
   });
 
+  test("loading a coValue from the sync server that was removed by the garbage collector along with its owner", async () => {
+    const client = setupTestNode();
+
+    client.connectToSyncServer();
+
+    const group = jazzCloud.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    // force the garbage collector to run twice to remove the map and its group
+    jazzCloud.node.garbageCollector?.collect();
+    jazzCloud.node.garbageCollector?.collect();
+
+    expect(jazzCloud.node.getCoValue(group.id).isAvailable()).toBe(false);
+    expect(jazzCloud.node.getCoValue(map.id).isAvailable()).toBe(false);
+
+    SyncMessagesLog.clear();
+
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+  });
+
   test("updating a coValue that was removed by the garbage collector", async () => {
     const client = setupTestNode();
 
