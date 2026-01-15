@@ -25,51 +25,13 @@ use wasm_bindgen_futures::future_to_promise;
 use groove::ObjectId;
 use groove::sql::{Database, ExecuteResult, encode_rows};
 use groove::sync::{
-    ClientEnv, ClientEnvConfig, PushRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
-    commits_to_send,
+    ClientEnv, ClientEnvConfig, PushRequest, ReconnectConfig, Runtime, SseEvent, SubscribeRequest,
+    SubscriptionOptions, calculate_reconnect_delay_with_jitter, commits_to_send,
 };
 
 use crate::indexeddb::IndexedDbEnvironment;
+use crate::runtime::WasmRuntime;
 use crate::sync::WasmClientEnv;
-
-// ============================================================================
-// Async Helpers
-// ============================================================================
-
-/// Sleep for the given number of milliseconds using JavaScript setTimeout.
-async fn sleep_ms(ms: u32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _| {
-        let window = web_sys::window().unwrap();
-        window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-            .unwrap();
-    });
-    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
-}
-
-/// Calculate reconnection delay with exponential backoff.
-fn calculate_reconnect_delay(attempt: u32) -> u32 {
-    const INITIAL_DELAY_MS: u32 = 1000;
-    const MAX_DELAY_MS: u32 = 30000;
-    const BACKOFF_MULTIPLIER: f64 = 1.5;
-
-    let delay = (INITIAL_DELAY_MS as f64) * BACKOFF_MULTIPLIER.powi(attempt as i32);
-    (delay as u32).min(MAX_DELAY_MS)
-}
-
-/// Calculate reconnection delay with jitter to prevent thundering herd.
-fn calculate_reconnect_delay_with_jitter(attempt: u32) -> u32 {
-    let base_delay = calculate_reconnect_delay(attempt);
-    // Add jitter: 0 to 25% of base delay
-    let jitter_range = base_delay / 4;
-    if jitter_range > 0 {
-        // Simple pseudo-random using js_sys
-        let random = (js_sys::Math::random() * jitter_range as f64) as u32;
-        base_delay + random
-    } else {
-        base_delay
-    }
-}
 
 // ============================================================================
 // Connection State
@@ -283,7 +245,7 @@ impl WasmSyncedLocalNode {
             // Spawn the reconnecting event loop
             let state_clone = Rc::clone(&state);
             let query_clone = query.clone();
-            wasm_bindgen_futures::spawn_local(async move {
+            WasmRuntime.spawn(async move {
                 sync_event_loop(&state_clone, &query_clone).await;
             });
 
@@ -313,7 +275,7 @@ impl WasmSyncedLocalNode {
                         state.pending_objects.insert(row_id);
                         // Trigger push in background
                         let state_clone = Rc::clone(&self.state);
-                        wasm_bindgen_futures::spawn_local(async move {
+                        WasmRuntime.spawn(async move {
                             push_pending_objects(&state_clone).await;
                         });
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
@@ -391,7 +353,7 @@ impl WasmSyncedLocalNode {
         if result {
             state.pending_objects.insert(id);
             let state_clone = Rc::clone(&self.state);
-            wasm_bindgen_futures::spawn_local(async move {
+            WasmRuntime.spawn(async move {
                 push_pending_objects(&state_clone).await;
             });
         }
@@ -423,7 +385,7 @@ impl WasmSyncedLocalNode {
         if result {
             state.pending_objects.insert(id);
             let state_clone = Rc::clone(&self.state);
-            wasm_bindgen_futures::spawn_local(async move {
+            WasmRuntime.spawn(async move {
                 push_pending_objects(&state_clone).await;
             });
         }
@@ -708,14 +670,16 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
         }
 
         // Calculate delay with jitter and wait before reconnecting
-        let delay = calculate_reconnect_delay_with_jitter(reconnect_attempt);
+        let runtime = WasmRuntime;
+        let config = ReconnectConfig::default();
+        let delay = calculate_reconnect_delay_with_jitter(reconnect_attempt, &config, runtime.random_f64());
         web_sys::console::log_1(&JsValue::from_str(&format!(
             "Reconnecting in {}ms (attempt {})",
             delay,
             reconnect_attempt + 1
         )));
 
-        sleep_ms(delay).await;
+        runtime.sleep(delay).await;
         reconnect_attempt = reconnect_attempt.saturating_add(1);
     }
 }
