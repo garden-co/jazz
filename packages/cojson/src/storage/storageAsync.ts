@@ -17,6 +17,7 @@ import {
   setSessionCounter,
 } from "../knownState.js";
 import { StorageKnownState } from "./knownState.js";
+import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -30,11 +31,16 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+import { isDeleteSessionID } from "../ids.js";
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
   private loadedCoValues = new Set<RawCoID>();
+  private deletedCoValuesEraserScheduler:
+    | DeletedCoValuesEraserScheduler
+    | undefined;
+  private eraserController: AbortController | undefined;
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
@@ -59,6 +65,7 @@ export class StorageApiAsync implements StorageAPI {
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
+    this.interruptEraser("load");
     const coValueRow = await this.dbClient.getCoValue(id);
 
     if (!coValueRow) {
@@ -212,8 +219,33 @@ export class StorageApiAsync implements StorageAPI {
     this.storeQueue.push(msg, correctionCallback);
 
     this.storeQueue.processQueue(async (data, correctionCallback) => {
+      this.interruptEraser("store");
       return this.storeSingle(data, correctionCallback);
     });
+  }
+
+  private interruptEraser(reason: string) {
+    // Cooperative cancellation: a DB transaction already in progress will complete,
+    // but the eraser loop will stop starting further work at its next abort check.
+    if (this.eraserController) {
+      this.eraserController.abort(reason);
+      this.eraserController = undefined;
+    }
+  }
+
+  async eraseAllDeletedCoValues() {
+    const ids = await this.dbClient.getAllCoValuesWaitingForDelete();
+
+    this.eraserController = new AbortController();
+    const signal = this.eraserController.signal;
+
+    for (const id of ids) {
+      if (signal.aborted) {
+        return;
+      }
+
+      await this.dbClient.eraseCoValueButKeepTombstone(id);
+    }
   }
 
   /**
@@ -258,6 +290,7 @@ export class StorageApiAsync implements StorageAPI {
     msg: NewContentMessage,
     correctionCallback: CorrectionCallback,
   ): Promise<boolean> {
+    this.interruptEraser("store");
     if (this.storeQueue.closed) {
       return false;
     }
@@ -286,6 +319,10 @@ export class StorageApiAsync implements StorageAPI {
           storedCoValueRowID,
           sessionID,
         );
+
+        if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
+          await tx.markCoValueAsDeleted(id);
+        }
 
         if (sessionRow) {
           setSessionCounter(
@@ -388,6 +425,30 @@ export class StorageApiAsync implements StorageAPI {
     return newLastIdx;
   }
 
+  deletedValues = new Set<RawCoID>();
+
+  markDeleteAsValid(id: RawCoID) {
+    this.deletedValues.add(id);
+
+    if (this.deletedCoValuesEraserScheduler) {
+      this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
+    }
+  }
+
+  enableDeletedCoValuesErasure() {
+    if (this.deletedCoValuesEraserScheduler) return;
+
+    this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
+      run: async () => {
+        // Async storage: no max-time budgeting; drain to completion when scheduled.
+        await this.eraseAllDeletedCoValues();
+        const remaining = await this.dbClient.getAllCoValuesWaitingForDelete();
+        return { hasMore: remaining.length > 0 };
+      },
+    });
+    this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
+  }
+
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knownStates.waitForSync(id, coValue);
   }
@@ -410,6 +471,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   close() {
+    this.deletedCoValuesEraserScheduler?.dispose();
     return this.storeQueue.close();
   }
 }

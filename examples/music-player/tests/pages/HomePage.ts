@@ -234,4 +234,34 @@ export class HomePage {
       this.page.getByRole("textbox", { name: "Username" }),
     ).toBeVisible();
   }
+
+  async navigateToSettings() {
+    await this.page
+      .getByRole("button", {
+        name: "Profile settings",
+      })
+      .click();
+  }
+
+  async deleteAccount() {
+    await this.page.getByRole("button", { name: "Delete account" }).click();
+
+    await this.page
+      .getByRole("textbox", { name: "Type the phrase to confirm" })
+      .fill("I want to delete my account");
+
+    await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete account" })
+      .click();
+
+    // Wait for redirect to home and username input to be visible
+    await this.page.getByRole("textbox", { name: "Username" }).waitFor({
+      state: "visible",
+    });
+
+    await expect(
+      this.page.getByRole("textbox", { name: "Username" }),
+    ).toBeVisible();
+  }
 }

@@ -171,6 +171,25 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
+    if (update.core.isDeleted) {
+      if (this.value.type !== CoValueLoadingState.DELETED) {
+        const error = new JazzError(this.id, CoValueLoadingState.DELETED, [
+          {
+            code: CoValueLoadingState.DELETED,
+            message: `Jazz Deleted Error: ${this.id} has been deleted`,
+            params: {
+              id: this.id,
+            },
+            path: [],
+          },
+        ]);
+
+        this.updateValue(error);
+        this.triggerUpdate();
+      }
+      return;
+    }
+
     if (!hasAccessToCoValue(update)) {
       if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
         const message = `Jazz Authorization Error: The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
@@ -279,6 +298,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (
       value.type === CoValueLoadingState.UNAVAILABLE ||
+      value.type === CoValueLoadingState.DELETED ||
       value.type === CoValueLoadingState.UNAUTHORIZED
     ) {
       this.childErrors.set(id, value.prependPath(key ?? id));
@@ -414,6 +434,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (
       rawValue === CoValueLoadingState.UNAUTHORIZED ||
+      rawValue === CoValueLoadingState.DELETED ||
       rawValue === CoValueLoadingState.UNAVAILABLE ||
       rawValue === CoValueLoadingState.LOADING
     ) {
@@ -427,6 +448,7 @@ export class SubscriptionScope<D extends CoValue> {
   private getCurrentRawValue(): D | NotLoadedCoValueState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
+      this.value.type === CoValueLoadingState.DELETED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       return this.value.type;
@@ -481,6 +503,7 @@ export class SubscriptionScope<D extends CoValue> {
   private getError() {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
+      this.value.type === CoValueLoadingState.DELETED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       return this.value;

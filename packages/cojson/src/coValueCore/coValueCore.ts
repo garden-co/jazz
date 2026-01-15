@@ -1,7 +1,10 @@
 import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
-import type { ControlledAccountOrAgent } from "../coValues/account.js";
+import {
+  RawAccount,
+  type ControlledAccountOrAgent,
+} from "../coValues/account.js";
 import type { RawGroup } from "../coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "../config.js";
 import { coreToCoValue } from "../coreToCoValue.js";
@@ -13,12 +16,18 @@ import {
   Signature,
   SignerID,
 } from "../crypto/crypto.js";
-import { AgentID, RawCoID, SessionID, TransactionID } from "../ids.js";
+import {
+  AgentID,
+  isDeleteSessionID,
+  RawCoID,
+  SessionID,
+  TransactionID,
+} from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { LocalNode, ResolveAccountAgentError } from "../localNode.js";
 import { logger } from "../logger.js";
 import { determineValidTransactions } from "../permissions.js";
-import { NewContentMessage, PeerID } from "../sync.js";
+import { KnownStateMessage, NewContentMessage, PeerID } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import {
@@ -240,6 +249,8 @@ export class CoValueCore {
   // context
   readonly node: LocalNode;
   private readonly crypto: CryptoProvider;
+  // Whether the coValue is deleted
+  public isDeleted: boolean = false;
 
   // state
   id: RawCoID;
@@ -601,6 +612,33 @@ export class CoValueCore {
     return this.verified?.immutableKnownState() ?? emptyKnownState(this.id);
   }
 
+  /**
+   * Returns a known state message to signal to the peer that the coValue doesn't need to be synced anymore
+   *
+   * Implemented to be backward compatible with clients that don't support deleted coValues
+   */
+  stopSyncingKnownStateMessage(
+    peerKnownState: CoValueKnownState | undefined,
+  ): KnownStateMessage {
+    if (!peerKnownState) {
+      return {
+        action: "known",
+        ...this.knownState(),
+      };
+    }
+
+    const knownState = cloneKnownState(this.knownState());
+
+    // We combine everything for backward compatibility with clients that don't support deleted coValues
+    // This way they won't try to sync their own content that we have discarded because the coValue is deleted
+    combineKnownStateSessions(knownState.sessions, peerKnownState.sessions);
+
+    return {
+      action: "known",
+      ...knownState,
+    };
+  }
+
   get meta(): JsonValue {
     return this.verified?.header.meta ?? null;
   }
@@ -635,6 +673,93 @@ export class CoValueCore {
     }
   }
 
+  #isDeleteTransaction(
+    sessionID: SessionID,
+    newTransactions: Transaction[],
+    skipVerify: boolean,
+  ) {
+    if (!this.verified) {
+      return {
+        value: false,
+      };
+    }
+
+    // Detect + validate delete transactions during ingestion
+    // Delete transactions are:
+    // - in a delete session (sessionID ends with `$`)
+    // - trusting (unencrypted)
+    // - have meta `{ deleted: true }`
+    let deleteTransaction: Transaction | undefined = undefined;
+
+    if (isDeleteSessionID(sessionID)) {
+      const txCount =
+        this.verified.sessions.get(sessionID)?.transactions.length ?? 0;
+      if (txCount > 0 || newTransactions.length > 1) {
+        return {
+          value: true,
+          err: {
+            type: "DeleteTransactionRejected",
+            id: this.id,
+            sessionID,
+            reason: "InvalidDeleteTransaction",
+            error: new Error(
+              "Delete transaction must be the only transaction in the session",
+            ),
+          } as const,
+        };
+      }
+
+      const firstTransaction = newTransactions[0];
+
+      if (
+        firstTransaction &&
+        this.#isDeleteMarkerTransaction(firstTransaction)
+      ) {
+        deleteTransaction = firstTransaction;
+      }
+
+      if (this.isGroupOrAccount()) {
+        return {
+          value: true,
+          err: {
+            type: "DeleteTransactionRejected",
+            id: this.id,
+            sessionID,
+            reason: "CoValueNotDeletable",
+            error: new Error("Cannot delete Group or Account coValues"),
+          },
+        } as const;
+      }
+    }
+
+    if (!skipVerify && deleteTransaction) {
+      const author = accountOrAgentIDfromSessionID(sessionID);
+
+      const permission = this.#canAuthorDeleteCoValueAtTime(
+        author,
+        deleteTransaction.madeAt,
+      );
+
+      if (!permission.ok) {
+        return {
+          value: true,
+          err: {
+            type: "DeleteTransactionRejected",
+            id: this.id,
+            sessionID,
+            author,
+            reason: permission.reason,
+            error: new Error(permission.message),
+          },
+        } as const;
+      }
+    }
+
+    return {
+      value: Boolean(deleteTransaction),
+    };
+  }
+
   /**
    * Apply new transactions that were not generated by the current node to the CoValue
    */
@@ -644,7 +769,21 @@ export class CoValueCore {
     newSignature: Signature,
     skipVerify: boolean = false,
   ) {
+    if (newTransactions.length === 0) {
+      return;
+    }
+
     let signerID: SignerID | undefined;
+
+    // sync should never try to add transactions to a deleted coValue
+    // this can only happen if `tryAddTransactions` is called directly, without going through `handleNewContent`
+    if (this.isDeleted && !isDeleteSessionID(sessionID)) {
+      return {
+        type: "CoValueDeleted",
+        id: this.id,
+        error: new Error("Cannot add transactions to a deleted coValue"),
+      } as const;
+    }
 
     if (!skipVerify) {
       const result = this.node.resolveAccountAgent(
@@ -671,6 +810,16 @@ export class CoValueCore {
       };
     }
 
+    const isDeleteTransaction = this.#isDeleteTransaction(
+      sessionID,
+      newTransactions,
+      skipVerify,
+    );
+
+    if (isDeleteTransaction.err) {
+      return isDeleteTransaction.err;
+    }
+
     try {
       this.verified.tryAddTransactions(
         sessionID,
@@ -680,12 +829,88 @@ export class CoValueCore {
         skipVerify,
       );
 
+      // Mark deleted state when a delete marker transaction is accepted.
+      // - In skipVerify mode (storage shards), we accept + mark without permission checks.
+      // - In verify mode, we only reach here if the delete permission check passed.
+      if (isDeleteTransaction.value) {
+        this.#markAsDeleted();
+      }
+
       this.processNewTransactions();
       this.scheduleNotifyUpdate();
       this.invalidateDependants();
     } catch (e) {
       return { type: "InvalidSignature", id: this.id, error: e } as const;
     }
+  }
+
+  #markAsDeleted() {
+    this.isDeleted = true;
+    this.verified?.markAsDeleted();
+  }
+
+  #isDeleteMarkerTransaction(tx: Transaction): boolean {
+    if (tx.privacy !== "trusting") {
+      return false;
+    }
+    if (!tx.meta) {
+      return false;
+    }
+    const meta = safeParseJSON(tx.meta);
+    return meta?.deleted === true;
+  }
+
+  #canAuthorDeleteCoValueAtTime(
+    author: RawAccountID | AgentID,
+    madeAt: number,
+  ):
+    | { ok: true }
+    | {
+        ok: false;
+        reason: DeleteTransactionRejectedError["reason"];
+        message: string;
+      } {
+    if (!this.verified) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message: "Cannot verify delete permissions without verified state",
+      };
+    }
+
+    if (this.isGroupOrAccount()) {
+      return {
+        ok: false,
+        reason: "CoValueNotDeletable",
+        message: "Cannot delete Group or Account coValues",
+      };
+    }
+
+    const group = this.safeGetGroup();
+
+    // Today, delete permission is defined in terms of group-admin on the owning group.
+    // If we cannot derive that (non-owned coValues), we reject the delete when verification is required.
+    if (!group) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message:
+          "Cannot verify delete permissions for coValues not owned by a group",
+      };
+    }
+
+    const groupAtTime = group.atTime(madeAt);
+    const role = groupAtTime.roleOfInternal(author);
+
+    if (role !== "admin") {
+      return {
+        ok: false,
+        reason: "NotAdmin",
+        message: "Delete transaction rejected: author is not an admin",
+      };
+    }
+
+    return { ok: true };
   }
 
   notifyDependants() {
@@ -785,6 +1010,70 @@ export class CoValueCore {
     };
   }
 
+  validateDeletePermissions() {
+    if (!this.verified) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message: "Cannot verify delete permissions without verified state",
+      };
+    }
+
+    if (this.isGroupOrAccount()) {
+      return {
+        ok: false,
+        reason: "CoValueNotDeletable",
+        message: "Cannot delete Group or Account coValues",
+      };
+    }
+
+    const group = this.safeGetGroup();
+    if (!group) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message:
+          "Cannot verify delete permissions for coValues not owned by a group",
+      };
+    }
+
+    const role = group.myRole();
+    if (role !== "admin") {
+      return {
+        ok: false,
+        reason: "NotAdmin",
+        message:
+          "The current account lacks admin permissions to delete this coValue",
+      };
+    }
+
+    return { ok: true };
+  }
+
+  /**
+   * Creates a delete marker transaction for this CoValue and sets the coValue as deleted
+   *
+   * Constraints:
+   * - Account and Group CoValues cannot be deleted.
+   * - Only admins can delete a coValue.
+   */
+  deleteCoValue() {
+    if (this.isDeleted) {
+      return;
+    }
+
+    const result = this.validateDeletePermissions();
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+
+    this.makeTransaction(
+      [], // Empty changes array
+      "trusting", // Unencrypted
+      { deleted: true }, // Delete metadata
+    );
+  }
+
   /**
    * Creates a new transaction with local changes and syncs it to all peers
    */
@@ -799,15 +1088,29 @@ export class CoValueCore {
         "CoValueCore: makeTransaction called on coValue without verified state",
       );
     }
+    const isDeleteTransaction = meta?.deleted;
+
+    if (this.isDeleted && !isDeleteTransaction) {
+      logger.error("Cannot make transaction on a deleted coValue", {
+        id: this.id,
+      });
+      return false;
+    }
 
     // This is an ugly hack to get a unique but stable session ID for editing the current account
-    const sessionID =
+    let sessionID =
       this.verified.header.meta?.type === "account"
         ? (this.node.currentSessionID.replace(
             this.node.getCurrentAgent().id,
             this.node.getCurrentAgent().currentAgentID(),
           ) as SessionID)
         : this.node.currentSessionID;
+
+    if (isDeleteTransaction) {
+      sessionID = this.crypto.newDeleteSessionID(
+        this.node.getCurrentAccountOrAgentID(),
+      );
+    }
 
     const signerAgent = this.node.getCurrentAgent();
 
@@ -839,6 +1142,10 @@ export class CoValueCore {
         meta,
         madeAt ?? Date.now(),
       );
+    }
+
+    if (isDeleteTransaction) {
+      this.#markAsDeleted();
     }
 
     const { transaction } = result;
@@ -1293,6 +1600,14 @@ export class CoValueCore {
     this.dependant.add(dependant);
   }
 
+  isGroupOrAccount() {
+    if (!this.verified) {
+      return false;
+    }
+
+    return this.verified.header.ruleset.type === "group";
+  }
+
   isGroup() {
     if (!this.verified) {
       return false;
@@ -1646,9 +1961,19 @@ export type TriedToAddTransactionsWithoutSignerIDError = {
   sessionID: SessionID;
 };
 
+export type DeleteTransactionRejectedError = {
+  type: "DeleteTransactionRejected";
+  id: RawCoID;
+  sessionID: SessionID;
+  author: RawAccountID | AgentID;
+  reason: "NotAdmin" | "CoValueNotDeletable" | "CannotVerifyPermissions";
+  error: Error;
+};
+
 export type TryAddTransactionsError =
   | TriedToAddTransactionsWithoutVerifiedStateErrpr
   | TriedToAddTransactionsWithoutSignerIDError
   | ResolveAccountAgentError
   | InvalidHashError
-  | InvalidSignatureError;
+  | InvalidSignatureError
+  | DeleteTransactionRejectedError;

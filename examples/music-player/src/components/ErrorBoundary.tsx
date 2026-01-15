@@ -57,6 +57,26 @@ export class ErrorBoundary extends React.Component<
         );
       }
 
+      if (this.state.errorType === "deleted") {
+        return (
+          <div className="flex min-h-screen items-center justify-center p-8">
+            <div className="max-w-2xl space-y-4">
+              <h1 className="text-2xl font-semibold text-red-600">
+                The page you are trying to access has been deleted
+              </h1>
+              <button
+                onClick={() => {
+                  window.location.href = "/";
+                }}
+                className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+              >
+                Go to home page
+              </button>
+            </div>
+          </div>
+        );
+      }
+
       if (this.state.errorType === "unavailable") {
         return (
           <div className="flex min-h-screen items-center justify-center p-8">

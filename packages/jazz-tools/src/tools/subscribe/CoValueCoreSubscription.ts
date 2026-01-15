@@ -223,6 +223,7 @@ export class CoValueCoreSubscription {
  */
 function isCompletelyDownloaded(value: RawCoValue) {
   return (
+    value.core.isDeleted ||
     value.core.verified?.header.meta?.type === "binary" ||
     value.core.isCompletelyDownloaded()
   );
