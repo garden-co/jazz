@@ -9,8 +9,7 @@ import type { AnyWebSocket } from "../types.js";
 import { BUFFER_LIMIT, BUFFER_LIMIT_POLLING_INTERVAL } from "../utils.js";
 import { createTestMetricReader, tearDownTestMetricReader } from "./utils.js";
 
-const { CO_VALUE_PRIORITY, WEBSOCKET_CONFIG, setOutgoingMessagesChunkDelay } =
-  cojsonInternals;
+const { CO_VALUE_PRIORITY, WEBSOCKET_CONFIG } = cojsonInternals;
 
 const { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } = WEBSOCKET_CONFIG;
 
@@ -43,10 +42,6 @@ function setup(opts: Partial<CreateWebSocketPeerOpts> = {}) {
 function serializeMessages(messages: SyncMessage[]) {
   return messages.map((msg) => JSON.stringify(msg)).join("\n");
 }
-
-afterEach(() => {
-  setOutgoingMessagesChunkDelay(5);
-});
 
 describe("createWebSocketPeer", () => {
   test("should create a peer with correct properties", () => {
@@ -611,7 +606,6 @@ describe("createWebSocketPeer", () => {
     });
 
     test("should drain the outgoing queue on websocket close so pulled equals pushed", async () => {
-      setOutgoingMessagesChunkDelay(500);
       const metricReader = createTestMetricReader();
       const { peer, listeners } = setup();
 

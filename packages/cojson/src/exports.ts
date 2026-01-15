@@ -89,7 +89,6 @@ import {
   setIncomingMessagesTimeBudget,
   setMaxInFlightLoadsPerPeer,
   setMaxOutgoingMessagesChunkBytes,
-  setOutgoingMessagesChunkDelay,
   setMaxRecommendedTxSize,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
@@ -141,7 +140,6 @@ export const cojsonInternals = {
   canBeBranched,
   WEBSOCKET_CONFIG,
   setMaxOutgoingMessagesChunkBytes,
-  setOutgoingMessagesChunkDelay,
   setMaxInFlightLoadsPerPeer,
 };
 

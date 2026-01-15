@@ -498,7 +498,7 @@ export class SyncManager {
         currentTimer - lastTimer >
         SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
       ) {
-        await new Promise<void>((resolve) => setTimeout(resolve));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
         lastTimer = performance.now();
       }
     }

@@ -64,15 +64,10 @@ export function setGarbageCollectorInterval(interval: number) {
 
 export const WEBSOCKET_CONFIG = {
   MAX_OUTGOING_MESSAGES_CHUNK_BYTES: 25_000,
-  OUTGOING_MESSAGES_CHUNK_DELAY: 5,
 };
 
 export function setMaxOutgoingMessagesChunkBytes(bytes: number) {
   WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES = bytes;
-}
-
-export function setOutgoingMessagesChunkDelay(delay: number) {
-  WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY = delay;
 }
 
 export function setMaxInFlightLoadsPerPeer(limit: number) {
