@@ -370,14 +370,14 @@ pub struct TestClient {
 }
 
 impl TestClient {
-    /// Create a new test client with its own Database.
+    /// Create a new test client with its own LocalNode.
     fn new(transport: Arc<TestTransport>, id: impl Into<String>) -> Self {
         let id = id.into();
         let env = TestClientEnv::new(Arc::clone(&transport), &id);
-        // Each client gets its OWN Database - NOT shared with server
+        // Each client gets its OWN LocalNode - NOT shared with server
         let db = crate::sql::Database::in_memory();
-        let db_state = db.into_state();
-        let sync_client = super::client::SyncClient::new(env, db_state);
+        let node_arc = db.state().node_arc();
+        let sync_client = super::client::SyncClient::new(env, node_arc);
         Self { sync_client, id }
     }
 

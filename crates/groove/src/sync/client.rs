@@ -5,13 +5,16 @@
 //! - SSE event handling for real-time updates
 //! - Persistent tracking of unsynced objects via SyncStateStore
 //! - Automatic reconnection with exponential backoff
+//!
+//! **Important**: The sync client knows NOTHING about databases, SQL, schemas, or tables.
+//! It operates purely at the object/commit level.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::commit::CommitId;
+use crate::node::LocalNode;
 use crate::object::ObjectId;
-use crate::sql::DatabaseState;
 
 use super::env::{ClientEnv, ClientError};
 use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers};
@@ -92,13 +95,16 @@ pub type ErrorCallback = Box<dyn Fn(&str)>;
 /// Manages connection to server, query subscriptions, and sync state.
 /// Generic over `E: ClientEnv` which provides the transport layer.
 ///
+/// **Important**: The sync client knows NOTHING about databases, SQL, schemas, or tables.
+/// It operates purely at the object/commit level.
+///
 /// Unsynced object tracking is delegated to the `LocalNode`'s storage
 /// via the `SyncStateStore` trait for persistence across restarts.
 pub struct SyncClient<E: ClientEnv> {
     /// Transport environment for HTTP/SSE operations
     env: E,
-    /// Database state for storage and SQL operations
-    db: Arc<DatabaseState>,
+    /// The underlying object store
+    node: Arc<LocalNode>,
     /// Current connection state
     connection_state: ConnectionState,
     /// Active query subscriptions by ID
@@ -123,11 +129,11 @@ impl<E: ClientEnv> SyncClient<E> {
     /// # Arguments
     ///
     /// * `env` - The transport environment (implements ClientEnv)
-    /// * `db` - The database state for storage and SQL operations
-    pub fn new(env: E, db: Arc<DatabaseState>) -> Self {
+    /// * `node` - The local node for object storage
+    pub fn new(env: E, node: Arc<LocalNode>) -> Self {
         Self {
             env,
-            db,
+            node,
             connection_state: ConnectionState::Disconnected,
             subscriptions: HashMap::new(),
             next_subscription_id: 1,
@@ -142,12 +148,12 @@ impl<E: ClientEnv> SyncClient<E> {
     /// Create a new sync client with custom reconnection configuration.
     pub fn with_reconnect_config(
         env: E,
-        db: Arc<DatabaseState>,
+        node: Arc<LocalNode>,
         reconnect_config: ReconnectConfig,
     ) -> Self {
         Self {
             env,
-            db,
+            node,
             connection_state: ConnectionState::Disconnected,
             subscriptions: HashMap::new(),
             next_subscription_id: 1,
@@ -164,21 +170,14 @@ impl<E: ClientEnv> SyncClient<E> {
         &self.env
     }
 
-    /// Get a reference to the database state.
-    pub fn db_state(&self) -> &Arc<DatabaseState> {
-        &self.db
-    }
-
-    /// Get a Database view for SQL operations.
-    ///
-    /// This creates a lightweight wrapper around the shared DatabaseState.
-    pub fn database(&self) -> crate::sql::Database {
-        crate::sql::Database::from_state(Arc::clone(&self.db))
-    }
-
     /// Get a reference to the local node.
-    pub fn node(&self) -> &crate::node::LocalNode {
-        self.db.node()
+    pub fn node(&self) -> &LocalNode {
+        &self.node
+    }
+
+    /// Get the local node as an Arc.
+    pub fn node_arc(&self) -> Arc<LocalNode> {
+        Arc::clone(&self.node)
     }
 
     /// Allocate a new subscription ID.
@@ -563,7 +562,7 @@ mod tests {
 
     fn make_client() -> SyncClient<MockClientEnv> {
         let db = crate::sql::Database::in_memory();
-        SyncClient::new(MockClientEnv, db.into_state())
+        SyncClient::new(MockClientEnv, db.state().node_arc())
     }
 
     #[test]

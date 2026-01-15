@@ -1664,11 +1664,13 @@ impl Database {
                 .create_object(format!("row:{}:{}", table, generate_object_id()));
 
         // Set object metadata to identify this as a row object
-        // NOTE: The table is identified via the branch name convention (env-descriptorId-branch)
+        // - `type: row` identifies this as a row object
+        // - `table: name` identifies which table (used by database callbacks)
         // The sync layer passes through metadata without interpreting it
         {
             let mut meta = std::collections::BTreeMap::new();
             meta.insert("type".to_string(), "row".to_string());
+            meta.insert("table".to_string(), table.to_string());
             if let Some(obj) = self.state.node.get_object(row_id)
                 && let Ok(mut obj_write) = obj.write()
             {

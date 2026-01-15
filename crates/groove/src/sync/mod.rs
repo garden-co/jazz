@@ -1,8 +1,7 @@
 //! Sync module for client-server synchronization.
 //!
-//! This module implements a query-based sync protocol where:
-//! - Clients subscribe to SQL queries
-//! - Server executes queries with ReBAC permissions to determine which objects to sync
+//! This module implements an object-based sync protocol where:
+//! - Clients connect to upstream servers and subscribe to queries
 //! - Both peers track assumed known state to send only deltas
 //! - Transport: HTTP POST (client→server) + SSE (server→client)
 //!
@@ -17,14 +16,40 @@
 //!   - `WriteBuffer`: Batching/debouncing for upstream pushes
 //!
 //! **Important**: The sync layer knows NOTHING about databases, SQL, schemas, or tables.
-//! It operates purely at the object/commit level. Objects marked as `node_private` in
-//! their metadata are never synced. Higher layers (e.g., Database) observe incoming
-//! objects via the `set_on_objects_received` callback.
+//! It operates purely at the object/commit level:
+//! - Objects marked as `node_private` in their metadata are never synced
+//! - Object metadata is passed through opaquely (BTreeMap<String, String>)
+//! - Higher layers (e.g., Database) observe incoming objects via callbacks
+//!
+//! # Layer Separation
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │  Database Layer (SQL, schema, queries)                  │
+//! │  - Marks objects with metadata (type, priority, etc.)   │
+//! │  - Observes synced objects via on_objects_received      │
+//! └─────────────────────────────────────────────────────────┘
+//!                           │ uses
+//!                           ▼
+//! ┌─────────────────────────────────────────────────────────┐
+//! │  Sync Layer (this module)                               │
+//! │  - Wraps LocalNode for sync capabilities                │
+//! │  - Respects node_private flag                           │
+//! │  - Passes metadata through opaquely                     │
+//! └─────────────────────────────────────────────────────────┘
+//!                           │ uses
+//!                           ▼
+//! ┌─────────────────────────────────────────────────────────┐
+//! │  ObjectStore (LocalNode)                                │
+//! │  - Pure storage with object metadata                    │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
 //!
 //! # Crate Organization
 //!
 //! - **groove** (this crate): Core sync logic and traits
 //!   - `SyncedNode<R, E>`: LocalNode with sync capabilities
+//!   - `SyncClient<E>`: Client-side sync (subscriptions, push, reconnect)
 //!   - `Runtime`: Trait for async task spawning (TokioRuntime, WasmRuntime)
 //!   - `ClientEnv`: Transport abstraction for upstream connections
 //!
