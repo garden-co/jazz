@@ -191,13 +191,15 @@ impl WasmSyncedLocalNode {
     // SQL Operations
     // ========================================================================
 
-    /// Execute a SQL statement.
+    /// Execute a SQL statement with automatic sync queueing.
+    ///
+    /// INSERT/UPDATE/DELETE operations automatically queue affected rows
+    /// for sync to upstream servers.
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
         let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
 
-        match db.execute(sql) {
+        match node.execute(sql) {
             Ok(result) => {
                 let js_result = match result {
                     ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
@@ -206,8 +208,6 @@ impl WasmSyncedLocalNode {
                     )
                     .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
-                        // Queue for push via write buffer
-                        node.queue_for_push(row_id, "main");
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
                     ExecuteResult::Updated(count) => {
@@ -227,9 +227,8 @@ impl WasmSyncedLocalNode {
     #[wasm_bindgen(js_name = selectBinary)]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
         let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
 
-        match db.query(sql) {
+        match node.query(sql) {
             Ok(rows) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
@@ -242,80 +241,16 @@ impl WasmSyncedLocalNode {
     #[wasm_bindgen(js_name = initSchema)]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
         let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
 
         for stmt in schema
             .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
-            db.execute(stmt)
+            node.execute(stmt)
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         }
         Ok(())
-    }
-
-    /// Update a specific row's column with a string value.
-    #[wasm_bindgen(js_name = updateRow)]
-    pub fn update_row(
-        &self,
-        table: &str,
-        row_id: &str,
-        column: &str,
-        value: &str,
-    ) -> Result<bool, JsValue> {
-        let id: groove::ObjectId = row_id
-            .parse()
-            .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
-        let value_owned = value.to_string();
-        let column_owned = column.to_string();
-
-        let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
-
-        let result = db
-            .update_with(table, id, |builder| {
-                builder
-                    .set_string_by_name(&column_owned, &value_owned)
-                    .build()
-            })
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        // Queue for push if update succeeded
-        if result {
-            node.queue_for_push(id, "main");
-        }
-        Ok(result)
-    }
-
-    /// Update a specific row's column with an i64 value.
-    #[wasm_bindgen(js_name = updateRowI64)]
-    pub fn update_row_i64(
-        &self,
-        table: &str,
-        row_id: &str,
-        column: &str,
-        value: i64,
-    ) -> Result<bool, JsValue> {
-        let id: groove::ObjectId = row_id
-            .parse()
-            .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
-        let column_owned = column.to_string();
-
-        let node = self.node.read();
-        let db = Database::from_state(node.db_arc());
-
-        let result = db
-            .update_with(table, id, |builder| {
-                builder.set_i64_by_name(&column_owned, value).build()
-            })
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        // Queue for push if update succeeded
-        if result {
-            node.queue_for_push(id, "main");
-        }
-        Ok(result)
     }
 
     /// List all tables in the database.

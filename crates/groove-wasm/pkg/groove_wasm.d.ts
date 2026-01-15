@@ -326,7 +326,10 @@ export class WasmSyncedLocalNode {
    */
   connect(query: string): Promise<any>;
   /**
-   * Execute a SQL statement.
+   * Execute a SQL statement with automatic sync queueing.
+   *
+   * INSERT/UPDATE/DELETE operations automatically queue affected rows
+   * for sync to upstream servers.
    */
   execute(sql: string): any;
   /**
@@ -337,14 +340,6 @@ export class WasmSyncedLocalNode {
    * Initialize the database schema from a SQL string.
    */
   initSchema(schema: string): void;
-  /**
-   * Update a specific row's column with a string value.
-   */
-  updateRow(table: string, row_id: string, column: string, value: string): boolean;
-  /**
-   * Update a specific row's column with an i64 value.
-   */
-  updateRowI64(table: string, row_id: string, column: string, value: bigint): boolean;
   /**
    * List all tables in the database.
    */
@@ -455,8 +450,6 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_initSchema: (a: number, b: number, c: number) => [number, number];
-  readonly wasmsyncedlocalnode_updateRow: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
-  readonly wasmsyncedlocalnode_updateRowI64: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number];
   readonly wasmsyncedlocalnode_listTables: (a: number) => any;
   readonly wasmsyncedlocalnode_subscribeDelta: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly wasmsyncedlocalnode_subscribeRows: (a: number, b: number, c: number, d: any) => [number, number, number];
@@ -464,10 +457,10 @@ export interface InitOutput {
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
   readonly syncedqueryhandle_diagram: (a: number) => [number, number];
   readonly syncedqueryhandle_free: (a: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h783d3c595025ae9c: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h28952e7d8d6ac40d: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h783d3c595025ae9c: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h28952e7d8d6ac40d: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

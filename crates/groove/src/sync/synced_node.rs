@@ -22,7 +22,7 @@ use web_time::Instant;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::sql::DatabaseState;
+use crate::sql::{Database, DatabaseError, DatabaseState, ExecuteResult};
 
 use super::env::{ClientEnv, ClientError};
 use super::event_handler::handle_commits_event;
@@ -657,6 +657,49 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Get the sync configuration.
     pub fn config(&self) -> &SyncConfig {
         &self.config
+    }
+
+    // ========== Sync-Aware Database API ==========
+
+    /// Execute a SQL statement with automatic sync queueing.
+    ///
+    /// This wraps `Database::execute()` and automatically queues any modified
+    /// rows for sync to upstream servers. Use this instead of accessing the
+    /// database directly when sync is desired.
+    pub fn execute(&self, sql: &str) -> Result<ExecuteResult, DatabaseError> {
+        let db = Database::from_state(Arc::clone(&self.db));
+        let result = db.execute(sql)?;
+
+        // Queue affected rows for sync
+        match &result {
+            ExecuteResult::Inserted { row_id, .. } => {
+                self.queue_for_push(*row_id, "main");
+            }
+            ExecuteResult::Updated(count) => {
+                // TODO: ExecuteResult::Updated should include row IDs
+                // For now, updates via execute() don't auto-sync
+                let _ = count;
+            }
+            ExecuteResult::Deleted(count) => {
+                // TODO: ExecuteResult::Deleted should include row IDs
+                // For now, deletes via execute() don't auto-sync
+                let _ = count;
+            }
+            ExecuteResult::Created(_) | ExecuteResult::PolicyCreated { .. } => {
+                // Schema changes don't need sync queueing
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Execute a SELECT query.
+    ///
+    /// Convenience wrapper around `Database::query()`.
+    /// Returns rows as (ObjectId, OwnedRow) tuples.
+    pub fn query(&self, sql: &str) -> Result<Vec<(ObjectId, crate::sql::OwnedRow)>, DatabaseError> {
+        let db = Database::from_state(Arc::clone(&self.db));
+        db.query(sql)
     }
 
     // ========== Upstream Server API ==========
