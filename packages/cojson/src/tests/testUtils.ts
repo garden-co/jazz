@@ -187,8 +187,8 @@ export function newGroupHighLevel() {
 
   const group = node.createGroup();
 
-  onTestFinished(() => {
-    node.gracefulShutdown();
+  onTestFinished(async () => {
+    await node.gracefulShutdown();
   });
   return { admin, node, group };
 }
@@ -517,8 +517,8 @@ export function setupTestNode(
     connectToSyncServer();
   }
 
-  onTestFinished(() => {
-    node.gracefulShutdown();
+  onTestFinished(async () => {
+    await node.gracefulShutdown();
   });
 
   const ctx = {

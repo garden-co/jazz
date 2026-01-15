@@ -73,6 +73,56 @@ describe("coValue sync state tracking", () => {
     expect(unsyncedTracker.has(map.id)).toBe(true);
   });
 
+  test("coValue is marked as synced after connecting to a server peer", async () => {
+    const client = setupTestNode({ connected: false });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const unsyncedTracker = client.node.syncManager.unsyncedTracker;
+    expect(unsyncedTracker.has(map.id)).toBe(true);
+
+    client.connectToSyncServer();
+
+    const serverPeer =
+      client.node.syncManager.peers[jazzCloud.node.currentSessionID]!;
+    await waitFor(() =>
+      client.node.syncManager.syncState.isSynced(serverPeer, map.id),
+    );
+    expect(unsyncedTracker.has(map.id)).toBe(false);
+  });
+
+  test("coValue is NOT marked as synced after uploading it to a client peer", async () => {
+    const client = setupTestNode({ connected: false });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const unsyncedTracker = client.node.syncManager.unsyncedTracker;
+    expect(unsyncedTracker.has(map.id)).toBe(true);
+
+    const anotherClient = setupTestNode({ connected: false });
+    anotherClient.connectToSyncServer({
+      syncServer: client.node,
+    });
+
+    // Load the coValue from the client to trigger sync between the server and the client
+    await anotherClient.node.loadCoValueCore(map.id);
+
+    const clientPeer =
+      client.node.syncManager.peers[anotherClient.node.currentSessionID]!;
+    await waitFor(() =>
+      client.node.syncManager.syncState.isSynced(clientPeer, map.id),
+    );
+    expect(unsyncedTracker.has(map.id)).toBe(true);
+  });
+
   test("only tracks sync state for persistent servers peers", async () => {
     const { node: client, connectToSyncServer } = setupTestNode({
       connected: true,
