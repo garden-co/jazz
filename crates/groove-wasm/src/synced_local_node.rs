@@ -722,11 +722,13 @@ async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
 
 /// Handle an SSE event from the server.
 fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
+    use groove::sync::handle_commits_event;
+
     match event {
         SseEvent::Commits {
             object_id,
             commits,
-            frontier: _,
+            frontier,
             object_meta,
         } => {
             web_sys::console::log_1(&JsValue::from_str(&format!(
@@ -735,62 +737,29 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
                 object_id
             )));
 
-            // Apply commits to the LocalNode underlying the Database
+            // Use shared event handler for core logic
             let state_ref = state.borrow();
-            let node = state_ref.db.node();
-            node.apply_commits(*object_id, "main", commits.clone());
-
-            // If we received object metadata with a table name, register the row
-            if let Some(meta) = object_meta {
-                if let Some(table_name) = meta.get("table") {
+            match handle_commits_event(
+                &state_ref.db,
+                *object_id,
+                commits.clone(),
+                frontier.clone(),
+                object_meta.clone(),
+            ) {
+                Ok(Some(table)) => {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Row {} belongs to table {}",
-                        object_id, table_name
+                        "Row {} registered with table {}",
+                        object_id, table
                     )));
-
-                    // Register the synced row with the database using table name
-                    if let Err(e) = state_ref
-                        .db
-                        .register_synced_row_by_table(*object_id, table_name)
-                    {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "Failed to register synced row: {:?}",
-                            e
-                        )));
-                    }
-                } else if let Some(descriptor_str) = meta.get("descriptor") {
-                    // Legacy fallback: use descriptor ID lookup
-                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Row {} belongs to descriptor {} (legacy)",
-                        object_id, descriptor_str
-                    )));
-
-                    if let Err(e) = state_ref.db.register_synced_row(*object_id, descriptor_str) {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "Failed to register synced row: {:?}",
-                            e
-                        )));
-                    }
                 }
-            } else {
-                // No metadata - this might be an update to an existing row
-                // Try to notify query graphs if we already know about this row
-                match state_ref.db.notify_synced_row_update(*object_id) {
-                    Ok(true) => {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "Notified query graphs about update to row {}",
-                            object_id
-                        )));
-                    }
-                    Ok(false) => {
-                        // Row not known to us - this is fine, might be a non-row object
-                    }
-                    Err(e) => {
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "Failed to notify synced row update: {:?}",
-                            e
-                        )));
-                    }
+                Ok(None) => {
+                    // No table metadata - handled by shared handler
+                }
+                Err(e) => {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Failed to handle commits: {}",
+                        e
+                    )));
                 }
             }
         }

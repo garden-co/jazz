@@ -28,6 +28,7 @@
 
 mod client;
 mod env;
+mod event_handler;
 mod negotiation;
 mod protocol;
 mod runtime;
@@ -42,6 +43,7 @@ pub mod test_harness;
 
 pub use client::*;
 pub use env::*;
+pub use event_handler::*;
 pub use negotiation::*;
 pub use protocol::*;
 pub use runtime::*;

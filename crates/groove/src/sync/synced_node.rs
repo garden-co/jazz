@@ -19,6 +19,7 @@ use crate::object::ObjectId;
 use crate::sql::DatabaseState;
 
 use super::env::{ClientEnv, ClientError};
+use super::event_handler::handle_commits_event;
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
@@ -738,25 +739,27 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Apply commits received from an upstream server.
     ///
     /// This is called automatically by the SSE event loop.
-    /// If `table_name` is provided, the row will be registered with the Database
-    /// so incremental queries can pick it up.
+    /// The commits are applied via the shared event handler, and then
+    /// SyncedNode-specific logic (known state tracking, broadcast) is done.
     pub fn apply_upstream_commits(
         &self,
         upstream_id: UpstreamId,
         object_id: ObjectId,
         commits: Vec<crate::commit::Commit>,
         frontier: Vec<CommitId>,
-        table_name: Option<&str>,
+        object_meta: Option<std::collections::BTreeMap<String, String>>,
     ) {
-        // Apply to local storage
-        self.db.node().apply_commits(object_id, "main", commits.clone());
-
-        // Register with Database if this is a table row
-        if let Some(table) = table_name {
-            // Use Database wrapper to register the synced row
-            let db = crate::sql::Database::from_state(self.db_arc());
-            let _ = db.register_synced_row_by_table(object_id, table);
-        }
+        // Use shared event handler for core logic:
+        // - Apply commits to local storage
+        // - Register with Database for incremental query notifications
+        let db = crate::sql::Database::from_state(self.db_arc());
+        let _ = handle_commits_event(
+            &db,
+            object_id,
+            commits.clone(),
+            frontier.clone(),
+            object_meta.clone(),
+        );
 
         // Update upstream's known state
         if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
@@ -770,7 +773,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
                 object_id,
                 commits,
                 frontier,
-                object_meta: None, // TODO: Include metadata for first sync
+                object_meta,
             };
             self.broadcast_to_clients(object_id, &event);
         }
@@ -1065,19 +1068,13 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                     upstream.track_object(sub_id, object_id);
                 }
 
-                // Extract table name from metadata if present
-                let table_name = object_meta
-                    .as_ref()
-                    .and_then(|meta| meta.get("table"))
-                    .map(|s| s.as_str());
-
-                // Ensure the object exists locally
-                if let Some(table) = table_name {
+                // Ensure the object exists locally with table name hint
+                if let Some(table) = object_meta.as_ref().and_then(|m| m.get("table")) {
                     self.db.node().ensure_object(object_id, table);
                 }
 
-                // Apply commits, register with Database, and broadcast
-                self.apply_upstream_commits(upstream_id, object_id, commits, frontier, table_name);
+                // Apply commits using shared event handler, then do SyncedNode-specific logic
+                self.apply_upstream_commits(upstream_id, object_id, commits, frontier, object_meta);
             }
             SseEvent::Excluded { object_id } => {
                 // Object no longer matches query - could clean up local tracking
