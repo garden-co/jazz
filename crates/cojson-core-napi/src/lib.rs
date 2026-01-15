@@ -2,7 +2,6 @@ use cojson_core::core::{
   CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
   SignerSecret, Transaction, TransactionMode,
 };
-use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -141,35 +140,35 @@ impl SessionLog {
   }
 
   /// Add an existing private transaction to the staging area.
-  /// The transaction is NOT committed until validateSignature() succeeds.
+  /// The transaction is NOT committed until commitTransactions() succeeds.
+  /// Note: made_at uses f64 because JavaScript's number type is f64.
   #[napi]
   pub fn add_existing_private_transaction(
     &mut self,
     encrypted_changes: String,
     key_used: String,
-    made_at: BigInt,
+    made_at: f64,
     meta: Option<String>,
   ) -> napi::Result<()> {
-    let made_at = made_at.get_u64().1;
     self
       .internal
-      .add_existing_private_transaction(encrypted_changes, key_used, made_at, meta)
+      .add_existing_private_transaction(encrypted_changes, key_used, made_at as u64, meta)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 
   /// Add an existing trusting transaction to the staging area.
-  /// The transaction is NOT committed until validateSignature() succeeds.
+  /// The transaction is NOT committed until commitTransactions() succeeds.
+  /// Note: made_at uses f64 because JavaScript's number type is f64.
   #[napi]
   pub fn add_existing_trusting_transaction(
     &mut self,
     changes: String,
-    made_at: BigInt,
+    made_at: f64,
     meta: Option<String>,
   ) -> napi::Result<()> {
-    let made_at = made_at.get_u64().1;
     self
       .internal
-      .add_existing_trusting_transaction(changes, made_at, meta)
+      .add_existing_trusting_transaction(changes, made_at as u64, meta)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 

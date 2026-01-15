@@ -65,14 +65,14 @@ interface NativeModuleInterface {
     ptr: bigint,
     encryptedChanges: Uint8Array,
     keyUsed: Uint8Array,
-    madeAt: bigint,
+    madeAt: number,
     meta: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_existing_trusting_transaction(
     ptr: bigint,
     changes: Uint8Array,
-    madeAt: bigint,
+    madeAt: number,
     meta: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;

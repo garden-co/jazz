@@ -36,13 +36,13 @@ This design describes how the `tryAdd` method is optimized by replacing JSON ser
 │        this.sessionLog.addExistingPrivateTransaction(               │
 │          tx.encryptedChanges,                                       │
 │          tx.keyUsed,                                                │
-│          BigInt(tx.madeAt),                                         │
+│          tx.madeAt,           // f64 - no BigInt needed             │
 │          tx.meta                                                    │
 │        );                                                           │
 │      } else {                                                       │
 │        this.sessionLog.addExistingTrustingTransaction(              │
 │          tx.changes,                                                │
-│          BigInt(tx.madeAt),                                         │
+│          tx.madeAt,           // f64 - no BigInt needed             │
 │          tx.meta                                                    │
 │        );                                                           │
 │      }                                                              │
@@ -72,9 +72,13 @@ This design describes how the `tryAdd` method is optimized by replacing JSON ser
 │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │
 │  │   NAPI (Node)  │  │  WASM (Browser)│  │ Uniffi (RN)    │         │
 │  │                │  │                │  │                │         │
-│  │  BigInt → u64  │  │  bigint → u64  │  │  u64 → u64     │         │
+│  │  f64 → f64     │  │  f64 → f64     │  │  f64 → f64     │         │
 │  │                │  │                │  │  (+ Mutex)     │         │
 │  └────────────────┘  └────────────────┘  └────────────────┘         │
+│                                                                      │
+│  Note: made_at uses f64 because JavaScript's number type is f64.    │
+│  Timestamps in milliseconds fit well within f64's 53-bit integer    │
+│  precision (safe up to ~285,000 years from epoch).                  │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
@@ -152,7 +156,7 @@ impl SessionLogInternal {
     /// # Arguments
     /// * `encrypted_changes` - The encrypted changes string (e.g., "encrypted_U...")
     /// * `key_used` - The key ID used for encryption
-    /// * `made_at` - Timestamp in milliseconds
+    /// * `made_at` - Timestamp in milliseconds (f64 for JS compatibility)
     /// * `meta` - Optional encrypted metadata
     /// 
     /// # Errors
@@ -161,7 +165,7 @@ impl SessionLogInternal {
         &mut self,
         encrypted_changes: String,
         key_used: String,
-        made_at: u64,
+        made_at: f64,
         meta: Option<String>,
     ) -> Result<(), CoJsonCoreError>;
 
@@ -170,15 +174,18 @@ impl SessionLogInternal {
     /// 
     /// # Arguments
     /// * `changes` - The stringified JSON changes
-    /// * `made_at` - Timestamp in milliseconds
+    /// * `made_at` - Timestamp in milliseconds (f64 for JS compatibility)
     /// * `meta` - Optional metadata
+    /// 
+    /// # Note on made_at type
+    /// We use f64 instead of u64 because JavaScript's number type is f64.
     /// 
     /// # Errors
     /// Returns `CoJsonCoreError::Json` if serialization fails (clears pending transactions).
     pub fn add_existing_trusting_transaction(
         &mut self,
         changes: String,
-        made_at: u64,
+        made_at: f64,
         meta: Option<String>,
     ) -> Result<(), CoJsonCoreError>;
 
@@ -211,24 +218,26 @@ impl SessionLogInternal {
 ### NAPI Binding (Node.js)
 
 ```rust
-#[napi(js_name = "addExistingPrivateTransaction")]
+/// Note: made_at uses f64 because JavaScript numbers are f64.
+/// No BigInt conversion needed - timestamps fit within f64 precision.
+#[napi]
 pub fn add_existing_private_transaction(
     &mut self,
     encrypted_changes: String,
     key_used: String,
-    made_at: BigInt,        // napi::bindgen_prelude::BigInt
+    made_at: f64,
     meta: Option<String>,
 ) -> napi::Result<()>;
 
-#[napi(js_name = "addExistingTrustingTransaction")]
+#[napi]
 pub fn add_existing_trusting_transaction(
     &mut self,
     changes: String,
-    made_at: BigInt,
+    made_at: f64,
     meta: Option<String>,
 ) -> napi::Result<()>;
 
-#[napi(js_name = "commitTransactions")]
+#[napi]
 pub fn commit_transactions(
     &mut self,
     new_signature_str: String,
@@ -239,12 +248,13 @@ pub fn commit_transactions(
 ### WASM Binding (Browser)
 
 ```rust
+/// Note: made_at uses f64 because JavaScript numbers are f64.
 #[wasm_bindgen(js_name = addExistingPrivateTransaction)]
 pub fn add_existing_private_transaction(
     &mut self,
     encrypted_changes: String,
     key_used: String,
-    made_at: u64,           // wasm-bindgen maps to bigint
+    made_at: f64,
     meta: Option<String>,
 ) -> Result<(), CojsonCoreWasmError>;
 
@@ -252,7 +262,7 @@ pub fn add_existing_private_transaction(
 pub fn add_existing_trusting_transaction(
     &mut self,
     changes: String,
-    made_at: u64,
+    made_at: f64,
     meta: Option<String>,
 ) -> Result<(), CojsonCoreWasmError>;
 
@@ -268,19 +278,20 @@ pub fn commit_transactions(
 
 ```rust
 // Note: Uniffi bindings use Mutex<SessionLogInternal> for thread safety
+// made_at uses f64 because JavaScript numbers are f64.
 
 pub fn add_existing_private_transaction(
     &self,
     encrypted_changes: String,
     key_used: String,
-    made_at: u64,
+    made_at: f64,
     meta: Option<String>,
 ) -> Result<(), SessionLogError>;
 
 pub fn add_existing_trusting_transaction(
     &self,
     changes: String,
-    made_at: u64,
+    made_at: f64,
     meta: Option<String>,
 ) -> Result<(), SessionLogError>;
 
@@ -466,13 +477,13 @@ tryAdd(
       this.sessionLog.addExistingPrivateTransaction(
         tx.encryptedChanges,
         tx.keyUsed,
-        BigInt(tx.madeAt),
+        tx.madeAt,  // f64 - no BigInt conversion needed
         tx.meta,
       );
     } else {
       this.sessionLog.addExistingTrustingTransaction(
         tx.changes,
-        BigInt(tx.madeAt),
+        tx.madeAt,  // f64 - no BigInt conversion needed
         tx.meta,
       );
     }
@@ -483,6 +494,15 @@ tryAdd(
 ```
 
 ## Rust Implementation Notes
+
+### Why f64 for made_at?
+
+JavaScript's `number` type is IEEE 754 double-precision (f64). While Rust might naturally use `u64` for timestamps, we use `f64` to match JavaScript's native type and avoid unnecessary conversions:
+
+- **No BigInt needed**: Passing `madeAt` directly without `BigInt()` conversion
+- **Sufficient precision**: f64 has 53 bits of integer precision (`Number.MAX_SAFE_INTEGER = 9,007,199,254,740,991`)
+- **~285,000 years**: Timestamps in milliseconds since epoch are safe well beyond practical use
+- **Simpler FFI**: Direct f64 ↔ f64 mapping across all bindings (NAPI, WASM, Uniffi)
 
 ### Core Layer Changes
 
@@ -510,13 +530,13 @@ impl SessionLogInternal {
         &mut self,
         encrypted_changes: String,
         key_used: String,
-        made_at: u64,
+        made_at: f64,  // f64 for JS compatibility
         meta: Option<String>,
     ) -> Result<(), CoJsonCoreError> {
         let tx = Transaction::Private(PrivateTransaction {
             encrypted_changes: Encrypted { value: encrypted_changes, _phantom: PhantomData },
             key_used: KeyID(key_used),
-            made_at: Number::from(made_at),
+            made_at: Number::from(made_at as u64),  // Convert to u64 for internal storage
             meta: meta.map(|m| Encrypted { value: m, _phantom: PhantomData }),
             privacy: "private".to_string(),
         });
@@ -537,12 +557,12 @@ impl SessionLogInternal {
     pub fn add_existing_trusting_transaction(
         &mut self,
         changes: String,
-        made_at: u64,
+        made_at: f64,  // f64 for JS compatibility
         meta: Option<String>,
     ) -> Result<(), CoJsonCoreError> {
         let tx = Transaction::Trusting(TrustingTransaction {
             changes,
-            made_at: Number::from(made_at),
+            made_at: Number::from(made_at as u64),  // Convert to u64 for internal storage
             meta,
             privacy: "trusting".to_string(),
         });
@@ -642,6 +662,7 @@ The staging area approach guarantees:
 | JSON.stringify (JS side) | ❌ Required | ✅ Not needed |
 | FFI calls | 1 call | N+1 calls |
 | Memory overhead | JSON strings | Pending Vec |
+| BigInt conversion | N/A | ✅ Not needed (f64) |
 | Performance | Baseline | ~2.7x faster |
 
 The overhead of multiple FFI calls is significantly less than the JSON serialization overhead.
@@ -675,9 +696,8 @@ The overhead of multiple FFI calls is significantly less than the JSON serializa
 ### Integration Tests (Binding Layer)
 
 1. **Type Mapping Tests**
-   - Verify `BigInt` (NAPI) correctly converts to `u64`
-   - Verify `bigint` (WASM) correctly converts to `u64`
-   - Verify `u64` (Uniffi) is passed correctly
+   - Verify `f64` correctly passes through all bindings (NAPI, WASM, Uniffi)
+   - Verify timestamp precision is maintained
 
 2. **Error Propagation Tests**
    - Verify core errors are correctly converted to binding-specific errors

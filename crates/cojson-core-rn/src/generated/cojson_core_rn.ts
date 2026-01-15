@@ -1738,21 +1738,23 @@ const FfiConverterTypeBlake3Hasher = new FfiConverterObject(
 export interface SessionLogInterface {
   /**
    * Add an existing private transaction to the staging area.
-   * The transaction is NOT committed until validate_signature() succeeds.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
   addExistingPrivateTransaction(
     encryptedChanges: string,
     keyUsed: string,
-    madeAt: /*u64*/ bigint,
+    madeAt: /*f64*/ number,
     meta: string | undefined
   ) /*throws*/ : void;
   /**
    * Add an existing trusting transaction to the staging area.
-   * The transaction is NOT committed until validate_signature() succeeds.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
   addExistingTrustingTransaction(
     changes: string,
-    madeAt: /*u64*/ bigint,
+    madeAt: /*f64*/ number,
     meta: string | undefined
   ) /*throws*/ : void;
   addNewPrivateTransaction(
@@ -1816,12 +1818,13 @@ export class SessionLog
 
   /**
    * Add an existing private transaction to the staging area.
-   * The transaction is NOT committed until validate_signature() succeeds.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
   public addExistingPrivateTransaction(
     encryptedChanges: string,
     keyUsed: string,
-    madeAt: /*u64*/ bigint,
+    madeAt: /*f64*/ number,
     meta: string | undefined
   ): void /*throws*/ {
     uniffiCaller.rustCallWithError(
@@ -1833,7 +1836,7 @@ export class SessionLog
           uniffiTypeSessionLogObjectFactory.clonePointer(this),
           FfiConverterString.lower(encryptedChanges),
           FfiConverterString.lower(keyUsed),
-          FfiConverterUInt64.lower(madeAt),
+          FfiConverterFloat64.lower(madeAt),
           FfiConverterOptionalString.lower(meta),
           callStatus
         );
@@ -1844,11 +1847,12 @@ export class SessionLog
 
   /**
    * Add an existing trusting transaction to the staging area.
-   * The transaction is NOT committed until validate_signature() succeeds.
+   * The transaction is NOT committed until commit_transactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
   public addExistingTrustingTransaction(
     changes: string,
-    madeAt: /*u64*/ bigint,
+    madeAt: /*f64*/ number,
     meta: string | undefined
   ): void /*throws*/ {
     uniffiCaller.rustCallWithError(
@@ -1859,7 +1863,7 @@ export class SessionLog
         nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_existing_trusting_transaction(
           uniffiTypeSessionLogObjectFactory.clonePointer(this),
           FfiConverterString.lower(changes),
-          FfiConverterUInt64.lower(madeAt),
+          FfiConverterFloat64.lower(madeAt),
           FfiConverterOptionalString.lower(meta),
           callStatus
         );
@@ -2342,7 +2346,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_private_transaction() !==
-    20800
+    30773
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_private_transaction'
@@ -2350,7 +2354,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_trusting_transaction() !==
-    34230
+    44589
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_trusting_transaction'

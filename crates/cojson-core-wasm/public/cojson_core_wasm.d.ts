@@ -198,14 +198,16 @@ export class SessionLog {
   addNewTrustingTransaction(changes_json: string, signer_secret: string, made_at: number, meta?: string | null): string;
   /**
    * Add an existing private transaction to the staging area.
-   * The transaction is NOT committed until validateSignature() succeeds.
+   * The transaction is NOT committed until commitTransactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
-  addExistingPrivateTransaction(encrypted_changes: string, key_used: string, made_at: bigint, meta?: string | null): void;
+  addExistingPrivateTransaction(encrypted_changes: string, key_used: string, made_at: number, meta?: string | null): void;
   /**
    * Add an existing trusting transaction to the staging area.
-   * The transaction is NOT committed until validateSignature() succeeds.
+   * The transaction is NOT committed until commitTransactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
-  addExistingTrustingTransaction(changes: string, made_at: bigint, meta?: string | null): void;
+  addExistingTrustingTransaction(changes: string, made_at: number, meta?: string | null): void;
   decryptNextTransactionMetaJson(tx_index: number, encryption_key: string): string | undefined;
   decryptNextTransactionChangesJson(tx_index: number, encryption_key: string): string;
   constructor(co_id: string, session_id: string, signer_id?: string | null);
@@ -217,8 +219,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_sessionlog_free: (a: number, b: number) => void;
-  readonly sessionlog_addExistingPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: number) => [number, number];
-  readonly sessionlog_addExistingTrustingTransaction: (a: number, b: number, c: number, d: bigint, e: number, f: number) => [number, number];
+  readonly sessionlog_addExistingPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+  readonly sessionlog_addExistingTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
   readonly sessionlog_addNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
   readonly sessionlog_addNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly sessionlog_clone: (a: number) => number;

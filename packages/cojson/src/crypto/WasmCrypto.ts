@@ -240,13 +240,13 @@ class SessionLogAdapter {
         this.sessionLog.addExistingPrivateTransaction(
           tx.encryptedChanges,
           tx.keyUsed,
-          BigInt(tx.madeAt),
+          tx.madeAt,
           tx.meta,
         );
       } else {
         this.sessionLog.addExistingTrustingTransaction(
           tx.changes,
-          BigInt(tx.madeAt),
+          tx.madeAt,
           tx.meta,
         );
       }

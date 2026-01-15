@@ -926,10 +926,11 @@ export class SessionLog {
     }
     /**
      * Add an existing private transaction to the staging area.
-     * The transaction is NOT committed until validateSignature() succeeds.
+     * The transaction is NOT committed until commitTransactions() succeeds.
+     * Note: made_at uses f64 because JavaScript's number type is f64.
      * @param {string} encrypted_changes
      * @param {string} key_used
-     * @param {bigint} made_at
+     * @param {number} made_at
      * @param {string | null} [meta]
      */
     addExistingPrivateTransaction(encrypted_changes, key_used, made_at, meta) {
@@ -946,9 +947,10 @@ export class SessionLog {
     }
     /**
      * Add an existing trusting transaction to the staging area.
-     * The transaction is NOT committed until validateSignature() succeeds.
+     * The transaction is NOT committed until commitTransactions() succeeds.
+     * Note: made_at uses f64 because JavaScript's number type is f64.
      * @param {string} changes
-     * @param {bigint} made_at
+     * @param {number} made_at
      * @param {string | null} [meta]
      */
     addExistingTrustingTransaction(changes, made_at, meta) {

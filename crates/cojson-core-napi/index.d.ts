@@ -14,14 +14,16 @@ export declare class SessionLog {
   addNewTrustingTransaction(changesJson: string, signerSecret: string, madeAt: number, meta?: string | undefined | null): string
   /**
    * Add an existing private transaction to the staging area.
-   * The transaction is NOT committed until validateSignature() succeeds.
+   * The transaction is NOT committed until commitTransactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
-  addExistingPrivateTransaction(encryptedChanges: string, keyUsed: string, madeAt: bigint, meta?: string | undefined | null): void
+  addExistingPrivateTransaction(encryptedChanges: string, keyUsed: string, madeAt: number, meta?: string | undefined | null): void
   /**
    * Add an existing trusting transaction to the staging area.
-   * The transaction is NOT committed until validateSignature() succeeds.
+   * The transaction is NOT committed until commitTransactions() succeeds.
+   * Note: made_at uses f64 because JavaScript's number type is f64.
    */
-  addExistingTrustingTransaction(changes: string, madeAt: bigint, meta?: string | undefined | null): void
+  addExistingTrustingTransaction(changes: string, madeAt: number, meta?: string | undefined | null): void
   /**
    * Commit pending transactions to the main state.
    * If skip_validate is false, validates the signature first.

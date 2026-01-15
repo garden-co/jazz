@@ -133,17 +133,18 @@ impl SessionLog {
     }
 
     /// Add an existing private transaction to the staging area.
-    /// The transaction is NOT committed until validate_signature() succeeds.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
+    /// Note: made_at uses f64 because JavaScript's number type is f64.
     pub fn add_existing_private_transaction(
         &self,
         encrypted_changes: String,
         key_used: String,
-        made_at: u64,
+        made_at: f64,
         meta: Option<String>,
     ) -> Result<(), SessionLogError> {
         if let Ok(mut internal) = self.internal.lock() {
             internal
-                .add_existing_private_transaction(encrypted_changes, key_used, made_at, meta)
+                .add_existing_private_transaction(encrypted_changes, key_used, made_at as u64, meta)
                 .map_err(Into::into)
         } else {
             Err(SessionLogError::LockError)
@@ -151,16 +152,17 @@ impl SessionLog {
     }
 
     /// Add an existing trusting transaction to the staging area.
-    /// The transaction is NOT committed until validate_signature() succeeds.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
+    /// Note: made_at uses f64 because JavaScript's number type is f64.
     pub fn add_existing_trusting_transaction(
         &self,
         changes: String,
-        made_at: u64,
+        made_at: f64,
         meta: Option<String>,
     ) -> Result<(), SessionLogError> {
         if let Ok(mut internal) = self.internal.lock() {
             internal
-                .add_existing_trusting_transaction(changes, made_at, meta)
+                .add_existing_trusting_transaction(changes, made_at as u64, meta)
                 .map_err(Into::into)
         } else {
             Err(SessionLogError::LockError)
