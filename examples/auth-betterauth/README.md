@@ -3,6 +3,9 @@
 This example demonstrates how to integrate Jazz with BetterAuth for authentication
 and use JWT claims in ReBAC policies.
 
+> **Spec**: See [Authentication](/docs/internals/authentication) for the full specification
+> and [Access Control](/docs/internals/access-control) for ReBAC policy syntax.
+
 ## Architecture
 
 ```
