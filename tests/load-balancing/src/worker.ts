@@ -27,7 +27,7 @@ type WorkerStats = {
   opsDone: number;
   fileOpsDone: number;
   mapOpsDone: number;
-  errors: number;
+  unavailable: number;
 };
 
 function sleep(ms: number) {
@@ -106,7 +106,7 @@ async function main() {
   let opsDone = 0;
   let fileOpsDone = 0;
   let mapOpsDone = 0;
-  let errors = 0;
+  let unavailable = 0;
 
   const startedAt = Date.now();
   const deadline = startedAt + data.durationMs;
@@ -135,6 +135,8 @@ async function main() {
         v.unmount();
         mapOpsDone++;
       }
+    } else {
+      unavailable++;
     }
   }
 
@@ -156,7 +158,7 @@ async function main() {
         opsDone,
         fileOpsDone,
         mapOpsDone,
-        errors,
+        unavailable,
       };
       parentPort?.postMessage(msg);
     }
@@ -170,7 +172,7 @@ async function main() {
     opsDone,
     fileOpsDone,
     mapOpsDone,
-    errors,
+    unavailable,
   } satisfies WorkerStats);
 
   wsPeer.disable();

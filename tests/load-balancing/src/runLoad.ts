@@ -44,7 +44,7 @@ type WorkerStats = {
   opsDone: number;
   fileOpsDone: number;
   mapOpsDone: number;
-  errors: number;
+  unavailable: number;
 };
 type WorkerDone = { type: "done"; workerId: number };
 type WorkerMessage = WorkerHello | WorkerStats | WorkerDone;
@@ -159,13 +159,13 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
     let ops = 0;
     let fileOps = 0;
     let mapOps = 0;
-    let errors = 0;
+    let unavailable = 0;
 
     for (const s of byId.values()) {
       ops += s.opsDone;
       fileOps += s.fileOpsDone;
       mapOps += s.mapOpsDone;
-      errors += s.errors;
+      unavailable += s.unavailable;
     }
 
     const elapsedMs = Date.now() - startedAt;
@@ -173,9 +173,12 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
 
     console.log(
       JSON.stringify({
-        elapsedMs,
-        workers: { total: workers, done: doneCount },
-        ops: { total: ops, fileOps, mapOps, errors, opsPerSec },
+        opsPerSec: Number(opsPerSec.toFixed(5)),
+        duration: (elapsedMs / 1000).toFixed(0) + "s",
+        totalOps: ops,
+        fileOps,
+        mapOps,
+        unavailable,
       }),
     );
   };
