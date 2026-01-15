@@ -1,18 +1,22 @@
-//! SyncedNode - LocalNode with sync capabilities.
+//! SyncedNode - Database with sync capabilities.
 //!
-//! SyncedNode wraps a LocalNode and adds:
+//! SyncedNode wraps a DatabaseState and adds:
 //! - Upstream server connections (servers we sync TO)
 //! - Connected client sessions (clients that sync FROM us)
 //! - Automatic write batching/debouncing
 //! - Automatic SSE event application
+//!
+//! By wrapping DatabaseState instead of LocalNode, sync-applied commits
+//! automatically update the same storage that the SQL layer uses, enabling
+//! incremental query notifications when data arrives from upstream.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::commit::CommitId;
-use crate::node::LocalNode;
 use crate::object::ObjectId;
+use crate::sql::DatabaseState;
 
 use super::client::ReconnectConfig;
 use super::env::{ClientEnv, ClientError};
@@ -206,6 +210,62 @@ impl<E: ClientEnv> UpstreamServer<E> {
     /// Request reconciliation for an object.
     pub async fn reconcile(&mut self, request: ReconcileRequest) -> Result<SseEvent, ClientError> {
         self.env.reconcile(request).await
+    }
+
+    /// Get all active subscriptions for reconnection.
+    ///
+    /// Returns (query, options) pairs that should be re-subscribed after reconnect.
+    pub fn active_subscriptions(&self) -> Vec<(String, SubscriptionOptions)> {
+        self.subscriptions
+            .values()
+            .map(|s| (s.query.clone(), s.options.clone()))
+            .collect()
+    }
+
+    /// Get all objects tracked via subscriptions.
+    ///
+    /// Returns deduplicated list of object IDs from all subscriptions.
+    pub fn tracked_objects(&self) -> Vec<ObjectId> {
+        self.subscriptions
+            .values()
+            .flat_map(|s| s.objects.iter().copied())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Record that an object was received via a subscription.
+    pub fn track_object(&mut self, subscription_id: u32, object_id: ObjectId) {
+        if let Some(sub) = self.subscriptions.get_mut(&subscription_id) {
+            sub.objects.insert(object_id);
+        }
+    }
+
+    /// Clear all subscriptions (for reconnection).
+    pub fn clear_subscriptions(&mut self) {
+        self.subscriptions.clear();
+        self.next_subscription_id = 1;
+    }
+
+    /// Check if any subscriptions exist.
+    pub fn has_subscriptions(&self) -> bool {
+        !self.subscriptions.is_empty()
+    }
+
+    /// Add a subscription (for use when subscribe was called externally).
+    ///
+    /// Returns the subscription ID.
+    pub fn add_subscription(&mut self, query: String, options: SubscriptionOptions) -> u32 {
+        let sub_id = self.next_subscription_id();
+        self.subscriptions.insert(
+            sub_id,
+            UpstreamSubscription {
+                query,
+                options,
+                objects: std::collections::HashSet::new(),
+            },
+        );
+        sub_id
     }
 }
 
@@ -508,16 +568,20 @@ impl WriteBuffer {
 // SyncedNode
 // ============================================================================
 
-/// A LocalNode with sync capabilities.
+/// A DatabaseState with sync capabilities.
 ///
-/// SyncedNode wraps a LocalNode and adds:
+/// SyncedNode wraps a DatabaseState (which contains LocalNode + SQL schema) and adds:
 /// - Connections to upstream servers (servers we sync TO)
 /// - Sessions from connected clients (clients that sync FROM us)
 /// - Automatic write batching and debouncing
 /// - Automatic SSE event application
+///
+/// By wrapping DatabaseState instead of just LocalNode, sync-applied commits
+/// update the same storage that the SQL layer uses, enabling incremental
+/// query notifications when data arrives from upstream.
 pub struct SyncedNode<R: Runtime, E: ClientEnv> {
-    /// The underlying LocalNode.
-    node: Arc<LocalNode>,
+    /// The underlying DatabaseState (contains LocalNode + SQL schema).
+    db: Arc<DatabaseState>,
 
     /// Runtime for spawning async tasks.
     runtime: R,
@@ -537,10 +601,10 @@ pub struct SyncedNode<R: Runtime, E: ClientEnv> {
 }
 
 impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
-    /// Create a new SyncedNode.
-    pub fn new(node: Arc<LocalNode>, runtime: R) -> Self {
+    /// Create a new SyncedNode from a DatabaseState.
+    pub fn new(db: Arc<DatabaseState>, runtime: R) -> Self {
         Self {
-            node,
+            db,
             runtime,
             upstream_servers: RwLock::new(UpstreamServers::new()),
             #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
@@ -551,9 +615,9 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     }
 
     /// Create a new SyncedNode with custom configuration.
-    pub fn with_config(node: Arc<LocalNode>, runtime: R, config: SyncConfig) -> Self {
+    pub fn with_config(db: Arc<DatabaseState>, runtime: R, config: SyncConfig) -> Self {
         Self {
-            node,
+            db,
             runtime,
             upstream_servers: RwLock::new(UpstreamServers::new()),
             #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
@@ -563,9 +627,19 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
     }
 
-    /// Get a reference to the underlying LocalNode.
-    pub fn inner(&self) -> &Arc<LocalNode> {
-        &self.node
+    /// Get a reference to the underlying DatabaseState.
+    pub fn db(&self) -> &DatabaseState {
+        &self.db
+    }
+
+    /// Get the underlying DatabaseState as an Arc.
+    pub fn db_arc(&self) -> Arc<DatabaseState> {
+        Arc::clone(&self.db)
+    }
+
+    /// Get a reference to the underlying LocalNode (through DatabaseState).
+    pub fn inner(&self) -> &crate::node::LocalNode {
+        self.db.node()
     }
 
     /// Get the runtime.
@@ -665,15 +739,25 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     /// Apply commits received from an upstream server.
     ///
     /// This is called automatically by the SSE event loop.
+    /// If `table_name` is provided, the row will be registered with the Database
+    /// so incremental queries can pick it up.
     pub fn apply_upstream_commits(
         &self,
         upstream_id: UpstreamId,
         object_id: ObjectId,
         commits: Vec<crate::commit::Commit>,
         frontier: Vec<CommitId>,
+        table_name: Option<&str>,
     ) {
         // Apply to local storage
-        self.node.apply_commits(object_id, "main", commits.clone());
+        self.db.node().apply_commits(object_id, "main", commits.clone());
+
+        // Register with Database if this is a table row
+        if let Some(table) = table_name {
+            // Use Database wrapper to register the synced row
+            let db = crate::sql::Database::from_state(self.db_arc());
+            let _ = db.register_synced_row_by_table(object_id, table);
+        }
 
         // Update upstream's known state
         if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
@@ -760,6 +844,300 @@ impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
 }
 
 // ============================================================================
+// Upstream Sync Event Loop
+// ============================================================================
+
+/// Result of processing upstream events.
+#[derive(Debug)]
+pub enum UpstreamEventResult {
+    /// Event processed successfully.
+    Ok,
+    /// Stream ended (server closed connection).
+    StreamEnded,
+    /// Error occurred.
+    Error(ClientError),
+}
+
+// Methods for upstream sync with reconnection (requires sync-server for tokio sleep)
+#[cfg(feature = "sync-server")]
+impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
+    /// Start the upstream sync event loop for a connection.
+    ///
+    /// Spawns a background task that:
+    /// - Subscribes to the configured queries
+    /// - Processes incoming SSE events
+    /// - Handles disconnection with exponential backoff + jitter
+    /// - Re-subscribes to all queries after reconnect
+    ///
+    /// The `queries` parameter specifies the initial queries to subscribe to.
+    pub fn start_upstream_sync(
+        self: &Arc<Self>,
+        upstream_id: UpstreamId,
+        queries: Vec<(String, SubscriptionOptions)>,
+    ) {
+        let node = Arc::clone(self);
+        self.runtime.spawn(async move {
+            node.upstream_event_loop(upstream_id, queries).await;
+        });
+    }
+
+    /// Main upstream event loop with reconnection handling.
+    async fn upstream_event_loop(
+        &self,
+        upstream_id: UpstreamId,
+        initial_queries: Vec<(String, SubscriptionOptions)>,
+    ) {
+        let mut attempt: u32 = 0;
+
+        loop {
+            // Try to connect and subscribe
+            match self
+                .connect_and_subscribe(upstream_id, &initial_queries)
+                .await
+            {
+                Ok(streams) => {
+                    // Reset attempt counter on successful connection
+                    attempt = 0;
+
+                    // Update state to connected
+                    if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id)
+                    {
+                        upstream.set_state(UpstreamState::Connected);
+                    }
+
+                    // Process events until stream ends or error
+                    let result = self.process_upstream_streams(upstream_id, streams).await;
+
+                    match result {
+                        UpstreamEventResult::Ok => {
+                            // Normal completion - shouldn't happen in practice
+                            continue;
+                        }
+                        UpstreamEventResult::StreamEnded => {
+                            // Server closed connection - reconnect
+                        }
+                        UpstreamEventResult::Error(_err) => {
+                            // Error occurred - reconnect
+                        }
+                    }
+                }
+                Err(_err) => {
+                    // Connection failed - will retry
+                }
+            }
+
+            // Check if max attempts exceeded
+            if let Some(max) = self.config.reconnect.max_attempts {
+                if attempt >= max {
+                    // Give up
+                    if let Some(upstream) =
+                        self.upstream_servers.write().unwrap().get_mut(upstream_id)
+                    {
+                        upstream.set_state(UpstreamState::Disconnected);
+                    }
+                    return;
+                }
+            }
+
+            // Calculate delay with jitter
+            let delay_ms = calculate_reconnect_delay_with_jitter(attempt, &self.config.reconnect);
+
+            // Update state to reconnecting
+            if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
+                upstream.set_state(UpstreamState::Reconnecting {
+                    attempt,
+                    next_delay_ms: delay_ms,
+                });
+            }
+
+            // Wait before retry
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+
+            attempt += 1;
+        }
+    }
+
+    /// Connect and subscribe to all queries.
+    async fn connect_and_subscribe(
+        &self,
+        upstream_id: UpstreamId,
+        queries: &[(String, SubscriptionOptions)],
+    ) -> Result<
+        Vec<(
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        )>,
+        ClientError,
+    > {
+        let mut streams = Vec::new();
+
+        // Clear old subscriptions and set state
+        {
+            let mut servers = self.upstream_servers.write().unwrap();
+            if let Some(upstream) = servers.get_mut(upstream_id) {
+                upstream.clear_subscriptions();
+                upstream.set_state(UpstreamState::Connecting);
+            }
+        }
+
+        // Subscribe to each query
+        for (query, options) in queries {
+            // Get the env clone outside the lock
+            let env = {
+                let servers = self.upstream_servers.read().unwrap();
+                let upstream = servers
+                    .get(upstream_id)
+                    .ok_or(ClientError::new(0, "Upstream not connected"))?;
+                upstream.env().clone()
+            };
+
+            // Create subscribe request
+            let request = SubscribeRequest {
+                query: query.clone(),
+                options: options.clone(),
+            };
+
+            // Make the subscribe call without holding any locks
+            let stream = env.subscribe(request).await?;
+
+            // Update subscription tracking
+            {
+                let mut servers = self.upstream_servers.write().unwrap();
+                if let Some(upstream) = servers.get_mut(upstream_id) {
+                    let sub_id = upstream.add_subscription(query.clone(), options.clone());
+                    upstream.set_state(UpstreamState::Connected);
+                    streams.push((sub_id, stream));
+                }
+            }
+        }
+
+        Ok(streams)
+    }
+
+    /// Process events from all subscription streams.
+    async fn process_upstream_streams(
+        &self,
+        upstream_id: UpstreamId,
+        streams: Vec<(
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        )>,
+    ) -> UpstreamEventResult {
+        use futures::StreamExt;
+
+        // Merge all streams into one
+        let mut merged = futures::stream::select_all(
+            streams
+                .into_iter()
+                .map(|(sub_id, stream)| stream.map(move |r| (sub_id, r))),
+        );
+
+        while let Some((sub_id, result)) = merged.next().await {
+            match result {
+                Ok(event) => {
+                    self.handle_upstream_event(upstream_id, sub_id, event);
+                }
+                Err(e) => {
+                    return UpstreamEventResult::Error(e);
+                }
+            }
+        }
+
+        // All streams ended
+        UpstreamEventResult::StreamEnded
+    }
+
+    /// Handle a single SSE event from upstream.
+    fn handle_upstream_event(&self, upstream_id: UpstreamId, sub_id: u32, event: SseEvent) {
+        match event {
+            SseEvent::Commits {
+                object_id,
+                commits,
+                frontier,
+                object_meta,
+            } => {
+                // Track this object in the subscription
+                if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id)
+                {
+                    upstream.track_object(sub_id, object_id);
+                }
+
+                // Extract table name from metadata if present
+                let table_name = object_meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("table"))
+                    .map(|s| s.as_str());
+
+                // Ensure the object exists locally
+                if let Some(table) = table_name {
+                    self.db.node().ensure_object(object_id, table);
+                }
+
+                // Apply commits, register with Database, and broadcast
+                self.apply_upstream_commits(upstream_id, object_id, commits, frontier, table_name);
+            }
+            SseEvent::Excluded { object_id } => {
+                // Object no longer matches query - could clean up local tracking
+                let _ = object_id;
+            }
+            SseEvent::Truncate {
+                object_id,
+                truncate_at: _,
+            } => {
+                // Handle truncation if needed
+                let _ = object_id;
+            }
+            SseEvent::Request {
+                object_id: _,
+                commit_ids: _,
+            } => {
+                // Server requesting specific commits - push them
+                // TODO: Implement push response
+            }
+            SseEvent::Error { message: _, code: _ } => {
+                // Log error
+            }
+        }
+    }
+
+    /// Subscribe to a query on an upstream server.
+    ///
+    /// This is a convenience method for subscribing to a single query
+    /// without using the full event loop.
+    pub async fn subscribe_upstream(
+        &self,
+        upstream_id: UpstreamId,
+        query: String,
+        options: SubscriptionOptions,
+    ) -> Result<
+        (
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        ),
+        ClientError,
+    > {
+        let mut servers = self.upstream_servers.write().unwrap();
+        let upstream = servers
+            .get_mut(upstream_id)
+            .ok_or(ClientError::new(0, "Upstream not connected"))?;
+        upstream.subscribe(query, options).await
+    }
+
+    /// Push commits to an upstream server.
+    pub async fn push_upstream(
+        &self,
+        upstream_id: UpstreamId,
+        request: PushRequest,
+    ) -> Result<PushResponse, ClientError> {
+        let mut servers = self.upstream_servers.write().unwrap();
+        let upstream = servers
+            .get_mut(upstream_id)
+            .ok_or(ClientError::new(0, "Upstream not connected"))?;
+        upstream.push(request).await
+    }
+}
+
+// ============================================================================
 // Reconnection Logic
 // ============================================================================
 
@@ -767,4 +1145,28 @@ impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
 pub fn calculate_reconnect_delay(attempt: u32, config: &ReconnectConfig) -> u64 {
     let delay = (config.initial_delay_ms as f64) * config.backoff_multiplier.powi(attempt as i32);
     (delay as u64).min(config.max_delay_ms)
+}
+
+/// Calculate reconnection delay with jitter to prevent thundering herd.
+///
+/// Adds random jitter of up to 25% of the base delay.
+pub fn calculate_reconnect_delay_with_jitter(attempt: u32, config: &ReconnectConfig) -> u64 {
+    let base_delay = calculate_reconnect_delay(attempt, config);
+    // Add jitter: 0 to 25% of base delay
+    let jitter_range = base_delay / 4;
+    if jitter_range > 0 {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        // Simple pseudo-random without external dependency
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u32(attempt);
+        hasher.write_u64(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64);
+        let jitter = (hasher.finish() % jitter_range) as u64;
+        base_delay + jitter
+    } else {
+        base_delay
+    }
 }

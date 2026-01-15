@@ -171,6 +171,99 @@ impl std::fmt::Debug for DatabaseState {
 }
 
 impl DatabaseState {
+    /// Get a reference to the underlying LocalNode.
+    pub fn node(&self) -> &LocalNode {
+        &self.node
+    }
+
+    /// Get the catalog object ID.
+    pub fn catalog_object_id(&self) -> ObjectId {
+        self.catalog_object_id
+    }
+
+    /// Get the table rows object ID for a table.
+    pub fn table_rows_object_id(&self, table: &str) -> Option<ObjectId> {
+        self.table_rows_objects.read().unwrap().get(table).copied()
+    }
+
+    /// Get the descriptor object ID for a table.
+    pub fn descriptor_object_id(&self, table: &str) -> Option<ObjectId> {
+        self.descriptor_objects.read().unwrap().get(table).copied()
+    }
+
+    /// Reload the catalog from storage.
+    ///
+    /// This re-reads the catalog object and all table descriptors,
+    /// refreshing the in-memory schema cache.
+    pub fn reload_catalog(&self) -> Result<(), DatabaseError> {
+        // Read the catalog object
+        let catalog_bytes = self
+            .node
+            .read(self.catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+
+        let catalog = Catalog::from_bytes(&catalog_bytes)
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        // Clear existing schema cache
+        self.tables.write().unwrap().clear();
+        self.schemas.write().unwrap().clear();
+        self.table_rows_objects.write().unwrap().clear();
+        self.descriptor_objects.write().unwrap().clear();
+        self.policies.write().unwrap().clear();
+
+        // Reload each table from the catalog
+        for (table_name, descriptor_id) in &catalog.tables {
+            let desc_object_id = descriptor_id.as_object_id();
+
+            // Try to read the descriptor from "main" branch
+            // TODO: For schema migrations, we may need to read from version branches
+            // and sync them properly. For now, "main" always has the latest descriptor.
+            if let Ok(Some(desc_bytes)) = self.node.read(desc_object_id, "main") {
+                if let Ok(descriptor) = TableDescriptor::from_bytes(&desc_bytes) {
+                    let schema_id: SchemaId = desc_object_id;
+
+                    self.tables
+                        .write()
+                        .unwrap()
+                        .insert(table_name.clone(), schema_id);
+                    self.schemas
+                        .write()
+                        .unwrap()
+                        .insert(schema_id, descriptor.schema.clone());
+                    self.descriptor_objects
+                        .write()
+                        .unwrap()
+                        .insert(table_name.clone(), desc_object_id);
+
+                    // Load table rows object ID and ensure the object exists locally.
+                    // NOTE: table_rows is local state - each node tracks which rows it knows about.
+                    // We don't sync the table_rows content, but we use the same object ID
+                    // (from the descriptor) so all nodes store their local row set consistently.
+                    self.table_rows_objects
+                        .write()
+                        .unwrap()
+                        .insert(table_name.clone(), descriptor.rows_object_id);
+                    self.node.ensure_object(
+                        descriptor.rows_object_id,
+                        &format!("table_rows:{}", table_name),
+                    );
+
+                    // Load policies if present
+                    if !descriptor.policies.is_empty() {
+                        self.policies
+                            .write()
+                            .unwrap()
+                            .insert(table_name.clone(), descriptor.policies.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn new(env: Arc<dyn Environment>) -> Self {
         let node = LocalNode::new(env);
 
@@ -267,6 +360,36 @@ impl DatabaseState {
             policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
         }
+    }
+
+    /// Create in-memory database state as a replica waiting for catalog sync.
+    ///
+    /// Unlike `in_memory_with_catalog`, this does NOT write an initial empty catalog.
+    /// The replica expects to receive the catalog via sync from an upstream server.
+    /// Use `has_catalog()` or `await_catalog()` to check/wait for catalog arrival.
+    fn in_memory_replica(catalog_object_id: ObjectId) -> Self {
+        let node = LocalNode::in_memory();
+
+        // Create the catalog object but don't write to it
+        node.ensure_object(catalog_object_id, "catalog");
+
+        DatabaseState {
+            node,
+            catalog_object_id,
+            tables: RwLock::new(HashMap::new()),
+            schemas: RwLock::new(HashMap::new()),
+            table_rows_objects: RwLock::new(HashMap::new()),
+            descriptor_objects: RwLock::new(HashMap::new()),
+            row_table: RwLock::new(HashMap::new()),
+            index_objects: RwLock::new(HashMap::new()),
+            policies: RwLock::new(HashMap::new()),
+            graph_registry: GraphRegistry::new(),
+        }
+    }
+
+    /// Check if the catalog has been synced (has exactly one tip).
+    pub fn has_catalog(&self) -> bool {
+        self.node.read(self.catalog_object_id, "main").ok().flatten().is_some()
     }
 
     /// Set up the callback for sync-applied commits.
@@ -879,6 +1002,48 @@ impl Database {
         #[cfg(not(feature = "wasm"))]
         DatabaseState::setup_sync_callback(Arc::clone(&state));
         Database { state }
+    }
+
+    /// Create an in-memory database as a replica waiting for catalog sync.
+    ///
+    /// Unlike `in_memory_with_catalog`, this does NOT write an initial empty catalog.
+    /// The replica expects to receive the catalog via sync from an upstream server.
+    /// Use `has_catalog()` to check if the catalog has arrived, then `reload_catalog()`.
+    pub fn in_memory_replica(catalog_id: ObjectId) -> Self {
+        let state = Arc::new(DatabaseState::in_memory_replica(catalog_id));
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
+    }
+
+    /// Check if the catalog has been synced (has readable content).
+    ///
+    /// Returns true if the catalog object has exactly one tip and is readable.
+    /// Use this to check if a replica has received its catalog from upstream.
+    pub fn has_catalog(&self) -> bool {
+        self.state.has_catalog()
+    }
+
+    /// Consume the Database and return the underlying Arc<DatabaseState>.
+    ///
+    /// This is useful when you need to wrap the DatabaseState in a SyncedNode.
+    pub fn into_state(self) -> Arc<DatabaseState> {
+        self.state
+    }
+
+    /// Create a Database from an existing Arc<DatabaseState>.
+    ///
+    /// This is useful when you have a SyncedNode and want to perform SQL operations.
+    pub fn from_state(state: Arc<DatabaseState>) -> Self {
+        Database { state }
+    }
+
+    /// Reload the catalog from storage, picking up any synced schema changes.
+    ///
+    /// Call this after schema objects (catalog, descriptors) have been synced
+    /// from another node to refresh the in-memory schema cache.
+    pub fn reload_catalog(&self) -> Result<(), DatabaseError> {
+        self.state.reload_catalog()
     }
 
     /// Restore database from an existing environment with a known catalog object ID.

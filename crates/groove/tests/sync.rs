@@ -607,8 +607,8 @@ async fn test_synced_node_apply_upstream_commits() {
     // Ensure object exists
     synced_node.inner().ensure_object(object_id, "");
 
-    // Apply commits from upstream
-    synced_node.apply_upstream_commits(upstream_id, object_id, vec![commit], vec![commit_id]);
+    // Apply commits from upstream (no table name - this is raw object sync)
+    synced_node.apply_upstream_commits(upstream_id, object_id, vec![commit], vec![commit_id], None);
 
     // The commit should be in LocalNode
     assert!(

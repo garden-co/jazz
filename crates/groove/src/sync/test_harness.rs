@@ -20,6 +20,7 @@ use tokio::sync::{RwLock, mpsc};
 use crate::commit::CommitId;
 use crate::node::LocalNode;
 use crate::object::ObjectId;
+use crate::sql::Database;
 use crate::storage::MemoryEnvironment;
 
 use super::env::{ClientEnv, ClientError};
@@ -311,6 +312,7 @@ impl Default for TestTransport {
 // ============================================================================
 
 /// A ClientEnv implementation that routes requests through TestTransport.
+#[derive(Clone)]
 pub struct TestClientEnv {
     transport: Arc<TestTransport>,
     auth_token: String,
@@ -498,9 +500,8 @@ pub fn create_synced_node(
     _transport: Arc<TestTransport>,
     _id: &str,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
-    let client_env = Arc::new(MemoryEnvironment::new());
-    let node = Arc::new(LocalNode::new(client_env));
-    Arc::new(SyncedNode::new(node, TokioRuntime))
+    let db = Database::in_memory();
+    Arc::new(SyncedNode::new(db.into_state(), TokioRuntime))
 }
 
 /// Create a SyncedNode with custom config for testing.
@@ -509,7 +510,130 @@ pub fn create_synced_node_with_config(
     _id: &str,
     config: SyncConfig,
 ) -> Arc<SyncedNode<TokioRuntime, TestClientEnv>> {
-    let client_env = Arc::new(MemoryEnvironment::new());
-    let node = Arc::new(LocalNode::new(client_env));
-    Arc::new(SyncedNode::with_config(node, TokioRuntime, config))
+    let db = Database::in_memory();
+    Arc::new(SyncedNode::with_config(db.into_state(), TokioRuntime, config))
+}
+
+// ============================================================================
+// Multi-Server Test Harness
+// ============================================================================
+
+use super::synced_node::UpstreamId;
+use std::collections::HashMap;
+
+/// A server in the multi-server test harness.
+pub struct TestServer {
+    /// The server's transport (handles incoming requests).
+    pub transport: Arc<TestTransport>,
+    /// The server's SyncedNode (for upstream connections).
+    pub synced_node: Arc<SyncedNode<TokioRuntime, TestClientEnv>>,
+    /// Server name/identifier.
+    pub name: String,
+}
+
+impl TestServer {
+    fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let transport = Arc::new(TestTransport::new());
+        let db = Database::in_memory();
+        let synced_node = Arc::new(SyncedNode::new(db.into_state(), TokioRuntime));
+        Self {
+            transport,
+            synced_node,
+            name,
+        }
+    }
+
+    /// Get the server's storage environment.
+    pub fn storage(&self) -> &Arc<MemoryEnvironment> {
+        self.transport.server_env()
+    }
+}
+
+/// Multi-server test harness for hierarchical sync testing.
+///
+/// Supports topologies like:
+/// ```text
+///   Client A -> Edge Server -> Origin Server
+///   Client B -> Edge Server -> Origin Server
+/// ```
+///
+/// Each server has its own storage and can connect upstream to other servers.
+pub struct MultiServerHarness {
+    /// Named servers in the harness.
+    servers: HashMap<String, TestServer>,
+}
+
+impl MultiServerHarness {
+    /// Create a new multi-server harness.
+    pub fn new() -> Self {
+        Self {
+            servers: HashMap::new(),
+        }
+    }
+
+    /// Create a new server in the harness.
+    ///
+    /// Returns a reference to the server for further configuration.
+    pub fn create_server(&mut self, name: impl Into<String>) -> &TestServer {
+        let name = name.into();
+        let server = TestServer::new(&name);
+        self.servers.insert(name.clone(), server);
+        self.servers.get(&name).unwrap()
+    }
+
+    /// Get a server by name.
+    pub fn get_server(&self, name: &str) -> Option<&TestServer> {
+        self.servers.get(name)
+    }
+
+    /// Connect one server to another as upstream.
+    ///
+    /// After this, the `from` server can subscribe to and push to the `to` server.
+    ///
+    /// Returns the UpstreamId for the new connection.
+    pub fn connect_upstream(&self, from: &str, to: &str) -> Option<UpstreamId> {
+        let from_server = self.servers.get(from)?;
+        let to_server = self.servers.get(to)?;
+
+        // Create a ClientEnv that routes to the upstream server's transport
+        let env = TestClientEnv::new(Arc::clone(&to_server.transport), format!("server:{}", from));
+
+        // Add the upstream connection
+        let upstream_id = from_server.synced_node.add_upstream(env);
+        Some(upstream_id)
+    }
+
+    /// Create a client connected to a specific server.
+    pub fn create_client(&self, id: impl Into<String>, server_name: &str) -> Option<TestClient> {
+        let server = self.servers.get(server_name)?;
+        Some(TestClient::new(Arc::clone(&server.transport), id))
+    }
+
+    /// Start upstream sync for a server connection.
+    ///
+    /// This starts the background event loop that processes SSE events
+    /// from the upstream server.
+    pub fn start_upstream_sync(
+        &self,
+        server_name: &str,
+        upstream_id: UpstreamId,
+        query: &str,
+    ) -> bool {
+        if let Some(server) = self.servers.get(server_name) {
+            server.synced_node.start_upstream_sync(
+                upstream_id,
+                vec![(query.to_string(), SubscriptionOptions::default())],
+            );
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for MultiServerHarness {
+    fn default() -> Self {
+        Self::new()
+    }
 }
