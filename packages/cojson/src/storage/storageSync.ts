@@ -63,6 +63,28 @@ export class StorageApiSync implements StorageAPI {
     return this.knownStates.getKnownState(id);
   }
 
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void {
+    // Check in-memory cache first
+    const cached = this.knownStates.getCachedKnownState(id);
+    if (cached) {
+      callback(cached);
+      return;
+    }
+
+    // Load from database
+    const knownState = this.dbClient.getCoValueKnownState(id);
+
+    if (knownState) {
+      // Cache for future use
+      this.knownStates.setKnownState(id, knownState);
+    }
+
+    callback(knownState);
+  }
+
   async load(
     id: string,
     callback: (data: NewContentMessage) => void,

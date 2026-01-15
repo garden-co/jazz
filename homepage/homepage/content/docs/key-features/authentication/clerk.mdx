@@ -2,7 +2,7 @@ export const metadata = {
   description: "Integrate Clerk with your Jazz app to authenticate users. This method combines Clerk's comprehensive authentication services with Jazz's local-first capabilities."
 };
 
-import { CodeGroup, ContentByFramework, FileName, ReactLogo, ExpoLogo, RNLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { CodeGroup, ContentByFramework, FileName, ReactLogo, ExpoLogo, RNLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
 
 # Clerk Authentication
 
@@ -11,6 +11,7 @@ Jazz can be integrated with [Clerk](https://clerk.com/) to authenticate users. T
 ## How it works
 
 When using Clerk authentication:
+
 1. Users sign up or sign in through Clerk's authentication system
 2. Jazz securely stores the user's account keys with Clerk
 3. When logging in, Jazz retrieves these keys from Clerk
@@ -29,14 +30,42 @@ This authentication method is not fully local-first, as login and signup need to
 ## Implementation
 
 <ContentByFramework framework="react">
-Use `<JazzReactProviderWithClerk />` to wrap your app:
+  Use `<JazzReactProviderWithClerk />` to wrap your app:
 </ContentByFramework>
 
 <ContentByFramework framework="react-native-expo">
-Use `<JazzExpoProviderWithClerk />` to wrap your app.
+  Use `<JazzExpoProviderWithClerk />` to wrap your app.
 </ContentByFramework>
 
-<FileName>App.tsx</FileName>
+<ContentByFramework framework="svelte">
+The Clerk provider for Svelte depends on the community package `svelte-clerk`. Install it first:
+
+<TabbedCodeGroup
+  id="install-svelte-clerk"
+  default="pnpm"
+  savedPreferenceKey="package-manager"
+>
+  <TabbedCodeGroupItem label="npm">
+    ```sh npm install svelte-clerk ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+    ```sh pnpm add svelte-clerk ```
+  </TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+Then wrap your app with `ClerkProvider` and a wrapper component that uses `<JazzSvelteProviderWithClerk />`:
+
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+  <FileName>App.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="react-native-expo">
+  <FileName>App.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" className="mb-4">
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
@@ -47,10 +76,32 @@ Use `<JazzExpoProviderWithClerk />` to wrap your app.
 ```tsx expo.tsx#Basic
 ```
 </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte svelte.svelte
+```
+</TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
-<FileName>AuthButton.tsx</FileName>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" >
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/JazzClerkWrapper.svelte</FileName>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+```svelte JazzClerkWrapper.svelte
+```
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+  <FileName>AuthButton.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="react-native-expo">
+  <FileName>AuthButton.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/AuthButton.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="auth-button" >
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx react-snippet.tsx#AuthButton
 ```
@@ -58,6 +109,10 @@ Use `<JazzExpoProviderWithClerk />` to wrap your app.
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
 ```tsx expo.tsx#AuthButton
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AuthButton.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>

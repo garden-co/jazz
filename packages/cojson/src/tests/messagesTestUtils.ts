@@ -1,6 +1,7 @@
 import { CoValueCore, LocalNode } from "../exports";
 import { NewContentMessage, SyncMessage } from "../sync";
 import { CoValueKnownState } from "../knownState.js";
+import { LazyLoadMessage, LazyLoadResultMessage } from "./testUtils.js";
 
 function simplifySessions(msg: Pick<CoValueKnownState, "sessions" | "header">) {
   const count = Object.values(msg.sessions).reduce(
@@ -25,12 +26,14 @@ function simplifyNewContent(content: NewContentMessage["new"]) {
     .join(" | ");
 }
 
+type TestMessage = SyncMessage | LazyLoadMessage | LazyLoadResultMessage;
+
 export function toSimplifiedMessages(
   coValues: Record<string, CoValueCore>,
   messages: {
     from: string;
     to: string;
-    msg: SyncMessage;
+    msg: TestMessage;
   }[],
 ) {
   function getCoValue(id: string) {
@@ -43,7 +46,7 @@ export function toSimplifiedMessages(
     return `unknown/${id}`;
   }
 
-  function toDebugString(from: string, to: string, msg: SyncMessage) {
+  function toDebugString(from: string, to: string, msg: TestMessage) {
     switch (msg.action) {
       case "known":
         return `${from} -> ${to} | KNOWN ${msg.isCorrection ? "CORRECTION " : ""}${getCoValue(msg.id)} sessions: ${simplifySessions(msg)}`;
@@ -53,6 +56,10 @@ export function toSimplifiedMessages(
         return `${from} -> ${to} | DONE ${getCoValue(msg.id)}`;
       case "content":
         return `${from} -> ${to} | CONTENT ${getCoValue(msg.id)} header: ${Boolean(msg.header)} new: ${simplifyNewContent(msg.new)}${msg.expectContentUntil ? ` expectContentUntil: ${simplifySessions({ sessions: msg.expectContentUntil, header: true })}` : ""}`;
+      case "lazyLoad":
+        return `${from} -> ${to} | GET_KNOWN_STATE ${getCoValue(msg.id)}`;
+      case "lazyLoadResult":
+        return `${from} -> ${to} | GET_KNOWN_STATE_RESULT ${getCoValue(msg.id)} sessions: ${simplifySessions(msg)}`;
     }
   }
 
@@ -75,7 +82,7 @@ export function debugMessages(
   messages: {
     from: string;
     to: string;
-    msg: SyncMessage;
+    msg: TestMessage;
   }[],
 ) {
   console.log(toSimplifiedMessages(coValues, messages));

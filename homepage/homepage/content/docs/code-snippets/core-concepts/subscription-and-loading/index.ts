@@ -1,3 +1,4 @@
+import { co } from "jazz-tools";
 import { Task, Project } from "./schema";
 const taskId = "";
 
@@ -47,4 +48,23 @@ async function completeAllTasks(projectId: string) {
     task.$jazz.set("title", `Task ${i}`);
   });
 }
+// #endregion
+
+const projectId = "";
+// #region ResolvedHelper
+const TaskWithDescription = Task.resolved({
+  description: true,
+});
+const ProjectWithTasks = Project.resolved({
+  tasks: {
+    // Use `.resolveQuery` to get the resolve query from a schema and compose it in other queries
+    $each: TaskWithDescription.resolveQuery,
+  },
+});
+
+// .load() will use the resolve query from the schema
+const project = await ProjectWithTasks.load(projectId);
+if (!project.$isLoaded) throw new Error("Project not found or not accessible");
+// Both the tasks and the descriptions are loaded
+project.tasks[0].description; // CoPlainText
 // #endregion

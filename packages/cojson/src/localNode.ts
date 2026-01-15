@@ -751,9 +751,16 @@ export class LocalNode {
       };
     }
 
-    const account = coValue.getCurrentContent() as RawAccount;
+    const agentId = coValue.verified.header.ruleset.initialAdmin;
 
-    return { value: account.currentAgentID(), error: undefined };
+    if (!isAgentID(agentId)) {
+      return {
+        value: undefined,
+        error: new Error(`Unexpectedly not account: ${expectation}`),
+      };
+    }
+
+    return { value: agentId, error: undefined };
   }
 
   createGroup(

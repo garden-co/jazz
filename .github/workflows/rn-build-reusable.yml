@@ -76,6 +76,8 @@ jobs:
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
+        with:
+          cache: 'false'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

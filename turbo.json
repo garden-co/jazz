@@ -134,6 +134,21 @@
         "!.turbo/**"
       ]
     },
+    "build:wasm": {
+      "outputs": ["dist/**", "*.wasm"],
+      "inputs": [
+        "src/**",
+        "*.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "tsconfig*.json",
+        "*.config.*",
+        "!node_modules/**",
+        "!dist/**",
+        "!.turbo/**"
+      ]
+    },
     "dev": {
       "cache": false,
       "persistent": true,

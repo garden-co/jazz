@@ -54,4 +54,4 @@ export type SubscriptionValueLoading = {
   id: string;
 };
 
-export type BranchDefinition = { name: string; owner?: Group | Account | null };
+export type BranchDefinition = { name: string; owner?: Group | Account };

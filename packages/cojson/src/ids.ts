@@ -28,7 +28,7 @@ export type TransactionID = {
 
 export type AgentID = `sealer_z${string}/signer_z${string}`;
 
-export function isAgentID(id: string): id is AgentID {
+export function isAgentID(id: unknown): id is AgentID {
   return (
     typeof id === "string" &&
     id.startsWith("sealer_") &&

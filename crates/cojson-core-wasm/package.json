@@ -1,7 +1,7 @@
 {
   "name": "cojson-core-wasm",
   "type": "module",
-  "version": "0.19.19",
+  "version": "0.19.21",
   "files": [
     "public/cojson_core_wasm.js",
     "public/cojson_core_wasm.d.ts",

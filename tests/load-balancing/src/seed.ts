@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 
 import { LocalNode, cojsonInternals } from "cojson";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { getBetterSqliteStorage } from "cojson-storage-sqlite";
 
 import type { ParsedArgs } from "./utils/args.ts";
@@ -49,7 +49,7 @@ export async function seedDb(args: ParsedArgs): Promise<SeedResult> {
   const pdfBytes = pdfBuf.byteLength;
   const pdfName = basename(pdfPath);
 
-  const crypto = await WasmCrypto.create();
+  const crypto = await NapiCrypto.create();
   const agentSecret = crypto.newRandomAgentSecret();
   const agentID = crypto.getAgentID(agentSecret);
 
@@ -67,16 +67,18 @@ export async function seedDb(args: ParsedArgs): Promise<SeedResult> {
   group.addMember("everyone", "writer");
 
   const indexMap = group.createMap();
-  indexMap.set("seed:kind", "load-balancing", "trusting");
-  indexMap.set("seed:pdfName", pdfName, "trusting");
-  indexMap.set("seed:items", items, "trusting");
+  indexMap.set("seed:kind", "load-balancing");
+  indexMap.set("seed:pdfName", pdfName);
+  indexMap.set("seed:items", items);
 
   const chunkSize = cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
 
   let fileCount = 0;
   let mapCount = 0;
 
-  for (let i = 0; i < items; i++) {
+  const toSync = [];
+
+  for (let i = 1; i <= items; i++) {
     if (i % 2 === 0) {
       const stream = group.createBinaryStream();
       stream.startBinaryStream(
@@ -93,30 +95,39 @@ export async function seedDb(args: ParsedArgs): Promise<SeedResult> {
           off,
           Math.min(off + chunkSize, pdfBuf.length),
         );
-        stream.pushBinaryStreamChunk(chunk, "trusting");
-        // Yield to keep Node responsive when `--items` is large.
-        if (off === 0 || off + chunkSize >= pdfBuf.length) continue;
-        if (off % (chunkSize * 8) === 0) {
-          await sleep(0);
-        }
+        stream.pushBinaryStreamChunk(chunk);
       }
       stream.endBinaryStream("trusting");
-
-      indexMap.set(`file:${fileCount}`, stream.id, "trusting");
+      indexMap.set(`file:${fileCount}`, stream.id);
       fileCount++;
+      toSync.push(stream);
     } else {
       const map = group.createMap();
-      map.set("kind", "map", "trusting");
-      map.set("i", i, "trusting");
-      map.set("value", `v${i}`, "trusting");
+      map.set("kind", "map");
+      map.set("i", i);
+      map.set("value", `v${i}`);
 
-      indexMap.set(`map:${mapCount}`, map.id, "trusting");
+      indexMap.set(`map:${mapCount}`, map.id);
       mapCount++;
+      toSync.push(map);
+    }
+
+    if (i % 200 === 0) {
+      console.log("Generated ", i, " covalues");
+    }
+
+    // Assumption, sync happens on microtask, storage is sync so it is enough to wait one timer to ensure that all the toSync values are stored
+    if (toSync.length >= 10) {
+      await sleep(0);
+      for (const value of toSync) {
+        value.core.unmount();
+      }
+      toSync.length = 0;
     }
   }
 
-  indexMap.set("seed:files", fileCount, "trusting");
-  indexMap.set("seed:maps", mapCount, "trusting");
+  indexMap.set("seed:files", fileCount);
+  indexMap.set("seed:maps", mapCount);
 
   // Give storage a moment to settle before shutdown; avoids flaky partial writes.
   await sleep(200);

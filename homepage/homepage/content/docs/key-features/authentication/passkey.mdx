@@ -2,7 +2,7 @@ export const metadata = {
   description: "Passkey authentication is fully local-first and the most secure of the auth methods that Jazz provides because keys are managed by the device/operating system itself."
 };
 
-import { TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework, ReactLogo, SvelteLogo, VanillaLogo, RNLogo, ExpoLogo } from "@/components/forMdx";
+import { CodeGroup, TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework, ReactLogo, SvelteLogo, VanillaLogo, RNLogo, ExpoLogo } from "@/components/forMdx";
 
 # Passkey Authentication
 
@@ -66,7 +66,8 @@ Passkey authentication on React Native requires the `react-native-passkey` libra
 
    Add this override to your `AppDelegate.swift`:
 
-   ```swift
+<CodeGroup preferWrap>
+   ```
    class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
      // ... existing methods ...
 
@@ -75,7 +76,7 @@ Passkey authentication on React Native requires the `react-native-passkey` libra
      }
    }
    ```
-
+</CodeGroup>
 See the [react-native-passkey documentation](https://github.com/f-23/react-native-passkey) for detailed setup instructions.
 
 </ContentByFramework>

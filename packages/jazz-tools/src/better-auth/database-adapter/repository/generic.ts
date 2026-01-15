@@ -1,5 +1,5 @@
 import { CleanedWhere } from "better-auth/adapters";
-import { BetterAuthDbSchema } from "better-auth/db";
+import { BetterAuthDBSchema } from "better-auth/db";
 import { Account, CoList, CoMap, Group, co } from "jazz-tools";
 import type { Database, TableItem } from "../schema.js";
 import {
@@ -14,7 +14,7 @@ export class JazzRepository {
   protected databaseRoot: co.loaded<Database, { group: true }>;
   protected worker: Account;
   protected owner: Group;
-  protected betterAuthSchema: BetterAuthDbSchema;
+  protected betterAuthSchema: BetterAuthDBSchema;
 
   private coValuesTracker:
     | {
@@ -26,7 +26,7 @@ export class JazzRepository {
     databaseSchema: Database,
     databaseRoot: co.loaded<Database, { group: true }>,
     worker: Account,
-    betterAuthSchema: BetterAuthDbSchema = {},
+    betterAuthSchema: BetterAuthDBSchema = {},
     ensureSync: boolean = false,
   ) {
     this.databaseSchema = databaseSchema;

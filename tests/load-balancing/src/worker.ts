@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 
-import { LocalNode } from "cojson";
+import { LocalNode, type RawCoID } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WebSocket } from "ws";
@@ -113,61 +113,36 @@ async function main() {
 
   const inFlight = new Set<Promise<void>>();
 
-  async function doOneOp(kind: OpKind) {
-    try {
+  async function doOneOp() {
+    const kind = cycle[cycleIdx]!;
+    cycleIdx = (cycleIdx + 1) % cycle.length;
+
+    const id =
+      kind === "file"
+        ? pick(data.targets.fileIds, rng)
+        : pick(data.targets.mapIds, rng);
+
+    const v = await node.loadCoValueCore(id as RawCoID);
+
+    opsDone++;
+    if (!v.isAvailable()) {
+      console.error("coValue unavailable", id);
+      await sleep(50 + Math.floor(rng() * 50));
+    } else {
       if (kind === "file") {
-        const id = pick(data.targets.fileIds, rng);
-        // IDs are stored as strings (from SQLite); cast for the load API.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const v = await node.load(id as any);
-        if (v === "unavailable") {
-          throw new Error("file unavailable");
-        }
-        // Verify we have at least the stream info, and optionally a first chunk.
-        // (We avoid materializing the entire PDF into memory.)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const raw: any = v;
-        const info = raw.getBinaryStreamInfo?.();
-        if (!info) {
-          throw new Error("missing binary stream info");
-        }
-        const chunks = raw.getBinaryChunks?.(true);
-        if (
-          chunks &&
-          Array.isArray(chunks.chunks) &&
-          chunks.chunks.length > 0
-        ) {
-          // Touch the first chunk length to force decode path.
-          void chunks.chunks[0]?.byteLength;
-        }
         fileOpsDone++;
       } else {
-        const id = pick(data.targets.mapIds, rng);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const v = await node.load(id as any);
-        if (v === "unavailable") {
-          throw new Error("map unavailable");
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const map: any = v;
-        map.set(`w${data.workerId}`, opsDone, "trusting");
         mapOpsDone++;
       }
-      opsDone++;
-    } catch {
-      errors++;
-      // Backoff slightly on errors to avoid hot-looping.
-      await sleep(50 + Math.floor(rng() * 50));
     }
+
+    v.unmount();
   }
 
   while (Date.now() < deadline) {
     await sem.acquire();
 
-    const kind = cycle[cycleIdx]!;
-    cycleIdx = (cycleIdx + 1) % cycle.length;
-
-    const p = doOneOp(kind).finally(() => {
+    const p = doOneOp().finally(() => {
       sem.release();
     });
 
