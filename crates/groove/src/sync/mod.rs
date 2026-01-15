@@ -31,6 +31,7 @@ mod env;
 mod negotiation;
 mod protocol;
 mod runtime;
+mod shared;
 mod synced_node;
 
 #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
@@ -44,6 +45,7 @@ pub use env::*;
 pub use negotiation::*;
 pub use protocol::*;
 pub use runtime::*;
+pub use shared::*;
 pub use synced_node::*;
 
 #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]

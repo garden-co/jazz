@@ -18,6 +18,7 @@ use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers}
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
+use super::runtime::ReconnectConfig;
 
 /// State of a query subscription.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,30 +52,6 @@ impl QuerySubscription {
             options,
             state: SubscriptionState::Pending,
             objects: HashSet::new(),
-        }
-    }
-}
-
-/// Configuration for automatic reconnection.
-#[derive(Debug, Clone)]
-pub struct ReconnectConfig {
-    /// Initial delay before first reconnect attempt (ms)
-    pub initial_delay_ms: u64,
-    /// Maximum delay between reconnect attempts (ms)
-    pub max_delay_ms: u64,
-    /// Multiplier for exponential backoff
-    pub backoff_multiplier: f64,
-    /// Maximum number of reconnect attempts (None = unlimited)
-    pub max_attempts: Option<u32>,
-}
-
-impl Default for ReconnectConfig {
-    fn default() -> Self {
-        Self {
-            initial_delay_ms: 1000,
-            max_delay_ms: 30000,
-            backoff_multiplier: 2.0,
-            max_attempts: None,
         }
     }
 }

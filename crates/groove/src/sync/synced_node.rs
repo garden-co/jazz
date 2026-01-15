@@ -18,12 +18,11 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::sql::DatabaseState;
 
-use super::client::ReconnectConfig;
 use super::env::{ClientEnv, ClientError};
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
-use super::runtime::Runtime;
+use super::runtime::{ReconnectConfig, Runtime, calculate_reconnect_delay_with_jitter};
 
 #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 use super::server::{ClientIdentity, ClientSession, SessionId, SseSender, TokenValidator};
@@ -939,8 +938,12 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                 }
             }
 
-            // Calculate delay with jitter
-            let delay_ms = calculate_reconnect_delay_with_jitter(attempt, &self.config.reconnect);
+            // Calculate delay with jitter using runtime's random
+            let delay_ms = calculate_reconnect_delay_with_jitter(
+                attempt,
+                &self.config.reconnect,
+                self.runtime.random_f64(),
+            );
 
             // Update state to reconnecting
             if let Some(upstream) = self.upstream_servers.write().unwrap().get_mut(upstream_id) {
@@ -950,8 +953,8 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
                 });
             }
 
-            // Wait before retry
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            // Wait before retry using runtime's sleep
+            self.runtime.sleep(delay_ms).await;
 
             attempt += 1;
         }
@@ -1137,36 +1140,3 @@ impl<R: Runtime, E: ClientEnv + Clone + 'static> SyncedNode<R, E> {
     }
 }
 
-// ============================================================================
-// Reconnection Logic
-// ============================================================================
-
-/// Calculate the next reconnection delay with exponential backoff.
-pub fn calculate_reconnect_delay(attempt: u32, config: &ReconnectConfig) -> u64 {
-    let delay = (config.initial_delay_ms as f64) * config.backoff_multiplier.powi(attempt as i32);
-    (delay as u64).min(config.max_delay_ms)
-}
-
-/// Calculate reconnection delay with jitter to prevent thundering herd.
-///
-/// Adds random jitter of up to 25% of the base delay.
-pub fn calculate_reconnect_delay_with_jitter(attempt: u32, config: &ReconnectConfig) -> u64 {
-    let base_delay = calculate_reconnect_delay(attempt, config);
-    // Add jitter: 0 to 25% of base delay
-    let jitter_range = base_delay / 4;
-    if jitter_range > 0 {
-        use std::collections::hash_map::RandomState;
-        use std::hash::{BuildHasher, Hasher};
-        // Simple pseudo-random without external dependency
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u32(attempt);
-        hasher.write_u64(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64);
-        let jitter = (hasher.finish() % jitter_range) as u64;
-        base_delay + jitter
-    } else {
-        base_delay
-    }
-}
