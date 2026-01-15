@@ -71,13 +71,28 @@ export class OutgoingLoadQueue {
       const timeout = sentAt + CO_VALUE_LOADING_CONFIG.TIMEOUT;
 
       if (now >= timeout) {
-        logger.warn("Load request timed out", {
-          id: coValue.id,
-          peerId: this.peerId,
-        });
+        if (!coValue.isAvailable()) {
+          logger.warn("Load request timed out", {
+            id: coValue.id,
+            peerId: this.peerId,
+          });
+          coValue.markNotFoundInPeer(this.peerId);
+        } else if (coValue.isStreaming()) {
+          logger.warn(
+            "Content streaming is taking more than " +
+              CO_VALUE_LOADING_CONFIG.TIMEOUT / 1000 +
+              "s",
+            {
+              id: coValue.id,
+              peerId: this.peerId,
+              knownState: coValue.knownState().sessions,
+              streamingTarget: coValue.knownStateWithStreaming().sessions,
+            },
+          );
+        }
+
         this.inFlightLoads.delete(coValue);
         this.requestedSet.delete(coValue.id);
-        coValue.markNotFoundInPeer(this.peerId);
         this.processQueue();
       } else {
         nextTimeout = Math.min(nextTimeout ?? Infinity, timeout - now);
@@ -90,16 +105,32 @@ export class OutgoingLoadQueue {
     }
   }
 
+  trackUpdate(coValue: CoValueCore): void {
+    if (!this.inFlightLoads.has(coValue)) {
+      return;
+    }
+
+    // Refresh the timeout for the in-flight load
+    this.inFlightLoads.set(coValue, performance.now());
+  }
+
   /**
    * Track that a load request has completed.
    * Triggers processing of pending requests.
    */
   trackComplete(coValue: CoValueCore): void {
-    if (this.inFlightLoads.has(coValue)) {
-      this.inFlightLoads.delete(coValue);
-      this.requestedSet.delete(coValue.id);
-      this.processQueue();
+    if (!this.inFlightLoads.has(coValue)) {
+      return;
     }
+
+    if (coValue.isStreaming()) {
+      // wait for the next chunk
+      return;
+    }
+
+    this.inFlightLoads.delete(coValue);
+    this.requestedSet.delete(coValue.id);
+    this.processQueue();
   }
 
   /**

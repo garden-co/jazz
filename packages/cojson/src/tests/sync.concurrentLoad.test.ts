@@ -97,20 +97,20 @@ describe("concurrent load", () => {
         Map3: map3.core,
       }),
     ).toMatchInlineSnapshot(`
-          [
-            "client -> server | LOAD Map1 sessions: empty",
-            "client -> server | LOAD Map2 sessions: empty",
-            "server -> client | CONTENT Group header: true new: After: 0 New: 3",
-            "server -> client | CONTENT Map1 header: true new: After: 0 New: 1",
-            "server -> client | CONTENT Map2 header: true new: After: 0 New: 1",
-            "client -> server | KNOWN Group sessions: header/3",
-            "client -> server | LOAD Map3 sessions: empty",
-            "client -> server | KNOWN Map1 sessions: header/1",
-            "client -> server | KNOWN Map2 sessions: header/1",
-            "server -> client | CONTENT Map3 header: true new: After: 0 New: 1",
-            "client -> server | KNOWN Map3 sessions: header/1",
-          ]
-        `);
+      [
+        "client -> server | LOAD Map1 sessions: empty",
+        "client -> server | LOAD Map2 sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Map1 header: true new: After: 0 New: 1",
+        "server -> client | CONTENT Map2 header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Map1 sessions: header/1",
+        "client -> server | LOAD Map3 sessions: empty",
+        "client -> server | KNOWN Map2 sessions: header/1",
+        "server -> client | CONTENT Map3 header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map3 sessions: header/1",
+      ]
+    `);
   });
 
   test("should process pending loads when capacity becomes available", async () => {
@@ -150,8 +150,8 @@ describe("concurrent load", () => {
         "server -> client | CONTENT Group header: true new: After: 0 New: 3",
         "server -> client | CONTENT Map1 header: true new: After: 0 New: 1",
         "client -> server | KNOWN Group sessions: header/3",
-        "client -> server | LOAD Map2 sessions: empty",
         "client -> server | KNOWN Map1 sessions: header/1",
+        "client -> server | LOAD Map2 sessions: empty",
         "server -> client | CONTENT Map2 header: true new: After: 0 New: 1",
         "client -> server | KNOWN Map2 sessions: header/1",
       ]

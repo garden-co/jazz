@@ -498,7 +498,7 @@ export class SyncManager {
         currentTimer - lastTimer >
         SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
       ) {
-        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        await waitForNextTick();
         lastTimer = performance.now();
       }
     }
@@ -717,7 +717,6 @@ export class SyncManager {
       this.sendNewContent(msg.id, peer);
     }
 
-    // Mark load request as complete when we receive a known state response
     peer.trackLoadRequestComplete(coValue);
   }
 
@@ -738,11 +737,6 @@ export class SyncManager {
     const coValue = this.local.getCoValue(msg.id);
     const peer = from === "storage" || from === "import" ? undefined : from;
 
-    // Mark load request as complete when we receive content
-    if (peer) {
-      peer.trackLoadRequestComplete(coValue);
-    }
-
     const sourceRole =
       from === "storage"
         ? "storage"
@@ -759,6 +753,7 @@ export class SyncManager {
       };
     }
 
+    peer?.trackLoadRequestUpdate(coValue);
     coValue.addDependenciesFromContentMessage(msg);
 
     // If some of the dependencies are missing, we wait for them to be available
@@ -991,6 +986,8 @@ export class SyncManager {
         this.trackSyncState(coValue.id);
       }
     }
+
+    peer?.trackLoadRequestComplete(coValue);
 
     for (const peer of this.getPeers(coValue.id)) {
       /**
@@ -1283,4 +1280,11 @@ export function hwrServerPeerSelector(n: number): ServerPeerSelector {
       .slice(0, n)
       .map((wp) => wp.peer);
   };
+}
+
+let waitForNextTick = () =>
+  new Promise<void>((resolve) => queueMicrotask(resolve));
+
+if (typeof setImmediate === "function") {
+  waitForNextTick = () => new Promise<void>((resolve) => setImmediate(resolve));
 }

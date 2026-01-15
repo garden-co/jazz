@@ -70,6 +70,10 @@ export class PeerState {
     });
   }
 
+  trackLoadRequestUpdate(coValue: CoValueCore) {
+    this.loadQueue.trackUpdate(coValue);
+  }
+
   trackLoadRequestComplete(coValue: CoValueCore) {
     this.loadQueue.trackComplete(coValue);
   }

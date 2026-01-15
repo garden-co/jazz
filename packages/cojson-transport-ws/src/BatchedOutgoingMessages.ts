@@ -69,6 +69,14 @@ export class BatchedOutgoingMessages
       return;
     }
 
+    if (
+      isWebSocketOpen(this.websocket) &&
+      !hasWebSocketTooMuchBufferedData(this.websocket)
+    ) {
+      this.websocket.send(this.serializeMessage(msg));
+      return;
+    }
+
     this.processQueue().catch((e) => {
       logger.error("Error while processing sendMessage queue", { err: e });
     });
