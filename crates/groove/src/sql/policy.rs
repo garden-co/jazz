@@ -10,6 +10,9 @@ use crate::sql::query_graph::PredicateValue;
 use crate::sql::row_buffer::OwnedRow;
 use std::collections::HashMap;
 
+#[cfg(feature = "sync-server")]
+use crate::sync::ClaimValue;
+
 /// Policy action type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PolicyAction {
@@ -128,6 +131,14 @@ pub enum PolicyExpr {
         /// Column reference (either column name or @new.column)
         column: PolicyColumnRef,
     },
+
+    /// Array contains check: array CONTAINS value
+    /// e.g., @viewer.claims.roles CONTAINS 'admin'
+    Contains(PolicyValue, PolicyValue),
+
+    /// Value in array check: value IN array
+    /// e.g., team_id IN @viewer.claims.groups
+    In(PolicyValue, PolicyValue),
 }
 
 impl PolicyExpr {
@@ -155,6 +166,18 @@ impl PolicyExpr {
     pub fn inherits(action: PolicyAction, column: PolicyColumnRef) -> Self {
         PolicyExpr::Inherits { action, column }
     }
+
+    /// Create a CONTAINS expression (array contains value).
+    /// e.g., @viewer.claims.roles CONTAINS 'admin'
+    pub fn contains(array: PolicyValue, value: PolicyValue) -> Self {
+        PolicyExpr::Contains(array, value)
+    }
+
+    /// Create an IN expression (value in array).
+    /// e.g., team_id IN @viewer.claims.groups
+    pub fn is_in(value: PolicyValue, array: PolicyValue) -> Self {
+        PolicyExpr::In(value, array)
+    }
 }
 
 /// A value in a policy expression.
@@ -166,8 +189,12 @@ pub enum PolicyValue {
     OldColumn(String),
     /// Column on new row (@new.column, for INSERT/UPDATE CHECK)
     NewColumn(String),
-    /// The viewer's user ID (@viewer)
+    /// The viewer's user ObjectId (@viewer)
     Viewer,
+    /// The viewer's external ID from auth provider (@viewer.external_id)
+    ViewerExternalId,
+    /// A viewer claim value (@viewer.claims.subscriptionTier)
+    ViewerClaim(String),
     /// A literal value
     Literal(PredicateValue),
 }
@@ -186,6 +213,11 @@ impl PolicyValue {
     /// Create an @new column reference.
     pub fn new_column(name: impl Into<String>) -> Self {
         PolicyValue::NewColumn(name.into())
+    }
+
+    /// Create a viewer claim reference (@viewer.claims.name).
+    pub fn viewer_claim(name: impl Into<String>) -> Self {
+        PolicyValue::ViewerClaim(name.into())
     }
 
     /// Create a literal value.
@@ -420,6 +452,16 @@ fn serialize_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             buf.push(action.tag());
             serialize_column_ref(buf, column);
         }
+        PolicyExpr::Contains(array, value) => {
+            buf.push(12);
+            serialize_value(buf, array);
+            serialize_value(buf, value);
+        }
+        PolicyExpr::In(value, array) => {
+            buf.push(13);
+            serialize_value(buf, value);
+            serialize_value(buf, array);
+        }
     }
 }
 
@@ -443,6 +485,13 @@ fn serialize_value(buf: &mut Vec<u8>, val: &PolicyValue) {
         PolicyValue::Literal(v) => {
             buf.push(4);
             serialize_literal(buf, v);
+        }
+        PolicyValue::ViewerExternalId => {
+            buf.push(5);
+        }
+        PolicyValue::ViewerClaim(name) => {
+            buf.push(6);
+            serialize_string(buf, name);
         }
     }
 }
@@ -617,6 +666,18 @@ fn deserialize_expr(data: &[u8], pos: usize) -> Result<(PolicyExpr, usize), Poli
             let (column, new_pos) = deserialize_column_ref(data, pos)?;
             Ok((PolicyExpr::Inherits { action, column }, new_pos))
         }
+        12 => {
+            // Contains
+            let (array, new_pos) = deserialize_value(data, pos)?;
+            let (value, new_pos) = deserialize_value(data, new_pos)?;
+            Ok((PolicyExpr::Contains(array, value), new_pos))
+        }
+        13 => {
+            // In
+            let (value, new_pos) = deserialize_value(data, pos)?;
+            let (array, new_pos) = deserialize_value(data, new_pos)?;
+            Ok((PolicyExpr::In(value, array), new_pos))
+        }
         _ => Err(PolicyError::DeserializationError(format!(
             "invalid expr tag: {}",
             tag
@@ -651,6 +712,11 @@ fn deserialize_value(data: &[u8], pos: usize) -> Result<(PolicyValue, usize), Po
         4 => {
             let (lit, new_pos) = deserialize_literal(data, pos)?;
             Ok((PolicyValue::Literal(lit), new_pos))
+        }
+        5 => Ok((PolicyValue::ViewerExternalId, pos)),
+        6 => {
+            let (name, new_pos) = deserialize_string(data, pos)?;
+            Ok((PolicyValue::ViewerClaim(name), new_pos))
         }
         _ => Err(PolicyError::DeserializationError(format!(
             "invalid value tag: {}",
@@ -952,6 +1018,43 @@ impl PolicyResult {
     }
 }
 
+/// Context for the viewer (authenticated user) including claims from JWT.
+#[cfg(feature = "sync-server")]
+#[derive(Debug, Clone)]
+pub struct ViewerContext {
+    /// The viewer's Jazz ObjectId (for @viewer).
+    pub user_id: ObjectId,
+    /// The viewer's external ID from auth provider (for @viewer.external_id).
+    pub external_id: String,
+    /// JWT claims for policy evaluation (for @viewer.claims.*).
+    pub claims: HashMap<String, ClaimValue>,
+}
+
+#[cfg(feature = "sync-server")]
+impl ViewerContext {
+    /// Create a new viewer context.
+    pub fn new(user_id: ObjectId, external_id: String) -> Self {
+        Self {
+            user_id,
+            external_id,
+            claims: HashMap::new(),
+        }
+    }
+
+    /// Create a viewer context with claims.
+    pub fn with_claims(
+        user_id: ObjectId,
+        external_id: String,
+        claims: HashMap<String, ClaimValue>,
+    ) -> Self {
+        Self {
+            user_id,
+            external_id,
+            claims,
+        }
+    }
+}
+
 /// Policy evaluator with cycle detection and depth limiting.
 pub struct PolicyEvaluator<'a, R: RowLookup, P: PolicyLookup> {
     /// Row lookup implementation.
@@ -960,6 +1063,9 @@ pub struct PolicyEvaluator<'a, R: RowLookup, P: PolicyLookup> {
     policy_lookup: &'a P,
     /// The viewer's user ID.
     viewer: ObjectId,
+    /// Optional viewer context with claims (for @viewer.claims.* support).
+    #[cfg(feature = "sync-server")]
+    viewer_context: Option<ViewerContext>,
     /// Configuration.
     config: PolicyConfig,
     /// Visited (table, row_id) pairs for cycle detection.
@@ -987,6 +1093,28 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             row_lookup,
             policy_lookup,
             viewer,
+            #[cfg(feature = "sync-server")]
+            viewer_context: None,
+            config,
+            visited: HashSet::new(),
+            depth: 0,
+            warned_tables: &WARNED_TABLES,
+        }
+    }
+
+    /// Create a new policy evaluator with a viewer context (for claims support).
+    #[cfg(feature = "sync-server")]
+    pub fn new_with_context(
+        row_lookup: &'a R,
+        policy_lookup: &'a P,
+        viewer_context: ViewerContext,
+        config: PolicyConfig,
+    ) -> Self {
+        PolicyEvaluator {
+            row_lookup,
+            policy_lookup,
+            viewer: viewer_context.user_id,
+            viewer_context: Some(viewer_context),
             config,
             visited: HashSet::new(),
             depth: 0,
@@ -1211,6 +1339,86 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             PolicyExpr::Inherits { action, column } => {
                 self.eval_inherits(*action, column, ctx, table)
             }
+            PolicyExpr::Contains(array, value) => {
+                // Array CONTAINS value check
+                // Only supported with sync-server feature for viewer claims
+                #[cfg(feature = "sync-server")]
+                {
+                    self.eval_contains(array, value, ctx)
+                }
+                #[cfg(not(feature = "sync-server"))]
+                {
+                    let _ = (array, value);
+                    false
+                }
+            }
+            PolicyExpr::In(value, array) => {
+                // Value IN array check (inverse of contains)
+                #[cfg(feature = "sync-server")]
+                {
+                    self.eval_contains(array, value, ctx)
+                }
+                #[cfg(not(feature = "sync-server"))]
+                {
+                    let _ = (value, array);
+                    false
+                }
+            }
+        }
+    }
+
+    /// Evaluate a CONTAINS expression (array contains value).
+    #[cfg(feature = "sync-server")]
+    fn eval_contains(
+        &self,
+        array_val: &PolicyValue,
+        target_val: &PolicyValue,
+        ctx: &EvalContext,
+    ) -> bool {
+        // For viewer claims, we need to check the claims map
+        // For other values, resolve and compare
+        match array_val {
+            PolicyValue::ViewerClaim(claim_name) => {
+                // Get the claim array from viewer context and check if it contains target
+                if let Some(claim) = self
+                    .viewer_context
+                    .as_ref()
+                    .and_then(|vc| vc.claims.get(claim_name))
+                    && let Some(target) = self.resolve_value_to_claim(target_val, ctx)
+                {
+                    return claim.contains(&target);
+                }
+                false
+            }
+            _ => {
+                // For non-claim arrays, we can't currently evaluate CONTAINS
+                // This would require array support in PredicateValue
+                false
+            }
+        }
+    }
+
+    /// Resolve a PolicyValue to a ClaimValue for comparison with claims.
+    #[cfg(feature = "sync-server")]
+    fn resolve_value_to_claim(&self, pv: &PolicyValue, ctx: &EvalContext) -> Option<ClaimValue> {
+        match pv {
+            PolicyValue::Literal(v) => match v {
+                PredicateValue::String(s) => Some(ClaimValue::String(s.clone())),
+                PredicateValue::I64(n) => Some(ClaimValue::Number(*n as f64)),
+                PredicateValue::F64(n) => Some(ClaimValue::Number(*n)),
+                PredicateValue::Bool(b) => Some(ClaimValue::Bool(*b)),
+                PredicateValue::Null => Some(ClaimValue::Null),
+                _ => None,
+            },
+            PolicyValue::Column(name) => ctx.get_column(name).and_then(|v| match v {
+                PredicateValue::String(s) => Some(ClaimValue::String(s)),
+                PredicateValue::I64(n) => Some(ClaimValue::Number(n as f64)),
+                PredicateValue::F64(n) => Some(ClaimValue::Number(n)),
+                PredicateValue::Bool(b) => Some(ClaimValue::Bool(b)),
+                PredicateValue::Null => Some(ClaimValue::Null),
+                _ => None,
+            }),
+            _ => None,
         }
     }
 
@@ -1221,6 +1429,43 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             PolicyValue::OldColumn(name) => ctx.get_old_column(name),
             PolicyValue::NewColumn(name) => ctx.get_new_column(name),
             PolicyValue::Viewer => Some(PredicateValue::Ref(self.viewer)),
+            PolicyValue::ViewerExternalId => {
+                #[cfg(feature = "sync-server")]
+                {
+                    self.viewer_context
+                        .as_ref()
+                        .map(|vc| PredicateValue::String(vc.external_id.clone()))
+                }
+                #[cfg(not(feature = "sync-server"))]
+                {
+                    None
+                }
+            }
+            PolicyValue::ViewerClaim(name) => {
+                #[cfg(feature = "sync-server")]
+                {
+                    self.viewer_context.as_ref().and_then(|vc| {
+                        vc.claims.get(name).and_then(|cv| match cv {
+                            ClaimValue::String(s) => Some(PredicateValue::String(s.clone())),
+                            ClaimValue::Number(n) => {
+                                if n.fract() == 0.0 {
+                                    Some(PredicateValue::I64(*n as i64))
+                                } else {
+                                    Some(PredicateValue::F64(*n))
+                                }
+                            }
+                            ClaimValue::Bool(b) => Some(PredicateValue::Bool(*b)),
+                            ClaimValue::Null => Some(PredicateValue::Null),
+                            ClaimValue::Array(_) => None, // Arrays need special handling via CONTAINS
+                        })
+                    })
+                }
+                #[cfg(not(feature = "sync-server"))]
+                {
+                    let _ = name;
+                    None
+                }
+            }
             PolicyValue::Literal(v) => Some(v.clone()),
         }
     }

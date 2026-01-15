@@ -251,3 +251,90 @@ jobs:
           name: demo-app-playwright-report
           path: examples/demo-app/playwright-report
           retention-days: 7
+
+  auth-betterauth-tests:
+    name: Auth BetterAuth E2E Tests
+    runs-on: ubuntu-latest
+    needs: ts-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: .
+
+      - name: Rebuild native modules
+        run: cd examples/auth-betterauth && npm rebuild better-sqlite3
+
+      - name: Run BetterAuth migrations
+        run: cd examples/auth-betterauth && npx @better-auth/cli migrate --config server/auth-server.ts -y
+
+      - name: Install Playwright browsers
+        run: cd examples/auth-betterauth && pnpm exec playwright install --with-deps chromium
+
+      - name: Run BetterAuth E2E tests
+        run: cd examples/auth-betterauth && pnpm test
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: auth-betterauth-playwright-report
+          path: examples/auth-betterauth/playwright-report
+          retention-days: 7
+
+  auth-workos-tests:
+    name: Auth WorkOS E2E Tests
+    runs-on: ubuntu-latest
+    needs: ts-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+          path: .
+
+      - name: Install Playwright browsers
+        run: cd examples/auth-workos && pnpm exec playwright install --with-deps chromium
+
+      - name: Run WorkOS E2E tests
+        env:
+          WORKOS_TEST_EMAIL: ${{ secrets.WORKOS_TEST_EMAIL }}
+          WORKOS_TEST_PASSWORD: ${{ secrets.WORKOS_TEST_PASSWORD }}
+        run: cd examples/auth-workos && pnpm test
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: auth-workos-playwright-report
+          path: examples/auth-workos/playwright-report
+          retention-days: 7

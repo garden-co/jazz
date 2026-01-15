@@ -1,0 +1,28 @@
+# Groove Server configuration for WorkOS demo
+#
+# This configures groove-server to validate JWT tokens from WorkOS
+# and use the automatic claims for policy evaluation.
+
+host = "0.0.0.0"
+port = 8080
+
+[auth]
+provider = "workos"
+
+[auth.jwt]
+# WorkOS JWKS endpoint
+jwks_url = "https://api.workos.com/sso/jwks/client_01JX28XKCGFWXHBMX2FW66JTRM"
+# WorkOS issuer
+issuer = "https://api.workos.com/"
+# WorkOS uses 'sub' for user ID
+user_id_claim = "sub"
+# Validate token expiration
+validate_exp = true
+
+[auth.provisioning]
+# Automatically create Jazz users on first login
+auto_provision = true
+# Table to store user records
+users_table = "users"
+# Column for external user ID mapping
+external_id_column = "external_id"

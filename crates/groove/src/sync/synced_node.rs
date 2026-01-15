@@ -337,7 +337,7 @@ impl ConnectedClients {
 
         // Track by identity
         self.identity_sessions
-            .entry(identity.id.clone())
+            .entry(identity.external_id.clone())
             .or_default()
             .insert(id);
 
@@ -359,7 +359,10 @@ impl ConnectedClients {
     pub fn remove_session(&mut self, id: SessionId) -> Option<ClientSession> {
         if let Some(session) = self.sessions.remove(&id) {
             // Remove from identity index
-            if let Some(sessions) = self.identity_sessions.get_mut(&session.identity.id) {
+            if let Some(sessions) = self
+                .identity_sessions
+                .get_mut(&session.identity.external_id)
+            {
                 sessions.remove(&id);
             }
 
@@ -370,7 +373,7 @@ impl ConnectedClients {
 
             // Keep stale state for reconnection
             self.stale_states.insert(
-                session.identity.id.clone(),
+                session.identity.external_id.clone(),
                 StaleClientState {
                     known_state: session.client_known_state.clone(),
                     removed_at: Instant::now(),

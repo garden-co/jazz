@@ -305,10 +305,11 @@ CREATE POLICY ON documents FOR UPDATE
 
 - `groove/src/sql/policy.rs` - Policy types and evaluation
 
+## Related Specs
+
+- [Authentication](/docs/internals/authentication) - How `@viewer` is bound via JWT authentication
+
 ## Open Questions
 
-### Identity: @viewer Binding (GCO-1052)
-How to extract authenticated user ID from context and make it available in policy expressions?
-
 ### Server-Authenticated Accounts (GCO-1051)
-Account creation, authentication flow, and session handling.
+Account creation, authentication flow, and session handling beyond JWT.

@@ -274,7 +274,7 @@ async fn handle_unsubscribe<E: Environment>(
 
     // Find sessions for this identity and remove the subscription
     let mut server = state.server.write().await;
-    let session_ids = server.sessions_for_identity(&identity.id);
+    let session_ids = server.sessions_for_identity(&identity.external_id);
 
     let query_id = QueryId(request.subscription_id);
 
@@ -347,7 +347,7 @@ async fn handle_push<E: Environment>(
     let sender_session = {
         let server = state.server.read().await;
         server
-            .sessions_for_identity(&identity.id)
+            .sessions_for_identity(&identity.external_id)
             .into_iter()
             .next()
     };
@@ -462,7 +462,7 @@ async fn handle_reconcile<E: Environment>(
     if let Some(session_id) = {
         let server = state.server.read().await;
         server
-            .sessions_for_identity(&identity.id)
+            .sessions_for_identity(&identity.external_id)
             .into_iter()
             .next()
     } {
@@ -904,22 +904,10 @@ mod tests {
             let mut server = state.server.write().await;
 
             // Session 1 - the pusher
-            let s1 = server.create_session(
-                ClientIdentity {
-                    id: "user1".to_string(),
-                    name: None,
-                },
-                tx1,
-            );
+            let s1 = server.create_session(ClientIdentity::simple("user1"), tx1);
 
             // Session 2 - should receive the broadcast
-            let s2 = server.create_session(
-                ClientIdentity {
-                    id: "user2".to_string(),
-                    name: None,
-                },
-                tx2,
-            );
+            let s2 = server.create_session(ClientIdentity::simple("user2"), tx2);
 
             // Both sessions track the same object
             server.register_object_session(object_id, s1);
@@ -1048,13 +1036,7 @@ mod tests {
         let query_id;
         {
             let mut server = state.server.write().await;
-            session_id = server.create_session(
-                ClientIdentity {
-                    id: "user1".to_string(),
-                    name: None,
-                },
-                tx,
-            );
+            session_id = server.create_session(ClientIdentity::simple("user1"), tx);
             let session = server.get_session_mut(&session_id).unwrap();
             query_id = session.next_query_id();
             session.queries.insert(

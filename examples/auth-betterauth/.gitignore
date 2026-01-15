@@ -1,0 +1,6 @@
+# BetterAuth SQLite database
+auth.db
+
+# Test results
+test-results/
+playwright-report/
