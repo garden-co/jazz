@@ -12,7 +12,7 @@ Changes:
 - **Removed `RNQuickCrypto`** from `jazz-tools`.
 - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
 - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
-- Optimized the JS <--> Rust communication, by removing the compat logic we had with JS crypto
+- Optimized the JS-to-Rust communication by implementing native data type exchange, eliminating serialization overhead.
 - Added permanent CoValue deletion with a new `deleted` loading state.
 - Restricted `unique` parameters to strings or string records for deterministic serialization.
 - `removeMember` now throws when the caller is unauthorized.
