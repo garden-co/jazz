@@ -445,15 +445,10 @@ impl LocalNode {
 
         // Ensure initial state is set (only if not already set)
         // This must happen BEFORE subscribe so the callback gets called with initial state
-        let env = self
-            .env
-            .clone()
-            .expect("subscribe requires environment; use new() not new_without_env()");
-        self.listeners
-            .ensure_initial_state(&key, env.clone(), tips, branch_ref);
+        self.listeners.ensure_initial_state(&key, tips, branch_ref);
 
         // Subscribe with the callback - it will be called immediately with current state
-        let id = self.listeners.subscribe(key, env, callback);
+        let id = self.listeners.subscribe(key, callback);
 
         Ok(id)
     }

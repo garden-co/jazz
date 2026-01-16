@@ -18,7 +18,6 @@ use bytes::Bytes;
 use crate::branch::Branch;
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::storage::Environment;
 
 /// Unique ID for a listener subscription.
 /// Uses the newtype pattern to keep the internal representation opaque.
@@ -65,7 +64,7 @@ pub enum ListenerError {
 }
 
 /// The current state of an object (branch).
-/// Contains commit IDs for previous and current tips, plus references to branch and environment.
+/// Contains commit IDs for previous and current tips, plus reference to branch.
 #[derive(Clone)]
 pub struct ObjectState {
     /// The previous tip commit IDs (None if this is the first load).
@@ -74,8 +73,6 @@ pub struct ObjectState {
     pub tips: Vec<CommitId>,
     /// Reference to the branch for resolving commits.
     branch: Rc<RwLock<Branch>>,
-    /// Reference to the environment for loading chunked content.
-    env: Rc<dyn Environment>,
 }
 
 impl std::fmt::Debug for ObjectState {
@@ -89,12 +86,11 @@ impl std::fmt::Debug for ObjectState {
 
 impl ObjectState {
     /// Create a new state with no previous tips.
-    pub fn new(tips: Vec<CommitId>, branch: Rc<RwLock<Branch>>, env: Rc<dyn Environment>) -> Self {
+    pub fn new(tips: Vec<CommitId>, branch: Rc<RwLock<Branch>>) -> Self {
         ObjectState {
             previous_tips: None,
             tips,
             branch,
-            env,
         }
     }
 
@@ -103,13 +99,11 @@ impl ObjectState {
         previous_tips: Option<Vec<CommitId>>,
         tips: Vec<CommitId>,
         branch: Rc<RwLock<Branch>>,
-        env: Rc<dyn Environment>,
     ) -> Self {
         ObjectState {
             previous_tips,
             tips,
             branch,
-            env,
         }
     }
 
@@ -131,11 +125,6 @@ impl ObjectState {
     /// Get the branch reference.
     pub fn branch(&self) -> &Rc<RwLock<Branch>> {
         &self.branch
-    }
-
-    /// Get the environment reference.
-    pub fn env(&self) -> &Rc<dyn Environment> {
-        &self.env
     }
 
     /// Compute merged content using a merge strategy.
@@ -342,18 +331,15 @@ struct ObjectListenerState {
     current: Option<Rc<ObjectState>>,
     /// Previous tips for computing diffs.
     previous_tips: Option<Vec<CommitId>>,
-    /// Environment reference.
-    env: Rc<dyn Environment>,
     /// Active listeners.
     listeners: HashMap<ListenerId, ObjectCallback>,
 }
 
 impl ObjectListenerState {
-    fn new(env: Rc<dyn Environment>) -> Self {
+    fn new() -> Self {
         ObjectListenerState {
             current: None,
             previous_tips: None,
-            env,
             listeners: HashMap::new(),
         }
     }
@@ -363,12 +349,7 @@ impl ObjectListenerState {
         let prev = self.previous_tips.take();
         self.previous_tips = Some(tips.clone());
 
-        let state = Rc::new(ObjectState::with_previous(
-            prev,
-            tips,
-            branch,
-            self.env.clone(),
-        ));
+        let state = Rc::new(ObjectState::with_previous(prev, tips, branch));
         self.current = Some(state.clone());
 
         // Notify all listeners synchronously
@@ -430,12 +411,7 @@ impl ObjectListenerRegistry {
     /// Returns a listener ID that can be used to unsubscribe.
     ///
     /// Use `ensure_initial_state` before calling this if you need to set initial state.
-    pub fn subscribe(
-        &self,
-        key: ObjectKey,
-        env: Rc<dyn Environment>,
-        callback: ObjectCallback,
-    ) -> ListenerId {
+    pub fn subscribe(&self, key: ObjectKey, callback: ObjectCallback) -> ListenerId {
         let id = {
             let mut next = self.next_id.write().unwrap();
             let id = ListenerId::new(*next);
@@ -444,9 +420,7 @@ impl ObjectListenerRegistry {
         };
 
         let mut states = self.states.write().unwrap();
-        let state = states
-            .entry(key)
-            .or_insert_with(|| ObjectListenerState::new(env));
+        let state = states.entry(key).or_insert_with(ObjectListenerState::new);
         state.add_listener(id, callback);
         id
     }
@@ -458,23 +432,17 @@ impl ObjectListenerRegistry {
     pub fn ensure_initial_state(
         &self,
         key: &ObjectKey,
-        env: Rc<dyn Environment>,
         tips: Vec<CommitId>,
         branch: Rc<RwLock<Branch>>,
     ) {
         let mut states = self.states.write().unwrap();
         let state = states
             .entry(key.clone())
-            .or_insert_with(|| ObjectListenerState::new(env));
+            .or_insert_with(ObjectListenerState::new);
         if state.current.is_none() {
             // Set initial state without notifying (there are no listeners yet)
             state.previous_tips = Some(tips.clone());
-            state.current = Some(Rc::new(ObjectState::with_previous(
-                None,
-                tips,
-                branch,
-                state.env.clone(),
-            )));
+            state.current = Some(Rc::new(ObjectState::with_previous(None, tips, branch)));
         }
     }
 

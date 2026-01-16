@@ -4,14 +4,7 @@ use std::rc::Rc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use groove::{
-    Branch, Commit, Environment, MemoryEnvironment, ObjectId, ObjectKey, ObjectListenerRegistry,
-    ObjectState,
-};
-
-fn make_env() -> Rc<dyn Environment> {
-    Rc::new(MemoryEnvironment::new())
-}
+use groove::{Branch, Commit, ObjectId, ObjectKey, ObjectListenerRegistry, ObjectState};
 
 fn make_branch_with_commit(content: &[u8]) -> (Rc<RwLock<Branch>>, groove::CommitId) {
     let mut branch = Branch::new("main");
@@ -29,7 +22,6 @@ fn make_branch_with_commit(content: &[u8]) -> (Rc<RwLock<Branch>>, groove::Commi
 #[test]
 fn basic_subscribe_and_notify() {
     let registry = ObjectListenerRegistry::new();
-    let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
@@ -38,7 +30,6 @@ fn basic_subscribe_and_notify() {
 
     let listener_id = registry.subscribe(
         key.clone(),
-        env,
         Box::new(move |_state| {
             call_count_clone.fetch_add(1, Ordering::SeqCst);
         }),
@@ -59,12 +50,11 @@ fn basic_subscribe_and_notify() {
 #[test]
 fn new_subscriber_gets_current_state() {
     let registry = ObjectListenerRegistry::new();
-    let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
     // First subscriber
-    let _id1 = registry.subscribe(key.clone(), env.clone(), Box::new(|_| {}));
+    let _id1 = registry.subscribe(key.clone(), Box::new(|_| {}));
 
     // Notify to set initial state
     registry.notify(&key, vec![id], branch);
@@ -74,7 +64,6 @@ fn new_subscriber_gets_current_state() {
     let call_count_clone = call_count.clone();
     let _id2 = registry.subscribe(
         key.clone(),
-        env,
         Box::new(move |_state| {
             call_count_clone.fetch_add(1, Ordering::SeqCst);
         }),
@@ -86,7 +75,6 @@ fn new_subscriber_gets_current_state() {
 #[test]
 fn multiple_listeners_all_called() {
     let registry = ObjectListenerRegistry::new();
-    let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
@@ -97,14 +85,12 @@ fn multiple_listeners_all_called() {
 
     let _id1 = registry.subscribe(
         key.clone(),
-        env.clone(),
         Box::new(move |_| {
             count1_clone.fetch_add(1, Ordering::SeqCst);
         }),
     );
     let _id2 = registry.subscribe(
         key.clone(),
-        env,
         Box::new(move |_| {
             count2_clone.fetch_add(1, Ordering::SeqCst);
         }),
@@ -119,7 +105,6 @@ fn multiple_listeners_all_called() {
 #[test]
 fn state_tracks_previous_tips() {
     let registry = ObjectListenerRegistry::new();
-    let env = make_env();
     let (branch, id1) = make_branch_with_commit(b"first");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
@@ -128,7 +113,6 @@ fn state_tracks_previous_tips() {
 
     let _id = registry.subscribe(
         key.clone(),
-        env,
         Box::new(move |state| {
             has_previous_clone
                 .write()
@@ -163,14 +147,13 @@ fn state_tracks_previous_tips() {
 #[test]
 fn get_current_state() {
     let registry = ObjectListenerRegistry::new();
-    let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
     // No state yet
     assert!(registry.get_current(&key).is_none());
 
-    let _id = registry.subscribe(key.clone(), env, Box::new(|_| {}));
+    let _id = registry.subscribe(key.clone(), Box::new(|_| {}));
     registry.notify(&key, vec![id], branch);
 
     // Now should have state
@@ -183,7 +166,6 @@ fn get_current_state() {
 #[test]
 fn unsubscribe_removes_listener() {
     let registry = ObjectListenerRegistry::new();
-    let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
     let key = ObjectKey::new(ObjectId::new(1), "main");
 
@@ -192,7 +174,6 @@ fn unsubscribe_removes_listener() {
 
     let listener_id = registry.subscribe(
         key.clone(),
-        env,
         Box::new(move |_| {
             call_count_clone.fetch_add(1, Ordering::SeqCst);
         }),
@@ -223,11 +204,10 @@ fn unsubscribe_removes_listener() {
 
 #[test]
 fn diff_raw_detects_changes() {
-    let env = make_env();
     let (branch, id1) = make_branch_with_commit(b"hello");
 
     // No previous - should be Initial
-    let state = ObjectState::new(vec![id1], branch.clone(), env.clone());
+    let state = ObjectState::new(vec![id1], branch.clone());
     assert!(state.diff_raw().is_initial());
 
     // Add commit with same content
@@ -243,7 +223,7 @@ fn diff_raw_detects_changes() {
     };
 
     // With previous, unchanged
-    let state = ObjectState::with_previous(Some(vec![id1]), vec![id2], branch.clone(), env.clone());
+    let state = ObjectState::with_previous(Some(vec![id1]), vec![id2], branch.clone());
     assert!(state.diff_raw().is_unchanged());
 
     // Add commit with different content
@@ -259,6 +239,6 @@ fn diff_raw_detects_changes() {
     };
 
     // With previous, changed
-    let state = ObjectState::with_previous(Some(vec![id2]), vec![id3], branch, env);
+    let state = ObjectState::with_previous(Some(vec![id2]), vec![id3], branch);
     assert!(state.diff_raw().is_changed());
 }
