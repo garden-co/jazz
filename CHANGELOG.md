@@ -13,7 +13,7 @@ Changes:
 - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
 - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
 - Optimized the JS-to-Rust communication by implementing native data type exchange, eliminating serialization overhead.
-- Added permanent CoValue deletion with a new `deleted` loading state.
+- Added permanent [CoValue deletion](https://jazz.tools/docs/core-concepts/covalues/deleting) with a new `deleted` loading state.
 - Restricted `unique` parameters to strings or string records for deterministic serialization.
 - `removeMember` now throws when the caller is unauthorized.
 - React context changes: `useJazzContextValue` replaces value access, `useJazzContext` returns the manager, and nested `JazzProvider` now throws.

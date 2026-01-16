@@ -61,7 +61,7 @@ export const docNavigationItems = [
         done: 100,
       },
       {
-        name: "0.18.0 - New `$jazz` field in CoValues",
+        name: "0.18.0 - New `$jazz` field",
         href: "/docs/upgrade/0-18-0",
         done: 100,
       },
