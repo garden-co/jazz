@@ -220,9 +220,9 @@ export function replaceCodeSnippets(source, filePath) {
   
   // Regex to match code fences with snippet syntax
   // Matches: ```ts snippet=path/to/file.ts or ```tsx path/to/file.ts#Region
-  const codeFenceRegex = /```(\w+)\s+([^\n]+)\n([\s\S]*?)```/g;
+  const codeFenceRegex = /^([ \t]*)```(\w+)\s+([^\n]+)\n([\s\S]*?)^[ \t]*```/gm;
 
-  return source.replace(codeFenceRegex, (match, lang, meta, content) => {
+  return source.replace(codeFenceRegex, (match, indent, lang, meta, content) => {
     const params = parseMeta(meta);
     
     // If no snippet parameter, leave it unchanged
@@ -246,8 +246,13 @@ export function replaceCodeSnippets(source, filePath) {
 
       const cleanContent = processAnnotations(fileContent);
 
+      const indentedContent = cleanContent
+        .split("\n")
+        .map((line) => (line.length ? `${indent}${line}` : indent))
+        .join("\n");
+
       // Return the code fence with the actual content
-      return `\`\`\`${lang}\n${cleanContent}\n\`\`\``;
+      return `${indent}\`\`\`${lang}\n${indentedContent}\n${indent}\`\`\``;
     } catch (error) {
       console.warn(`Error processing snippet: ${error.message}`);
       return match;
