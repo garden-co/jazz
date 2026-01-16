@@ -18,15 +18,15 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 
 ## What changed
 
-- There is no more fallback to Javascript crypto. If the crypto fails to initialize, it will throw an error. See [Edge runtimes](#edge-runtimes).
-**NB**: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
-- We dropped support for `PureJSCrypto`. Jazz crypto now runs natively in each environment. See [Expo](#expo) and [React Native](#react-native-non-expo).
-- We dropped support for `RNQuickCrypto`. RNCrypto is now the default crypto provider on React Native. See [Expo](#expo) and [React Native](#react-native-non-expo).
+- There is no more fallback to Javascript crypto. If the crypto fails to initialize, it will throw an error. See [Edge runtimes](#edge-runtimes) for upgrading.
+- As Jazz crypto now runs natively in all environments, we no longer support `PureJSCrypto`. See [Expo](#expo) and [React Native](#react-native-non-expo) for upgrade instructions.
+- RNCrypto is now the default crypto provider on React Native. As a result, we're also discontinuing support for `RNQuickCrypto`.
 - Optimized the JS-to-Rust communication by implementing native data type exchange, eliminating serialization overhead.
-- You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic. See [A more strict `unique` param](#a-more-strict-unique-param).
+- You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic. See [a more strict `unique` param](#a-more-strict-unique-param).
 - The `removeMember` method now throws an error if the caller is not authorized.
-- We have introduced a way to permanently [delete CoValues](/docs/react/core-concepts/deleting). This brings a new `deleted` loading state. See [New `deleted` loading state](#new-deleted-loading-state).
+- We have introduced a way to permanently [delete CoValues](/docs/react/core-concepts/deleting). This brings a [new `deleted` loading state](#new-deleted-loading-state).
 - The React context API in `jazz-tools/react-core` changed: `useJazzContextValue` replaces `useJazzContext` for value access, and nesting `JazzProvider` now throws. See [React context/provider changes](#react-contextprovider-changes).
+- The `load` method now returns a `CoValue` object instead of a `Promise<CoValue>`. See [Removed `load` method](#removed-load-method).
 
 ## Breaking changes
 
@@ -187,21 +187,6 @@ If you do encounter issues (for example, errors about unsupported `unique` value
 the recommended upgrade path is to convert your uniqueness constraint to a string (as shown below), or, if necessary, to an object containing only string properties.
 
 **If you are affected by this change and cannot migrate to a supported unique type, please [reach us on Discord](https://discord.gg/ANm5jY6Y) for help or guidance.**
-
-Below is an example showing a correct migration:
-<CodeGroup>
-```ts
-// Before (integers cause TypeScript errors but still work at runtime)
-Task.create({ text: "X" }, { unique: 123 }); // TYPE ERROR (deprecated)
-
-// After - Recommended: convert to string or object with string values
-Task.create({ text: "X" }, { unique: "123" }); // SUPPORTED (RECOMMENDED)
-
-// Alternative: bypass type check (integers still work at runtime, but deprecated)
-// @ts-expect-error - We are bypassing the type check
-Task.create({ text: "X" }, { unique: 123 }); // SUPPORTED (but use string instead)
-```
-</CodeGroup>
 
 ### New `deleted` loading state
 
