@@ -5,6 +5,7 @@ import {
 } from "../config.js";
 import {
   blockMessageTypeOnOutgoingPeer,
+  fillCoMapWithLargeData,
   loadCoValueOrFail,
   moveContentToNode,
   setupTestNode,
@@ -471,5 +472,64 @@ describe("concurrent load", () => {
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
+  });
+
+  test("should keep load slot occupied while streaming large CoValues", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+
+    const { peerState, peerOnServer } = client.connectToSyncServer();
+
+    // Create a large CoValue that requires multiple chunks to stream
+    const group = jazzCloud.node.createGroup();
+    const largeMap = group.createMap();
+    fillCoMapWithLargeData(largeMap);
+
+    // Create a small CoValue that will be queued
+    const smallMap = group.createMap();
+    smallMap.set("key", "value", "trusting");
+
+    // Block all the streaming chunks, except the first content message
+    const blocker = blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {
+      id: largeMap.id,
+      matcher: (msg) => msg.action === "content" && !msg.expectContentUntil,
+    });
+
+    // Start loading both maps concurrently
+    const largeMapOnClient = await client.node.loadCoValueCore(largeMap.id);
+    const smallMapPromise = client.node.loadCoValueCore(smallMap.id);
+
+    expect(client.node.getCoValue(largeMap.id).isStreaming()).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The SmallMap load should still be waiting in the queue
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        LargeMap: largeMapOnClient,
+        SmallMap: smallMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD LargeMap sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT LargeMap header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN LargeMap sessions: header/73",
+      ]
+    `);
+
+    // Now unblock and send all remaining chunks to complete streaming
+    blocker.unblock();
+    blocker.sendBlockedMessages();
+
+    await client.node.getCoValue(largeMap.id).waitForFullStreaming();
+
+    const loadedSmallMap = await smallMapPromise;
+    expect(loadedSmallMap.isAvailable()).toBe(true);
   });
 });

@@ -336,6 +336,35 @@ describe("OutgoingLoadQueue", () => {
       expect(queue.inFlightCount).toBe(1);
       expect(secondCallbackCount).toBe(1);
     });
+
+    test("should warn but not mark as unavailable when streaming CoValue times out", async () => {
+      vi.useFakeTimers();
+      CO_VALUE_LOADING_CONFIG.TIMEOUT = 1000;
+      setMaxInFlightLoadsPerPeer(1);
+
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      map.set("key", "value");
+
+      // Mock isStreaming to return true (CoValue is available but still streaming)
+      vi.spyOn(map.core, "isStreaming").mockReturnValue(true);
+
+      queue.enqueue(map.core, () => {});
+
+      expect(queue.inFlightCount).toBe(1);
+
+      // Advance time past the timeout
+      await vi.advanceTimersByTimeAsync(1001);
+
+      // Should be removed from in-flight (timeout clears the slot)
+      expect(queue.inFlightCount).toBe(0);
+
+      // But should NOT be marked as unavailable since it's available (just streaming)
+      expect(map.core.isAvailable()).toBe(true);
+    });
   });
 
   describe("trackComplete", () => {
@@ -410,6 +439,108 @@ describe("OutgoingLoadQueue", () => {
 
       expect(queue.inFlightCount).toBe(1);
       expect(secondCallbackCount).toBe(1);
+    });
+
+    test("should not complete if CoValue is streaming", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+
+      // Mock isStreaming to return true
+      vi.spyOn(map1.core, "isStreaming").mockReturnValue(true);
+
+      let callback2Called = false;
+
+      queue.enqueue(map1.core, () => {});
+      queue.enqueue(map2.core, () => {
+        callback2Called = true;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(callback2Called).toBe(false);
+
+      // trackComplete should not complete because map1 is streaming
+      queue.trackComplete(map1.core);
+
+      // Should still be in-flight and pending should not be processed
+      expect(queue.inFlightCount).toBe(1);
+      expect(callback2Called).toBe(false);
+      expect(queue.pendingCount).toBe(1);
+
+      // Stop streaming
+      vi.spyOn(map1.core, "isStreaming").mockReturnValue(false);
+
+      // Now trackComplete should work
+      queue.trackComplete(map1.core);
+
+      expect(queue.inFlightCount).toBe(1); // map2 is now in-flight
+      expect(callback2Called).toBe(true);
+      expect(queue.pendingCount).toBe(0);
+    });
+  });
+
+  describe("trackUpdate", () => {
+    test("should refresh timeout for in-flight streaming CoValue", async () => {
+      vi.useFakeTimers();
+      CO_VALUE_LOADING_CONFIG.TIMEOUT = 1000;
+      setMaxInFlightLoadsPerPeer(1);
+
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      map.set("key", "value");
+
+      // Mock isStreaming to return true
+      vi.spyOn(map.core, "isStreaming").mockReturnValue(true);
+
+      queue.enqueue(map.core, () => {});
+
+      expect(queue.inFlightCount).toBe(1);
+
+      // Advance time to just before timeout
+      await vi.advanceTimersByTimeAsync(900);
+
+      // Refresh the timeout (simulating receiving a chunk)
+      queue.trackUpdate(map.core);
+
+      // Advance another 200ms - would have timed out without the refresh
+      await vi.advanceTimersByTimeAsync(200);
+
+      // Should still be in-flight because timeout was refreshed
+      expect(queue.inFlightCount).toBe(1);
+
+      // Now advance past the new timeout
+      await vi.advanceTimersByTimeAsync(900);
+
+      // Should have timed out now
+      expect(queue.inFlightCount).toBe(0);
+    });
+
+    test("should be a no-op for unknown CoValues", () => {
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      const unknownCoValue = node.getCoValue(
+        "co_zTestTrackUpdateUnknown01" as any,
+      );
+
+      queue.enqueue(map.core, () => {});
+
+      expect(queue.inFlightCount).toBe(1);
+
+      // trackUpdate on unknown CoValue should be a no-op
+      queue.trackUpdate(unknownCoValue);
+
+      // Should still have the same in-flight count
+      expect(queue.inFlightCount).toBe(1);
     });
   });
 

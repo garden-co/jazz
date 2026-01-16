@@ -269,6 +269,7 @@ export function blockMessageTypeOnOutgoingPeer(
   opts: {
     id?: string;
     once?: boolean;
+    matcher?: (msg: SyncMessage) => boolean;
   },
 ) {
   const push = peer.outgoing.push;
@@ -281,7 +282,8 @@ export function blockMessageTypeOnOutgoingPeer(
       typeof msg === "object" &&
       msg.action === messageType &&
       (!opts.id || msg.id === opts.id) &&
-      (!opts.once || !blockedIds.has(msg.id))
+      (!opts.once || !blockedIds.has(msg.id)) &&
+      (!opts.matcher || opts.matcher(msg))
     ) {
       blockedMessages.push(msg);
       blockedIds.add(msg.id);
