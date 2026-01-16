@@ -352,6 +352,144 @@ LIFECYCLE OF A COVALUE:
 
 ---
 
+## Eviction Safeguards
+
+To prevent eviction from getting stuck or causing performance issues, the system implements several safeguards:
+
+### 1. Eviction Mutex (Prevent Concurrent Eviction)
+
+```typescript
+class StorageEvictionManager {
+  private evictionInProgress: boolean = false;
+  
+  async evictToFreeSpace(bytesNeeded: number): Promise<number> {
+    // Prevent concurrent eviction (background + store could collide)
+    if (this.evictionInProgress) {
+      logger.debug("Eviction already in progress, skipping");
+      return 0;
+    }
+    
+    this.evictionInProgress = true;
+    try {
+      return await this.doEviction(bytesNeeded);
+    } finally {
+      this.evictionInProgress = false;
+    }
+  }
+}
+```
+
+### 2. Maximum Candidates Limit
+
+```typescript
+async getEvictionCandidates(): Promise<EvictionCandidate[]> {
+  const candidates = await this.storage.getEvictionCandidates(protectedIds);
+  
+  // Limit candidates to prevent processing too many at once
+  // This bounds memory usage and processing time
+  return candidates.slice(0, this.config.maxEvictionCandidates);  // default: 1000
+}
+```
+
+### 3. Early Exit Conditions
+
+```typescript
+async doEviction(bytesNeeded: number): Promise<number> {
+  const candidates = await this.getEvictionCandidates();
+  
+  // Exit 1: No candidates available
+  if (candidates.length === 0) {
+    logger.warn("No eviction candidates available");
+    return 0;
+  }
+  
+  // Exit 2: Calculate total evictable space upfront
+  const totalEvictableBytes = candidates.reduce((sum, c) => sum + c.sizeBytes, 0);
+  if (totalEvictableBytes < bytesNeeded) {
+    logger.warn("Not enough evictable space", { 
+      needed: bytesNeeded, 
+      available: totalEvictableBytes 
+    });
+    // Still evict what we can, but caller knows we couldn't free enough
+  }
+  
+  let freedBytes = 0;
+  let evictedCount = 0;
+  
+  for (const candidate of candidates) {
+    // Exit 3: We've freed enough
+    if (freedBytes >= bytesNeeded) {
+      break;
+    }
+    
+    await this.deleteCoValue(candidate.id);
+    freedBytes += candidate.sizeBytes;
+    evictedCount++;
+    
+    // Exit 4: Batch limit reached (yield to other operations)
+    if (evictedCount >= this.config.evictionBatchSize) {
+      break;
+    }
+  }
+  
+  return freedBytes;
+}
+```
+
+### 4. Background Eviction Skip During Store
+
+```typescript
+// Background eviction checks if store eviction is happening
+async backgroundEvictionCheck(): Promise<void> {
+  if (this.evictionInProgress) {
+    // Store eviction is running, skip this background check
+    return;
+  }
+  
+  const currentSize = await this.getCurrentStorageSize();
+  const softThreshold = this.config.maxStorageBytes * this.config.softThresholdRatio;
+  
+  if (currentSize > softThreshold) {
+    await this.evictToFreeSpace(currentSize - softThreshold);
+  }
+}
+```
+
+### 5. Graceful Degradation Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     EVICTION TERMINATION CONDITIONS                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  evictToFreeSpace() will ALWAYS terminate because:
+  
+  1. MUTEX: Only one eviction can run at a time
+     └─► Concurrent calls return 0 immediately
+  
+  2. FINITE CANDIDATES: Limited to maxEvictionCandidates (default 1000)
+     └─► Can't loop forever through infinite candidates
+  
+  3. BATCH LIMIT: Evicts at most evictionBatchSize per call (default 100)
+     └─► Prevents long-running transactions
+  
+  4. EARLY EXIT: Stops when freedBytes >= bytesNeeded
+     └─► Doesn't evict more than necessary
+  
+  5. NO CANDIDATES: Returns 0 when no evictable CoValues exist
+     └─► Triggers graceful degradation to memory-only mode
+  
+  6. INSUFFICIENT SPACE: Returns freedBytes < bytesNeeded
+     └─► Caller handles graceful degradation
+
+  Result: Eviction NEVER loops infinitely. Worst case is:
+  - Process maxEvictionCandidates candidates
+  - In batches of evictionBatchSize
+  - Then return and let caller decide (store or skip)
+```
+
+---
+
 ## Components
 
 ### 1. StorageEvictionManager
@@ -372,6 +510,7 @@ interface StorageEvictionConfig {
   sizeWeight: number;               // Weight for size in eviction score (default: 0.2 = 20%)
   evictionIntervalMs: number;       // Background check interval (default: 5 min)
   evictionBatchSize: number;        // Max CoValues to evict per batch (default: 100)
+  maxEvictionCandidates: number;    // Max candidates to process per eviction (default: 1000)
 }
 
 class StorageEvictionManager {
@@ -380,6 +519,7 @@ class StorageEvictionManager {
   private inMemoryCoValues: Map<RawCoID, CoValueCore>;  // Reference to LocalNode.coValues
   private unsyncedTracker: UnsyncedCoValuesTracker;     // Reference to in-memory tracker
   private interval: ReturnType<typeof setInterval> | undefined;
+  private evictionInProgress: boolean = false;          // Mutex to prevent concurrent eviction
   
   constructor(
     storage: StorageAPI,
@@ -1012,13 +1152,15 @@ const DEFAULT_EVICTION_CONFIG: StorageEvictionConfig = {
   sizeWeight: 0.2,                            // 20% weight for size
   evictionIntervalMs: 5 * 60 * 1000,          // 5 minutes
   evictionBatchSize: 100,                     // Max 100 CoValues per batch
+  maxEvictionCandidates: 1000,                // Max candidates to process per eviction
 };
 ```
 
-**Weight Rationale:**
+**Config Rationale:**
 - `ageWeight: 0.8` (80%) - Prioritizes recency, ensuring frequently accessed CoValues stay cached
 - `sizeWeight: 0.2` (20%) - Gives a boost to larger items, making eviction more space-efficient
-- These weights mean: a 10× older CoValue scores ~1.8 points higher; a 10× larger CoValue scores ~0.2 points higher
+- `evictionBatchSize: 100` - Limits each eviction run to prevent long transactions
+- `maxEvictionCandidates: 1000` - Bounds memory and processing time for candidate selection
 
 ---
 
