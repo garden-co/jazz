@@ -52,6 +52,7 @@ pub struct TimerId(pub u64);
 
 /// Unique identifier for a query subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // Part of intended API, will be used for query subscriptions
 pub struct QueryId(pub u64);
 
 // ============================================================================
@@ -862,7 +863,7 @@ impl SyncEngine {
 
         match comparison {
             FrontierComparison::LocalAhead | FrontierComparison::Diverged => {
-                commits_to_send(&*branch_guard, local_frontier, server_frontier)
+                commits_to_send(&branch_guard, local_frontier, server_frontier)
             }
             _ => vec![],
         }

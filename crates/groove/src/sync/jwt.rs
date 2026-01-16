@@ -350,12 +350,11 @@ impl JwtTokenValidator {
         validation.algorithms = vec![header.alg];
 
         // If token has a kid, try that key first
-        if let Some(ref kid) = header.kid {
-            if let Some(key) = cache.keys.get(kid) {
-                if let Ok(data) = decode::<TokenClaims>(token, key, &validation) {
-                    return Some(data.claims);
-                }
-            }
+        if let Some(ref kid) = header.kid
+            && let Some(key) = cache.keys.get(kid)
+            && let Ok(data) = decode::<TokenClaims>(token, key, &validation)
+        {
+            return Some(data.claims);
         }
 
         // Try all keys (for tokens without kid or if kid didn't match)

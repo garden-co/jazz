@@ -3,8 +3,10 @@
 //! These traits abstract the HTTP/SSE transport layer from the sync logic,
 //! allowing different platforms to provide their own implementations.
 
+#[cfg(not(target_arch = "wasm32"))]
 use async_trait::async_trait;
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::protocol::SseEvent;
 
 // ============================================================================
