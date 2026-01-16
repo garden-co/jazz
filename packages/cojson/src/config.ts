@@ -26,7 +26,7 @@ export const CO_VALUE_LOADING_CONFIG = {
   MAX_RETRIES: 1,
   TIMEOUT: 60_000,
   RETRY_DELAY: 3000,
-  MAX_IN_FLIGHT_LOADS_PER_PEER: 100,
+  MAX_IN_FLIGHT_LOADS_PER_PEER: 1000,
 };
 
 export function setCoValueLoadingMaxRetries(maxRetries: number) {
