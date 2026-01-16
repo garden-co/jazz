@@ -55,6 +55,7 @@
 //! - **groove-server**: Axum-based HTTP server implementation
 //!   - HTTP handlers and router
 
+mod engine;
 mod env;
 mod negotiation;
 mod protocol;
@@ -75,12 +76,37 @@ pub mod test_harness;
 ))]
 pub mod jwt;
 
+// New engine types (runtime-less state machine)
+// Note: QueryId is not exported here to avoid conflict with server::QueryId
+pub use engine::{
+    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
+    OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StreamAction,
+    SubscribeRequestEvent, SubscriptionState, SyncConfig, SyncEngine, TickEvent, TimerId,
+    TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
+};
+
+// Environment and protocol
 pub use env::*;
 pub use negotiation::*;
 pub use protocol::*;
+
+// Legacy types (will be removed)
 pub use runtime::*;
 pub use shared::*;
-pub use synced_node::*;
+
+// Re-export synced_node types that don't conflict
+pub use synced_node::{
+    OnObjectsReceivedCallback,
+    PendingWrites,
+    SyncedNode,
+    UpstreamServer,
+    UpstreamServers,
+    UpstreamSubscription,
+    WriteBuffer,
+    push_object_standalone,
+    // Legacy async functions (will be removed)
+    run_upstream_event_loop,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::*;

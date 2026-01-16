@@ -4,15 +4,14 @@
 //! - `WasmDatabase` - In-memory or IndexedDB-backed database
 //! - `WasmQueryHandle*` - Incremental query subscriptions (string, binary, delta)
 //! - `WasmBlobWriter` - Streaming blob creation
-//! - `WasmSyncClient` - WebSocket sync client
-//! - `WasmSyncedLocalNode` - Synced local node wrapper
+//! - `WasmSyncDriver` - Runtime-less sync driver (state machine + EventSource)
 //! - `IndexedDbEnvironment` - Persistent storage backend
 //!
 //! ## Modules
 //!
+//! - `driver` - Runtime-less sync driver using SyncEngine
 //! - `indexeddb` - IndexedDB storage implementation
-//! - `sync` - WebSocket sync client
-//! - `synced_local_node` - High-level synced node API
+//! - `sync` - Legacy WebSocket sync client (deprecated)
 
 use bytes::Bytes;
 use groove::ListenerId;
@@ -29,15 +28,19 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
+pub mod driver;
 pub mod indexeddb;
 pub mod runtime;
 pub mod sync;
-pub mod synced_local_node;
+// Legacy synced_local_node removed - use WasmSyncDriver instead
+// pub mod synced_local_node;
 
+pub use driver::WasmSyncDriver;
 pub use indexeddb::IndexedDbEnvironment;
 pub use runtime::WasmRuntime;
 pub use sync::WasmSyncClient;
-pub use synced_local_node::WasmSyncedLocalNode;
+// Legacy WasmSyncedLocalNode removed - use WasmSyncDriver instead
+// pub use synced_local_node::WasmSyncedLocalNode;
 
 // ==================== Blob Registry ====================
 
