@@ -67,7 +67,6 @@ export default function RootLayout({
           {children}
           <JazzFooter />
           <PagefindSearch />
-          <AdventOfJazzBanner />
         </ThemeProvider>
       </body>
     </html>
