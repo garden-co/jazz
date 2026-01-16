@@ -8,6 +8,7 @@ use std::rc::Rc;
 use bytes::Bytes;
 use groove::sql::row_buffer::RowValue;
 use groove::sql::{Database, ExecuteResult};
+use groove::sync::StorageRequest;
 use groove::{ChunkStore, ContentRef, INLINE_THRESHOLD, MemoryEnvironment};
 
 /// Helper to extract inserted ID from ExecuteResult
@@ -16,6 +17,31 @@ fn get_inserted_id(result: ExecuteResult) -> groove::ObjectId {
         ExecuteResult::Inserted { row_id: id, .. } => id,
         other => panic!("expected Inserted, got {:?}", other),
     }
+}
+
+/// Execute pending storage requests from a database.
+/// This is needed in tests because storage goes through outboxes,
+/// and tests don't use a full driver/SyncEngine.
+fn flush_storage(db: &Database) {
+    let env = db.node().env().clone();
+    let requests = db.node().drain_storage_requests();
+
+    futures::executor::block_on(async {
+        for request in requests {
+            match request {
+                StorageRequest::PutCommit { commit } => {
+                    env.put_commit(&commit).await;
+                }
+                StorageRequest::SetFrontier {
+                    object_id,
+                    branch,
+                    frontier,
+                } => {
+                    env.set_frontier(object_id.into(), &branch, &frontier).await;
+                }
+            }
+        }
+    });
 }
 
 #[test]
@@ -35,6 +61,7 @@ fn database_roundtrip_simple() {
         db.execute("INSERT INTO users (name) VALUES ('Bob')")
             .unwrap();
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -101,6 +128,7 @@ fn database_roundtrip_multiple_tables() {
         ))
         .unwrap();
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -171,6 +199,7 @@ fn database_roundtrip_with_policies() {
         db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer")
             .unwrap();
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -233,6 +262,7 @@ fn database_roundtrip_after_delete() {
         let items = db.query("SELECT * FROM items").unwrap();
         assert_eq!(items.len(), 2);
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -279,6 +309,7 @@ fn database_roundtrip_after_update() {
             Some(RowValue::String("new_value"))
         );
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -310,6 +341,7 @@ fn database_roundtrip_with_nullable() {
         db.execute("INSERT INTO contacts (name) VALUES ('Bob')")
             .unwrap();
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -388,6 +420,7 @@ fn database_roundtrip_with_inline_blob() {
         eprintln!("Row buffer len: {}", rows_before[0].1.buffer.len());
         eprintln!("Data value: {:?}", rows_before[0].1.get_by_name("data"));
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 
@@ -459,6 +492,7 @@ fn database_roundtrip_with_chunked_blob() {
         })
         .unwrap();
 
+        flush_storage(&db);
         db.catalog_object_id()
     };
 

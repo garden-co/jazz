@@ -20,8 +20,8 @@ use groove::ObjectId;
 use groove::sync::{
     ConnectionEvent, ConnectionEventKind, Encode, Inboxes, LocalWriteEvent, Notification,
     OutboundRequest, Outboxes, PushRequest, PushResponse, PushResponseEvent, SseEvent,
-    SseInboxEvent, StreamAction, SubscribeRequestEvent, SubscriptionOptions, SyncEngine, TickEvent,
-    UpstreamId,
+    SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent, SubscriptionOptions,
+    SyncEngine, TickEvent, UpstreamId,
 };
 
 // ============================================================================
@@ -287,6 +287,29 @@ impl NativeSyncDriver {
             for notification in &outboxes.notifications {
                 callback(notification);
             }
+        }
+
+        // Handle storage requests
+        // For MemoryEnvironment, we run synchronously since it's instant.
+        // A production driver with async storage would need Arc<dyn Environment + Send + Sync>.
+        if !outboxes.storage.is_empty() {
+            let env = self.engine.local_node.env().clone();
+            futures::executor::block_on(async {
+                for request in outboxes.storage {
+                    match request {
+                        StorageRequest::PutCommit { commit } => {
+                            env.put_commit(&commit).await;
+                        }
+                        StorageRequest::SetFrontier {
+                            object_id,
+                            branch,
+                            frontier,
+                        } => {
+                            env.set_frontier(object_id.into(), &branch, &frontier).await;
+                        }
+                    }
+                }
+            });
         }
     }
 

@@ -20,12 +20,13 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{EventSource, MessageEvent, Request, RequestInit, Response};
 
 // ObjectId is used via groove::sync::*
+use groove::Environment;
 use groove::sql::{Database, DatabaseState};
 use groove::sync::{
     ConnectionEvent, ConnectionEventKind, ConnectionState, Decode, Encode, Inboxes,
     LocalWriteEvent, Notification, OutboundRequest, Outboxes, PushResponse, PushResponseEvent,
-    SseEvent, SseInboxEvent, StreamAction, SubscribeRequestEvent, SubscriptionOptions, SyncEngine,
-    TickEvent, UpstreamId,
+    SseEvent, SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent,
+    SubscriptionOptions, SyncEngine, TickEvent, UpstreamId,
 };
 
 // ============================================================================
@@ -337,6 +338,7 @@ impl WasmSyncDriver {
             };
 
             let outboxes = engine.borrow_mut().pass(inboxes);
+            let env = engine.borrow().local_node.env().clone();
 
             // Handle outboxes inline (can't call self methods from closure)
             handle_outboxes_impl(
@@ -347,6 +349,7 @@ impl WasmSyncDriver {
                 &auth_token,
                 on_state_change.as_ref(),
                 on_error.as_ref(),
+                env,
             );
         }) as Box<dyn FnMut()>);
 
@@ -364,6 +367,7 @@ impl WasmSyncDriver {
 
     /// Handle outboxes from a pass.
     fn handle_outboxes(&self, outboxes: Outboxes) {
+        let env = self.engine.borrow().local_node.env().clone();
         handle_outboxes_impl(
             &outboxes,
             &self.engine,
@@ -372,6 +376,7 @@ impl WasmSyncDriver {
             &self.auth_token,
             self.on_state_change.as_ref(),
             self.on_error.as_ref(),
+            env,
         );
     }
 }
@@ -385,6 +390,7 @@ fn handle_outboxes_impl(
     auth_token: &str,
     on_state_change: Option<&Function>,
     _on_error: Option<&Function>,
+    env: Rc<dyn Environment>,
 ) {
     // Handle stream actions
     for action in &outboxes.stream_actions {
@@ -441,6 +447,11 @@ fn handle_outboxes_impl(
         }
     }
 
+    // Handle storage requests (fire-and-forget)
+    for storage_req in &outboxes.storage {
+        execute_storage_request(env.clone(), storage_req.clone());
+    }
+
     // Handle notifications
     for notification in &outboxes.notifications {
         match notification {
@@ -460,6 +471,24 @@ fn handle_outboxes_impl(
             }
         }
     }
+}
+
+/// Execute a storage request asynchronously (fire-and-forget).
+fn execute_storage_request(env: Rc<dyn Environment>, request: StorageRequest) {
+    wasm_bindgen_futures::spawn_local(async move {
+        match request {
+            StorageRequest::PutCommit { commit } => {
+                env.put_commit(&commit).await;
+            }
+            StorageRequest::SetFrontier {
+                object_id,
+                branch,
+                frontier,
+            } => {
+                env.set_frontier(object_id.into(), &branch, &frontier).await;
+            }
+        }
+    });
 }
 
 /// Open an SSE stream to the server.

@@ -52,9 +52,9 @@ pub mod jwt;
 // Note: QueryId not exported to avoid conflict with server::QueryId
 pub use engine::{
     ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
-    OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StreamAction,
-    SubscribeRequestEvent, SubscriptionState, SyncConfig, SyncEngine, TickEvent, TimerId,
-    TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
+    OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StorageRequest,
+    StreamAction, SubscribeRequestEvent, SubscriptionState, SyncConfig, SyncEngine, TickEvent,
+    TimerId, TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
 };
 
 // Protocol types

@@ -178,6 +178,26 @@ pub struct Outboxes {
 
     /// Timer requests.
     pub timers: Vec<TimerRequest>,
+
+    /// Storage requests (fire-and-forget persistence).
+    pub storage: Vec<StorageRequest>,
+}
+
+/// A storage request for persistence.
+///
+/// These are fire-and-forget operations - the driver executes them
+/// asynchronously and doesn't report results back. This matches the
+/// previous `spawn_persist` behavior but makes storage explicit.
+#[derive(Debug, Clone)]
+pub enum StorageRequest {
+    /// Persist a commit.
+    PutCommit { commit: Commit },
+    /// Update the frontier for an object's branch.
+    SetFrontier {
+        object_id: ObjectId,
+        branch: String,
+        frontier: Vec<CommitId>,
+    },
 }
 
 /// An outbound HTTP request.
@@ -462,6 +482,11 @@ impl SyncEngine {
         if let Some(tick) = inboxes.tick {
             self.process_tick(tick, &mut outboxes);
         }
+
+        // 7. Drain storage requests from LocalNode
+        outboxes
+            .storage
+            .extend(self.local_node.drain_storage_requests());
 
         outboxes
     }

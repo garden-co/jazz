@@ -5,13 +5,14 @@ use std::sync::RwLock;
 
 use bytes::Bytes;
 
-use crate::commit::CommitId;
+use crate::commit::{Commit, CommitId};
 use crate::listener::{
     ListenerError, ListenerId, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState,
 };
 use crate::object::{Object, ObjectId};
 use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
+use crate::sync::StorageRequest;
 
 /// Callback type for when commits are applied to an object.
 ///
@@ -22,29 +23,7 @@ use crate::storage::{Environment, MemoryEnvironment};
 /// allowing it to update query graphs and column change metadata.
 ///
 /// Single-threaded: no Send/Sync bounds. The sync layer is single-threaded on all platforms.
-pub type CommitsAppliedCallback = Rc<dyn Fn(ObjectId, &str, &[crate::commit::Commit])>;
-
-/// Spawn an async task for background persistence.
-/// In WASM, uses spawn_local. In native, uses block_on (for now).
-#[cfg(target_arch = "wasm32")]
-fn spawn_persist<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + 'static,
-{
-    wasm_bindgen_futures::spawn_local(future);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_persist<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + 'static,
-{
-    // For native, we run synchronously since MemoryEnvironment is instant.
-    // This ensures tests can verify persistence immediately.
-    // Real async backends (RocksDB, SQLite) would use a proper async runtime.
-    // No Send bound needed - block_on runs the future on the current thread.
-    futures::executor::block_on(future);
-}
+pub type CommitsAppliedCallback = Rc<dyn Fn(ObjectId, &str, &[Commit])>;
 
 /// Generate a new UUIDv7 as ObjectId.
 #[cfg(not(feature = "wasm"))]
@@ -79,6 +58,10 @@ pub struct LocalNode {
     /// Used by Database to be notified of sync-applied commits.
     /// Single-threaded: uses RefCell on all platforms.
     on_commits_applied: RefCell<Option<CommitsAppliedCallback>>,
+    /// Pending storage requests (for inbox/outbox architecture).
+    /// When using SyncEngine, these are drained into outboxes.
+    /// For standalone use, call `drain_storage_requests()` and execute them.
+    pending_storage: RefCell<Vec<StorageRequest>>,
 }
 
 impl Default for LocalNode {
@@ -104,7 +87,21 @@ impl LocalNode {
             listeners: ObjectListenerRegistry::new(),
             env,
             on_commits_applied: RefCell::new(None),
+            pending_storage: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Drain pending storage requests.
+    ///
+    /// Called by SyncEngine during `pass()` to collect storage operations.
+    /// Also used by tests to execute storage directly.
+    pub fn drain_storage_requests(&self) -> Vec<StorageRequest> {
+        std::mem::take(&mut *self.pending_storage.borrow_mut())
+    }
+
+    /// Queue a storage request.
+    fn queue_storage(&self, request: StorageRequest) {
+        self.pending_storage.borrow_mut().push(request);
     }
 
     /// Set a callback to be invoked when commits are applied via `apply_commits`.
@@ -378,7 +375,7 @@ impl LocalNode {
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
 
-        // Collect data for async persist
+        // Collect data for storage
         let persist_data = if let Some(branch_ref) = obj.branch_ref(branch) {
             let branch_guard = branch_ref.read().unwrap();
             branch_guard.get_commit(&commit_id).map(|commit| {
@@ -392,13 +389,13 @@ impl LocalNode {
         // Notify listeners synchronously (before persist, so UI updates immediately)
         self.notify_listeners(object_id, branch, &obj);
 
-        // Persist asynchronously in background
+        // Queue storage requests (driver will execute asynchronously)
         if let Some((commit, frontier)) = persist_data {
-            let env = self.env.clone();
-            let branch = branch.to_string();
-            spawn_persist(async move {
-                env.put_commit(&commit).await;
-                env.set_frontier(object_id.into(), &branch, &frontier).await;
+            self.queue_storage(StorageRequest::PutCommit { commit });
+            self.queue_storage(StorageRequest::SetFrontier {
+                object_id,
+                branch: branch.to_string(),
+                frontier,
             });
         }
 
@@ -433,7 +430,7 @@ impl LocalNode {
         let commit_id =
             obj.write_sync_with_tracking(branch, content, author, timestamp, None, descriptor);
 
-        // Collect data for async persist
+        // Collect data for storage
         let persist_data = if let Some(branch_ref) = obj.branch_ref(branch) {
             let branch_guard = branch_ref.read().unwrap();
             branch_guard.get_commit(&commit_id).map(|commit| {
@@ -447,13 +444,13 @@ impl LocalNode {
         // Notify listeners synchronously (before persist, so UI updates immediately)
         self.notify_listeners(object_id, branch, &obj);
 
-        // Persist asynchronously in background
+        // Queue storage requests (driver will execute asynchronously)
         if let Some((commit, frontier)) = persist_data {
-            let env = self.env.clone();
-            let branch = branch.to_string();
-            spawn_persist(async move {
-                env.put_commit(&commit).await;
-                env.set_frontier(object_id.into(), &branch, &frontier).await;
+            self.queue_storage(StorageRequest::PutCommit { commit });
+            self.queue_storage(StorageRequest::SetFrontier {
+                object_id,
+                branch: branch.to_string(),
+                frontier,
             });
         }
 
@@ -645,17 +642,15 @@ impl LocalNode {
             callback(object_id, branch, &commits_to_persist);
         }
 
-        // Persist asynchronously in background
+        // Queue storage requests (driver will execute asynchronously)
         if !commits_to_persist.is_empty() {
-            let env = self.env.clone();
-            let branch_name = branch.to_string();
-            let frontier_clone = frontier.clone();
-            spawn_persist(async move {
-                for commit in commits_to_persist {
-                    env.put_commit(&commit).await;
-                }
-                env.set_frontier(object_id.into(), &branch_name, &frontier_clone)
-                    .await;
+            for commit in commits_to_persist {
+                self.queue_storage(StorageRequest::PutCommit { commit });
+            }
+            self.queue_storage(StorageRequest::SetFrontier {
+                object_id,
+                branch: branch.to_string(),
+                frontier: frontier.clone(),
             });
         }
 
