@@ -108,7 +108,8 @@ async function getPlaceholderBase64(filePath: string): Promise<string> {
       );
     }
 
-    return base64;
+    // Convert base64 to data URL
+    return "data:image/png;base64," + base64;
   }
 }
 
