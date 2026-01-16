@@ -167,7 +167,7 @@ describe("peer reconciliation", () => {
 
     await map.core.waitForSync();
 
-    jazzCloud.restart();
+    await jazzCloud.restart();
     SyncMessagesLog.clear();
     client.connectToSyncServer();
 
@@ -222,7 +222,7 @@ describe("peer reconciliation", () => {
 
     await map.core.waitForSync();
 
-    jazzCloud.restart();
+    await jazzCloud.restart();
     SyncMessagesLog.clear();
     client.connectToSyncServer();
 
@@ -305,7 +305,7 @@ describe("peer reconciliation", () => {
 
     await map.core.waitForSync();
 
-    jazzCloud.restart();
+    await jazzCloud.restart();
 
     SyncMessagesLog.clear();
     client.connectToSyncServer();

@@ -29,6 +29,11 @@ type WorkerOptions<
 > = {
   accountID?: string;
   accountSecret?: string;
+  /**
+   * A peer to connect to for synchronization.
+   * If provided, syncServer is ignored.
+   */
+  peer?: Peer;
   syncServer?: string;
   WebSocket?: AnyWebSocketConstructor;
   AccountSchema?: S;
@@ -63,21 +68,28 @@ export async function startWorker<
 
   const peers: Peer[] = [];
 
-  const wsPeer = new WebSocketPeerWithReconnection({
-    peer: syncServer,
-    reconnectionTimeout: 100,
-    addPeer: (peer) => {
-      if (node) {
-        node.syncManager.addPeer(peer);
-      } else {
-        peers.push(peer);
-      }
-    },
-    removePeer: () => {},
-    WebSocketConstructor: options.WebSocket,
-  });
+  // If a peer is provided directly, use it instead of WebSocket
+  let wsPeer: WebSocketPeerWithReconnection | undefined;
 
-  wsPeer.enable();
+  if (options.peer) {
+    peers.push(options.peer);
+  } else {
+    wsPeer = new WebSocketPeerWithReconnection({
+      peer: syncServer,
+      reconnectionTimeout: 100,
+      addPeer: (peer) => {
+        if (node) {
+          node.syncManager.addPeer(peer);
+        } else {
+          peers.push(peer);
+        }
+      },
+      removePeer: () => {},
+      WebSocketConstructor: options.WebSocket,
+    });
+
+    wsPeer.enable();
+  }
 
   if (!accountID) {
     throw new Error("No accountID provided");
@@ -117,7 +129,7 @@ export async function startWorker<
   async function done() {
     await context.account.$jazz.waitForAllCoValuesSync();
 
-    wsPeer.disable();
+    wsPeer?.disable();
     context.done();
   }
 
@@ -146,11 +158,18 @@ export async function startWorker<
      * Wait for the connection to the sync server to be established.
      *
      * If already connected, it will resolve immediately.
+     * Returns immediately if using a custom peer.
      */
     waitForConnection() {
-      return wsPeer.waitUntilConnected();
+      return wsPeer?.waitUntilConnected() ?? Promise.resolve();
     },
     subscribeToConnectionChange(listener: (connected: boolean) => void) {
+      if (!wsPeer) {
+        // For custom peers, immediately notify as connected
+        listener(true);
+        return () => {};
+      }
+
       wsPeer.subscribe(listener);
 
       return () => {

@@ -34,7 +34,11 @@ import type {
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
-  private loadedCoValues = new Set<RawCoID>();
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
+  private inMemoryCoValues = new Set<RawCoID>();
 
   // Track pending loads to deduplicate concurrent requests
   private pendingKnownStateLoads = new Map<
@@ -153,7 +157,7 @@ export class StorageApiAsync implements StorageAPI {
       );
     }
 
-    this.loadedCoValues.add(coValueRow.id);
+    this.inMemoryCoValues.add(coValueRow.id);
 
     let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
 
@@ -224,7 +228,7 @@ export class StorageApiAsync implements StorageAPI {
     done?.(true);
   }
 
-  async pushContentWithDependencies(
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -237,7 +241,7 @@ export class StorageApiAsync implements StorageAPI {
     const promises = [];
 
     for (const dependedOnCoValue of dependedOnCoValuesList) {
-      if (this.loadedCoValues.has(dependedOnCoValue)) {
+      if (this.inMemoryCoValues.has(dependedOnCoValue)) {
         continue;
       }
 
@@ -364,6 +368,8 @@ export class StorageApiAsync implements StorageAPI {
       });
     }
 
+    this.inMemoryCoValues.add(id);
+
     this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
@@ -460,7 +466,12 @@ export class StorageApiAsync implements StorageAPI {
     this.dbClient.stopTrackingSyncState(id);
   }
 
+  onCoValueUnmounted(id: RawCoID): void {
+    this.inMemoryCoValues.delete(id);
+  }
+
   close() {
+    this.inMemoryCoValues.clear();
     return this.storeQueue.close();
   }
 }
