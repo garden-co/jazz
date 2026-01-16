@@ -1,66 +1,49 @@
 //! Sync module for client-server synchronization.
 //!
-//! This module implements an object-based sync protocol where:
-//! - Clients connect to upstream servers and subscribe to queries
-//! - Both peers track assumed known state to send only deltas
-//! - Transport: HTTP POST (client→server) + SSE (server→client)
+//! This module implements a runtime-less sync architecture using explicit
+//! inboxes/outboxes instead of async event loops.
 //!
 //! # Architecture
 //!
-//! The sync system is built around `SyncedNode<R, E>` which wraps a `LocalNode`:
-//!
-//! - **LocalNode**: Pure storage, no async concerns
-//! - **SyncedNode**: Adds sync capabilities with:
-//!   - `UpstreamServers`: Connections to servers we sync TO
-//!   - `ConnectedClients`: Sessions from clients that sync FROM us
-//!   - `WriteBuffer`: Batching/debouncing for upstream pushes
-//!
-//! **Important**: The sync layer knows NOTHING about databases, SQL, schemas, or tables.
-//! It operates purely at the object/commit level:
-//! - Objects marked as `node_private` in their metadata are never synced
-//! - Object metadata is passed through opaquely (BTreeMap<String, String>)
-//! - Higher layers (e.g., Database) observe incoming objects via callbacks
-//!
-//! # Layer Separation
-//!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │  Database Layer (SQL, schema, queries)                      │
-//! │  - Marks objects with metadata (type, priority, etc.)       │
-//! │  - Observes synced objects via on_objects_received          │
-//! └─────────────────────────────────────────────────────────────┘
-//!                           │ uses
-//!                           ▼
+//! │                        DRIVER                                │
+//! │  (Platform-specific: WasmSyncDriver, NativeSyncDriver)      │
+//! │                                                              │
+//! │  • Receives I/O events (SSE, HTTP responses, timers)        │
+//! │  • Puts events into INBOXES                                  │
+//! │  • Calls pass() on SyncEngine                                │
+//! │  • Takes actions from OUTBOXES                               │
+//! └──────────────────────────┬──────────────────────────────────┘
+//!                            │
+//!                     pass() │ (synchronous)
+//!                            ▼
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │  Sync Layer (this module)                                   │
-//! │  - Wraps LocalNode for sync capabilities                    │
-//! │  - Respects node_private flag                               │
-//! │  - Passes metadata through opaquely                         │
-//! └─────────────────────────────────────────────────────────────┘
-//!                           │ uses
-//!                           ▼
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │  ObjectStore (LocalNode)                                    │
-//! │  - Pure storage with object metadata                        │
+//! │                    SYNC ENGINE                               │
+//! │  (Pure synchronous state machine)                           │
+//! │                                                              │
+//! │  LocalNode + UpstreamState                                  │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Crate Organization
+//! # Key Types
 //!
-//! - **groove** (this crate): Core sync logic and traits
-//!   - `SyncedNode<R, E>`: LocalNode with sync capabilities
-//!   - `Runtime`: Trait for async task spawning (TokioRuntime, WasmRuntime)
-//!   - `ClientEnv`: Transport abstraction for upstream connections
-//!
-//! - **groove-server**: Axum-based HTTP server implementation
-//!   - HTTP handlers and router
+//! - `SyncEngine`: The runtime-less state machine
+//! - `Inboxes`: Events flowing into the engine
+//! - `Outboxes`: Actions for the driver to execute
+//! - `SyncServer`: Server-side sync handling (unchanged)
 
 mod engine;
 mod env;
 mod negotiation;
 mod protocol;
+
+// Legacy async modules (non-wasm only, used by test_harness)
+#[cfg(not(target_arch = "wasm32"))]
 mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
 mod shared;
+#[cfg(not(target_arch = "wasm32"))]
 mod synced_node;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -77,34 +60,40 @@ pub mod test_harness;
 pub mod jwt;
 
 // New engine types (runtime-less state machine)
-// Note: QueryId is not exported here to avoid conflict with server::QueryId
 pub use engine::{
     ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
     OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StreamAction,
-    SubscribeRequestEvent, SubscriptionState, SyncConfig, SyncEngine, TickEvent, TimerId,
-    TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
+    SubscribeRequestEvent, SubscriptionState, SyncEngine, TickEvent, TimerId, TimerPurpose,
+    TimerRequest,
 };
+
+// On WASM, export engine types directly (no conflicts since synced_node isn't compiled)
+#[cfg(target_arch = "wasm32")]
+pub use engine::{SyncConfig, UpstreamId, UpstreamState};
+
+// On non-WASM, use aliases to avoid conflicts with synced_node types
+#[cfg(not(target_arch = "wasm32"))]
+pub use engine::SyncConfig as EngineSyncConfig;
+#[cfg(not(target_arch = "wasm32"))]
+pub use engine::UpstreamState as EngineUpstreamState;
+#[cfg(not(target_arch = "wasm32"))]
+pub use engine::UpstreamId as EngineUpstreamId;
 
 // Environment and protocol
 pub use env::*;
 pub use negotiation::*;
 pub use protocol::*;
 
-// Legacy types (will be removed)
+// Legacy async types (non-wasm only, used by test_harness)
+// TODO: Remove once test_harness is migrated to driver-based testing
+#[cfg(not(target_arch = "wasm32"))]
 pub use runtime::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use shared::*;
-
-// Re-export synced_node types that don't conflict
+#[cfg(not(target_arch = "wasm32"))]
 pub use synced_node::{
-    OnObjectsReceivedCallback,
-    PendingWrites,
-    SyncedNode,
-    UpstreamServer,
-    UpstreamServers,
-    UpstreamSubscription,
-    WriteBuffer,
-    push_object_standalone,
-    // Legacy async functions (will be removed)
+    OnObjectsReceivedCallback, PendingWrites, SyncConfig, SyncedNode, UpstreamId, UpstreamServer,
+    UpstreamServers, UpstreamState, UpstreamSubscription, WriteBuffer, push_object_standalone,
     run_upstream_event_loop,
 };
 
