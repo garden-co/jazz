@@ -1,0 +1,283 @@
+---
+title: Developer-First Migrations
+description: Zero-friction schema iteration during development with auto-branch creation
+status: future
+implements: []
+---
+
+<StatusBadge status="future" />
+
+This spec describes a zero-friction developer experience for schema migrations during early development. The goal is to restore the "just works" experience of legacy Jazz while maintaining security for production deployments.
+
+## Problem
+
+Current migration flow requires explicit CLI steps for every schema change:
+
+1. Edit schema SQL file
+2. Run `jazz migrate push --env dev` with API key
+3. Manage environments manually
+
+This friction is acceptable for staging/prod but painful during rapid early development when schemas change frequently.
+
+## Design Goals
+
+- **Zero-friction iteration**: Change schema → rebuild → things just work
+- **Auto branch creation**: Schema branches created automatically, tied to git branch + schema hash
+- **Team coordination**: Works on shared dev servers without conflicts
+- **Developer notifications**: Clear feedback when schema branches are created
+- **Secure promotion**: Staging/prod deployment remains explicit and guarded
+
+## Core Concepts
+
+### Schema Branch Naming for Dev
+
+Auto-created development branches follow this format:
+
+```
+dev-{gitBranch}-{schemaHash}-auto
+```
+
+**Components:**
+- `gitBranch`: Sanitized git branch name (max 50 chars, `/` → `-`)
+- `schemaHash`: First 8 characters of SHA-256 of normalized schema
+- `auto`: Marker distinguishing auto-created from explicitly deployed branches
+
+**Example:** `dev-feature-auth-3f7a8b2c-auto`
+
+**Key insight**: Each unique (git branch, schema) pair gets its own schema branch. Two developers on the same git branch with identical schemas share a branch. Schema changes create new branches automatically without conflicts.
+
+### Developer Token (JAZZ_DEV_TOKEN)
+
+A separate JWT that grants "developer capability" independently of user identity. This enables schema branch auto-creation while keeping user identity (for policies) separate.
+
+**JWT claims:**
+
+```typescript
+interface DevTokenClaims {
+  iss: string;              // Issuer (Jazz Cloud or self-hosted)
+  sub: string;              // Developer ID
+  aud: string;              // Project/app ID
+  exp: number;              // Expiration timestamp
+  jazzScope: "dev";         // Environment scope (dev only for auto-creation)
+  projectId: string;        // Which project this token is for
+  teamId?: string;          // Optional team membership
+}
+```
+
+**Sent in separate header alongside user auth:**
+
+```
+Authorization: Bearer <user-jwt>        # User identity for policy evaluation
+X-Jazz-Dev-Token: Bearer <dev-jwt>      # Developer capability for schema ops
+```
+
+### Schema Hash Computation
+
+At build time, hash the normalized schema to detect changes:
+
+```typescript
+function computeSchemaHash(tables: ParsedTable[]): string {
+  // Sort for determinism
+  const sorted = [...tables].sort((a, b) => a.name.localeCompare(b.name));
+
+  // Create canonical representation
+  const canonical = sorted.map(table => ({
+    name: table.name,
+    columns: table.columns
+      .map(col => ({
+        name: col.name,
+        type: col.sqlType,
+        nullable: col.nullable
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }));
+
+  // Hash and truncate
+  return sha256(JSON.stringify(canonical)).substring(0, 8);
+}
+```
+
+## Developer Flow
+
+### One-Time Setup
+
+1. Run `jazz auth dev-token` to authenticate and receive a dev token
+2. Add token to `.env.local`: `JAZZ_DEV_TOKEN=eyJ...`
+
+### Ongoing Development
+
+1. Edit `schema.sql`
+2. Run build (or auto-triggered by Vite/webpack plugin)
+3. Build generates schema types + metadata including expected branch name
+4. Client connects to sync server with schema metadata
+5. Server auto-creates branch if needed, notifies client
+6. Development continues seamlessly
+
+### Promotion to Staging/Prod
+
+When ready to deploy:
+
+```bash
+jazz migrate promote --to staging
+```
+
+Guided CLI shows diff, generates lens, confirms deployment.
+
+## Implementation
+
+### Build-Time Integration
+
+`jazz schema build` generates metadata alongside types:
+
+```typescript
+// generated/schema-meta.ts
+export const schemaMeta = {
+  schemaHash: "3f7a8b2c",
+  gitBranch: "feature-auth",
+  expectedBranch: "dev-feature-auth-3f7a8b2c-auto",
+  buildTime: "2026-01-15T12:00:00Z",
+};
+```
+
+**Console notification:**
+
+```
+[jazz] Schema build complete
+  Schema hash: 3f7a8b2c (changed)
+  Expected branch: dev-feature-auth-3f7a8b2c-auto
+  Note: New schema branch will be created on first sync.
+```
+
+### Sync Protocol Changes
+
+**New headers on sync requests:**
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `X-Jazz-Schema-Branch` | `dev-feature-auth-3f7a8b2c-auto` | Expected schema branch |
+| `X-Jazz-Dev-Token` | `Bearer eyJ...` | Developer JWT |
+| `X-Jazz-Schema-Hash` | `3f7a8b2c` | For validation |
+
+**Server handling:**
+
+1. Extract schema branch and dev token from headers
+2. Validate dev token (project, scope, expiration)
+3. Check if schema branch exists
+4. If not: auto-create from nearest ancestor with generated lens
+5. Send notification to client via SSE
+
+### Nearest Ancestor Detection
+
+When auto-creating a branch, find the best parent:
+
+1. Same git branch, different hash (previous iteration of this feature)
+2. Main branch for this environment (`dev-main-*`)
+3. Latest schema version for environment
+
+### Notifications
+
+**SSE event on branch creation:**
+
+```typescript
+{
+  type: "schema_branch_created",
+  branch: "dev-feature-auth-3f7a8b2c-auto",
+  parent: "dev-main-abc12345@v1",
+  lensWarnings: ["Users.avatar added as nullable"]
+}
+```
+
+**Client-side logging:**
+
+```
+[Jazz] Schema branch 'dev-feature-auth-3f7a8b2c-auto' created
+  Forked from: dev-main-abc12345@v1
+  Lens: +Users.avatar (nullable)
+```
+
+### Promotion Command
+
+```bash
+$ jazz migrate promote --to staging
+
+[jazz] Detecting current dev schema...
+  Found: dev-feature-auth-3f7a8b2c-auto
+
+[jazz] Comparing with staging (staging-main-abc12345@v3)...
+
+[jazz] Schema diff:
+  Users:
+    + avatar: STRING (nullable)
+    ~ name -> full_name (rename detected)
+
+[jazz] Is 'name -> full_name' a rename? [Y/n] Y
+
+[jazz] Deploy to staging? [y/N] y
+
+[jazz] Deployed: staging-feature-auth-3f7a8b2c@v1
+```
+
+### Token Issuance Command
+
+```bash
+$ jazz auth dev-token
+
+[jazz] Authenticating with Jazz Cloud...
+[jazz] Opening browser for OAuth...
+
+[jazz] Dev token generated!
+  Scope: dev
+  Project: my-app
+  Expires: 2026-02-14
+
+Add to your .env.local:
+  JAZZ_DEV_TOKEN=eyJ...
+```
+
+## Security
+
+### Environment Isolation
+
+Dev tokens with `jazzScope: "dev"` are rejected by non-dev servers:
+
+```rust
+fn validate_dev_token(&self, token: &str) -> Option<DevTokenIdentity> {
+    let claims = self.validate_jwt(token)?;
+    let server_env = env::var("JAZZ_ENV").unwrap_or("dev".into());
+
+    // Reject dev tokens in non-dev environments
+    if claims.jazzScope == "dev" && server_env != "dev" {
+        return None;
+    }
+
+    Some(DevTokenIdentity { ... })
+}
+```
+
+### Token Revocation
+
+- Server maintains revocation list keyed by JWT `jti` claim
+- `jazz auth revoke-token <id>` for manual revocation
+- Tokens auto-expire (default: 30 days for dev scope)
+
+### Audit Logging
+
+All schema branch operations are logged:
+
+- Branch created: developer, timestamp, parent, environment
+- Branch promoted: source, target, developer
+- Token issued/revoked: scope, developer, reason
+
+## Open Questions
+
+1. **Branch garbage collection**: How and when to clean up stale dev branches? Options: TTL-based expiry, manual cleanup, or triggered when git branches are deleted.
+
+2. **Offline development**: What happens if dev token expires while working offline? Should client cache schema branch state?
+
+3. **CI integration**: Should CI builds use dev tokens for PR preview environments, or require explicit `jazz migrate push`?
+
+## Related Specs
+
+- [Schema Evolution](./schema-evolution.mdx): Core lens and migration infrastructure
+- [Authentication](./authentication.mdx): JWT validation and `@viewer` binding
+- [Sync](./sync.mdx): Sync protocol and branch handling
