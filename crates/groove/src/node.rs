@@ -6,9 +6,7 @@ use std::sync::RwLock;
 use bytes::Bytes;
 
 use crate::commit::{Commit, CommitId};
-use crate::listener::{
-    ListenerError, ListenerId, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState,
-};
+use crate::listener::ListenerError;
 use crate::object::{Object, ObjectId};
 use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
@@ -55,7 +53,7 @@ pub fn generate_object_id() -> ObjectId {
     ObjectId::new(Uuid::new_v7(ts).as_u128())
 }
 
-/// A local node managing multiple objects with listener support.
+/// A local node managing multiple objects.
 ///
 /// LocalNode is primarily an in-memory store for objects. Storage persistence
 /// is handled by the driver via the outbox system (StorageRequest).
@@ -68,7 +66,6 @@ pub fn generate_object_id() -> ObjectId {
 /// uses `restore_object` to populate LocalNode.
 pub struct LocalNode {
     objects: RwLock<BTreeMap<ObjectId, Rc<RwLock<Object>>>>,
-    listeners: ObjectListenerRegistry,
     /// Optional environment for legacy load_object support.
     /// New code should use restore_object instead.
     env: Option<Rc<dyn Environment>>,
@@ -108,7 +105,6 @@ impl std::fmt::Debug for LocalNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalNode")
             .field("objects", &self.objects.read().unwrap().len())
-            .field("listeners", &self.listeners)
             .finish()
     }
 }
@@ -122,7 +118,6 @@ impl LocalNode {
     pub fn new(env: Rc<dyn Environment>) -> Self {
         LocalNode {
             objects: RwLock::new(BTreeMap::new()),
-            listeners: ObjectListenerRegistry::new(),
             env: Some(env),
             on_commits_applied: RefCell::new(None),
             pending_storage: RefCell::new(Vec::new()),
@@ -138,7 +133,6 @@ impl LocalNode {
     pub fn new_without_env() -> Self {
         LocalNode {
             objects: RwLock::new(BTreeMap::new()),
-            listeners: ObjectListenerRegistry::new(),
             env: None,
             on_commits_applied: RefCell::new(None),
             pending_storage: RefCell::new(Vec::new()),
@@ -404,67 +398,6 @@ impl LocalNode {
         self.objects.read().unwrap().get(&id).cloned()
     }
 
-    /// Get a reference to the listener registry.
-    pub fn listeners(&self) -> &ObjectListenerRegistry {
-        &self.listeners
-    }
-
-    // ========== Subscription API ==========
-
-    /// Subscribe to an object's branch with a callback.
-    /// The callback is called immediately with current state (if any),
-    /// and then synchronously on every subsequent write.
-    /// Returns a listener ID that can be used to unsubscribe.
-    pub fn subscribe(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-        callback: ObjectCallback,
-    ) -> Result<ListenerId, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let key = ObjectKey::new(object_id, branch);
-
-        // Verify branch exists
-        let obj = obj_lock.read().unwrap();
-        let branch_ref = obj
-            .branch_ref(branch)
-            .ok_or(ListenerError::BranchNotFound)?;
-
-        // Get current tips
-        let tips = {
-            let b = branch_ref.read().unwrap();
-            b.frontier().to_vec()
-        };
-
-        // Ensure initial state is set (only if not already set)
-        // This must happen BEFORE subscribe so the callback gets called with initial state
-        self.listeners.ensure_initial_state(&key, tips, branch_ref);
-
-        // Subscribe with the callback - it will be called immediately with current state
-        let id = self.listeners.subscribe(key, callback);
-
-        Ok(id)
-    }
-
-    /// Unsubscribe a listener by ID.
-    pub fn unsubscribe(&self, object_id: ObjectId, branch: &str, listener_id: ListenerId) -> bool {
-        let key = ObjectKey::new(object_id, branch);
-        self.listeners.unsubscribe(&key, listener_id)
-    }
-
-    /// Get current cached state for an object's branch.
-    pub fn get_current_state(&self, object_id: ObjectId, branch: &str) -> Option<Rc<ObjectState>> {
-        let key = ObjectKey::new(object_id, branch);
-        self.listeners.get_current(&key)
-    }
-
     // ========== Read API ==========
 
     /// Read content from the frontier of an object's branch.
@@ -488,7 +421,7 @@ impl LocalNode {
 
     // ========== Write API with Auto-Notify ==========
 
-    /// Write content to an object's branch and notify all listeners.
+    /// Write content to an object's branch.
     /// Returns the new commit ID.
     pub fn write(
         &self,
@@ -501,10 +434,10 @@ impl LocalNode {
         self.write_with_meta(object_id, branch, content, author, timestamp, None)
     }
 
-    /// Write content to an object's branch with optional metadata and notify all listeners.
+    /// Write content to an object's branch with optional metadata.
     /// Returns the new commit ID.
     ///
-    /// The write is synchronous to in-memory state (and listeners are notified immediately),
+    /// The write is synchronous to in-memory state,
     /// but persistence to the Environment happens asynchronously in the background.
     pub fn write_with_meta(
         &self,
@@ -536,9 +469,6 @@ impl LocalNode {
         } else {
             None
         };
-
-        // Notify listeners synchronously (before persist, so UI updates immediately)
-        self.notify_listeners(object_id, branch, &obj);
 
         // Queue storage requests (driver will execute asynchronously)
         if let Some((commit, frontier)) = persist_data {
@@ -594,9 +524,6 @@ impl LocalNode {
         } else {
             None
         };
-
-        // Notify listeners synchronously (before persist, so UI updates immediately)
-        self.notify_listeners(object_id, branch, &obj);
 
         // Queue storage requests (driver will execute asynchronously)
         if let Some((commit, frontier)) = persist_data {
@@ -662,43 +589,6 @@ impl LocalNode {
             .map_err(|e| ListenerError::StorageError(e.to_string()))
     }
 
-    /// Internal: notify listeners for a branch update.
-    fn notify_listeners(&self, object_id: ObjectId, branch: &str, obj: &Object) {
-        let key = ObjectKey::new(object_id, branch);
-
-        if let Some(branch_ref) = obj.branch_ref(branch) {
-            let tips = {
-                let b = branch_ref.read().unwrap();
-                b.frontier().to_vec()
-            };
-            self.listeners.notify(&key, tips, branch_ref);
-        }
-    }
-
-    /// Notify all listeners for an object.
-    /// Use this after external changes to the object (e.g., sync from peers).
-    pub fn notify_object(&self, object_id: ObjectId) {
-        let obj_lock = match self.objects.read().unwrap().get(&object_id).cloned() {
-            Some(o) => o,
-            None => return,
-        };
-
-        let obj = obj_lock.read().unwrap();
-
-        // Find all active listeners for this object
-        let keys = self.listeners.keys_for_object(object_id);
-
-        for key in keys {
-            if let Some(branch_ref) = obj.branch_ref(&key.branch) {
-                let tips = {
-                    let b = branch_ref.read().unwrap();
-                    b.frontier().to_vec()
-                };
-                self.listeners.notify(&key, tips, branch_ref);
-            }
-        }
-    }
-
     // ========== Helper: Load content for a commit ==========
 
     /// Load content for a commit.
@@ -723,7 +613,7 @@ impl LocalNode {
     /// 1. Creates the object if it doesn't exist
     /// 2. Adds all commits to the branch
     /// 3. Persists commits and frontier to storage
-    /// 4. Notifies listeners
+    /// 4. Invokes the on_commits_applied callback if set
     ///
     /// Returns the new frontier after applying commits.
     pub fn apply_commits(
@@ -783,9 +673,6 @@ impl LocalNode {
             let branch_guard = branch_ref.read().unwrap();
             branch_guard.frontier().to_vec()
         };
-
-        // Notify listeners synchronously
-        self.notify_listeners(object_id, branch, &obj);
 
         // Drop the object read lock before calling the callback.
         // The callback may need to acquire its own lock on the same object,
