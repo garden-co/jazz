@@ -1,6 +1,6 @@
 import { CojsonMessageChannel, type Peer } from "cojson";
 import type {
-  AcceptOptions,
+  WaitForConnectionOptions,
   ExposeOptions,
   PostMessageTarget,
 } from "cojson/src/CojsonMessageChannel/types.js";
@@ -59,15 +59,15 @@ export class JazzMessageChannel {
 
   /**
    * Accept an incoming Jazz connection.
-   * Same as cojson CojsonMessageChannel.accept().
+   * Same as cojson CojsonMessageChannel.waitForConnection().
    */
-  static accept(opts?: AcceptOptions): Promise<Peer> {
-    return CojsonMessageChannel.accept(opts);
+  static waitForConnection(opts?: WaitForConnectionOptions): Promise<Peer> {
+    return CojsonMessageChannel.waitForConnection(opts);
   }
 }
 
 // Re-export types for convenience
 export type {
-  AcceptOptions,
+  WaitForConnectionOptions,
   AcceptFromPortOptions,
 } from "cojson/src/CojsonMessageChannel/types.js";

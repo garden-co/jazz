@@ -99,7 +99,7 @@ describe("CojsonMessageChannel", () => {
     });
   });
 
-  test("should ignore mismatched peer IDs in accept() when id filter is provided", async () => {
+  test("should ignore mismatched peer IDs in waitForConnection() when id filter is provided", async () => {
     const { node } = setupTestNode();
 
     const hostPeerId = "host-peer-id";

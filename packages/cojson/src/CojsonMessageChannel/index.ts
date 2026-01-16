@@ -1,7 +1,7 @@
 export { CojsonMessageChannel } from "./CojsonMessageChannel.js";
 export type {
   AcceptFromPortOptions,
-  AcceptOptions,
+  WaitForConnectionOptions,
   ExposeOptions,
   MessageChannelLike,
   PostMessageTarget,

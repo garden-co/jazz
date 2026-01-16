@@ -863,7 +863,7 @@ export function createTrackedMessageChannel(opts: {
 
 /**
  * Creates a mock worker target that simulates receiving a port
- * and calling a callback with the received port (simulating accept()).
+ * and calling a callback with the received port (simulating a connection handshake).
  */
 export function createMockWorkerWithAccept(
   onPortReceived: (port: MessagePortLike) => Promise<void>,

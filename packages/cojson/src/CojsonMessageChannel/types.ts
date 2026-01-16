@@ -87,9 +87,9 @@ export interface ExposeOptions {
 }
 
 /**
- * Options for CojsonMessageChannel.accept()
+ * Options for CojsonMessageChannel.waitForConnection()
  */
-export interface AcceptOptions {
+export interface WaitForConnectionOptions {
   /**
    * Expected peer ID to accept.
    * If provided, only handshakes with matching id will be accepted; others are ignored.
@@ -171,8 +171,8 @@ export function isControlMessage(msg: unknown): msg is ControlMessage {
     typeof msg === "object" &&
     msg !== null &&
     "type" in msg &&
-    typeof (msg as { type: unknown }).type === "string" &&
-    (msg as { type: string }).type.startsWith("jazz:")
+    typeof msg.type === "string" &&
+    msg.type.startsWith("jazz:")
   );
 }
 
@@ -182,39 +182,19 @@ export function isControlMessage(msg: unknown): msg is ControlMessage {
 export function isPortTransferMessage(
   msg: unknown,
 ): msg is PortTransferMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    (msg as { type: unknown }).type === "jazz:port" &&
-    "id" in msg &&
-    typeof (msg as { id: unknown }).id === "string"
-  );
+  return isControlMessage(msg) && msg.type === "jazz:port";
 }
 
 /**
  * Type guard to check if a message is a ReadyMessage (with id).
  */
 export function isReadyMessage(msg: unknown): msg is ReadyMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    (msg as { type: unknown }).type === "jazz:ready" &&
-    "id" in msg &&
-    typeof (msg as { id: unknown }).id === "string"
-  );
+  return isControlMessage(msg) && msg.type === "jazz:ready" && "id" in msg;
 }
 
 /**
  * Type guard to check if a message is a ReadyAckMessage (without id).
  */
 export function isReadyAckMessage(msg: unknown): msg is ReadyAckMessage {
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in msg &&
-    (msg as { type: unknown }).type === "jazz:ready" &&
-    !("id" in msg)
-  );
+  return isControlMessage(msg) && msg.type === "jazz:ready" && !("id" in msg);
 }

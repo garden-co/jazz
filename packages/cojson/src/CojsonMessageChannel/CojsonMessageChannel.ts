@@ -3,7 +3,7 @@ import { ConnectedPeerChannel } from "../streamUtils.js";
 import { MessagePortOutgoingChannel } from "./MessagePortOutgoingChannel.js";
 import type {
   AcceptFromPortOptions,
-  AcceptOptions,
+  WaitForConnectionOptions,
   ExposeOptions,
   MessageChannelLike,
   MessagePortLike,
@@ -16,6 +16,7 @@ import {
   isReadyAckMessage,
   isReadyMessage,
 } from "./types.js";
+import { logger } from "../logger.js";
 
 /**
  * CojsonMessageChannel provides a low-level API for creating cojson peers
@@ -130,13 +131,13 @@ export class CojsonMessageChannel {
   }
 
   /**
-   * Accept an incoming Jazz connection.
+   * Wait for an incoming Jazz connection.
    * Listens for a port transfer message on the global scope and completes the handshake.
    *
    * @param opts - Configuration options
    * @returns A promise that resolves to a Peer once the handshake completes
    */
-  static accept(opts: AcceptOptions = {}): Promise<Peer> {
+  static waitForConnection(opts: WaitForConnectionOptions = {}): Promise<Peer> {
     return new Promise<Peer>((resolve) => {
       let resolved = false;
 
@@ -167,6 +168,7 @@ export class CojsonMessageChannel {
             (allowed) => allowed === "*" || allowed === origin,
           );
           if (!isAllowed) {
+            logger.warn(`Ignoring message from non-allowed origin: ${origin}`);
             return; // Ignore messages from non-allowed origins
           }
         }
