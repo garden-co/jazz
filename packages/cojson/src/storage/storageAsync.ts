@@ -460,6 +460,10 @@ export class StorageApiAsync implements StorageAPI {
     this.dbClient.stopTrackingSyncState(id);
   }
 
+  onCoValueUnmounted(id: RawCoID): void {
+    this.loadedCoValues.delete(id);
+  }
+
   close() {
     return this.storeQueue.close();
   }
