@@ -136,7 +136,9 @@ export function getDbPath(defaultDbPath?: string) {
 
   if (!defaultDbPath) {
     onTestFinished(() => {
-      unlinkSync(dbPath);
+      setTimeout(() => {
+        unlinkSync(dbPath);
+      }, 100);
     });
   }
 

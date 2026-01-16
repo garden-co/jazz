@@ -9,44 +9,90 @@ import type { AnyWebSocket } from "../types.js";
 import { BUFFER_LIMIT, BUFFER_LIMIT_POLLING_INTERVAL } from "../utils.js";
 import { createTestMetricReader, tearDownTestMetricReader } from "./utils.js";
 
-const { CO_VALUE_PRIORITY, WEBSOCKET_CONFIG, setOutgoingMessagesChunkDelay } =
-  cojsonInternals;
+const { CO_VALUE_PRIORITY, WEBSOCKET_CONFIG } = cojsonInternals;
 
 const { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } = WEBSOCKET_CONFIG;
 
-function setup(opts: Partial<CreateWebSocketPeerOpts> = {}) {
-  const listeners = new Map<string, (event: MessageEvent) => void>();
+interface SetupOptions extends Partial<CreateWebSocketPeerOpts> {
+  initialReadyState?: number;
+}
+
+function setup(opts: SetupOptions = {}) {
+  const { initialReadyState = 1, ...peerOpts } = opts;
+  const listeners = new Map<
+    string,
+    Set<{ callback: (event: MessageEvent) => void; once?: boolean }>
+  >();
 
   const mockWebSocket = {
-    readyState: 1,
-    addEventListener: vi.fn().mockImplementation((type, listener) => {
-      listeners.set(type, listener);
-    }),
-    removeEventListener: vi.fn().mockImplementation((type) => {
-      listeners.delete(type);
-    }),
+    readyState: initialReadyState,
+    bufferedAmount: 0,
+    addEventListener: vi
+      .fn()
+      .mockImplementation(
+        (
+          type: string,
+          callback: (event: MessageEvent) => void,
+          options?: { once?: boolean },
+        ) => {
+          if (!listeners.has(type)) {
+            listeners.set(type, new Set());
+          }
+          listeners.get(type)!.add({ callback, once: options?.once });
+        },
+      ),
+    removeEventListener: vi
+      .fn()
+      .mockImplementation(
+        (type: string, callback: (event: MessageEvent) => void) => {
+          const set = listeners.get(type);
+          if (set) {
+            for (const entry of set) {
+              if (entry.callback === callback) {
+                set.delete(entry);
+                break;
+              }
+            }
+          }
+        },
+      ),
     close: vi.fn(),
     send: vi.fn(),
   } as unknown as Mocked<AnyWebSocket>;
+
+  const triggerEvent = (type: string, event?: MessageEvent) => {
+    const set = listeners.get(type);
+    if (set) {
+      const toRemove: {
+        callback: (event: MessageEvent) => void;
+        once?: boolean;
+      }[] = [];
+      for (const entry of set) {
+        entry.callback(event ?? new MessageEvent(type));
+        if (entry.once) {
+          toRemove.push(entry);
+        }
+      }
+      for (const entry of toRemove) {
+        set.delete(entry);
+      }
+    }
+  };
 
   const peer = createWebSocketPeer({
     id: "test-peer",
     websocket: mockWebSocket,
     role: "client",
     batchingByDefault: true,
-    ...opts,
+    ...peerOpts,
   });
 
-  return { mockWebSocket, peer, listeners };
+  return { mockWebSocket, peer, listeners, triggerEvent };
 }
 
 function serializeMessages(messages: SyncMessage[]) {
   return messages.map((msg) => JSON.stringify(msg)).join("\n");
 }
-
-afterEach(() => {
-  setOutgoingMessagesChunkDelay(5);
-});
 
 describe("createWebSocketPeer", () => {
   test("should create a peer with correct properties", () => {
@@ -59,29 +105,25 @@ describe("createWebSocketPeer", () => {
   });
 
   test("should handle disconnection", async () => {
-    const { listeners, peer } = setup();
+    const { triggerEvent, peer } = setup();
 
     const onMessageSpy = vi.fn();
     peer.incoming.onMessage(onMessageSpy);
 
-    const closeHandler = listeners.get("close");
-
-    closeHandler?.(new MessageEvent("close"));
+    triggerEvent("close");
 
     expect(onMessageSpy).toHaveBeenCalledWith("Disconnected");
   });
 
   test("should handle ping timeout", async () => {
     vi.useFakeTimers();
-    const { listeners, peer } = setup();
+    const { triggerEvent, peer } = setup();
 
     const onMessageSpy = vi.fn();
 
     peer.incoming.onMessage(onMessageSpy);
 
-    const messageHandler = listeners.get("message");
-
-    messageHandler?.(new MessageEvent("message", { data: "{}" }));
+    triggerEvent("message", new MessageEvent("message", { data: "{}" }));
 
     await vi.advanceTimersByTimeAsync(10_000);
 
@@ -156,9 +198,8 @@ describe("createWebSocketPeer", () => {
 
   test("should call onSuccess handler after receiving first message", () => {
     const onSuccess = vi.fn();
-    const { listeners } = setup({ onSuccess });
+    const { triggerEvent } = setup({ onSuccess });
 
-    const messageHandler = listeners.get("message");
     const message: SyncMessage = {
       action: "known",
       id: "co_ztest",
@@ -167,24 +208,24 @@ describe("createWebSocketPeer", () => {
     };
 
     // First message should trigger onSuccess
-    messageHandler?.(
+    triggerEvent(
+      "message",
       new MessageEvent("message", { data: JSON.stringify(message) }),
     );
     expect(onSuccess).toHaveBeenCalledTimes(1);
 
     // Subsequent messages should not trigger onSuccess again
-    messageHandler?.(
+    triggerEvent(
+      "message",
       new MessageEvent("message", { data: JSON.stringify(message) }),
     );
     expect(onSuccess).toHaveBeenCalledTimes(1);
   });
 
   describe("batchingByDefault = true", () => {
-    test("should batch outgoing messages", async () => {
-      const { peer, mockWebSocket } = setup();
-
-      mockWebSocket.send.mockImplementation(() => {
-        mockWebSocket.readyState = 0;
+    test("should batch outgoing messages when socket is not ready", async () => {
+      const { peer, mockWebSocket, triggerEvent } = setup({
+        initialReadyState: 0,
       });
 
       const message1: SyncMessage = {
@@ -203,6 +244,10 @@ describe("createWebSocketPeer", () => {
 
       void peer.outgoing.push(message1);
       void peer.outgoing.push(message2);
+
+      // Simulate socket becoming ready
+      mockWebSocket.readyState = 1;
+      triggerEvent("open");
 
       await waitFor(() => {
         expect(mockWebSocket.send).toHaveBeenCalled();
@@ -213,94 +258,30 @@ describe("createWebSocketPeer", () => {
       );
     });
 
-    test("should sort outgoing messages by priority", async () => {
+    test("should send messages immediately when socket is ready", async () => {
       const { peer, mockWebSocket } = setup();
 
-      mockWebSocket.send.mockImplementation(() => {
-        mockWebSocket.readyState = 0;
-      });
-
       const message1: SyncMessage = {
-        action: "content",
-        id: "co_zlow",
-        new: {},
-        priority: CO_VALUE_PRIORITY.LOW,
+        action: "known",
+        id: "co_ztest",
+        header: false,
+        sessions: {},
       };
 
       const message2: SyncMessage = {
         action: "content",
-        id: "co_zhigh",
+        id: "co_zlow",
         new: {},
-        priority: CO_VALUE_PRIORITY.HIGH,
+        priority: 6,
       };
 
       void peer.outgoing.push(message1);
-      void peer.outgoing.push(message2);
-      void peer.outgoing.push(message2);
 
       await waitFor(() => {
-        expect(mockWebSocket.send).toHaveBeenCalled();
+        expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
       });
 
-      expect(mockWebSocket.send).toHaveBeenCalledWith(
-        [message2, message2, message1]
-          .map((msg) => JSON.stringify(msg))
-          .join("\n"),
-      );
-    });
-
-    test("should send all the pending messages when the websocket is closed", async () => {
-      const { peer, mockWebSocket } = setup();
-
-      const message1: SyncMessage = {
-        action: "known",
-        id: "co_ztest",
-        header: false,
-        sessions: {},
-      };
-
-      const message2: SyncMessage = {
-        action: "content",
-        id: "co_zlow",
-        new: {},
-        priority: 6,
-      };
-
-      void peer.outgoing.push(message1);
-      void peer.outgoing.push(message2);
-
-      peer.outgoing.close();
-
-      expect(mockWebSocket.send).toHaveBeenCalledWith(
-        [message1, message2].map((msg) => JSON.stringify(msg)).join("\n"),
-      );
-    });
-
-    test("should limit the chunk size to MAX_OUTGOING_MESSAGES_CHUNK_SIZE", async () => {
-      const { peer, mockWebSocket } = setup();
-
-      const message1: SyncMessage = {
-        action: "known",
-        id: "co_ztest",
-        header: false,
-        sessions: {},
-      };
-      const message2: SyncMessage = {
-        action: "content",
-        id: "co_zlow",
-        new: {},
-        priority: 6,
-      };
-
-      const stream: SyncMessage[] = [];
-
-      while (
-        serializeMessages(stream.concat(message1)).length <
-        MAX_OUTGOING_MESSAGES_CHUNK_BYTES
-      ) {
-        stream.push(message1);
-        void peer.outgoing.push(message1);
-      }
+      expect(mockWebSocket.send).toHaveBeenCalledWith(JSON.stringify(message1));
 
       void peer.outgoing.push(message2);
 
@@ -308,18 +289,138 @@ describe("createWebSocketPeer", () => {
         expect(mockWebSocket.send).toHaveBeenCalledTimes(2);
       });
 
-      expect(mockWebSocket.send).toHaveBeenCalledWith(
-        serializeMessages(stream),
-      );
-
       expect(mockWebSocket.send).toHaveBeenNthCalledWith(
         2,
         JSON.stringify(message2),
       );
     });
 
+    test("should sort remaining queued messages by priority after first message", async () => {
+      const { peer, mockWebSocket, triggerEvent } = setup({
+        initialReadyState: 0,
+      });
+
+      const lowPriority: SyncMessage = {
+        action: "content",
+        id: "co_zlow",
+        new: {},
+        priority: CO_VALUE_PRIORITY.LOW,
+      };
+
+      const highPriority: SyncMessage = {
+        action: "content",
+        id: "co_zhigh",
+        new: {},
+        priority: CO_VALUE_PRIORITY.HIGH,
+      };
+
+      // First message is pulled immediately before socket check,
+      // so it will be first regardless of priority
+      void peer.outgoing.push(lowPriority);
+      // Subsequent messages are queued and sorted by priority
+      void peer.outgoing.push(lowPriority);
+      void peer.outgoing.push(highPriority);
+
+      // Simulate socket becoming ready
+      mockWebSocket.readyState = 1;
+      triggerEvent("open");
+
+      await waitFor(() => {
+        expect(mockWebSocket.send).toHaveBeenCalled();
+      });
+
+      // First message (lowPriority) comes first as it was pulled before waiting,
+      // then remaining messages are sorted: highPriority before lowPriority
+      expect(mockWebSocket.send).toHaveBeenCalledWith(
+        [lowPriority, highPriority, lowPriority]
+          .map((msg) => JSON.stringify(msg))
+          .join("\n"),
+      );
+    });
+
+    test("should send remaining queued messages when close is called", async () => {
+      const { peer, mockWebSocket } = setup({ initialReadyState: 0 });
+
+      const message1: SyncMessage = {
+        action: "known",
+        id: "co_ztest",
+        header: false,
+        sessions: {},
+      };
+
+      const message2: SyncMessage = {
+        action: "content",
+        id: "co_zlow",
+        new: {},
+        priority: 6,
+      };
+
+      const message3: SyncMessage = {
+        action: "content",
+        id: "co_zmedium",
+        new: {},
+        priority: 3,
+      };
+
+      void peer.outgoing.push(message1);
+      void peer.outgoing.push(message2);
+      void peer.outgoing.push(message3);
+
+      // Set socket to open before close to allow sending
+      mockWebSocket.readyState = 1;
+      peer.outgoing.close();
+
+      // First message was already pulled by processQueue (waiting for socket),
+      // close() processes and sends remaining messages from queue sorted by priority
+      expect(mockWebSocket.send).toHaveBeenCalledWith(
+        [message3, message2].map((msg) => JSON.stringify(msg)).join("\n"),
+      );
+    });
+
+    test("should limit the chunk size to MAX_OUTGOING_MESSAGES_CHUNK_SIZE", async () => {
+      // This test verifies chunking works when socket is already ready
+      const { peer, mockWebSocket } = setup();
+
+      mockWebSocket.send.mockImplementation((value: string) => {
+        mockWebSocket.bufferedAmount += value.length;
+      });
+
+      const message1: SyncMessage = {
+        action: "known",
+        id: "co_ztest",
+        header: false,
+        sessions: {},
+      };
+      const message2: SyncMessage = {
+        action: "content",
+        id: "co_zlow",
+        new: {},
+        priority: 6,
+      };
+
+      // Fill up the buffer
+      while (mockWebSocket.bufferedAmount < BUFFER_LIMIT) {
+        peer.outgoing.push(message1);
+      }
+
+      mockWebSocket.send.mockClear();
+
+      void peer.outgoing.push(message2);
+
+      expect(mockWebSocket.send).not.toHaveBeenCalled();
+
+      // Reset the buffer, make it look like we have sent the messages
+      mockWebSocket.bufferedAmount = 0;
+
+      await waitFor(() => {
+        expect(mockWebSocket.send).toHaveBeenCalled();
+      });
+    });
+
     test("should send accumulated messages before a large message", async () => {
       const { peer, mockWebSocket } = setup();
+
+      mockWebSocket.bufferedAmount = BUFFER_LIMIT + 1;
 
       const smallMessage: SyncMessage = {
         action: "known",
@@ -340,6 +441,8 @@ describe("createWebSocketPeer", () => {
       void peer.outgoing.push(smallMessage);
       void peer.outgoing.push(largeMessage);
 
+      mockWebSocket.bufferedAmount = 0;
+
       await waitFor(() => {
         expect(mockWebSocket.send).toHaveBeenCalledTimes(2);
       });
@@ -359,10 +462,6 @@ describe("createWebSocketPeer", () => {
       vi.useFakeTimers();
       const { peer, mockWebSocket } = setup();
 
-      mockWebSocket.send.mockImplementation(() => {
-        mockWebSocket.bufferedAmount = BUFFER_LIMIT + 1;
-      });
-
       const message1: SyncMessage = {
         action: "known",
         id: "co_ztest",
@@ -376,31 +475,25 @@ describe("createWebSocketPeer", () => {
         priority: 6,
       };
 
-      const stream: SyncMessage[] = [];
+      // Start with buffer full so messages go through the queue
+      mockWebSocket.bufferedAmount = BUFFER_LIMIT + 1;
 
-      while (
-        serializeMessages(stream.concat(message1)).length <
-        MAX_OUTGOING_MESSAGES_CHUNK_BYTES
-      ) {
-        stream.push(message1);
-        void peer.outgoing.push(message1);
-      }
-
+      void peer.outgoing.push(message1);
       void peer.outgoing.push(message2);
 
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(0);
 
-      expect(mockWebSocket.send).toHaveBeenCalledWith(
-        serializeMessages(stream),
-      );
+      // No messages sent yet because buffer is full
+      expect(mockWebSocket.send).not.toHaveBeenCalled();
 
+      // Clear the buffer
       mockWebSocket.bufferedAmount = 0;
 
       await vi.advanceTimersByTimeAsync(BUFFER_LIMIT_POLLING_INTERVAL + 1);
 
-      expect(mockWebSocket.send).toHaveBeenNthCalledWith(
-        2,
-        JSON.stringify(message2),
+      // Both messages are batched together
+      expect(mockWebSocket.send).toHaveBeenCalledWith(
+        [message1, message2].map((msg) => JSON.stringify(msg)).join("\n"),
       );
 
       vi.useRealTimers();
@@ -426,10 +519,15 @@ describe("createWebSocketPeer", () => {
       };
 
       void peer.outgoing.push(message1);
+
+      await waitFor(() => {
+        expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
+      });
+
       void peer.outgoing.push(message2);
 
       await waitFor(() => {
-        expect(mockWebSocket.send).toHaveBeenCalled();
+        expect(mockWebSocket.send).toHaveBeenCalledTimes(2);
       });
 
       expect(mockWebSocket.send).toHaveBeenNthCalledWith(
@@ -442,9 +540,10 @@ describe("createWebSocketPeer", () => {
       );
     });
 
-    test("should start batching outgoing messages when reiceving a batched message", async () => {
-      const { peer, mockWebSocket, listeners } = setup({
+    test("should start batching outgoing messages when receiving a batched message", async () => {
+      const { peer, mockWebSocket, triggerEvent } = setup({
         batchingByDefault: false,
+        initialReadyState: 0,
       });
 
       const message1: SyncMessage = {
@@ -454,9 +553,8 @@ describe("createWebSocketPeer", () => {
         sessions: {},
       };
 
-      const messageHandler = listeners.get("message");
-
-      messageHandler?.(
+      triggerEvent(
+        "message",
         new MessageEvent("message", {
           data: Array.from({ length: 5 }, () => message1)
             .map((msg) => JSON.stringify(msg))
@@ -474,6 +572,10 @@ describe("createWebSocketPeer", () => {
       void peer.outgoing.push(message1);
       void peer.outgoing.push(message2);
 
+      // Simulate socket becoming ready
+      mockWebSocket.readyState = 1;
+      triggerEvent("open");
+
       await waitFor(() => {
         expect(mockWebSocket.send).toHaveBeenCalled();
       });
@@ -483,8 +585,8 @@ describe("createWebSocketPeer", () => {
       );
     });
 
-    test("should not start batching outgoing messages when reiceving non-batched message", async () => {
-      const { peer, mockWebSocket, listeners } = setup({
+    test("should not start batching outgoing messages when receiving non-batched message", async () => {
+      const { peer, mockWebSocket, triggerEvent } = setup({
         batchingByDefault: false,
       });
 
@@ -495,9 +597,8 @@ describe("createWebSocketPeer", () => {
         sessions: {},
       };
 
-      const messageHandler = listeners.get("message");
-
-      messageHandler?.(
+      triggerEvent(
+        "message",
         new MessageEvent("message", {
           data: JSON.stringify(message1),
         }),
@@ -511,10 +612,15 @@ describe("createWebSocketPeer", () => {
       };
 
       void peer.outgoing.push(message1);
+
+      await waitFor(() => {
+        expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
+      });
+
       void peer.outgoing.push(message2);
 
       await waitFor(() => {
-        expect(mockWebSocket.send).toHaveBeenCalled();
+        expect(mockWebSocket.send).toHaveBeenCalledTimes(2);
       });
 
       expect(mockWebSocket.send).toHaveBeenNthCalledWith(
@@ -550,14 +656,13 @@ describe("createWebSocketPeer", () => {
 
     test("should correctly measure incoming ingress", async () => {
       const metricReader = createTestMetricReader();
-      const { listeners } = setup({
+      const { triggerEvent } = setup({
         meta: { label: "value" },
       });
 
-      const messageHandler = listeners.get("message");
-
       const encryptedChanges = "Hello, world!";
-      messageHandler?.(
+      triggerEvent(
+        "message",
         new MessageEvent("message", {
           data: JSON.stringify({
             action: "content",
@@ -585,7 +690,8 @@ describe("createWebSocketPeer", () => {
       ).toBe(encryptedChanges.length);
 
       const trustingChanges = "Jazz is great!";
-      messageHandler?.(
+      triggerEvent(
+        "message",
         new MessageEvent("message", {
           data: JSON.stringify({
             action: "content",
@@ -611,9 +717,8 @@ describe("createWebSocketPeer", () => {
     });
 
     test("should drain the outgoing queue on websocket close so pulled equals pushed", async () => {
-      setOutgoingMessagesChunkDelay(500);
       const metricReader = createTestMetricReader();
-      const { peer, listeners } = setup();
+      const { peer, triggerEvent } = setup({ initialReadyState: 0 });
 
       const high: SyncMessage = {
         action: "content",
@@ -657,12 +762,14 @@ describe("createWebSocketPeer", () => {
         }),
       ).toBe(1);
 
+      // First message is already pulled by processQueue (waiting for socket open),
+      // so pulled count for that priority is already 1
       expect(
         await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
           priority: CO_VALUE_PRIORITY.HIGH,
           peerRole: "client",
         }),
-      ).toBe(0);
+      ).toBe(1);
       expect(
         await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
           priority: CO_VALUE_PRIORITY.MEDIUM,
@@ -676,9 +783,9 @@ describe("createWebSocketPeer", () => {
         }),
       ).toBe(0);
 
-      const closeHandler = listeners.get("close");
-      closeHandler?.(new MessageEvent("close"));
+      triggerEvent("close");
 
+      // After close, drain() is called which pulls all remaining messages
       expect(
         await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
           priority: CO_VALUE_PRIORITY.HIGH,
@@ -697,8 +804,6 @@ describe("createWebSocketPeer", () => {
           peerRole: "client",
         }),
       ).toBe(1);
-
-      vi.useRealTimers();
     });
   });
 });

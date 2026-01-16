@@ -9,6 +9,7 @@ import { getFlagNumber, getFlagString } from "./utils/args.ts";
 import { parseMixSpec } from "./utils/mix.ts";
 import { readAllCoValues } from "./utils/sqliteCoValues.ts";
 import { setupMetrics } from "./metrics.ts";
+import type { WorkerStats } from "./worker.ts";
 
 type HeaderRow = { id: string; header: CoValueHeader };
 
@@ -38,14 +39,7 @@ function classifyTargets(rows: HeaderRow[]) {
 }
 
 type WorkerHello = { type: "hello"; workerId: number };
-type WorkerStats = {
-  type: "stats";
-  workerId: number;
-  opsDone: number;
-  fileOpsDone: number;
-  mapOpsDone: number;
-  unavailable: number;
-};
+
 type WorkerDone = { type: "done"; workerId: number };
 type WorkerMessage = WorkerHello | WorkerStats | WorkerDone;
 
@@ -158,12 +152,14 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
   const printStats = () => {
     let ops = 0;
     let fileOps = 0;
+    let fullFileOps = 0;
     let mapOps = 0;
     let unavailable = 0;
 
     for (const s of byId.values()) {
       ops += s.opsDone;
       fileOps += s.fileOpsDone;
+      fullFileOps += s.fullFileOpsDone;
       mapOps += s.mapOpsDone;
       unavailable += s.unavailable;
     }
@@ -177,6 +173,7 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
         duration: (elapsedMs / 1000).toFixed(0) + "s",
         totalOps: ops,
         fileOps,
+        fullFileOps,
         mapOps,
         unavailable,
       }),

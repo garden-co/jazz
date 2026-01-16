@@ -21,18 +21,15 @@ type WorkerData = {
   };
 };
 
-type WorkerStats = {
+export type WorkerStats = {
   type: "stats";
   workerId: number;
   opsDone: number;
   fileOpsDone: number;
+  fullFileOpsDone: number;
   mapOpsDone: number;
   unavailable: number;
 };
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function makeRng(seed: number): () => number {
   // Mulberry32
@@ -105,6 +102,7 @@ async function main() {
 
   let opsDone = 0;
   let fileOpsDone = 0;
+  let fullFileOpsDone = 0;
   let mapOpsDone = 0;
   let unavailable = 0;
 
@@ -128,6 +126,7 @@ async function main() {
     if (v.isAvailable()) {
       if (kind === "file") {
         v.waitForFullStreaming().finally(() => {
+          fullFileOpsDone++;
           v.unmount();
         });
         fileOpsDone++;
@@ -157,6 +156,7 @@ async function main() {
         workerId: data.workerId,
         opsDone,
         fileOpsDone,
+        fullFileOpsDone,
         mapOpsDone,
         unavailable,
       };
@@ -173,6 +173,7 @@ async function main() {
     fileOpsDone,
     mapOpsDone,
     unavailable,
+    fullFileOpsDone,
   } satisfies WorkerStats);
 
   wsPeer.disable();

@@ -1465,11 +1465,11 @@ export class CoValueCore {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
 
-  load(peers: PeerState[]) {
+  load(peers: PeerState[], allowOverflow?: boolean) {
     this.loadFromStorage((found) => {
       // When found the load is triggered by handleNewContent
       if (!found) {
-        this.loadFromPeers(peers);
+        this.loadFromPeers(peers, allowOverflow);
       }
     });
   }
@@ -1555,7 +1555,7 @@ export class CoValueCore {
     this.node.storage.loadKnownState(this.id, done);
   }
 
-  loadFromPeers(peers: PeerState[]) {
+  loadFromPeers(peers: PeerState[], allowOverflow?: boolean) {
     if (peers.length === 0) {
       return;
     }
@@ -1565,27 +1565,15 @@ export class CoValueCore {
 
       if (currentState === "unknown" || currentState === "unavailable") {
         this.markPending(peer.id);
-        this.internalLoadFromPeer(peer);
+        this.internalLoadFromPeer(peer, allowOverflow);
       }
     }
   }
 
-  private internalLoadFromPeer(peer: PeerState) {
+  private internalLoadFromPeer(peer: PeerState, allowOverflow?: boolean) {
     if (peer.closed && !peer.persistent) {
       this.markNotFoundInPeer(peer.id);
       return;
-    }
-
-    /**
-     * On reconnection persistent peers will automatically fire the load request
-     * as part of the reconnection process.
-     */
-    if (!peer.closed) {
-      peer.pushOutgoingMessage({
-        action: "load",
-        ...this.knownState(),
-      });
-      peer.trackLoadRequestSent(this.id);
     }
 
     const markNotFound = () => {
@@ -1598,10 +1586,18 @@ export class CoValueCore {
       }
     };
 
-    const timeout = setTimeout(markNotFound, CO_VALUE_LOADING_CONFIG.TIMEOUT);
+    // Close listener for non-persistent peers
     const removeCloseListener = peer.persistent
       ? undefined
       : peer.addCloseListener(markNotFound);
+
+    /**
+     * On reconnection persistent peers will automatically fire the load request
+     * as part of the reconnection process.
+     */
+    if (!peer.closed) {
+      peer.sendLoadRequest(this, allowOverflow);
+    }
 
     this.subscribe((state, unsubscribe) => {
       const peerState = state.getLoadingStateForPeer(peer.id);
@@ -1613,7 +1609,6 @@ export class CoValueCore {
       ) {
         unsubscribe();
         removeCloseListener?.();
-        clearTimeout(timeout);
       }
     }, true);
   }

@@ -108,7 +108,7 @@ class QueueMeter {
   }
 }
 export function meteredList<T>(
-  type: "incoming" | "outgoing" | "storage-streaming",
+  type: "incoming" | "outgoing" | "storage-streaming" | "load-requests-queue",
   attrs?: Record<string, string | number>,
 ) {
   return new LinkedList<T>(new QueueMeter("jazz.messagequeue." + type, attrs));
