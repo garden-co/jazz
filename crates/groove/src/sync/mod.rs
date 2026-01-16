@@ -38,6 +38,9 @@ mod env;
 mod negotiation;
 mod protocol;
 
+#[cfg(test)]
+pub mod test_driver;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
 

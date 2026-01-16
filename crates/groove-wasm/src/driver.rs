@@ -23,10 +23,10 @@ use web_sys::{EventSource, MessageEvent, Request, RequestInit, Response};
 use groove::Environment;
 use groove::sql::{Database, DatabaseState};
 use groove::sync::{
-    ConnectionEvent, ConnectionEventKind, ConnectionState, Decode, Encode, Inboxes,
-    LocalWriteEvent, Notification, OutboundRequest, Outboxes, PushResponse, PushResponseEvent,
-    SseEvent, SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent,
-    SubscriptionOptions, SyncEngine, TickEvent, UpstreamId,
+    ConnectionEvent, ConnectionEventKind, ConnectionState, Decode, Encode, Inboxes, Notification,
+    OutboundRequest, Outboxes, PushResponse, PushResponseEvent, SseEvent, SseInboxEvent,
+    StorageRequest, StreamAction, SubscribeRequestEvent, SubscriptionOptions, SyncEngine,
+    TickEvent, UpstreamId,
 };
 
 // ============================================================================
@@ -196,25 +196,14 @@ impl WasmSyncDriver {
         let db = Database::from_state(Rc::clone(&self.db));
         match db.execute(sql) {
             Ok(result) => {
+                // Run a pass to pick up any changed objects for sync
+                let outboxes = self.engine.borrow_mut().pass(Inboxes::default());
+                self.handle_outboxes(outboxes);
+
                 let obj = js_sys::Object::new();
 
                 match &result {
                     ExecuteResult::Inserted { row_id, .. } => {
-                        // Queue for sync
-                        let now_ms = js_sys::Date::now() as u64;
-                        let inboxes = Inboxes {
-                            local_writes: vec![LocalWriteEvent {
-                                object_id: *row_id,
-                                branch: "main".to_string(),
-                                content: vec![], // Content already written by execute
-                                author: "wasm".to_string(),
-                                timestamp: now_ms,
-                            }],
-                            ..Default::default()
-                        };
-                        let outboxes = self.engine.borrow_mut().pass(inboxes);
-                        self.handle_outboxes(outboxes);
-
                         js_sys::Reflect::set(&obj, &"rowsAffected".into(), &JsValue::from(1u32))?;
                         js_sys::Reflect::set(
                             &obj,

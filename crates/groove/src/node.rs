@@ -14,6 +14,18 @@ use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
 use crate::sync::StorageRequest;
 
+/// Record of an object that changed during this pass.
+/// Used by SyncEngine to know which objects need to be pushed upstream.
+#[derive(Debug, Clone)]
+pub struct ObjectChange {
+    /// The object that changed.
+    pub object_id: ObjectId,
+    /// The branch that changed.
+    pub branch: String,
+    /// Timestamp of the change (for debounce tracking).
+    pub timestamp: u64,
+}
+
 /// Callback type for when commits are applied to an object.
 ///
 /// This callback is invoked after `apply_commits` adds commits to an object's branch.
@@ -62,6 +74,9 @@ pub struct LocalNode {
     /// When using SyncEngine, these are drained into outboxes.
     /// For standalone use, call `drain_storage_requests()` and execute them.
     pending_storage: RefCell<Vec<StorageRequest>>,
+    /// Objects that changed during this pass (for sync).
+    /// SyncEngine drains these to know which objects to push upstream.
+    changed_objects: RefCell<Vec<ObjectChange>>,
 }
 
 impl Default for LocalNode {
@@ -88,6 +103,7 @@ impl LocalNode {
             env,
             on_commits_applied: RefCell::new(None),
             pending_storage: RefCell::new(Vec::new()),
+            changed_objects: RefCell::new(Vec::new()),
         }
     }
 
@@ -102,6 +118,22 @@ impl LocalNode {
     /// Queue a storage request.
     fn queue_storage(&self, request: StorageRequest) {
         self.pending_storage.borrow_mut().push(request);
+    }
+
+    /// Drain changed objects (for sync).
+    ///
+    /// Called by SyncEngine during `pass()` to collect objects that need pushing.
+    pub fn drain_changed_objects(&self) -> Vec<ObjectChange> {
+        std::mem::take(&mut *self.changed_objects.borrow_mut())
+    }
+
+    /// Record that an object changed (for sync tracking).
+    fn record_change(&self, object_id: ObjectId, branch: &str, timestamp: u64) {
+        self.changed_objects.borrow_mut().push(ObjectChange {
+            object_id,
+            branch: branch.to_string(),
+            timestamp,
+        });
     }
 
     /// Set a callback to be invoked when commits are applied via `apply_commits`.
@@ -399,6 +431,9 @@ impl LocalNode {
             });
         }
 
+        // Record change for sync
+        self.record_change(object_id, branch, timestamp);
+
         Ok(commit_id)
     }
 
@@ -453,6 +488,9 @@ impl LocalNode {
                 frontier,
             });
         }
+
+        // Record change for sync
+        self.record_change(object_id, branch, timestamp);
 
         Ok(commit_id)
     }

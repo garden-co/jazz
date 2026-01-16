@@ -427,6 +427,11 @@ impl SyncEngine {
         id
     }
 
+    /// Check if there are pending writes awaiting push.
+    pub fn has_pending_writes(&self) -> bool {
+        !self.pending_writes.is_empty()
+    }
+
     /// Get an upstream state by ID.
     pub fn upstream(&self, id: UpstreamId) -> Option<&UpstreamState> {
         self.upstreams.get(&id)
@@ -463,27 +468,30 @@ impl SyncEngine {
             self.process_connection_event(event, &mut outboxes);
         }
 
-        // 3. Process local writes → update LocalNode, queue for push
+        // 3. Process local writes from inbox (if any)
         for write in inboxes.local_writes {
-            self.process_local_write(write, &mut outboxes);
+            self.process_local_write(write);
         }
 
-        // 4. Process SSE events → apply commits, update state
+        // 4. Drain changed objects from LocalNode → add to pending_writes
+        self.drain_changed_objects(&mut outboxes);
+
+        // 5. Process SSE events → apply commits, update state
         for sse in inboxes.sse_events {
             self.process_sse_event(sse, &mut outboxes);
         }
 
-        // 5. Process push responses → update server_known_state
+        // 6. Process push responses → update server_known_state
         for response in inboxes.push_responses {
             self.process_push_response(response, &mut outboxes);
         }
 
-        // 6. Process tick → check debounce timers, generate push requests
+        // 7. Process tick → check debounce timers, generate push requests
         if let Some(tick) = inboxes.tick {
             self.process_tick(tick, &mut outboxes);
         }
 
-        // 7. Drain storage requests from LocalNode
+        // 8. Drain storage requests from LocalNode
         outboxes
             .storage
             .extend(self.local_node.drain_storage_requests());
@@ -633,9 +641,11 @@ impl SyncEngine {
         }
     }
 
-    fn process_local_write(&mut self, write: LocalWriteEvent, outboxes: &mut Outboxes) {
-        // Apply write to LocalNode
-        let result = self.local_node.write_with_meta(
+    /// Process a local write from inbox.
+    /// The actual pending_writes tracking is done via drain_changed_objects.
+    fn process_local_write(&mut self, write: LocalWriteEvent) {
+        // Apply write to LocalNode (this will record the change)
+        let _ = self.local_node.write_with_meta(
             write.object_id,
             &write.branch,
             &write.content,
@@ -643,37 +653,39 @@ impl SyncEngine {
             write.timestamp,
             None,
         );
+    }
 
-        if result.is_ok() {
-            // Queue for push (debounced)
-            let tick_now = outboxes
-                .timers
-                .iter()
-                .find(|t| t.purpose == TimerPurpose::Debounce)
-                .map(|_| true)
-                .unwrap_or(false);
+    /// Drain changed objects from LocalNode and add to pending_writes.
+    fn drain_changed_objects(&mut self, outboxes: &mut Outboxes) {
+        let changes = self.local_node.drain_changed_objects();
+        if changes.is_empty() {
+            return;
+        }
 
-            // Get current time from tick or use write timestamp as fallback
-            let now_ms = write.timestamp;
+        let mut needs_timer = false;
 
+        for change in changes {
             self.pending_writes
-                .entry(write.object_id)
-                .and_modify(|p| p.last_write_ms = now_ms)
-                .or_insert_with(|| PendingWrite {
-                    object_id: write.object_id,
-                    branch: write.branch,
-                    first_write_ms: now_ms,
-                    last_write_ms: now_ms,
+                .entry(change.object_id)
+                .and_modify(|p| p.last_write_ms = change.timestamp)
+                .or_insert_with(|| {
+                    needs_timer = true;
+                    PendingWrite {
+                        object_id: change.object_id,
+                        branch: change.branch,
+                        first_write_ms: change.timestamp,
+                        last_write_ms: change.timestamp,
+                    }
                 });
+        }
 
-            // Request debounce timer if not already requested
-            if !tick_now {
-                outboxes.timers.push(TimerRequest {
-                    id: self.next_timer_id(),
-                    delay_ms: self.config.write_debounce_ms,
-                    purpose: TimerPurpose::Debounce,
-                });
-            }
+        // Request debounce timer if we added new pending writes
+        if needs_timer {
+            outboxes.timers.push(TimerRequest {
+                id: self.next_timer_id(),
+                delay_ms: self.config.write_debounce_ms,
+                purpose: TimerPurpose::Debounce,
+            });
         }
     }
 
