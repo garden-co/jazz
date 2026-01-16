@@ -18,10 +18,10 @@ use tokio::sync::mpsc;
 
 use groove::ObjectId;
 use groove::sync::{
-    ConnectionEvent, ConnectionEventKind, Encode, Inboxes, LocalWriteEvent, Notification,
-    OutboundRequest, Outboxes, PushRequest, PushResponse, PushResponseEvent, SseEvent,
-    SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent, SubscriptionOptions,
-    SyncEngine, TickEvent, UpstreamId,
+    ConnectionEvent, ConnectionEventKind, Encode, Inboxes, LocalWriteEvent, MemoryStorage,
+    Notification, OutboundRequest, Outboxes, PushRequest, PushResponse, PushResponseEvent,
+    SseEvent, SseInboxEvent, StreamAction, SubscribeRequestEvent, SubscriptionOptions, SyncEngine,
+    TickEvent, UpstreamId,
 };
 
 // ============================================================================
@@ -68,6 +68,8 @@ enum DriverEvent {
 pub struct NativeSyncDriver {
     /// The sync engine
     engine: SyncEngine,
+    /// In-memory storage (owned by driver, not Environment)
+    storage: MemoryStorage,
     /// Server URL for sync
     server_url: String,
     /// Auth token for requests
@@ -92,6 +94,7 @@ impl NativeSyncDriver {
 
         Self {
             engine,
+            storage: MemoryStorage::new(),
             server_url,
             auth_token,
             event_rx,
@@ -100,6 +103,16 @@ impl NativeSyncDriver {
             upstream_id,
             on_notification: None,
         }
+    }
+
+    /// Get a reference to the storage.
+    pub fn storage(&self) -> &MemoryStorage {
+        &self.storage
+    }
+
+    /// Get a mutable reference to the storage.
+    pub fn storage_mut(&mut self) -> &mut MemoryStorage {
+        &mut self.storage
     }
 
     /// Set a callback for notifications.
@@ -289,39 +302,25 @@ impl NativeSyncDriver {
             }
         }
 
-        // Handle storage requests
-        // For MemoryEnvironment, we run synchronously since it's instant.
-        // A production driver with async storage would need Arc<dyn Environment + Send + Sync>.
+        // Handle storage requests using MemoryStorage
         if !outboxes.storage.is_empty() {
-            let env = self.engine.local_node.env().expect("env required").clone();
-            futures::executor::block_on(async {
-                for request in outboxes.storage {
-                    match request {
-                        StorageRequest::PutCommit { commit } => {
-                            env.put_commit(&commit).await;
-                        }
-                        StorageRequest::SetFrontier {
-                            object_id,
-                            branch,
-                            frontier,
-                        } => {
-                            env.set_frontier(object_id.into(), &branch, &frontier).await;
-                        }
-                        StorageRequest::PutChunk { data, .. } => {
-                            use bytes::Bytes;
-                            env.put_chunk(Bytes::from(data)).await;
-                        }
-                        StorageRequest::GetChunk { .. } => {
-                            // TODO: For native driver, we would need to handle async
-                            // responses. For now, native driver doesn't use lazy loading.
-                        }
-                        StorageRequest::LoadObject { .. } => {
-                            // TODO: For native driver, we would need to handle async
-                            // responses. For now, native driver doesn't use lazy loading.
-                        }
-                    }
+            let mut responses = Vec::new();
+            for request in outboxes.storage {
+                if let Some(response) = self.storage.execute(request) {
+                    responses.push(response);
                 }
-            });
+            }
+
+            // Feed storage responses back to engine
+            if !responses.is_empty() {
+                let inboxes = Inboxes {
+                    storage_responses: responses,
+                    ..Default::default()
+                };
+                let more_outboxes = self.engine.pass(inboxes);
+                // Recursively handle (shouldn't normally generate more storage responses)
+                self.handle_outboxes(more_outboxes);
+            }
         }
     }
 

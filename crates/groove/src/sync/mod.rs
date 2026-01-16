@@ -35,11 +35,15 @@
 
 mod engine;
 mod env;
+mod memory_storage;
 mod negotiation;
 mod protocol;
 
 #[cfg(test)]
 pub mod test_driver;
+
+// Re-export MemoryStorage for drivers
+pub use memory_storage::MemoryStorage;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
@@ -54,10 +58,11 @@ pub mod jwt;
 // Engine types (runtime-less state machine)
 // Note: QueryId not exported to avoid conflict with server::QueryId
 pub use engine::{
-    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
-    OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StorageRequest,
-    StorageResponse, StreamAction, SubscribeRequestEvent, SubscriptionState, SyncConfig,
-    SyncEngine, TickEvent, TimerId, TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
+    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, ListenerChunkRequest,
+    LocalWriteEvent, Notification, OutboundRequest, Outboxes, PendingWrite, PushResponseEvent,
+    SseInboxEvent, StorageRequest, StorageResponse, StreamAction, SubscribeRequestEvent,
+    SubscriptionState, SyncConfig, SyncEngine, TickEvent, TimerId, TimerPurpose, TimerRequest,
+    UpstreamId, UpstreamState,
 };
 
 // Protocol types

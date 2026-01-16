@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::commit::{Commit, CommitId};
+use crate::listener::ListenerId;
 use crate::node::LocalNode;
 use crate::object::ObjectId;
 use crate::storage::ChunkHash;
@@ -100,6 +101,22 @@ pub struct Inboxes {
 
     /// Storage responses (from async storage operations).
     pub storage_responses: Vec<StorageResponse>,
+
+    /// Chunk requests from listeners (routed through engine for tracking).
+    pub listener_chunk_requests: Vec<ListenerChunkRequest>,
+}
+
+/// A chunk request from a listener.
+///
+/// Listeners that need chunk data (for chunked content) send requests through
+/// the engine. The engine tracks pending requests and routes responses back
+/// to the appropriate listener.
+#[derive(Debug, Clone)]
+pub struct ListenerChunkRequest {
+    /// The listener that needs this chunk.
+    pub listener_id: ListenerId,
+    /// The chunk hash to load.
+    pub hash: ChunkHash,
 }
 
 /// A response from async storage operations.
@@ -307,6 +324,15 @@ pub enum Notification {
         upstream_id: UpstreamId,
         state: ConnectionState,
     },
+    /// Chunk loaded for a listener.
+    ///
+    /// Sent when a listener's chunk request has been fulfilled.
+    /// The driver should route this to the appropriate listener.
+    ListenerChunkLoaded {
+        listener_id: ListenerId,
+        hash: ChunkHash,
+        data: Option<Vec<u8>>,
+    },
 }
 
 /// Purpose of a timer.
@@ -445,6 +471,9 @@ pub struct SyncEngine {
 
     /// Next storage request ID.
     next_storage_request_id: u64,
+
+    /// Pending listener chunk requests: request_id -> (listener_id, hash).
+    pending_listener_chunks: HashMap<u64, (ListenerId, ChunkHash)>,
 }
 
 impl Default for SyncEngine {
@@ -464,6 +493,7 @@ impl SyncEngine {
             pending_writes: HashMap::new(),
             next_timer_id: 1,
             next_storage_request_id: 1,
+            pending_listener_chunks: HashMap::new(),
         }
     }
 
@@ -477,6 +507,7 @@ impl SyncEngine {
             pending_writes: HashMap::new(),
             next_timer_id: 1,
             next_storage_request_id: 1,
+            pending_listener_chunks: HashMap::new(),
         }
     }
 
@@ -564,7 +595,12 @@ impl SyncEngine {
             self.process_storage_response(response, &mut outboxes);
         }
 
-        // 9. Drain storage requests from LocalNode
+        // 9. Process listener chunk requests → emit GetChunk with tracking
+        for request in inboxes.listener_chunk_requests {
+            self.process_listener_chunk_request(request, &mut outboxes);
+        }
+
+        // 10. Drain storage requests from LocalNode
         outboxes
             .storage
             .extend(self.local_node.drain_storage_requests());
@@ -864,13 +900,27 @@ impl SyncEngine {
     fn process_storage_response(&mut self, response: StorageResponse, outboxes: &mut Outboxes) {
         match response {
             StorageResponse::ChunkLoaded {
-                request_id: _,
-                hash: _,
-                data: _,
+                request_id,
+                hash,
+                data,
             } => {
-                // TODO: Chunks are used by Database for blob fields.
-                // When we implement lazy blob loading, this will provide
-                // the chunk data to resolve pending reads.
+                // Check if this chunk was requested by a listener
+                if let Some((listener_id, expected_hash)) =
+                    self.pending_listener_chunks.remove(&request_id)
+                {
+                    // Sanity check
+                    debug_assert_eq!(hash, expected_hash);
+
+                    // Notify the listener
+                    outboxes
+                        .notifications
+                        .push(Notification::ListenerChunkLoaded {
+                            listener_id,
+                            hash,
+                            data,
+                        });
+                }
+                // Otherwise, chunk was requested for other purposes (future blob loading)
             }
             StorageResponse::ObjectLoaded {
                 request_id: _,
@@ -894,6 +944,24 @@ impl SyncEngine {
                 }
             }
         }
+    }
+
+    fn process_listener_chunk_request(
+        &mut self,
+        request: ListenerChunkRequest,
+        outboxes: &mut Outboxes,
+    ) {
+        let request_id = self.next_storage_request_id();
+
+        // Track this request so we can route the response
+        self.pending_listener_chunks
+            .insert(request_id, (request.listener_id, request.hash));
+
+        // Emit GetChunk request to storage
+        outboxes.storage.push(StorageRequest::GetChunk {
+            request_id,
+            hash: request.hash,
+        });
     }
 
     fn process_tick(&mut self, tick: TickEvent, outboxes: &mut Outboxes) {
@@ -1174,5 +1242,62 @@ mod tests {
         assert_eq!(calculate_reconnect_delay(4, 1000, 30000), 8000);
         assert_eq!(calculate_reconnect_delay(5, 1000, 30000), 16000);
         assert_eq!(calculate_reconnect_delay(6, 1000, 30000), 30000); // Capped
+    }
+
+    #[test]
+    fn test_listener_chunk_request_flow() {
+        let mut engine = SyncEngine::new();
+        let listener_id = ListenerId::new(42);
+        let chunk_hash = ChunkHash::compute(b"test chunk data");
+
+        // Request a chunk for a listener
+        let inboxes = Inboxes {
+            listener_chunk_requests: vec![ListenerChunkRequest {
+                listener_id,
+                hash: chunk_hash,
+            }],
+            ..Default::default()
+        };
+
+        let outboxes = engine.pass(inboxes);
+
+        // Should have emitted a GetChunk storage request
+        assert_eq!(outboxes.storage.len(), 1);
+        let request_id = match &outboxes.storage[0] {
+            StorageRequest::GetChunk { request_id, hash } => {
+                assert_eq!(*hash, chunk_hash);
+                *request_id
+            }
+            _ => panic!("Expected GetChunk request"),
+        };
+
+        // Should have tracked the pending request
+        assert!(engine.pending_listener_chunks.contains_key(&request_id));
+
+        // Now simulate the chunk being loaded
+        let chunk_data = b"test chunk data".to_vec();
+        let response_inboxes = Inboxes {
+            storage_responses: vec![StorageResponse::ChunkLoaded {
+                request_id,
+                hash: chunk_hash,
+                data: Some(chunk_data.clone()),
+            }],
+            ..Default::default()
+        };
+
+        let response_outboxes = engine.pass(response_inboxes);
+
+        // Should have emitted a ListenerChunkLoaded notification
+        assert!(response_outboxes.notifications.iter().any(|n| matches!(
+            n,
+            Notification::ListenerChunkLoaded {
+                listener_id: lid,
+                hash,
+                data: Some(d),
+            } if *lid == listener_id && *hash == chunk_hash && *d == chunk_data
+        )));
+
+        // Pending request should be removed
+        assert!(!engine.pending_listener_chunks.contains_key(&request_id));
     }
 }

@@ -32,7 +32,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use crate::commit::{Commit, CommitId};
@@ -42,128 +42,14 @@ use crate::sql::{Database, DatabaseState, ExecuteResult};
 
 use super::engine::{
     ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, OutboundRequest, Outboxes,
-    PushResponseEvent, SseInboxEvent, StorageRequest, StorageResponse, StreamAction,
-    SubscribeRequestEvent, SyncEngine, TickEvent, UpstreamId,
+    PushResponseEvent, SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent,
+    SyncEngine, TickEvent, UpstreamId,
 };
+use super::memory_storage::MemoryStorage;
 use super::protocol::{PushRequest, PushResponse, SseEvent, SubscriptionOptions};
-use crate::storage::ChunkHash;
 
-// ============================================================================
-// Test Storage
-// ============================================================================
-
-/// In-memory storage for test driver.
-///
-/// This replaces the Environment trait for tests - storage is synchronous
-/// and directly managed by the test driver.
-#[derive(Debug, Default)]
-pub struct TestStorage {
-    /// Commits by ID.
-    commits: HashMap<CommitId, Commit>,
-    /// Frontiers by (object_id, branch).
-    frontiers: HashMap<(ObjectId, String), Vec<CommitId>>,
-    /// Chunks by hash.
-    chunks: HashMap<ChunkHash, Vec<u8>>,
-}
-
-impl TestStorage {
-    /// Create new empty storage.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Execute a storage request.
-    /// Returns a StorageResponse for load operations, None for fire-and-forget operations.
-    pub fn execute(&mut self, request: StorageRequest) -> Option<StorageResponse> {
-        match request {
-            StorageRequest::PutCommit { commit } => {
-                let id = commit.compute_id();
-                self.commits.insert(id, commit);
-                None
-            }
-            StorageRequest::SetFrontier {
-                object_id,
-                branch,
-                frontier,
-            } => {
-                self.frontiers.insert((object_id, branch), frontier);
-                None
-            }
-            StorageRequest::PutChunk { data, .. } => {
-                let hash = ChunkHash::compute(&data);
-                self.chunks.insert(hash, data);
-                None
-            }
-            StorageRequest::GetChunk { request_id, hash } => {
-                let data = self.chunks.get(&hash).cloned();
-                Some(StorageResponse::ChunkLoaded {
-                    request_id,
-                    hash,
-                    data,
-                })
-            }
-            StorageRequest::LoadObject {
-                request_id,
-                object_id,
-                branch,
-            } => {
-                let frontier = self.get_frontier(object_id, &branch);
-                let commits = self.get_commits_for_frontier(&frontier);
-                Some(StorageResponse::ObjectLoaded {
-                    request_id,
-                    object_id,
-                    branch,
-                    object_meta: None, // TODO: Store object meta separately
-                    frontier,
-                    commits,
-                })
-            }
-        }
-    }
-
-    /// Get all commits reachable from a frontier.
-    fn get_commits_for_frontier(&self, frontier: &[CommitId]) -> Vec<Commit> {
-        let mut result = Vec::new();
-        let mut visited = HashSet::new();
-        let mut to_visit: Vec<CommitId> = frontier.to_vec();
-
-        while let Some(id) = to_visit.pop() {
-            if visited.contains(&id) {
-                continue;
-            }
-            visited.insert(id);
-
-            if let Some(commit) = self.commits.get(&id) {
-                result.push(commit.clone());
-                for parent in &commit.parents {
-                    if !visited.contains(parent) {
-                        to_visit.push(*parent);
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Get a commit by ID.
-    pub fn get_commit(&self, id: &CommitId) -> Option<&Commit> {
-        self.commits.get(id)
-    }
-
-    /// Get frontier for an object's branch.
-    pub fn get_frontier(&self, object_id: ObjectId, branch: &str) -> Vec<CommitId> {
-        self.frontiers
-            .get(&(object_id, branch.to_string()))
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Get all commits count.
-    pub fn commit_count(&self) -> usize {
-        self.commits.len()
-    }
-}
+// Type alias for backwards compatibility
+pub type TestStorage = MemoryStorage;
 
 // ============================================================================
 // Test Node
