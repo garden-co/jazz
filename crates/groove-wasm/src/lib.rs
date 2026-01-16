@@ -26,7 +26,6 @@ use js_sys::{Array, Promise, Uint8Array};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
@@ -147,7 +146,7 @@ impl WasmDatabase {
         future_to_promise(async move {
             let name = db_name.as_deref().unwrap_or("groove");
             let env = IndexedDbEnvironment::with_name(name).await?;
-            let env = Arc::new(env);
+            let env = Rc::new(env);
 
             // Check if database already exists
             let db = if let Some(catalog_id_str) = env.get_catalog_id().await {
@@ -554,7 +553,7 @@ impl WasmDatabase {
             .db
             .get_table(table)
             .ok_or_else(|| JsValue::from_str(&format!("table not found: {}", table)))?;
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
         let mut builder = RowBuilder::new(descriptor);
 
         // Add string columns
@@ -828,15 +827,12 @@ struct BlobInfo {
 pub struct WasmBlobWriter {
     state: Option<BlobWriterState>,
     registry: Rc<RefCell<BlobRegistry>>,
-    env: std::sync::Arc<dyn groove::Environment>,
+    env: Rc<dyn groove::Environment>,
 }
 
 #[wasm_bindgen]
 impl WasmBlobWriter {
-    fn new(
-        registry: Rc<RefCell<BlobRegistry>>,
-        env: std::sync::Arc<dyn groove::Environment>,
-    ) -> Self {
+    fn new(registry: Rc<RefCell<BlobRegistry>>, env: Rc<dyn groove::Environment>) -> Self {
         Self {
             state: Some(BlobWriterState::new()),
             registry,

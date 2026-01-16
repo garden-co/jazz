@@ -24,8 +24,8 @@ use groove::Environment;
 use groove::sql::{ColumnDef, ColumnType, LensGenerationOptions, TableSchema};
 use groove::sync::{
     ActiveQuery, ClientIdentity, Decode, Encode, PushRequest, PushResponse, QueryId,
-    ReconcileRequest, SchemaRegistry, SseEvent, SubscribeRequest, SyncServer, TokenValidator,
-    UnsubscribeRequest,
+    ReconcileRequest, SchemaRegistry, SseEvent, SubscribeRequest, SubscriptionOptions, SyncServer,
+    TokenValidator, UnsubscribeRequest,
 };
 
 use crate::hyper_env::{
@@ -499,48 +499,99 @@ async fn handle_reconcile<E: Environment>(
 }
 
 /// Handle GET /sync/events (EventSource endpoint)
+///
+/// Query parameters:
+/// - token: JWT auth token (required)
+/// - query: SQL query to subscribe to (optional, URL-encoded)
 async fn handle_events<E: Environment + 'static>(
     state: Rc<AppState<E>>,
     req: Request<Incoming>,
 ) -> SyncResponse {
-    // Extract token from query string
-    let query = req.uri().query().unwrap_or("");
-    let token = query
-        .split('&')
-        .find_map(|pair| {
-            let mut parts = pair.split('=');
-            if parts.next() == Some("token") {
-                parts.next()
-            } else {
-                None
+    eprintln!("[SERVER] handle_events called with URI: {}", req.uri());
+
+    // Parse query string parameters
+    let query_string = req.uri().query().unwrap_or("");
+    let mut token = "";
+    let mut sql_query = None;
+
+    for pair in query_string.split('&') {
+        let mut parts = pair.split('=');
+        match parts.next() {
+            Some("token") => token = parts.next().unwrap_or(""),
+            Some("query") => {
+                // URL-decode the query parameter
+                if let Some(encoded) = parts.next() {
+                    if let Ok(decoded) = urlencoding::decode(encoded) {
+                        sql_query = Some(decoded.into_owned());
+                    }
+                }
             }
-        })
-        .unwrap_or("");
+            _ => {}
+        }
+    }
 
     // Validate token
     let identity = {
         let server = state.server.borrow();
         match server.token_validator.validate(token) {
-            Some(id) => id,
-            None => return SyncResponse::regular(error_response(401, "Invalid token")),
+            Some(id) => {
+                eprintln!(
+                    "[SERVER] Token validated successfully for user: {:?}",
+                    id.user_id
+                );
+                id
+            }
+            None => {
+                eprintln!("[SERVER] Token validation FAILED");
+                return SyncResponse::regular(error_response(401, "Invalid token"));
+            }
         }
     };
 
     // Create SSE channel
     let (tx, rx) = create_sse_channel();
 
-    // Create session
-    let session_id = {
+    // Create session and optionally register query
+    let (session_id, query_id) = {
         let mut server = state.server.borrow_mut();
-        server.create_session(identity, tx.clone())
+        let session_id = server.create_session(identity, tx.clone());
+
+        // If a query was provided, register it
+        let query_id = if let Some(query) = &sql_query {
+            let session = server.get_session_mut(&session_id).unwrap();
+            let qid = session.next_query_id();
+            session.queries.insert(
+                qid,
+                ActiveQuery::new(query.clone(), SubscriptionOptions::default()),
+            );
+            qid
+        } else {
+            QueryId(1)
+        };
+
+        (session_id, query_id)
     };
 
-    // Send initial objects
-    let state_clone = Rc::clone(&state);
-    tokio::task::spawn_local(async move {
-        send_initial_objects(state_clone, session_id, QueryId(1), tx).await;
+    // Send initial objects for wildcard or SELECT queries
+    let should_send_initial = sql_query.as_ref().map_or(true, |q| {
+        q == "*" || q.to_lowercase().contains("select * from")
     });
 
+    if should_send_initial {
+        eprintln!(
+            "[SERVER] Will send initial objects for session {:?}",
+            session_id
+        );
+        let state_clone = Rc::clone(&state);
+        tokio::task::spawn_local(async move {
+            send_initial_objects(state_clone, session_id, query_id, tx).await;
+        });
+    }
+
+    eprintln!(
+        "[SERVER] Returning SSE response for session {:?}",
+        session_id
+    );
     SyncResponse::Sse(sse_response(rx))
 }
 

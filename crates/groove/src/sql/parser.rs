@@ -360,6 +360,16 @@ impl<'a> Parser<'a> {
             return Ok(PredicateValue::Bool(false));
         }
 
+        // @viewer - placeholder for current user's row ID
+        if self.peek_char() == Some('@') {
+            self.consume_char();
+            let ident = self.parse_identifier()?;
+            if ident.to_lowercase() == "viewer" {
+                return Ok(PredicateValue::Viewer);
+            }
+            return Err(self.error(format!("unknown placeholder @{}", ident)));
+        }
+
         // String literal - always parse as String.
         // The database executor coerces to ObjectId when inserting into Ref columns.
         if self.peek_char() == Some('\'') {

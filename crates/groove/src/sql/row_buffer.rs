@@ -1371,6 +1371,10 @@ impl RowBuilder {
             PredicateValue::Bytes(v) => self.set_bytes(idx, v),
             PredicateValue::Ref(v) => self.set_ref(idx, *v),
             PredicateValue::Null => self.set_null(idx),
+            PredicateValue::Viewer => {
+                // Viewer should be resolved to ObjectId before reaching here
+                panic!("PredicateValue::Viewer must be resolved before setting row value")
+            }
         }
     }
 

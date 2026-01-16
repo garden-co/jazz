@@ -9,7 +9,7 @@ wasm = ["uuid/js", "getrandom/js", "dep:web-time"]
 # sync-server feature enables TokioRuntime for server-side use
 sync-server = []
 # jwt-auth feature enables JWT token validation for authentication
-jwt-auth = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json"]
+jwt-auth = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json", "dep:ureq", "dep:base64"]
 
 [dependencies]
 blake3 = "1"
@@ -25,6 +25,8 @@ web-time = { version = "1", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+ureq = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["sync", "rt", "time"] }
@@ -33,6 +35,7 @@ tokio-stream = "0.1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
 bytes = "1"

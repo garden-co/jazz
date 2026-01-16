@@ -91,30 +91,48 @@ impl ClientEnv for WasmClientEnv {
         &self,
         request: SubscribeRequest,
     ) -> Result<BoxStream<'static, Result<SseEvent, ClientError>>, ClientError> {
-        // POST to /sync/subscribe to register the subscription
-        let url = format!("{}/sync/subscribe", self.config.base_url);
-        let body = request.to_bytes();
-
-        let response = self.post_binary(&url, &body).await?;
-
-        if !response.ok() {
-            return Err(ClientError::new(
-                response.status(),
-                format!("Subscribe failed: {}", response.status_text()),
-            ));
-        }
-
         // Create channel for SSE events
         let (tx, rx) = mpsc::unbounded();
 
-        // Open EventSource for SSE stream
+        // Create channel to signal when EventSource is open
+        let (open_tx, open_rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+        let open_tx = std::rc::Rc::new(std::cell::RefCell::new(Some(open_tx)));
+
+        // URL-encode the token and query, then open EventSource directly
+        // The server's /sync/events endpoint handles both auth and query registration
+        let encoded_token = js_sys::encode_uri_component(&self.config.auth_token);
+        let encoded_query = js_sys::encode_uri_component(&request.query);
         let sse_url = format!(
-            "{}/sync/events?token={}",
-            self.config.base_url, self.config.auth_token
+            "{}/sync/events?token={}&query={}",
+            self.config.base_url, encoded_token, encoded_query
+        );
+
+        web_sys::console::log_1(
+            &format!("[WASM subscribe] Creating EventSource to: {}", sse_url).into(),
         );
 
         let event_source = EventSource::new(&sse_url)
             .map_err(|e| ClientError::internal(format!("EventSource error: {:?}", e)))?;
+
+        web_sys::console::log_1(
+            &format!(
+                "[WASM subscribe] EventSource created, readyState: {}",
+                event_source.ready_state()
+            )
+            .into(),
+        );
+
+        // Set up open handler - signals when connection is established
+        let open_tx_for_open = open_tx.clone();
+        let on_open = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            web_sys::console::log_1(&"[WASM subscribe] EventSource OPEN event received".into());
+            if let Some(tx) = open_tx_for_open.borrow_mut().take() {
+                let _ = tx.send(Ok(()));
+            }
+        }) as Box<dyn FnMut(web_sys::Event)>);
+
+        event_source.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+        on_open.forget();
 
         // Set up message handler
         let tx_clone = tx.clone();
@@ -140,17 +158,41 @@ impl ClientEnv for WasmClientEnv {
         event_source.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         on_message.forget();
 
-        // Set up error handler
+        // Set up error handler - also signals open_tx on connection failure
         let tx_error = tx;
+        let open_tx_for_error = open_tx;
         let on_error = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            web_sys::console::log_1(&"[WASM subscribe] EventSource ERROR event received".into());
+            // Signal open channel with error if we haven't connected yet
+            if let Some(tx) = open_tx_for_error.borrow_mut().take() {
+                let _ = tx.send(Err("SSE connection error".to_string()));
+            }
             let _ = tx_error.unbounded_send(Err(ClientError::internal("SSE connection error")));
         }) as Box<dyn FnMut(web_sys::Event)>);
 
         event_source.set_onerror(Some(on_error.as_ref().unchecked_ref()));
         on_error.forget();
 
-        // Return the stream
-        Ok(rx.boxed())
+        // Wait for EventSource to open or error
+        web_sys::console::log_1(&"[WASM subscribe] Waiting for open/error signal...".into());
+        match open_rx.await {
+            Ok(Ok(())) => {
+                web_sys::console::log_1(
+                    &"[WASM subscribe] EventSource connected successfully!".into(),
+                );
+                Ok(rx.boxed())
+            }
+            Ok(Err(e)) => {
+                web_sys::console::log_1(
+                    &format!("[WASM subscribe] EventSource error: {}", e).into(),
+                );
+                Err(ClientError::internal(e))
+            }
+            Err(_) => {
+                web_sys::console::log_1(&"[WASM subscribe] Connection cancelled".into());
+                Err(ClientError::internal("Connection cancelled"))
+            }
+        }
     }
 
     async fn push(&self, request: PushRequest) -> Result<PushResponse, ClientError> {

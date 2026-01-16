@@ -705,7 +705,7 @@ impl<E: Environment> SyncServer<E> {
         R: crate::sql::PolicyLookup + crate::sql::RowLookup,
         P: crate::sql::PolicyLookup,
     {
-        use crate::sql::{PolicyConfig, PolicyEvaluator, PolicyResult, ViewerContext};
+        use crate::sql::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         let event = SseEvent::Commits {
             object_id,
@@ -721,14 +721,9 @@ impl<E: Environment> SyncServer<E> {
             }
 
             // Check SELECT policy for this session's viewer
-            let viewer_context = ViewerContext::from_identity(&session.identity);
+            let viewer_id = session.identity.effective_user_id();
             let config = PolicyConfig::default();
-            let mut evaluator = PolicyEvaluator::new_with_context(
-                row_lookup,
-                policy_lookup,
-                viewer_context,
-                config,
-            );
+            let mut evaluator = PolicyEvaluator::new(row_lookup, policy_lookup, viewer_id, config);
 
             let result = evaluator.check_select(table, object_id, row);
 

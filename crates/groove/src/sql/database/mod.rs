@@ -162,6 +162,9 @@ pub struct DatabaseState {
     policies: RwLock<HashMap<String, TablePolicies>>,
     /// Registry for incremental QueryGraph instances.
     graph_registry: GraphRegistry,
+    /// Current viewer ObjectId for @viewer resolution in execute().
+    /// This is set when the user is provisioned/authenticated.
+    viewer: RwLock<Option<ObjectId>>,
 }
 
 impl std::fmt::Debug for DatabaseState {
@@ -199,6 +202,16 @@ impl DatabaseState {
     /// Get the descriptor object ID for a table.
     pub fn descriptor_object_id(&self, table: &str) -> Option<ObjectId> {
         self.descriptor_objects.read().unwrap().get(table).copied()
+    }
+
+    /// Get the current viewer ObjectId.
+    pub fn viewer(&self) -> Option<ObjectId> {
+        *self.viewer.read().unwrap()
+    }
+
+    /// Set the current viewer ObjectId.
+    pub fn set_viewer(&self, viewer: Option<ObjectId>) {
+        *self.viewer.write().unwrap() = viewer;
     }
 
     /// Reload the catalog from storage.
@@ -303,6 +316,7 @@ impl DatabaseState {
             index_objects: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
+            viewer: RwLock::new(None),
         }
     }
 
@@ -335,6 +349,7 @@ impl DatabaseState {
             index_objects: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
+            viewer: RwLock::new(None),
         }
     }
 
@@ -372,6 +387,7 @@ impl DatabaseState {
             index_objects: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
+            viewer: RwLock::new(None),
         }
     }
 
@@ -398,6 +414,7 @@ impl DatabaseState {
             index_objects: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
+            viewer: RwLock::new(None),
         }
     }
 
@@ -798,6 +815,8 @@ pub enum DatabaseError {
     },
     /// Migration error.
     Migration(MigrationError),
+    /// Execution error (e.g., @viewer not set).
+    Execution(String),
 }
 
 /// Errors that can occur during schema migration.
@@ -912,6 +931,7 @@ impl std::fmt::Display for DatabaseError {
                 write!(f, "{} denied: {}", action, reason)
             }
             DatabaseError::Migration(e) => write!(f, "migration error: {}", e),
+            DatabaseError::Execution(e) => write!(f, "execution error: {}", e),
         }
     }
 }
@@ -1190,6 +1210,7 @@ impl Database {
             index_objects: RwLock::new(index_objects),
             policies: RwLock::new(policies),
             graph_registry: GraphRegistry::new(),
+            viewer: RwLock::new(None),
         };
 
         let state = Rc::new(state);
@@ -1210,6 +1231,18 @@ impl Database {
     /// Get the shared database state.
     pub fn state(&self) -> &DatabaseState {
         &self.state
+    }
+
+    /// Get the current viewer ObjectId.
+    pub fn viewer(&self) -> Option<ObjectId> {
+        self.state.viewer()
+    }
+
+    /// Set the current viewer ObjectId.
+    ///
+    /// This is used to resolve `@viewer` in INSERT/UPDATE statements.
+    pub fn set_viewer(&self, viewer: Option<ObjectId>) {
+        self.state.set_viewer(viewer);
     }
 
     // ========== Index Object Helpers ==========
@@ -2559,23 +2592,36 @@ impl Database {
 
                 let mut builder = RowBuilder::new(descriptor);
                 for (col_name, value) in ins.columns.iter().zip(ins.values.iter()) {
-                    // Coerce string to Ref if inserting into a Ref column
+                    // First resolve @viewer placeholder
+                    let resolved_value = match value {
+                        PredicateValue::Viewer => {
+                            let viewer_id = self.viewer().ok_or_else(|| {
+                                DatabaseError::Execution(
+                                    "@viewer used but no viewer is set".to_string(),
+                                )
+                            })?;
+                            PredicateValue::Ref(viewer_id)
+                        }
+                        other => other.clone(),
+                    };
+
+                    // Then coerce string to Ref if inserting into a Ref column
                     let coerced_value = if let Some(col_def) = schema.column(col_name) {
                         if matches!(col_def.ty, ColumnType::Ref(_)) {
-                            if let PredicateValue::String(s) = value {
+                            if let PredicateValue::String(s) = &resolved_value {
                                 // Parse string as ObjectId
                                 match s.parse::<ObjectId>() {
                                     Ok(id) => PredicateValue::Ref(id),
-                                    Err(_) => value.clone(),
+                                    Err(_) => resolved_value.clone(),
                                 }
                             } else {
-                                value.clone()
+                                resolved_value
                             }
                         } else {
-                            value.clone()
+                            resolved_value
                         }
                     } else {
-                        value.clone()
+                        resolved_value
                     };
                     builder = builder.set_from_predicate_value_by_name(col_name, &coerced_value);
                 }

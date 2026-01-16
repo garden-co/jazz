@@ -95,6 +95,15 @@ export function SyncTest({ token, userId }: SyncTestProps) {
             CHECK (owner_id = @viewer);
         `);
 
+        // Provision the viewer (current user) - this creates a user row if needed
+        // and sets it as @viewer for policy evaluation
+        log(`Provisioning viewer for userId: ${userId}`);
+        const viewerId = db.provisionViewer(
+          userId,
+          `User ${userId.slice(0, 8)}`,
+        );
+        log(`Viewer provisioned: ${viewerId}`);
+
         // Subscribe to documents - will only receive docs we're allowed to see
         queryHandleRef.current = db.subscribeRows(
           "SELECT * FROM documents",
@@ -129,11 +138,14 @@ export function SyncTest({ token, userId }: SyncTestProps) {
   const handleConnect = async () => {
     if (!dbRef.current) return;
     try {
+      setStatus("Connecting...");
       log("Connecting to sync server...");
       await dbRef.current.connect("SELECT * FROM documents");
+      setStatus("Connected");
       log("Connected!");
     } catch (e: any) {
       const errorMsg = e?.message || String(e);
+      setStatus("Connection Failed");
       log(`Connection error: ${errorMsg}`);
       console.error("Connect error:", e);
     }

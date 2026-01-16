@@ -18,6 +18,9 @@ pub enum PredicateValue {
     Bytes(Vec<u8>),
     Ref(ObjectId),
     Null,
+    /// Placeholder for the current viewer's ObjectId.
+    /// Resolved at execution time using the database's viewer context.
+    Viewer,
 }
 
 impl PredicateValue {
@@ -35,6 +38,8 @@ impl PredicateValue {
             (PredicateValue::Ref(a), RowValue::Ref(b)) => *a == *b,
             (PredicateValue::String(a), RowValue::String(b)) => a.as_str() == *b,
             (PredicateValue::Bytes(a), RowValue::Bytes(b)) => a.as_slice() == *b,
+            // Viewer placeholder cannot be compared directly - should be resolved first
+            (PredicateValue::Viewer, _) => false,
             // Type mismatch - not equal
             _ => false,
         }
@@ -57,6 +62,7 @@ impl PredicateValue {
             PredicateValue::Bytes(b) => format!("<{} bytes>", b.len()),
             PredicateValue::Ref(id) => format!("@{}", id),
             PredicateValue::Null => "NULL".to_string(),
+            PredicateValue::Viewer => "@viewer".to_string(),
         }
     }
 }

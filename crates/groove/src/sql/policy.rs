@@ -551,6 +551,11 @@ fn serialize_literal(buf: &mut Vec<u8>, val: &PredicateValue) {
             buf.push(8);
             buf.extend_from_slice(&n.to_le_bytes());
         }
+        PredicateValue::Viewer => {
+            // Viewer is a placeholder that should be resolved before serialization.
+            // If we get here, it's a bug - serialize as null for safety.
+            buf.push(0);
+        }
     }
 }
 

@@ -349,6 +349,22 @@ export class WasmSyncedLocalNode {
    */
   execute(sql: string): any;
   /**
+   * Provision or find the viewer (current user) and set it on the database.
+   *
+   * This method looks up or creates a user row in the "users" table with the
+   * given external_id and name, then sets that user as the @viewer for
+   * subsequent INSERT/UPDATE statements.
+   *
+   * Note: This does NOT push the user row to the server immediately. The user
+   * row will be synced when connect() is called and the sync subscription
+   * includes the users table.
+   *
+   * @param external_id - The external user ID (e.g., from JWT sub claim)
+   * @param name - The user's display name
+   * @returns The user's ObjectId as a string
+   */
+  provisionViewer(external_id: string, name: string): string;
+  /**
    * Execute a SELECT query and return results as binary Uint8Array.
    */
   selectBinary(sql: string): Uint8Array;
@@ -466,6 +482,7 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_syncState: (a: number) => number;
   readonly wasmsyncedlocalnode_connect: (a: number, b: number, c: number) => any;
   readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
+  readonly wasmsyncedlocalnode_provisionViewer: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
   readonly wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_initSchema: (a: number, b: number, c: number) => [number, number];
   readonly wasmsyncedlocalnode_listTables: (a: number) => any;
@@ -475,12 +492,12 @@ export interface InitOutput {
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
   readonly syncedqueryhandle_diagram: (a: number) => [number, number];
   readonly syncedqueryhandle_free: (a: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h75fee8fd0bca4be8: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h06b1f0a7a7e3a424: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__ha88fd06ec3374ffb: (a: number, b: number) => void;
-  readonly wasm_bindgen__closure__destroy__hd30a2cb8baf489cb: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h2fda84b10f91d04a: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h145730200f177735: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__ha88fd06ec3374ffb: (a: number, b: number) => void;
+  readonly wasm_bindgen__closure__destroy__hd30a2cb8baf489cb: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

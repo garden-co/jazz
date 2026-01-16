@@ -71,7 +71,7 @@ async function signIn(page: Page, email: string, password: string) {
 
 // Helper to connect to sync server
 async function connectToSync(page: Page) {
-  // Wait for SyncTest component to be ready
+  // Wait for SyncTest component to be ready (shows "Ready (disconnected)")
   await expect(page.getByTestId("sync-status")).toContainText("Ready", {
     timeout: 15000,
   });
@@ -79,8 +79,8 @@ async function connectToSync(page: Page) {
   // Click connect
   await page.getByTestId("connect-btn").click();
 
-  // Wait for connected state
-  await expect(page.getByTestId("sync-status")).toContainText("Ready", {
+  // Wait for connected state (shows "Connected")
+  await expect(page.getByTestId("sync-status")).toContainText("Connected", {
     timeout: 15000,
   });
 }
@@ -101,10 +101,15 @@ test.describe("Authenticated Sync", () => {
   test.describe.configure({ mode: "serial" });
 
   test.beforeEach(async ({ page }) => {
-    // Capture console errors for debugging
+    // Capture all console messages for debugging
     page.on("console", (msg) => {
-      if (msg.type() === "error") {
-        console.log("CONSOLE ERROR:", msg.text());
+      const text = msg.text();
+      if (
+        text.includes("[WASM") ||
+        text.includes("[SyncTest") ||
+        msg.type() === "error"
+      ) {
+        console.log(`CONSOLE [${msg.type()}]:`, text);
       }
     });
     page.on("pageerror", (err) => console.log("PAGE ERROR:", err.message));
@@ -126,7 +131,7 @@ test.describe("Authenticated Sync", () => {
     await connectToSync(page);
 
     // Should show connected status
-    await expect(page.getByTestId("sync-status")).toContainText("Ready");
+    await expect(page.getByTestId("sync-status")).toContainText("Connected");
   });
 
   test("creates and displays documents", async ({ page }) => {
@@ -151,8 +156,13 @@ test.describe("Policy-Filtered Sync", () => {
 
   test.beforeEach(async ({ page }) => {
     page.on("console", (msg) => {
-      if (msg.type() === "error") {
-        console.log("CONSOLE ERROR:", msg.text());
+      const text = msg.text();
+      if (
+        text.includes("[WASM") ||
+        text.includes("[SyncTest") ||
+        msg.type() === "error"
+      ) {
+        console.log(`CONSOLE [${msg.type()}]:`, text);
       }
     });
   });
@@ -165,8 +175,14 @@ test.describe("Policy-Filtered Sync", () => {
     const page2 = await context2.newPage();
 
     try {
-      // Sign up both users
-      await signUp(page1, user1.email, user1.password, user1.name);
+      // Try to sign in user1, if it fails sign up first
+      try {
+        await signIn(page1, user1.email, user1.password);
+      } catch {
+        // User doesn't exist, sign up
+        await signUp(page1, user1.email, user1.password, user1.name);
+      }
+      // User2 is new - sign up
       await signUp(page2, user2.email, user2.password, user2.name);
 
       // Connect both to sync server
@@ -213,8 +229,12 @@ test.describe("Policy-Filtered Sync", () => {
     const page2 = await context.newPage();
 
     try {
-      // Sign in on first page
-      await signIn(page1, user1.email, user1.password);
+      // Sign in on first page (try signIn, fall back to signUp)
+      try {
+        await signIn(page1, user1.email, user1.password);
+      } catch {
+        await signUp(page1, user1.email, user1.password, user1.name);
+      }
       await connectToSync(page1);
 
       // Navigate second page (same session, same user)
@@ -250,9 +270,17 @@ test.describe("Policy-Filtered Sync", () => {
     const page2 = await context2.newPage();
 
     try {
-      // Sign in both users
-      await signIn(page1, user1.email, user1.password);
-      await signIn(page2, user2.email, user2.password);
+      // Sign in both users (try signIn, fall back to signUp)
+      try {
+        await signIn(page1, user1.email, user1.password);
+      } catch {
+        await signUp(page1, user1.email, user1.password, user1.name);
+      }
+      try {
+        await signIn(page2, user2.email, user2.password);
+      } catch {
+        await signUp(page2, user2.email, user2.password, user2.name);
+      }
 
       // User 1 connects, creates doc, disconnects
       await connectToSync(page1);

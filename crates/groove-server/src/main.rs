@@ -48,6 +48,14 @@ fn create_token_validator(config: &ServerConfig) -> Rc<dyn TokenValidator> {
             let jwt_config = config.auth.jwt.to_jwt_config();
             let jwt_validator = JwtTokenValidator::new(jwt_config);
 
+            // Pre-fetch JWKS keys if configured
+            if config.auth.jwt.jwks_url.is_some() {
+                match jwt_validator.refresh_jwks() {
+                    Ok(n) => println!("Loaded {} JWKS keys", n),
+                    Err(e) => eprintln!("Warning: Failed to fetch JWKS keys: {}", e),
+                }
+            }
+
             if auto_provision {
                 Rc::new(ProvisioningTokenValidator::with_auto_provision(
                     jwt_validator,

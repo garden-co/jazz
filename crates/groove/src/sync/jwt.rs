@@ -3,26 +3,39 @@
 //! This module provides JWT validation for authenticating clients with tokens
 //! from external auth providers like BetterAuth or WorkOS.
 //!
+//! Supports both HS256 (symmetric key) and RS256 (asymmetric/JWKS) validation.
+//!
 //! # Example
 //!
 //! ```ignore
 //! use groove::sync::jwt::{JwtConfig, JwtTokenValidator};
 //!
+//! // HS256 with shared secret
 //! let config = JwtConfig {
 //!     secret: Some("my-secret-key".to_string()),
 //!     issuer: Some("https://auth.example.com".to_string()),
-//!     audience: Some("my-app".to_string()),
+//!     user_id_claim: "sub".to_string(),
+//!     ..Default::default()
+//! };
+//!
+//! // RS256 with JWKS endpoint
+//! let config = JwtConfig {
+//!     jwks_url: Some("https://auth.example.com/.well-known/jwks.json".to_string()),
+//!     issuer: Some("https://auth.example.com".to_string()),
 //!     user_id_claim: "sub".to_string(),
 //!     ..Default::default()
 //! };
 //!
 //! let validator = JwtTokenValidator::new(config);
+//! // For JWKS, fetch keys at startup:
+//! validator.refresh_jwks().ok();
 //! ```
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use base64::Engine;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -83,12 +96,43 @@ impl JwtConfig {
     }
 }
 
+/// JWKS (JSON Web Key Set) response from an auth provider.
+#[derive(Debug, Deserialize)]
+struct JwksResponse {
+    keys: Vec<JwkKey>,
+}
+
+/// Individual JWK (JSON Web Key) in a JWKS response.
+#[derive(Debug, Deserialize)]
+struct JwkKey {
+    /// Key type (e.g., "RSA", "OKP")
+    kty: String,
+    /// Key ID - used to match tokens to keys
+    kid: Option<String>,
+    /// Algorithm (e.g., "RS256", "EdDSA")
+    #[serde(default)]
+    alg: Option<String>,
+    /// RSA modulus (base64url encoded)
+    #[serde(default)]
+    n: Option<String>,
+    /// RSA exponent (base64url encoded)
+    #[serde(default)]
+    e: Option<String>,
+    /// Curve for OKP keys (e.g., "Ed25519")
+    #[serde(default)]
+    crv: Option<String>,
+    /// Public key for OKP keys (base64url encoded)
+    #[serde(default)]
+    x: Option<String>,
+}
+
 /// Cached JWKS keys.
 #[derive(Default)]
 struct JwksCache {
     /// Cached keys indexed by key ID (kid).
     keys: HashMap<String, DecodingKey>,
     /// When the cache was last updated.
+    #[allow(dead_code)]
     last_updated: Option<std::time::Instant>,
 }
 
@@ -106,8 +150,7 @@ pub struct JwtTokenValidator {
     config: JwtConfig,
     /// Decoding key for HS256 (from secret).
     hs256_key: Option<DecodingKey>,
-    /// Cached JWKS keys for RS256 (placeholder for future JWKS support).
-    #[allow(dead_code)]
+    /// Cached JWKS keys for RS256/RS384/RS512.
     jwks_cache: RwLock<JwksCache>,
 }
 
@@ -140,6 +183,92 @@ impl JwtTokenValidator {
         Self::new(JwtConfig::with_secret(secret))
     }
 
+    /// Fetch and cache JWKS keys from the configured URL.
+    ///
+    /// Call this at server startup to pre-populate the key cache.
+    /// Keys are cached and reused for subsequent validations.
+    ///
+    /// Returns the number of keys successfully loaded.
+    pub fn refresh_jwks(&self) -> Result<usize, String> {
+        let jwks_url = self
+            .config
+            .jwks_url
+            .as_ref()
+            .ok_or_else(|| "No JWKS URL configured".to_string())?;
+
+        // Fetch JWKS from the URL
+        let response = ureq::get(jwks_url)
+            .call()
+            .map_err(|e| format!("Failed to fetch JWKS: {}", e))?;
+
+        let body = response
+            .into_string()
+            .map_err(|e| format!("Failed to read JWKS response: {}", e))?;
+
+        let jwks: JwksResponse =
+            serde_json::from_str(&body).map_err(|e| format!("Failed to parse JWKS: {}", e))?;
+
+        let mut keys_loaded = 0;
+        let mut cache = self.jwks_cache.write().unwrap();
+
+        for jwk in jwks.keys {
+            let decoding_key = match jwk.kty.as_str() {
+                "RSA" => {
+                    // RSA key - need modulus and exponent
+                    let (n, e) = match (jwk.n.as_ref(), jwk.e.as_ref()) {
+                        (Some(n), Some(e)) => (n, e),
+                        _ => continue,
+                    };
+
+                    // Decode base64url components
+                    let n_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(n) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+                    let e_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(e) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+
+                    DecodingKey::from_rsa_raw_components(&n_bytes, &e_bytes)
+                }
+                "OKP" => {
+                    // OKP key (EdDSA) - need curve and public key
+                    let (crv, x) = match (jwk.crv.as_ref(), jwk.x.as_ref()) {
+                        (Some(crv), Some(x)) => (crv.as_str(), x.as_str()),
+                        _ => continue,
+                    };
+
+                    // Only Ed25519 is supported
+                    if crv != "Ed25519" {
+                        continue;
+                    }
+
+                    // Use from_ed_components which takes the base64url-encoded x directly
+                    match DecodingKey::from_ed_components(x) {
+                        Ok(key) => key,
+                        Err(_) => continue,
+                    }
+                }
+                _ => continue,
+            };
+
+            // Use kid if available, otherwise use algorithm or index
+            let key_id = jwk
+                .kid
+                .clone()
+                .or_else(|| jwk.alg.clone())
+                .unwrap_or_else(|| format!("key_{}", keys_loaded));
+
+            cache.keys.insert(key_id, decoding_key);
+            keys_loaded += 1;
+        }
+
+        cache.last_updated = Some(std::time::Instant::now());
+
+        Ok(keys_loaded)
+    }
+
     /// Validate a token and extract claims.
     fn validate_token(&self, token: &str) -> Option<TokenClaims> {
         // Build validation settings
@@ -151,6 +280,9 @@ impl JwtTokenValidator {
 
         if let Some(ref aud) = self.config.audience {
             validation.set_audience(&[aud]);
+        } else {
+            // Disable audience validation if no audience is configured
+            validation.validate_aud = false;
         }
 
         validation.validate_exp = self.config.validate_exp;
@@ -163,9 +295,75 @@ impl JwtTokenValidator {
             }
         }
 
-        // TODO: Try JWKS keys for RS256/RS384/RS512
-        // This would require async key fetching which is not yet implemented.
-        // For now, only HS256 is supported.
+        // Try JWKS keys for RS256/RS384/RS512
+        if self.config.jwks_url.is_some() {
+            // Get the key ID from the token header
+            let header = match decode_header(token) {
+                Ok(h) => h,
+                Err(_) => return None,
+            };
+
+            let cache = self.jwks_cache.read().unwrap();
+
+            // If cache is empty, try to refresh (lazy loading)
+            if cache.keys.is_empty() {
+                drop(cache); // Release read lock
+                if self.refresh_jwks().is_err() {
+                    return None;
+                }
+                // Re-acquire read lock
+                let cache = self.jwks_cache.read().unwrap();
+                return self.try_jwks_validation(token, &header, &cache);
+            }
+
+            return self.try_jwks_validation(token, &header, &cache);
+        }
+
+        None
+    }
+
+    /// Try to validate token using JWKS cached keys.
+    fn try_jwks_validation(
+        &self,
+        token: &str,
+        header: &jsonwebtoken::Header,
+        cache: &JwksCache,
+    ) -> Option<TokenClaims> {
+        let mut validation = Validation::default();
+
+        if let Some(ref iss) = self.config.issuer {
+            validation.set_issuer(&[iss]);
+        }
+
+        if let Some(ref aud) = self.config.audience {
+            validation.set_audience(&[aud]);
+        } else {
+            // Disable audience validation if no audience is configured
+            validation.validate_aud = false;
+        }
+
+        validation.validate_exp = self.config.validate_exp;
+
+        // IMPORTANT: Only allow the algorithm specified in the token header.
+        // jsonwebtoken checks that ALL algorithms in the list match the key's family,
+        // so we can't mix RSA and EdDSA algorithms in the same validation.
+        validation.algorithms = vec![header.alg];
+
+        // If token has a kid, try that key first
+        if let Some(ref kid) = header.kid {
+            if let Some(key) = cache.keys.get(kid) {
+                if let Ok(data) = decode::<TokenClaims>(token, key, &validation) {
+                    return Some(data.claims);
+                }
+            }
+        }
+
+        // Try all keys (for tokens without kid or if kid didn't match)
+        for key in cache.keys.values() {
+            if let Ok(data) = decode::<TokenClaims>(token, key, &validation) {
+                return Some(data.claims);
+            }
+        }
 
         None
     }

@@ -19,15 +19,53 @@ impl<T> Shared<T> {
     /// Borrow the shared state immutably.
     ///
     /// Panics if the state is currently mutably borrowed.
+    #[track_caller]
     pub fn read(&self) -> Ref<'_, T> {
-        self.0.borrow()
+        match self.0.try_borrow() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let loc = std::panic::Location::caller();
+                panic!(
+                    "Shared<{}>::read() failed at {}:{} - RefCell already mutably borrowed",
+                    std::any::type_name::<T>(),
+                    loc.file(),
+                    loc.line()
+                );
+            }
+        }
     }
 
     /// Borrow the shared state mutably.
     ///
     /// Panics if the state is currently borrowed.
+    #[track_caller]
     pub fn write(&self) -> RefMut<'_, T> {
-        self.0.borrow_mut()
+        match self.0.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let loc = std::panic::Location::caller();
+                panic!(
+                    "Shared<{}>::write() failed at {}:{} - RefCell already borrowed",
+                    std::any::type_name::<T>(),
+                    loc.file(),
+                    loc.line()
+                );
+            }
+        }
+    }
+
+    /// Try to borrow the shared state immutably.
+    ///
+    /// Returns `None` if the state is currently mutably borrowed.
+    pub fn try_read(&self) -> Option<Ref<'_, T>> {
+        self.0.try_borrow().ok()
+    }
+
+    /// Try to borrow the shared state mutably.
+    ///
+    /// Returns `None` if the state is currently borrowed.
+    pub fn try_write(&self) -> Option<RefMut<'_, T>> {
+        self.0.try_borrow_mut().ok()
     }
 }
 
