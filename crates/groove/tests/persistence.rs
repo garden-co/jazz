@@ -39,6 +39,13 @@ fn flush_storage(db: &Database) {
                 } => {
                     env.set_frontier(object_id.into(), &branch, &frontier).await;
                 }
+                StorageRequest::PutChunk { data, .. } => {
+                    use bytes::Bytes;
+                    env.put_chunk(Bytes::from(data)).await;
+                }
+                StorageRequest::GetChunk { .. } | StorageRequest::LoadObject { .. } => {
+                    // Load operations require async responses, not used in persistence tests
+                }
             }
         }
     });

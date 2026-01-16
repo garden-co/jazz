@@ -35,6 +35,7 @@ use std::rc::Rc;
 use crate::commit::{Commit, CommitId};
 use crate::node::LocalNode;
 use crate::object::ObjectId;
+use crate::storage::ChunkHash;
 
 use super::protocol::{PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscriptionOptions};
 
@@ -96,6 +97,38 @@ pub struct Inboxes {
 
     /// Subscribe requests from application layer.
     pub subscribe_requests: Vec<SubscribeRequestEvent>,
+
+    /// Storage responses (from async storage operations).
+    pub storage_responses: Vec<StorageResponse>,
+}
+
+/// A response from async storage operations.
+#[derive(Debug, Clone)]
+pub enum StorageResponse {
+    /// Response to GetChunk request.
+    ChunkLoaded {
+        /// Request ID from the original GetChunk request.
+        request_id: u64,
+        /// Hash that was requested.
+        hash: ChunkHash,
+        /// Chunk data, or None if not found.
+        data: Option<Vec<u8>>,
+    },
+    /// Response to LoadObject request.
+    ObjectLoaded {
+        /// Request ID from the original LoadObject request.
+        request_id: u64,
+        /// Object ID that was loaded.
+        object_id: ObjectId,
+        /// Branch that was loaded.
+        branch: String,
+        /// Object metadata (table prefix, etc).
+        object_meta: Option<BTreeMap<String, String>>,
+        /// Current frontier for this branch.
+        frontier: Vec<CommitId>,
+        /// All commits for this object.
+        commits: Vec<Commit>,
+    },
 }
 
 /// A local write event from the application layer.
@@ -183,11 +216,10 @@ pub struct Outboxes {
     pub storage: Vec<StorageRequest>,
 }
 
-/// A storage request for persistence.
+/// A storage request for persistence and loading.
 ///
-/// These are fire-and-forget operations - the driver executes them
-/// asynchronously and doesn't report results back. This matches the
-/// previous `spawn_persist` behavior but makes storage explicit.
+/// Some requests are fire-and-forget (Put operations), others require
+/// responses (Get/Load operations).
 #[derive(Debug, Clone)]
 pub enum StorageRequest {
     /// Persist a commit.
@@ -197,6 +229,30 @@ pub enum StorageRequest {
         object_id: ObjectId,
         branch: String,
         frontier: Vec<CommitId>,
+    },
+    /// Store a content chunk.
+    PutChunk {
+        /// Request ID for tracking (optional, fire-and-forget).
+        request_id: Option<u64>,
+        /// Chunk data.
+        data: Vec<u8>,
+    },
+    /// Load a content chunk by hash.
+    GetChunk {
+        /// Request ID for matching response.
+        request_id: u64,
+        /// Hash of the chunk to load.
+        hash: ChunkHash,
+    },
+    /// Load an object's metadata, frontier, and commits.
+    /// Used for lazy loading - object exists in storage but not yet in memory.
+    LoadObject {
+        /// Request ID for matching response.
+        request_id: u64,
+        /// Object ID to load.
+        object_id: ObjectId,
+        /// Branch to load.
+        branch: String,
     },
 }
 
@@ -386,6 +442,9 @@ pub struct SyncEngine {
 
     /// Next timer ID.
     next_timer_id: u64,
+
+    /// Next storage request ID.
+    next_storage_request_id: u64,
 }
 
 impl Default for SyncEngine {
@@ -404,6 +463,7 @@ impl SyncEngine {
             next_upstream_id: 1,
             pending_writes: HashMap::new(),
             next_timer_id: 1,
+            next_storage_request_id: 1,
         }
     }
 
@@ -416,7 +476,15 @@ impl SyncEngine {
             next_upstream_id: 1,
             pending_writes: HashMap::new(),
             next_timer_id: 1,
+            next_storage_request_id: 1,
         }
+    }
+
+    /// Allocate a new storage request ID.
+    pub fn next_storage_request_id(&mut self) -> u64 {
+        let id = self.next_storage_request_id;
+        self.next_storage_request_id += 1;
+        id
     }
 
     /// Add an upstream server. Returns its ID.
@@ -491,7 +559,12 @@ impl SyncEngine {
             self.process_tick(tick, &mut outboxes);
         }
 
-        // 8. Drain storage requests from LocalNode
+        // 8. Process storage responses (loaded objects, chunks)
+        for response in inboxes.storage_responses {
+            self.process_storage_response(response, &mut outboxes);
+        }
+
+        // 9. Drain storage requests from LocalNode
         outboxes
             .storage
             .extend(self.local_node.drain_storage_requests());
@@ -784,6 +857,41 @@ impl SyncEngine {
             }
             Err(_) => {
                 // Push failed - will retry on next tick
+            }
+        }
+    }
+
+    fn process_storage_response(&mut self, response: StorageResponse, outboxes: &mut Outboxes) {
+        match response {
+            StorageResponse::ChunkLoaded {
+                request_id: _,
+                hash: _,
+                data: _,
+            } => {
+                // TODO: Chunks are used by Database for blob fields.
+                // When we implement lazy blob loading, this will provide
+                // the chunk data to resolve pending reads.
+            }
+            StorageResponse::ObjectLoaded {
+                request_id: _,
+                object_id,
+                branch,
+                object_meta,
+                frontier,
+                commits,
+            } => {
+                // Restore the object into LocalNode
+                self.local_node
+                    .restore_object(object_id, "", &branch, frontier, commits.clone());
+
+                // Notify observers that the object is now loaded
+                if !commits.is_empty() {
+                    outboxes.notifications.push(Notification::ObjectsReceived {
+                        object_id,
+                        commits,
+                        object_meta,
+                    });
+                }
             }
         }
     }

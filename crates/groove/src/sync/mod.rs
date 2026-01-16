@@ -56,8 +56,8 @@ pub mod jwt;
 pub use engine::{
     ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
     OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StorageRequest,
-    StreamAction, SubscribeRequestEvent, SubscriptionState, SyncConfig, SyncEngine, TickEvent,
-    TimerId, TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
+    StorageResponse, StreamAction, SubscribeRequestEvent, SubscriptionState, SyncConfig,
+    SyncEngine, TickEvent, TimerId, TimerPurpose, TimerRequest, UpstreamId, UpstreamState,
 };
 
 // Protocol types

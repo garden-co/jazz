@@ -307,6 +307,18 @@ impl NativeSyncDriver {
                         } => {
                             env.set_frontier(object_id.into(), &branch, &frontier).await;
                         }
+                        StorageRequest::PutChunk { data, .. } => {
+                            use bytes::Bytes;
+                            env.put_chunk(Bytes::from(data)).await;
+                        }
+                        StorageRequest::GetChunk { .. } => {
+                            // TODO: For native driver, we would need to handle async
+                            // responses. For now, native driver doesn't use lazy loading.
+                        }
+                        StorageRequest::LoadObject { .. } => {
+                            // TODO: For native driver, we would need to handle async
+                            // responses. For now, native driver doesn't use lazy loading.
+                        }
                     }
                 }
             });

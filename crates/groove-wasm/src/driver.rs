@@ -447,9 +447,9 @@ fn handle_outboxes_impl(
         }
     }
 
-    // Handle storage requests (fire-and-forget)
+    // Handle storage requests
     for storage_req in &outboxes.storage {
-        execute_storage_request(env.clone(), storage_req.clone());
+        execute_storage_request(env.clone(), Rc::clone(engine), storage_req.clone());
     }
 
     // Handle notifications
@@ -473,8 +473,13 @@ fn handle_outboxes_impl(
     }
 }
 
-/// Execute a storage request asynchronously (fire-and-forget).
-fn execute_storage_request(env: Rc<dyn Environment>, request: StorageRequest) {
+/// Execute a storage request asynchronously.
+/// Fire-and-forget for Put operations; Get/Load operations require sending responses back.
+fn execute_storage_request(
+    env: Rc<dyn Environment>,
+    engine: Rc<RefCell<SyncEngine>>,
+    request: StorageRequest,
+) {
     wasm_bindgen_futures::spawn_local(async move {
         match request {
             StorageRequest::PutCommit { commit } => {
@@ -486,6 +491,67 @@ fn execute_storage_request(env: Rc<dyn Environment>, request: StorageRequest) {
                 frontier,
             } => {
                 env.set_frontier(object_id.into(), &branch, &frontier).await;
+            }
+            StorageRequest::PutChunk { data, .. } => {
+                use bytes::Bytes;
+                env.put_chunk(Bytes::from(data)).await;
+            }
+            StorageRequest::GetChunk { request_id, hash } => {
+                use groove::sync::StorageResponse;
+                let data = env.get_chunk(&hash).await.map(|b| b.to_vec());
+                let inboxes = Inboxes {
+                    storage_responses: vec![StorageResponse::ChunkLoaded {
+                        request_id,
+                        hash,
+                        data,
+                    }],
+                    ..Default::default()
+                };
+                let outboxes = engine.borrow_mut().pass(inboxes);
+                // Recursively handle any outboxes from this response
+                // Note: This could cause deep recursion in edge cases
+                for storage_req in outboxes.storage {
+                    execute_storage_request(Rc::clone(&env), Rc::clone(&engine), storage_req);
+                }
+            }
+            StorageRequest::LoadObject {
+                request_id,
+                object_id,
+                branch,
+            } => {
+                use futures::StreamExt;
+                use groove::sync::StorageResponse;
+
+                // Load frontier
+                let frontier = env.get_frontier(object_id.into(), &branch).await;
+
+                // Load all commits for this object
+                let mut commits = vec![];
+                let mut stream = env.list_commits(object_id.into(), &branch);
+                while let Some(commit_id) = stream.next().await {
+                    if let Some(commit) = env.get_commit(&commit_id).await {
+                        commits.push(commit);
+                    }
+                }
+
+                // TODO: Load object_meta from somewhere (first commit's meta?)
+                let object_meta = None;
+
+                let inboxes = Inboxes {
+                    storage_responses: vec![StorageResponse::ObjectLoaded {
+                        request_id,
+                        object_id,
+                        branch,
+                        object_meta,
+                        frontier,
+                        commits,
+                    }],
+                    ..Default::default()
+                };
+                let outboxes = engine.borrow_mut().pass(inboxes);
+                for storage_req in outboxes.storage {
+                    execute_storage_request(Rc::clone(&env), Rc::clone(&engine), storage_req);
+                }
             }
         }
     });
