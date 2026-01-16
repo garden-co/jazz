@@ -49,6 +49,309 @@ This design implements configurable storage size limits with a hybrid LRU + size
 
 ---
 
+## Flow Diagrams
+
+### 1. Store Operation Flow
+
+This flow is triggered when new content needs to be stored:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           STORE OPERATION FLOW                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  store(msg) called
+        │
+        ▼
+┌───────────────────┐
+│ Estimate write    │
+│ size from msg     │
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐     ┌──────────────────────────────────────────────────┐
+│ evictionManager.  │     │                                                  │
+│ ensureSpaceFor    │────►│  ┌─────────────────────────────────────────┐    │
+│ Write(writeSize)  │     │  │ Get current storage size                │    │
+└─────────┬─────────┘     │  │ (PRAGMA page_count * page_size)         │    │
+          │               │  └───────────────┬─────────────────────────┘    │
+          │               │                  ▼                               │
+          │               │  ┌─────────────────────────────────────────┐    │
+          │               │  │ availableSpace = maxBytes - currentSize │    │
+          │               │  └───────────────┬─────────────────────────┘    │
+          │               │                  ▼                               │
+          │               │         writeSize <= availableSpace?             │
+          │               │              /           \                       │
+          │               │           YES             NO                     │
+          │               │            │               │                     │
+          │               │            ▼               ▼                     │
+          │               │    return true    ┌───────────────────┐         │
+          │               │         │         │ evictToFreeSpace  │         │
+          │               │         │         │ (bytesNeeded)     │         │
+          │               │         │         └─────────┬─────────┘         │
+          │               │         │                   │                    │
+          │               │         │                   ▼                    │
+          │               │         │         freedBytes >= needed?          │
+          │               │         │              /           \             │
+          │               │         │           YES             NO           │
+          │               │         │            │               │           │
+          │               │         │            ▼               ▼           │
+          │               │         │     return true    return false       │
+          │               │         │            │        (memory-only)     │
+          │               └─────────┼────────────┼───────────────┼──────────┘
+          │                         │            │               │
+          ▼                         ▼            ▼               ▼
+┌───────────────────┐        ┌─────────────────────────┐  ┌──────────────┐
+│ canStore = true?  │◄───────┤     canStore = true     │  │canStore=false│
+└─────────┬─────────┘        └─────────────────────────┘  └──────┬───────┘
+          │                                                       │
+    ┌─────┴─────┐                                                 │
+   YES          NO ◄──────────────────────────────────────────────┘
+    │            │
+    ▼            ▼
+┌─────────┐  ┌─────────────────────────────┐
+│ Store   │  │ Skip storage write          │
+│ to DB   │  │ (data stays in memory,      │
+│         │  │  syncs to server normally)  │
+└────┬────┘  └─────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────┐
+│ Update eviction metadata:   │
+│ - lastAccessedEpoch = now   │
+│ - sizeBytes += newSize      │
+└─────────────────────────────┘
+```
+
+### 2. Eviction Process Flow
+
+This flow shows how `evictToFreeSpace` works:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           EVICTION PROCESS FLOW                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  evictToFreeSpace(bytesNeeded) called
+        │
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│                    GET EVICTION CANDIDATES                     │
+│                                                                │
+│  1. Get unsynced IDs from UnsyncedCoValuesTracker (in-memory) │
+│  2. Get in-memory IDs from LocalNode.coValues                  │
+│  3. Combine into protectedIds set                              │
+│  4. Query storage for candidates NOT in protectedIds           │
+│  5. Calculate eviction score for each candidate                │
+│  6. Sort by score DESC (highest = evict first)                 │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────┐
+│ candidates.length │
+│ > 0 ?             │
+└─────────┬─────────┘
+          │
+    ┌─────┴─────┐
+   YES          NO
+    │            │
+    │            ▼
+    │    ┌─────────────────────────────┐
+    │    │ return 0                    │
+    │    │ (no candidates to evict,    │
+    │    │  graceful degradation)      │
+    │    └─────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    EVICTION LOOP                             │
+│                                                              │
+│   freedBytes = 0                                             │
+│   batch = []                                                 │
+│                                                              │
+│   for candidate in candidates:                               │
+│       │                                                      │
+│       ▼                                                      │
+│   ┌───────────────────────────┐                              │
+│   │ batch.push(candidate.id)  │                              │
+│   │ freedBytes += sizeBytes   │                              │
+│   └─────────────┬─────────────┘                              │
+│                 │                                            │
+│                 ▼                                            │
+│       batch.length >= batchSize?                             │
+│            /           \                                     │
+│         YES             NO                                   │
+│          │               │                                   │
+│          ▼               │                                   │
+│   ┌──────────────┐       │                                   │
+│   │ Flush batch  │       │                                   │
+│   │ (delete from │◄──────┘                                   │
+│   │  storage)    │                                           │
+│   └──────┬───────┘                                           │
+│          │                                                   │
+│          ▼                                                   │
+│   freedBytes >= bytesNeeded?                                 │
+│        /           \                                         │
+│     YES             NO                                       │
+│      │               │                                       │
+│      ▼               └──────► continue loop                  │
+│   BREAK                                                      │
+│                                                              │
+└──────────────────────────────────┬───────────────────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────┐
+                    │ Flush remaining batch    │
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                    ┌──────────────────────────┐
+                    │ return freedBytes        │
+                    └──────────────────────────┘
+```
+
+### 3. Delete CoValue Flow
+
+This flow shows what happens when evicting a single CoValue:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         DELETE COVALUE FLOW                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  deleteCoValue(id) called
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  DELETE FROM DATABASE                        │
+│                                                              │
+│  1. DELETE FROM covalue_eviction_metadata WHERE id = ?       │
+│  2. DELETE FROM transactions WHERE ses IN (session_ids)      │
+│  3. DELETE FROM signatureAfter WHERE ses IN (session_ids)    │
+│  4. DELETE FROM sessions WHERE coValue = ?                   │
+│  5. DELETE FROM coValues WHERE id = ?                        │
+│                                                              │
+│  (All in single transaction for consistency)                 │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────┐
+│              CLEAR FROM KNOWN STATE CACHE                    │
+│                                                              │
+│  knownStates.clearKnownState(id)                            │
+│    - Remove from knownStates Map                            │
+│    - Resolve any pending waitForSync requests               │
+│                                                              │
+└───────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────┐
+│  CoValue is now fully evicted:                               │
+│  - Not in storage                                           │
+│  - Not in known state cache                                 │
+│  - Can be re-fetched from server on next access             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 4. Background Eviction Flow
+
+This flow runs periodically (default: every 5 minutes):
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      BACKGROUND EVICTION FLOW                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  setInterval callback (every evictionIntervalMs)
+        │
+        ▼
+┌───────────────────────────────────┐
+│ Get current storage size          │
+└─────────────────┬─────────────────┘
+                  │
+                  ▼
+┌───────────────────────────────────┐
+│ currentSize > softThreshold?      │
+│ (softThreshold = max * 0.8)       │
+└─────────────────┬─────────────────┘
+                  │
+            ┌─────┴─────┐
+           YES          NO
+            │            │
+            │            ▼
+            │     ┌──────────────┐
+            │     │ Do nothing   │
+            │     │ (enough      │
+            │     │  headroom)   │
+            │     └──────────────┘
+            │
+            ▼
+┌───────────────────────────────────────────┐
+│ Proactive eviction:                        │
+│ bytesToFree = currentSize - softThreshold │
+│ evictToFreeSpace(bytesToFree)             │
+└───────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────────┐
+│ Log eviction stats:                        │
+│ - Bytes freed                             │
+│ - CoValues evicted                        │
+│ - New storage size                        │
+└───────────────────────────────────────────┘
+```
+
+### 5. Overall System Integration
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          SYSTEM INTEGRATION                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                        ┌─────────────────────┐
+                        │     LocalNode       │
+                        └──────────┬──────────┘
+                                   │
+           ┌───────────────────────┼───────────────────────┐
+           │                       │                       │
+           ▼                       ▼                       ▼
+┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
+│  GarbageCollector   │ │ StorageEvictionMgr  │ │UnsyncedCoValues     │
+│  (in-memory GC)     │ │ (storage eviction)  │ │Tracker              │
+│                     │ │                     │ │                     │
+│ - Unmounts CoValues │ │ - Checks protectedI │ │ - Tracks unsynced   │
+│   from memory after │ │   from both GC and  │◄│   CoValue IDs       │
+│   MAX_AGE           │ │   UnsyncedTracker   │ │ - Used to protect   │
+│ - Makes CoValues    │ │ - Evicts only safe  │ │   from eviction     │
+│   eligible for      │ │   candidates        │ │                     │
+│   storage eviction  │ │                     │ │                     │
+└─────────────────────┘ └──────────┬──────────┘ └─────────────────────┘
+                                   │
+                                   ▼
+                        ┌─────────────────────┐
+                        │     StorageAPI      │
+                        │  (SQLite/IndexedDB) │
+                        │                     │
+                        │ - store()           │
+                        │ - load()            │
+                        │ - deleteCoValue()   │
+                        │ - getStorageSize()  │
+                        │ - getEvictionMeta() │
+                        └─────────────────────┘
+
+LIFECYCLE OF A COVALUE:
+
+  Created ──► In Memory ──► Synced to Server ──► Unmounted by GC ──► Evicted
+     │            │               │                    │                │
+     │            │               │                    │                │
+     ▼            ▼               ▼                    ▼                ▼
+  Protected   Protected      Protected            EVICTABLE         Gone from
+  (unsynced)  (in-memory)    (in-memory)     (not in memory,       storage
+                                               synced)              (can re-fetch)
+```
+
+---
+
 ## Components
 
 ### 1. StorageEvictionManager
@@ -141,9 +444,11 @@ export interface StorageAPI {
   getEvictionCandidates(excludeIds: Set<RawCoID>): Promise<EvictionCandidate[]> | EvictionCandidate[];
   
   // Delete a CoValue and all associated data (for eviction)
+  // Also clears the entry from StorageKnownState.knownStates
   deleteCoValue(id: RawCoID): Promise<void> | void;
   
   // Batch delete multiple CoValues
+  // Also clears entries from StorageKnownState.knownStates
   deleteCoValues(ids: RawCoID[]): Promise<void> | void;
 }
 
@@ -164,6 +469,69 @@ The storage eviction system uses a **separate** `lastAccessedEpoch` field (using
 1. **Correct persistence** - `Date.now()` timestamps work correctly across app restarts
 2. **No coupling** - Storage eviction doesn't depend on GC timing or behavior
 3. **Simpler implementation** - No need to modify the existing GarbageCollector
+
+### 4. StorageKnownState Integration
+
+**Location:** `packages/cojson/src/storage/knownState.ts`
+
+When a CoValue is evicted, we must also clear its entry from `StorageKnownState.knownStates`. This ensures:
+
+1. **Correct sync behavior** - The system won't think data is still in storage when it's been evicted
+2. **Clean re-fetch** - When the CoValue is requested again, it will be properly loaded from server
+3. **No stale waitForSync** - Pending sync requests for evicted CoValues won't hang
+
+```typescript
+// Add method to StorageKnownState class:
+class StorageKnownState {
+  // ... existing methods ...
+  
+  /**
+   * Clear known state for an evicted CoValue.
+   * Called when a CoValue is deleted from storage.
+   */
+  clearKnownState(id: string): void {
+    this.knownStates.delete(id);
+    
+    // Also clear any pending waitForSync requests
+    const requests = this.waitForSyncRequests.get(id);
+    if (requests) {
+      // Resolve pending requests (they'll re-fetch from server)
+      for (const request of requests) {
+        request.resolve();
+      }
+      this.waitForSyncRequests.delete(id);
+    }
+  }
+  
+  /**
+   * Batch clear known states for multiple evicted CoValues.
+   */
+  clearKnownStates(ids: string[]): void {
+    for (const id of ids) {
+      this.clearKnownState(id);
+    }
+  }
+}
+```
+
+**Usage in StorageApiSync/StorageApiAsync:**
+```typescript
+deleteCoValue(id: RawCoID): void {
+  // Delete from database tables
+  this.dbClient.deleteCoValue(id);
+  
+  // Clear from knownStates cache
+  this.knownStates.clearKnownState(id);
+}
+
+deleteCoValues(ids: RawCoID[]): void {
+  // Delete from database tables
+  this.dbClient.deleteCoValues(ids);
+  
+  // Clear from knownStates cache
+  this.knownStates.clearKnownStates(ids);
+}
+```
 
 ---
 
@@ -215,11 +583,10 @@ if (ev.oldVersion <= 5) {
 **SQLite:**
 ```typescript
 function getStorageSize(db: SQLiteDatabaseDriver): number {
-  const result = db.get<{ page_count: number; page_size: number }>(
-    "SELECT (SELECT page_count FROM pragma_page_count) as page_count, " +
-    "(SELECT page_size FROM pragma_page_size) as page_size"
+  const result = db.get<{ size_bytes: number }>(
+    "SELECT (SELECT page_count FROM pragma_page_count) * (SELECT page_size FROM pragma_page_size) as size_bytes"
   );
-  return (result?.page_count ?? 0) * (result?.page_size ?? 0);
+  return result?.size_bytes ?? 0;
 }
 ```
 
@@ -227,9 +594,16 @@ function getStorageSize(db: SQLiteDatabaseDriver): number {
 ```typescript
 async function getStorageSize(): Promise<number> {
   const estimate = await navigator.storage.estimate();
-  return estimate.usage ?? 0;
+  
+  // Try to get IndexedDB-specific usage if available (Chrome/Chromium only)
+  // Falls back to total origin usage (includes Cache API, etc.)
+  const usageDetails = (estimate as { usageDetails?: { indexedDB?: number } }).usageDetails;
+  
+  return usageDetails?.indexedDB ?? estimate.usage ?? 0;
 }
 ```
+
+**Note:** `usageDetails.indexedDB` is more accurate but only available in Chromium browsers. Safari and Firefox don't support it, so we fall back to `estimate.usage` which includes all origin storage (IndexedDB, Cache API, etc.). This means the limit may be less precise on non-Chromium browsers.
 
 ### 2. Eviction Score Calculation (Logarithmic Approach)
 
@@ -654,8 +1028,9 @@ const DEFAULT_EVICTION_CONFIG: StorageEvictionConfig = {
 |------|------|---------|
 | `packages/cojson/src/storage/StorageEvictionManager.ts` | NEW | Core eviction logic |
 | `packages/cojson/src/storage/types.ts` | MODIFY | Add eviction methods to StorageAPI |
-| `packages/cojson/src/storage/storageSync.ts` | MODIFY | Add limit checks, metadata tracking |
-| `packages/cojson/src/storage/storageAsync.ts` | MODIFY | Add limit checks, metadata tracking |
+| `packages/cojson/src/storage/storageSync.ts` | MODIFY | Add limit checks, metadata tracking, delete methods |
+| `packages/cojson/src/storage/storageAsync.ts` | MODIFY | Add limit checks, metadata tracking, delete methods |
+| `packages/cojson/src/storage/knownState.ts` | MODIFY | Add `clearKnownState` and `clearKnownStates` methods |
 | `packages/cojson/src/storage/sqlite/client.ts` | MODIFY | Implement eviction methods |
 | `packages/cojson/src/storage/sqlite/sqliteMigrations.ts` | MODIFY | Add migration v5 |
 | `packages/cojson/src/storage/sqliteAsync/client.ts` | MODIFY | Implement eviction methods |
