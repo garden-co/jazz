@@ -541,7 +541,13 @@ impl DatabaseState {
         for row_id in row_ids {
             let data = match self.node.read(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
-                _ => continue,
+                _ => {
+                    // Object not loaded - request lazy loading
+                    if !self.node.is_loaded(row_id) {
+                        self.node.request_load(row_id, "main");
+                    }
+                    continue;
+                }
             };
 
             // Create OwnedRow directly from buffer
@@ -568,7 +574,13 @@ impl DatabaseState {
 
         let data = match self.node.read(id, "main") {
             Ok(Some(data)) if !data.is_empty() => data,
-            _ => return None,
+            _ => {
+                // Object not loaded - request lazy loading
+                if !self.node.is_loaded(id) {
+                    self.node.request_load(id, "main");
+                }
+                return None;
+            }
         };
 
         // Create OwnedRow directly from buffer
@@ -1855,8 +1867,13 @@ impl Database {
         // Read row data
         let data = match self.state.node.read(id, "main") {
             Ok(Some(data)) => data,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
+            Ok(None) | Err(_) => {
+                // Object not loaded - request lazy loading
+                if !self.state.node.is_loaded(id) {
+                    self.state.node.request_load(id, "main");
+                }
+                return Ok(None);
+            }
         };
 
         // Create OwnedRow directly from buffer
@@ -2079,8 +2096,13 @@ impl Database {
         // Read current row data for index updates (directly as OwnedRow)
         let old_row = match self.state.node.read(id, "main") {
             Ok(Some(data)) => OwnedRow::new(descriptor_arc, data),
-            Ok(None) => return Ok(false),
-            Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
+            Ok(None) | Err(_) => {
+                // Object not loaded - request lazy loading
+                if !self.state.node.is_loaded(id) {
+                    self.state.node.request_load(id, "main");
+                }
+                return Ok(false);
+            }
         };
 
         // Validate new references: check that referenced rows exist
@@ -2194,7 +2216,13 @@ impl Database {
         // Read current row data to get ref values for index cleanup
         let data = match self.state.node.read(id, "main") {
             Ok(Some(data)) if !data.is_empty() => Some(data),
-            _ => None,
+            _ => {
+                // Object not loaded - request lazy loading for potential retry
+                if !self.state.node.is_loaded(id) {
+                    self.state.node.request_load(id, "main");
+                }
+                None
+            }
         };
 
         // Remove from indexes
