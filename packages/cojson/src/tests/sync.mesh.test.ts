@@ -506,7 +506,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       ]
     `);
 
-    edge.restart();
+    await edge.restart();
 
     edge.connectToSyncServer({
       syncServerName: "core",

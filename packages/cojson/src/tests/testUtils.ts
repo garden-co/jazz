@@ -526,8 +526,8 @@ export function setupTestNode(
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
-    restart: () => {
-      node.gracefulShutdown();
+    restart: async () => {
+      await node.gracefulShutdown();
       ctx.node = node = new LocalNode(
         admin.agentSecret,
         session,

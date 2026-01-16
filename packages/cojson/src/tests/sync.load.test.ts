@@ -514,7 +514,7 @@ describe("loading coValues from server", () => {
     });
 
     // Makes the CoValues unavailable on the server
-    jazzCloud.restart();
+    await jazzCloud.restart();
 
     const client = setupTestNode({
       connected: true,
@@ -1476,7 +1476,7 @@ describe("lazy storage load optimization", () => {
 
     // Restart the server to clear memory (keeping storage)
     // Now the server has no CoValues in memory, only in storage
-    jazzCloud.restart();
+    await jazzCloud.restart();
     jazzCloud.node.setStorage(storage);
 
     SyncMessagesLog.clear();
@@ -1519,7 +1519,7 @@ describe("lazy storage load optimization", () => {
     await map.core.waitForSync();
 
     // Restart the server to clear memory (keeping storage)
-    jazzCloud.restart();
+    await jazzCloud.restart();
     jazzCloud.node.setStorage(storage);
 
     SyncMessagesLog.clear();

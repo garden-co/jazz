@@ -72,7 +72,7 @@ describe("client with storage syncs with server", () => {
     const firstLoad = await loadCoValueOrFail(client.node, map.id);
     await firstLoad.core.waitForSync(); // Need to wait for sync with storage
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer();
     client.addStorage({
@@ -311,7 +311,7 @@ describe("client syncs with a server with storage", () => {
 
     SyncMessagesLog.clear();
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -406,7 +406,7 @@ describe("client syncs with a server with storage", () => {
     const largeMapContent =
       largeMap.core.newContentSince(undefined)?.slice(0, 4) ?? [];
 
-    client.restart();
+    await client.restart();
 
     const newSyncServer = setupTestNode({
       isSyncServer: true,
@@ -518,7 +518,7 @@ describe("client syncs with a server with storage", () => {
 
     expect(correctionSpy).not.toHaveBeenCalled();
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -566,14 +566,14 @@ describe("client syncs with a server with storage", () => {
 
     await largeMap.core.waitForSync();
 
-    server.restart();
+    await server.restart();
 
     server.addStorage({
       ourName: "server",
       storage: serverStorage,
     });
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -703,7 +703,7 @@ describe("client syncs with a server with storage", () => {
 
     SyncMessagesLog.clear();
 
-    syncServer.restart();
+    await syncServer.restart();
     syncServer.addStorage({
       ourName: "syncServer",
       storage,
