@@ -1,8 +1,7 @@
-import { NativeModules } from "react-native";
 import type ImageResizerType from "@bam.tech/react-native-image-resizer";
 import type ImageManipulatorType from "expo-image-manipulator";
 import type { Account, Group } from "jazz-tools";
-import { FileStream } from "jazz-tools";
+import { co, type FileStream } from "jazz-tools";
 import { Image } from "react-native";
 import { createImageFactory } from "../create-image-factory";
 
@@ -108,7 +107,8 @@ async function getPlaceholderBase64(filePath: string): Promise<string> {
       );
     }
 
-    return base64;
+    // Convert base64 to data URL
+    return "data:image/png;base64," + base64;
   }
 }
 
@@ -147,7 +147,7 @@ async function resize(
   }
 }
 
-function getMimeType(filePath: string): Promise<string> {
+async function getMimeType(filePath: string): Promise<string> {
   return fetch(filePath)
     .then((res) => res.blob())
     .then((blob) => blob.type);
@@ -167,9 +167,11 @@ export async function createFileStreamFromSource(
   const blob = await fetch(filePath).then((res) => res.blob());
   const arrayBuffer = await toArrayBuffer(blob);
 
-  return FileStream.createFromArrayBuffer(arrayBuffer, blob.type, undefined, {
-    owner,
-  });
+  return co
+    .fileStream()
+    .createFromArrayBuffer(arrayBuffer, blob.type, undefined, {
+      owner,
+    });
 }
 
 // TODO: look for more efficient way to do this as React Native hasn't blob.arrayBuffer()
