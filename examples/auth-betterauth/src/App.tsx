@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { SyncTest } from "./SyncTest";
 import {
   type User,
   getJazzToken,
@@ -17,7 +18,6 @@ import {
   signOut,
   signUp,
 } from "./auth";
-import { SyncTest } from "./SyncTest";
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -158,6 +158,7 @@ function App() {
                 claims in this token can be used in Jazz policies.
               </p>
               <pre
+                data-testid="jwt-token"
                 style={{
                   background: "#f5f5f5",
                   padding: "1rem",

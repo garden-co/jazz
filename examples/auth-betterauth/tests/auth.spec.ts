@@ -252,7 +252,7 @@ test.describe("JWT Token Display", () => {
     ).toBeVisible();
 
     // Token should be displayed (it's a long base64 string with dots)
-    const tokenPre = page.locator("pre").first();
+    const tokenPre = page.getByTestId("jwt-token");
     const tokenText = await tokenPre.textContent();
     expect(tokenText).toMatch(/^eyJ/); // JWT tokens start with eyJ (base64 of {"...)
     expect(tokenText).toContain("."); // JWTs have dots separating header.payload.signature
