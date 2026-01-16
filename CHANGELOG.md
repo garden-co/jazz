@@ -8,6 +8,10 @@ Changes:
 - **Removed `RNQuickCrypto`** from `jazz-tools`.
 - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
 - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+- Added permanent CoValue deletion with a new `deleted` loading state.
+- Restricted `unique` parameters to strings or string records for deterministic serialization.
+- `removeMember` now throws when the caller is unauthorized.
+- React context changes: `useJazzContextValue` replaces value access, `useJazzContext` returns the manager, and nested `JazzProvider` now throws.
 
 Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
 
