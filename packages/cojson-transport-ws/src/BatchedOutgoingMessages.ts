@@ -73,6 +73,9 @@ export class BatchedOutgoingMessages
       isWebSocketOpen(this.websocket) &&
       !hasWebSocketTooMuchBufferedData(this.websocket)
     ) {
+      if (msg.action === "content") {
+        this.egressBytesCounter.add(getContentMessageSize(msg), this.meta);
+      }
       this.websocket.send(this.serializeMessage(msg));
       return;
     }
