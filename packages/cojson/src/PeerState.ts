@@ -59,15 +59,19 @@ export class PeerState {
   readonly loadRequestSent: Set<RawCoID> = new Set();
   private loadQueue: OutgoingLoadQueue;
 
-  sendLoadRequest(coValue: CoValueCore): void {
+  sendLoadRequest(coValue: CoValueCore, allowOverflow?: boolean): void {
     this.toldKnownState.add(coValue.id);
     this.loadRequestSent.add(coValue.id);
-    this.loadQueue.enqueue(coValue, () => {
-      this.pushOutgoingMessage({
-        action: "load",
-        ...coValue.knownStateWithStreaming(),
-      });
-    });
+    this.loadQueue.enqueue(
+      coValue,
+      () => {
+        this.pushOutgoingMessage({
+          action: "load",
+          ...coValue.knownStateWithStreaming(),
+        });
+      },
+      allowOverflow,
+    );
   }
 
   trackLoadRequestUpdate(coValue: CoValueCore) {

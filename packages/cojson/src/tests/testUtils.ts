@@ -811,3 +811,8 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
 
   return map;
 }
+
+export function moveContentToNode(value: CoValueCore, node: LocalNode) {
+  const content = value.newContentSince(undefined)?.[0]!;
+  node.syncManager.handleNewContent(content, "import");
+}

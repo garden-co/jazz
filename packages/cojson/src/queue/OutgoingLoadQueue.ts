@@ -140,14 +140,26 @@ export class OutgoingLoadQueue {
    *
    * @param coValue - The CoValue to load
    * @param sendCallback - Callback to send the request when ready
+   * @param allowOverflow - If true, send immediately bypassing the capacity limit (used for dependencies)
    */
-  enqueue(coValue: CoValueCore, sendCallback: () => void): void {
+  enqueue(
+    coValue: CoValueCore,
+    sendCallback: () => void,
+    allowOverflow?: boolean,
+  ): void {
     // Skip if already in-flight or pending
     if (this.inFlightLoads.has(coValue) || this.requestedSet.has(coValue.id)) {
       return;
     }
 
     this.requestedSet.add(coValue.id);
+
+    // Dependencies bypass the queue and send immediately
+    if (allowOverflow) {
+      this.trackSent(coValue);
+      sendCallback();
+      return;
+    }
 
     this.pending.push({ value: coValue, sendCallback });
     this.processQueue();

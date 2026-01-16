@@ -413,6 +413,136 @@ describe("OutgoingLoadQueue", () => {
     });
   });
 
+  describe("allowOverflow", () => {
+    test("should send immediately when allowOverflow is true even at capacity", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+
+      let callback1Called = false;
+      let callback2Called = false;
+
+      // Fill the queue to capacity
+      queue.enqueue(map1.core, () => {
+        callback1Called = true;
+      });
+
+      expect(callback1Called).toBe(true);
+      expect(queue.inFlightCount).toBe(1);
+
+      // This should bypass the capacity limit with allowOverflow
+      queue.enqueue(
+        map2.core,
+        () => {
+          callback2Called = true;
+        },
+        true,
+      );
+
+      // Both should have been called even though capacity is 1
+      expect(callback2Called).toBe(true);
+      expect(queue.inFlightCount).toBe(2);
+    });
+
+    test("should still track overflow requests for timeout handling", async () => {
+      vi.useFakeTimers();
+      CO_VALUE_LOADING_CONFIG.TIMEOUT = 1000;
+      setMaxInFlightLoadsPerPeer(1);
+
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+
+      const coValue = node.getCoValue("co_zTestOverflowTimeout01" as any);
+
+      queue.enqueue(coValue, () => {}, true);
+
+      expect(queue.inFlightCount).toBe(1);
+
+      // Advance time past the timeout
+      await vi.advanceTimersByTimeAsync(1001);
+
+      // Should be removed from in-flight and marked as not found
+      expect(queue.inFlightCount).toBe(0);
+      expect(coValue.getLoadingStateForPeer(TEST_PEER_ID)).toBe("unavailable");
+    });
+
+    test("should still deduplicate overflow requests", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+
+      let callbackCount = 0;
+
+      queue.enqueue(
+        map.core,
+        () => {
+          callbackCount++;
+        },
+        true,
+      );
+      queue.enqueue(
+        map.core,
+        () => {
+          callbackCount++;
+        },
+        true,
+      );
+
+      // Should only be called once due to deduplication
+      expect(callbackCount).toBe(1);
+      expect(queue.inFlightCount).toBe(1);
+    });
+
+    test("should process pending requests when overflow request completes", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map1 = group.createMap();
+      const overflowMap = group.createMap();
+      const map2 = group.createMap();
+
+      let callback2Called = false;
+
+      // Fill the queue
+      queue.enqueue(map1.core, () => {});
+
+      // Add pending request
+      queue.enqueue(map2.core, () => {
+        callback2Called = true;
+      });
+
+      expect(callback2Called).toBe(false);
+      expect(queue.pendingCount).toBe(1);
+
+      // Add overflow request - this bypasses the queue but still counts as in-flight
+      queue.enqueue(overflowMap.core, () => {}, true);
+
+      expect(queue.inFlightCount).toBe(2);
+
+      // Complete the overflow request
+      queue.trackComplete(overflowMap.core);
+
+      // Still at capacity because map1 is still in-flight
+      expect(callback2Called).toBe(false);
+      expect(queue.inFlightCount).toBe(1);
+
+      // Complete the regular request - now pending can be processed
+      queue.trackComplete(map1.core);
+
+      expect(callback2Called).toBe(true);
+      expect(queue.inFlightCount).toBe(1); // map2 is now in-flight
+    });
+  });
+
   describe("clear", () => {
     test("should clear all in-flight loads and pending queues", () => {
       setMaxInFlightLoadsPerPeer(2);

@@ -773,7 +773,12 @@ export class SyncManager {
             peers.push(peer);
           }
 
-          dependencyCoValue.load(peers);
+          // Allow overflow to bypass the concurrency limit for dependencies
+          // We do this to avoid that the dependency load is blocked
+          // by the pending dependendant load
+          // Also these should be done with the highest priority, because we need to
+          // unblock the coValue wait
+          dependencyCoValue.load(peers, true);
         }
       }
 

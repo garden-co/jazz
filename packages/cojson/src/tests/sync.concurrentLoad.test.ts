@@ -6,6 +6,7 @@ import {
 import {
   blockMessageTypeOnOutgoingPeer,
   loadCoValueOrFail,
+  moveContentToNode,
   setupTestNode,
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -407,5 +408,68 @@ describe("concurrent load", () => {
         id: maps[i]?.id,
       });
     }
+  });
+
+  test("should allow dependency loads to overflow the concurrency limit", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const server = setupTestNode();
+
+    const client = setupTestNode({ connected: false });
+    client.connectToSyncServer({
+      ourName: "client",
+      syncServerName: "server",
+      syncServer: server.node,
+    });
+
+    // Create a CoValue on the server - the Map depends on the Group
+    const group = server.node.createGroup();
+    group.addMember("everyone", "writer");
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Delete the Group from server so it won't be pushed with the Map content
+    // skipVerify prevents the server from checking dependencies before sending
+    server.node.syncManager.disableTransactionVerification();
+    server.node.internalDeleteCoValue(group.id);
+
+    // Load the map from the client
+    // The flow is:
+    // 1. Client sends LOAD Map to server (takes the slot, limit=1)
+    // 2. Server responds with Map content (no deps pushed because skipVerify + Group deleted)
+    // 3. Client sees missing dependency (Group), sends LOAD Group to server
+    //    This would be blocked by limit=1 without allowOverflow since Map load slot is taken
+    // 4. With allowOverflow, Group load bypasses the queue
+    // 5. Server responds with KNOWN Group (doesn't have it - was deleted)
+    // 6. Group content is moved back to server (simulating it becoming available)
+    // 7. Server responds with Group content
+    // 8. Client can now process Map content
+    const promise = loadCoValueOrFail(client.node, map.id);
+
+    // Wait for the Map content to be sent
+    await waitFor(() => SyncMessagesLog.messages.length >= 2);
+
+    moveContentToNode(group.core, server.node);
+
+    const result = await promise;
+    expect(result.get("key")).toBe("value");
+
+    // Verify both were loaded successfully despite throttling
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | LOAD Group sessions: empty",
+        "server -> client | KNOWN Group sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
   });
 });
