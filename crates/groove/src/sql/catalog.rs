@@ -1,6 +1,6 @@
-//! Database catalog for persistence.
+//! Query manager catalog for persistence.
 //!
-//! The catalog stores metadata about tables, allowing a Database to be
+//! The catalog stores metadata about tables, allowing a QueryManager to be
 //! restored from an Environment after being thrown away.
 //!
 //! ## Schema Descriptors
@@ -82,7 +82,7 @@ impl std::fmt::Display for DescriptorId {
     }
 }
 
-/// Database catalog - stored in a well-known object.
+/// QueryManager catalog - stored in a well-known object.
 ///
 /// Maps table names to their current descriptor IDs.
 #[derive(Debug, Clone, Default)]

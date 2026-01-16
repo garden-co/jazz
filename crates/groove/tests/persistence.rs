@@ -1,13 +1,13 @@
 //! Roundtrip persistence tests.
 //!
-//! These tests verify that a Database can be created, populated,
+//! These tests verify that a QueryManager can be created, populated,
 //! dropped, and then restored from the same Environment.
 
 use std::rc::Rc;
 
 use bytes::Bytes;
 use groove::sql::row_buffer::RowValue;
-use groove::sql::{Database, ExecuteResult};
+use groove::sql::{ExecuteResult, QueryManager};
 use groove::sync::StorageRequest;
 use groove::{ChunkStore, ContentRef, INLINE_THRESHOLD, MemoryEnvironment};
 
@@ -21,8 +21,8 @@ fn get_inserted_id(result: ExecuteResult) -> groove::ObjectId {
 
 /// Execute pending storage requests from a database.
 /// This is needed in tests because storage goes through outboxes,
-/// and tests don't use a full driver/SyncEngine.
-fn flush_storage(db: &Database) {
+/// and tests don't use a full driver/GrooveEngine.
+fn flush_storage(db: &QueryManager) {
     let env = db.node().env().expect("env required").clone();
     let requests = db.node().drain_storage_requests();
 
@@ -57,7 +57,7 @@ fn database_roundtrip_simple() {
 
     // Create and populate database
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         // Note: id column is auto-added as ObjectId type
         db.execute("CREATE TABLE users (name STRING NOT NULL)")
@@ -72,8 +72,8 @@ fn database_roundtrip_simple() {
         db.catalog_object_id()
     };
 
-    // Database dropped here - restore from same environment
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    // QueryManager dropped here - restore from same environment
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify table exists
     let tables = db.list_tables();
@@ -107,7 +107,7 @@ fn database_roundtrip_multiple_tables() {
 
     // Create and populate database
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         // Note: id columns are auto-added as ObjectId type
         db.execute("CREATE TABLE orgs (name STRING NOT NULL)")
@@ -140,7 +140,7 @@ fn database_roundtrip_multiple_tables() {
     };
 
     // Restore database
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify both tables exist
     let tables = db.list_tables();
@@ -170,7 +170,7 @@ fn database_roundtrip_with_policies() {
 
     // Create database with policies
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         // Note: id columns are auto-added as ObjectId type
         db.execute("CREATE TABLE users (name STRING NOT NULL)")
@@ -211,7 +211,7 @@ fn database_roundtrip_with_policies() {
     };
 
     // Restore database
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify policies are restored
     let policies = db.get_policies("documents").unwrap();
@@ -241,7 +241,7 @@ fn database_roundtrip_after_delete() {
 
     // Create, populate, then delete some rows
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         // Note: id column is auto-added as ObjectId type
         db.execute("CREATE TABLE items (name STRING NOT NULL)")
@@ -274,7 +274,7 @@ fn database_roundtrip_after_delete() {
     };
 
     // Restore and verify delete was persisted
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     let items = db.query("SELECT * FROM items").unwrap();
     assert_eq!(items.len(), 2, "delete should be persisted");
@@ -291,7 +291,7 @@ fn database_roundtrip_after_update() {
 
     // Create, populate, then update some rows
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         db.execute("CREATE TABLE settings (value STRING NOT NULL)")
             .unwrap();
@@ -321,7 +321,7 @@ fn database_roundtrip_after_update() {
     };
 
     // Restore and verify update was persisted
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     let settings = db.query("SELECT * FROM settings").unwrap();
     assert_eq!(settings.len(), 1);
@@ -338,7 +338,7 @@ fn database_roundtrip_with_nullable() {
 
     // Create table with nullable column
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         db.execute("CREATE TABLE contacts (name STRING NOT NULL, phone STRING)")
             .unwrap();
@@ -353,7 +353,7 @@ fn database_roundtrip_with_nullable() {
     };
 
     // Restore and verify nulls are preserved
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     let contacts = db.query("SELECT * FROM contacts").unwrap();
     assert_eq!(contacts.len(), 2);
@@ -389,7 +389,7 @@ fn database_roundtrip_with_inline_blob() {
     let small_data: Vec<u8> = (0..100).map(|i| i as u8).collect();
 
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         db.execute("CREATE TABLE files (name STRING NOT NULL, data BLOB NOT NULL)")
             .unwrap();
@@ -432,7 +432,7 @@ fn database_roundtrip_with_inline_blob() {
     };
 
     // Restore database
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify blob data
     let rows = db.query("SELECT * FROM files").unwrap();
@@ -475,7 +475,7 @@ fn database_roundtrip_with_chunked_blob() {
         .collect();
 
     let catalog_id = {
-        let db = Database::new(env.clone());
+        let db = QueryManager::new(env.clone());
 
         db.execute("CREATE TABLE files (name STRING NOT NULL, data BLOB NOT NULL)")
             .unwrap();
@@ -504,7 +504,7 @@ fn database_roundtrip_with_chunked_blob() {
     };
 
     // Restore database
-    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
+    let db = futures::executor::block_on(QueryManager::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify blob data
     let rows = db.query("SELECT * FROM files").unwrap();

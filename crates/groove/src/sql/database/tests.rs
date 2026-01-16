@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 #[test]
 fn insert_row_basic() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
         .unwrap();
 
@@ -38,7 +38,7 @@ fn insert_row_basic() {
 
 #[test]
 fn update_row_basic() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
         .unwrap();
 
@@ -79,7 +79,7 @@ fn update_row_basic() {
 
 #[test]
 fn insert_row_with_ref() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -114,7 +114,7 @@ fn insert_row_with_ref() {
 
 #[test]
 fn table_rows_object_created() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -126,7 +126,7 @@ fn table_rows_object_created() {
 
 #[test]
 fn index_object_created() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -141,7 +141,7 @@ fn index_object_created() {
 
 #[test]
 fn table_rows_updates_on_insert() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -168,7 +168,7 @@ fn table_rows_updates_on_insert() {
 
 #[test]
 fn table_rows_updates_on_delete() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -202,7 +202,7 @@ fn table_rows_updates_on_delete() {
 
 #[test]
 fn incremental_query_basic() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
 
@@ -230,7 +230,7 @@ fn incremental_query_basic() {
 
 #[test]
 fn incremental_query_with_filter() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
 
@@ -261,7 +261,7 @@ fn incremental_query_with_filter() {
 
 #[test]
 fn incremental_query_update_enters_filter() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
 
@@ -298,7 +298,7 @@ fn incremental_query_update_enters_filter() {
 
 #[test]
 fn incremental_query_update_leaves_filter() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
 
@@ -335,7 +335,7 @@ fn incremental_query_update_leaves_filter() {
 
 #[test]
 fn incremental_query_delete() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -366,7 +366,7 @@ fn incremental_query_delete() {
 fn incremental_query_subscribe() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -394,7 +394,7 @@ fn incremental_query_subscribe() {
 fn incremental_query_subscribe_rows() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -422,7 +422,7 @@ fn incremental_query_subscribe_rows() {
 
 #[test]
 fn incremental_query_join_basic() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -469,7 +469,7 @@ fn incremental_query_join_basic() {
 
 #[test]
 fn incremental_query_join_left_table_change() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -530,7 +530,7 @@ fn incremental_query_join_left_table_change() {
 fn incremental_query_join_right_table_change() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -579,20 +579,20 @@ fn incremental_query_join_right_table_change() {
 
 #[test]
 fn incremental_query_table_not_found() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let result = db.incremental_query("SELECT * FROM nonexistent");
-    assert!(matches!(result, Err(DatabaseError::TableNotFound(_))));
+    assert!(matches!(result, Err(QueryManagerError::TableNotFound(_))));
 }
 
 #[test]
 fn incremental_query_column_not_found() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
     let result = db.incremental_query("SELECT * FROM users WHERE nonexistent = 'foo'");
-    assert!(matches!(result, Err(DatabaseError::ColumnNotFound(_))));
+    assert!(matches!(result, Err(QueryManagerError::ColumnNotFound(_))));
 }
 
 // ========== Policy-Filtered Query Tests ==========
@@ -602,7 +602,7 @@ fn select_all_as_filters_by_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create users table
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
@@ -686,7 +686,7 @@ fn select_all_as_with_inheritance() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -759,7 +759,7 @@ fn insert_as_checks_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -815,7 +815,7 @@ fn insert_as_checks_policy() {
         alice_id,
     );
     assert!(
-        matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        matches!(result, Err(QueryManagerError::PolicyDenied { .. })),
         "should deny insert with other as author: {:?}",
         result
     );
@@ -826,7 +826,7 @@ fn update_as_checks_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -885,7 +885,7 @@ fn update_as_checks_policy() {
         bob_id,
     );
     assert!(
-        matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        matches!(result, Err(QueryManagerError::PolicyDenied { .. })),
         "non-owner should not be able to update: {:?}",
         result
     );
@@ -896,7 +896,7 @@ fn update_as_checks_both_where_and_check() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -948,7 +948,7 @@ fn update_as_checks_both_where_and_check() {
         alice_id,
     );
     assert!(
-        matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        matches!(result, Err(QueryManagerError::PolicyDenied { .. })),
         "should deny changing owner: {:?}",
         result
     );
@@ -959,7 +959,7 @@ fn delete_as_checks_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -998,7 +998,7 @@ fn delete_as_checks_policy() {
     // Bob cannot delete
     let result = db.delete_as("documents", doc_id, bob_id);
     assert!(
-        matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        matches!(result, Err(QueryManagerError::PolicyDenied { .. })),
         "non-owner should not be able to delete: {:?}",
         result
     );
@@ -1017,7 +1017,7 @@ fn delete_as_falls_back_to_update_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1056,7 +1056,7 @@ fn delete_as_falls_back_to_update_policy() {
     // Bob cannot delete (UPDATE policy check fails)
     let result = db.delete_as("documents", doc_id, bob_id);
     assert!(
-        matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        matches!(result, Err(QueryManagerError::PolicyDenied { .. })),
         "non-owner should not be able to delete via UPDATE fallback: {:?}",
         result
     );
@@ -1077,7 +1077,7 @@ fn incremental_query_as_filters_by_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1148,7 +1148,7 @@ fn incremental_query_as_updates_on_insert() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1220,7 +1220,7 @@ fn incremental_query_as_combines_with_where_clause() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1273,7 +1273,7 @@ fn incremental_query_as_no_policy_allows_all() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE items (name STRING NOT NULL)")
         .unwrap();
@@ -1308,7 +1308,7 @@ fn incremental_query_as_or_policy() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1409,7 +1409,7 @@ fn incremental_query_as_inherits_flattened_to_join() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1510,7 +1510,7 @@ fn incremental_query_as_inherits_incremental_updates() {
 
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1584,7 +1584,7 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1689,7 +1689,7 @@ fn incremental_query_as_nested_inherits_chain() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1822,7 +1822,7 @@ fn incremental_query_as_inherits_multiple_docs_same_folder() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1896,7 +1896,7 @@ fn incremental_query_as_inherits_delete_propagates() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1972,7 +1972,7 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2104,7 +2104,7 @@ fn incremental_query_as_pure_recursive_inherits_returns_nothing() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2163,7 +2163,7 @@ fn incremental_query_as_3_hop_inherits_chain() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2319,7 +2319,7 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2453,7 +2453,7 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2595,7 +2595,7 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2744,7 +2744,7 @@ fn incremental_query_as_3_hop_chain_new_document_insert() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2863,7 +2863,7 @@ fn incremental_query_as_3_hop_chain_with_filter() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2975,7 +2975,7 @@ fn policy_chain_or_condition_with_inherits() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -3115,7 +3115,7 @@ fn policy_chain_multiple_viewers_concurrent() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -3259,7 +3259,7 @@ fn policy_chain_insert_intermediate_row() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -3344,7 +3344,7 @@ fn policy_chain_delete_intermediate_row() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -3433,7 +3433,7 @@ fn policy_chain_4_hop_deep() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -3589,7 +3589,7 @@ fn policy_chain_update_at_each_level() {
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -3737,7 +3737,7 @@ fn incremental_query_reverse_join_basic() {
     // Schema: Issues and IssueAssignees (junction table)
     // IssueAssignees.issue references Issues
     // Query: SELECT Issues.* FROM Issues JOIN IssueAssignees ON IssueAssignees.issue = Issues.id
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -3811,7 +3811,7 @@ fn incremental_query_reverse_join_basic() {
 #[test]
 fn incremental_query_reverse_join_no_filter() {
     // Same schema but no WHERE filter - just the JOIN
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -3871,7 +3871,7 @@ fn incremental_query_reverse_join_no_filter() {
 #[test]
 fn incremental_query_reverse_join_with_from_table_filter() {
     // Filter on the FROM table (Issues) in a reverse join
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -3935,7 +3935,7 @@ fn incremental_query_reverse_join_with_from_table_filter() {
 #[test]
 fn incremental_query_reverse_join_combined_filters() {
     // Filter on both FROM table and JOIN table
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -4023,7 +4023,7 @@ fn incremental_query_reverse_join_combined_filters() {
 #[test]
 fn incremental_query_reverse_join_with_alias() {
     // Test that table aliases work in reverse JOINs
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -4079,7 +4079,7 @@ fn incremental_query_reverse_join_subscribe() {
     // Test that subscribe works for reverse JOINs - this mirrors what the WASM layer does
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -4149,7 +4149,7 @@ fn migration_rename_column() {
     use crate::sql::lens::LensGenerationOptions;
     use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create table with 'title' column
     db.execute("CREATE TABLE documents (title STRING NOT NULL)")
@@ -4202,7 +4202,7 @@ fn migration_add_column() {
     use crate::sql::lens::LensGenerationOptions;
     use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create table with 'name' column
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
@@ -4248,7 +4248,7 @@ fn migration_preview() {
     use crate::sql::lens::{ColumnTransform, LensGenerationOptions};
     use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create table
     db.execute("CREATE TABLE items (title STRING NOT NULL)")
@@ -4282,7 +4282,7 @@ fn migration_descriptor_chain() {
     use crate::sql::lens::LensGenerationOptions;
     use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create table
     db.execute("CREATE TABLE notes (text STRING NOT NULL)")
@@ -4321,7 +4321,7 @@ fn incremental_query_two_reverse_joins_combined_filters() {
     // Test that queries with TWO reverse joins work correctly
     // This reproduces the exact scenario that fails in CI but passes locally
     // Now includes a forward join to Projects, matching the TypeScript-generated query
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE Projects (name STRING NOT NULL, color STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL, project REFERENCES Projects NOT NULL)")
@@ -4519,7 +4519,7 @@ fn incremental_query_two_reverse_joins_combined_filters() {
 fn incremental_query_two_reverse_joins_combined_filters_run_100_times() {
     // Run the same test 100 times to check for non-determinism
     for i in 0..100 {
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
             .unwrap();
         db.execute("CREATE TABLE Users (name STRING NOT NULL)")
@@ -4620,7 +4620,7 @@ fn incremental_query_exact_typescript_sql_pattern() {
     // 1. Forward join: Projects ON i.project = Projects.id
     // 2. Reverse join: IssueLabels ON IssueLabels.issue = i.id
     // 3. Reverse join: IssueAssignees ON IssueAssignees.issue = i.id
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create tables matching the TypeScript schema
     db.execute("CREATE TABLE Projects (name STRING NOT NULL)")
@@ -5057,7 +5057,7 @@ fn build_lens_context_for_table_after_migration() {
     use crate::sql::lens::LensGenerationOptions;
     use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create table with 'title' column
     db.execute("CREATE TABLE documents (title STRING NOT NULL)")
@@ -5147,7 +5147,7 @@ fn build_lens_context_for_table_after_migration() {
 #[test]
 fn insert_row_populates_column_change_metadata() {
     // GCO-1097: Verify that insert_row populates per-column LWW metadata
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
         .unwrap();
 
@@ -5214,7 +5214,7 @@ fn insert_row_populates_column_change_metadata() {
 #[test]
 fn update_row_populates_column_change_metadata() {
     // GCO-1097: Verify that update_row populates per-column LWW metadata
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
         .unwrap();
 
@@ -5283,7 +5283,7 @@ fn apply_synced_commits_rebuilds_column_metadata() {
     // GCO-1097: Verify that apply_synced_commits rebuilds column change metadata
     use crate::commit::Commit;
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE documents (title STRING NOT NULL)")
         .unwrap();
 
@@ -5307,7 +5307,7 @@ fn apply_synced_commits_rebuilds_column_metadata() {
         meta: None,
     };
 
-    // Apply via the Database method (not directly to LocalNode)
+    // Apply via the QueryManager method (not directly to ObjectManager)
     db.apply_synced_commits("documents", row_id, "main", vec![commit]);
 
     // Verify column change metadata was rebuilt
@@ -5346,12 +5346,12 @@ fn apply_synced_commits_rebuilds_column_metadata() {
 #[test]
 #[cfg(not(feature = "wasm"))]
 fn sync_applied_commits_trigger_query_updates() {
-    // GCO-1102: Verify that commits applied via LocalNode.apply_commits
+    // GCO-1102: Verify that commits applied via ObjectManager.apply_commits
     // trigger query graph updates through the callback mechanism.
     use crate::commit::Commit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE documents (title STRING NOT NULL)")
         .unwrap();
 
@@ -5415,7 +5415,7 @@ fn sync_applied_commits_trigger_query_updates() {
         meta: None,
     };
 
-    // Apply commits via LocalNode.apply_commits (as sync would do)
+    // Apply commits via ObjectManager.apply_commits (as sync would do)
     // This should trigger the callback which notifies query graphs
     db.state().node.apply_commits(row_id, "main", vec![commit]);
 

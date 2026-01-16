@@ -1,10 +1,10 @@
-//! Integration tests for LocalNode.
+//! Integration tests for ObjectManager.
 
-use groove::{LocalNode, ObjectId, generate_object_id};
+use groove::{ObjectId, ObjectManager, generate_object_id};
 
 #[test]
 fn local_node_create_and_get_objects() {
-    let node = LocalNode::in_memory();
+    let node = ObjectManager::in_memory();
 
     let id1 = node.create_object("chat");
     let id2 = node.create_object("message");
@@ -32,7 +32,7 @@ fn uuidv7_is_unique_and_ordered() {
 
 #[test]
 fn local_node_uses_uuidv7() {
-    let node = LocalNode::in_memory();
+    let node = ObjectManager::in_memory();
 
     let id1 = node.create_object("test1");
     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -44,7 +44,7 @@ fn local_node_uses_uuidv7() {
 
 #[test]
 fn read_write_roundtrip() {
-    let node = LocalNode::in_memory();
+    let node = ObjectManager::in_memory();
     let id = node.create_object("test");
 
     node.write(id, "main", b"hello world", "alice", 1000)

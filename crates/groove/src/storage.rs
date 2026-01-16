@@ -341,7 +341,7 @@ pub trait Storage: ChunkStore + CommitStore {}
 impl<T: ChunkStore + CommitStore> Storage for T {}
 
 /// Environment trait - combines all storage capabilities.
-/// This is the main trait that LocalNode uses for storage.
+/// This is the main trait that ObjectManager uses for storage.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Environment:
     ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug

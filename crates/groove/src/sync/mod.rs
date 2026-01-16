@@ -12,7 +12,7 @@
 //! │                                                              │
 //! │  • Receives I/O events (SSE, HTTP responses, timers)        │
 //! │  • Puts events into INBOXES                                  │
-//! │  • Calls pass() on SyncEngine                                │
+//! │  • Calls pass() on GrooveEngine                                │
 //! │  • Takes actions from OUTBOXES                               │
 //! └──────────────────────────┬──────────────────────────────────┘
 //!                            │
@@ -22,13 +22,13 @@
 //! │                    SYNC ENGINE                               │
 //! │  (Pure synchronous state machine)                           │
 //! │                                                              │
-//! │  LocalNode + UpstreamState                                  │
+//! │  ObjectManager + UpstreamState                                  │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! # Key Types
 //!
-//! - `SyncEngine`: The runtime-less state machine
+//! - `GrooveEngine`: The runtime-less state machine
 //! - `Inboxes`: Events flowing into the engine
 //! - `Outboxes`: Actions for the driver to execute
 //! - `SyncServer`: Server-side sync handling
@@ -58,11 +58,11 @@ pub mod jwt;
 // Engine types (runtime-less state machine)
 // Note: QueryId not exported to avoid conflict with server::QueryId
 pub use engine::{
-    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
-    OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StorageRequest,
-    StorageResponse, StreamAction, SubscribeRequestEvent, SubscriptionChunkRequest,
-    SubscriptionState, SyncConfig, SyncEngine, TickEvent, TimerId, TimerPurpose, TimerRequest,
-    UpstreamId, UpstreamState,
+    ConnectionEvent, ConnectionEventKind, ConnectionState, GrooveEngine, Inboxes, LocalWriteEvent,
+    Notification, OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent,
+    StorageRequest, StorageResponse, StreamAction, SubscribeRequestEvent, SubscriptionChunkRequest,
+    SubscriptionState, SyncConfig, TickEvent, TimerId, TimerPurpose, TimerRequest, UpstreamId,
+    UpstreamState,
 };
 
 // Protocol types

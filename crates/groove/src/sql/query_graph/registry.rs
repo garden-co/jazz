@@ -9,7 +9,7 @@ use std::sync::RwLock;
 
 use super::SubscriptionId;
 use crate::object::ObjectId;
-use crate::sql::DatabaseState;
+use crate::sql::QueryManagerState;
 use crate::sql::catalog::DescriptorId;
 use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::cache::RowCache;
@@ -170,7 +170,7 @@ impl GraphRegistry {
     pub fn get_output(
         &self,
         graph_id: GraphId,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> Option<Vec<(ObjectId, OwnedRow)>> {
         let mut cache = self.cache.write().unwrap();
         self.queries
@@ -205,13 +205,13 @@ impl GraphRegistry {
     /// * `table` - The table the object belongs to
     /// * `object_id` - The object that changed
     /// * `object` - Reference to the Object (for reading branch data)
-    /// * `db` - Database state for routing through downstream nodes
+    /// * `db` - QueryManager state for routing through downstream nodes
     pub fn notify_object_changed(
         &self,
         table: &str,
         object_id: ObjectId,
         object: &crate::object::Object,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) {
         use crate::sql::query_graph::node::QueryNode;
 
@@ -453,7 +453,7 @@ mod tests {
     use crate::sql::query_graph::predicate::Predicate;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
-    use crate::sql::{Database, TableSchema};
+    use crate::sql::{QueryManager, TableSchema};
 
     fn test_schema() -> TableSchema {
         TableSchema::new(
@@ -528,7 +528,7 @@ mod tests {
         let schema = test_schema();
 
         // Create database and table
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         // Build and register a filtered query
@@ -569,7 +569,7 @@ mod tests {
         let registry = GraphRegistry::new();
         let schema = test_schema();
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         let mut builder = QueryGraphBuilder::new("users", schema);
@@ -651,7 +651,7 @@ mod tests {
             .unwrap();
 
         // Create database for state reference
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         // Create a branch-aware query using BranchMerge
@@ -704,7 +704,7 @@ mod tests {
         // Notify the registry that the object changed.
         // In a real system, this would be called automatically by:
         // - The sync layer when receiving commits from the server
-        // - The Database when local writes create commits
+        // - The QueryManager when local writes create commits
         //
         // For now, we call it explicitly to demonstrate the notification works.
         registry.notify_object_changed("users", object_id, &object, db.state());
@@ -845,7 +845,7 @@ mod tests {
         let graph = builder.build_branch_merge_query(GraphId(0));
 
         // Create database for state reference
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         let registry = GraphRegistry::new();
@@ -963,7 +963,7 @@ mod tests {
         );
         let graph = builder.build_branch_merge_query(GraphId(0));
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         let registry = GraphRegistry::new();
@@ -1072,7 +1072,7 @@ mod tests {
         let filtered = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let graph = builder.output(filtered, GraphId(0));
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         let registry = GraphRegistry::new();
@@ -1171,7 +1171,7 @@ mod tests {
         let scan = builder.table_scan();
         let graph = builder.output(scan, GraphId(0));
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema.clone()).unwrap();
 
         let registry = GraphRegistry::new();
@@ -1222,7 +1222,7 @@ mod tests {
         use std::rc::Rc;
 
         // Create database and table with v1 schema: "title" and "status" columns
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.execute("CREATE TABLE documents (title STRING NOT NULL, status BOOL NOT NULL)")
             .unwrap();
 

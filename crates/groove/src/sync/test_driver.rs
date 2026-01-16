@@ -38,12 +38,12 @@ use std::rc::Rc;
 use crate::commit::{Commit, CommitId};
 use crate::object::ObjectId;
 use crate::sql::row_buffer::{OwnedRow, RowValue};
-use crate::sql::{Database, DatabaseState, ExecuteResult};
+use crate::sql::{ExecuteResult, QueryManager, QueryManagerState};
 
 use super::engine::{
-    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, OutboundRequest, Outboxes,
-    PushResponseEvent, SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent,
-    SyncEngine, TickEvent, UpstreamId,
+    ConnectionEvent, ConnectionEventKind, ConnectionState, GrooveEngine, Inboxes, OutboundRequest,
+    Outboxes, PushResponseEvent, SseInboxEvent, StorageRequest, StreamAction,
+    SubscribeRequestEvent, TickEvent, UpstreamId,
 };
 use super::memory_storage::MemoryStorage;
 use super::protocol::{PushRequest, PushResponse, SseEvent, SubscriptionOptions};
@@ -58,9 +58,9 @@ pub type TestStorage = MemoryStorage;
 /// A node in the test driver (client or server).
 struct TestNode {
     /// The sync engine.
-    engine: Rc<RefCell<SyncEngine>>,
-    /// Database state (shares LocalNode with engine).
-    db: Rc<DatabaseState>,
+    engine: Rc<RefCell<GrooveEngine>>,
+    /// QueryManager state (shares ObjectManager with engine).
+    db: Rc<QueryManagerState>,
     /// Upstream ID (for client nodes).
     upstream_id: UpstreamId,
     /// Active subscription (for SSE).
@@ -71,12 +71,12 @@ struct TestNode {
 
 impl TestNode {
     fn new() -> Self {
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         let db_state = db.into_state();
 
-        // Create engine with the database's LocalNode (shared)
+        // Create engine with the database's ObjectManager (shared)
         let node = db_state.node_arc();
-        let mut engine = SyncEngine::with_local_node(node);
+        let mut engine = GrooveEngine::with_local_node(node);
 
         // Add upstream server
         let upstream_id = engine.add_upstream();
@@ -90,8 +90,8 @@ impl TestNode {
         }
     }
 
-    fn database(&self) -> Database {
-        Database::from_state(Rc::clone(&self.db))
+    fn database(&self) -> QueryManager {
+        QueryManager::from_state(Rc::clone(&self.db))
     }
 }
 
@@ -154,7 +154,7 @@ impl Default for TestDriver {
 impl TestDriver {
     /// Create a new test driver.
     pub fn new() -> Self {
-        // Start at actual current time so timestamps from Database.execute() work
+        // Start at actual current time so timestamps from QueryManager.execute() work
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

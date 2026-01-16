@@ -25,8 +25,8 @@ pub use catalog::{
     get_lens_path,
 };
 pub use database::{
-    Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery, MigrationError,
-    MigrationResult,
+    ExecuteResult, IncrementalQuery, MigrationError, MigrationResult, QueryManager,
+    QueryManagerError, QueryManagerState,
 };
 pub use index::RefIndex;
 pub use lens::{

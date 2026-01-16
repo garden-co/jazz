@@ -1,7 +1,7 @@
 //! WASM Driver for the runtime-less sync engine.
 //!
 //! This module provides a WASM-friendly driver that:
-//! - Owns a `SyncEngine` from groove
+//! - Owns a `GrooveEngine` from groove
 //! - Handles EventSource callbacks for SSE events
 //! - Makes fetch() calls for push requests
 //! - Calls JavaScript callbacks for notifications
@@ -21,11 +21,11 @@ use web_sys::{EventSource, MessageEvent, Request, RequestInit, Response};
 
 // ObjectId is used via groove::sync::*
 use groove::Environment;
-use groove::sql::{Database, DatabaseState};
+use groove::sql::{QueryManager, QueryManagerState};
 use groove::sync::{
-    ConnectionEvent, ConnectionEventKind, ConnectionState, Decode, Encode, Inboxes, Notification,
-    OutboundRequest, Outboxes, PushResponse, PushResponseEvent, SseEvent, SseInboxEvent,
-    StorageRequest, StreamAction, SubscribeRequestEvent, SubscriptionOptions, SyncEngine,
+    ConnectionEvent, ConnectionEventKind, ConnectionState, Decode, Encode, GrooveEngine, Inboxes,
+    Notification, OutboundRequest, Outboxes, PushResponse, PushResponseEvent, SseEvent,
+    SseInboxEvent, StorageRequest, StreamAction, SubscribeRequestEvent, SubscriptionOptions,
     TickEvent, UpstreamId,
 };
 
@@ -76,11 +76,11 @@ struct ActiveStream {
 /// This driver handles all I/O and feeds events into the sync engine.
 #[wasm_bindgen]
 pub struct WasmSyncDriver {
-    /// The sync engine (owns LocalNode and sync state)
-    engine: Rc<RefCell<SyncEngine>>,
+    /// The sync engine (owns ObjectManager and sync state)
+    engine: Rc<RefCell<GrooveEngine>>,
 
-    /// The database for SQL operations (shares LocalNode with engine)
-    db: Rc<DatabaseState>,
+    /// The database for SQL operations (shares ObjectManager with engine)
+    db: Rc<QueryManagerState>,
 
     /// Server URL for sync
     server_url: String,
@@ -112,12 +112,12 @@ impl WasmSyncDriver {
     /// @param auth_token - Bearer token for authentication
     #[wasm_bindgen(constructor)]
     pub fn new(server_url: String, auth_token: String) -> Self {
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         let db_state = db.into_state();
 
-        // Create engine with the database's LocalNode (shared)
+        // Create engine with the database's ObjectManager (shared)
         let node = db_state.node_arc();
-        let engine = SyncEngine::with_local_node(node);
+        let engine = GrooveEngine::with_local_node(node);
 
         // Wrap in Rc<RefCell> for shared access
         let engine = Rc::new(RefCell::new(engine));
@@ -193,7 +193,7 @@ impl WasmSyncDriver {
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
         use groove::sql::ExecuteResult;
 
-        let db = Database::from_state(Rc::clone(&self.db));
+        let db = QueryManager::from_state(Rc::clone(&self.db));
         match db.execute(sql) {
             Ok(result) => {
                 // Run a pass to pick up any changed objects for sync
@@ -241,7 +241,7 @@ impl WasmSyncDriver {
     pub fn query(&self, sql: &str) -> Result<JsValue, JsValue> {
         use groove::sql::RowValue;
 
-        let db = Database::from_state(Rc::clone(&self.db));
+        let db = QueryManager::from_state(Rc::clone(&self.db));
         match db.query(sql) {
             Ok(rows) => {
                 let array = Array::new();
@@ -384,7 +384,7 @@ impl WasmSyncDriver {
 /// Handle outboxes (standalone function for use in closures).
 fn handle_outboxes_impl(
     outboxes: &Outboxes,
-    engine: &Rc<RefCell<SyncEngine>>,
+    engine: &Rc<RefCell<GrooveEngine>>,
     active_streams: &Rc<RefCell<HashMap<(u64, u32), ActiveStream>>>,
     server_url: &str,
     auth_token: &str,
@@ -467,7 +467,7 @@ fn handle_outboxes_impl(
                 }
             }
             Notification::ObjectsReceived { .. } => {
-                // Database observes this internally via LocalNode callbacks
+                // QueryManager observes this internally via ObjectManager callbacks
             }
         }
     }
@@ -477,7 +477,7 @@ fn handle_outboxes_impl(
 /// Fire-and-forget for Put operations; Get/Load operations require sending responses back.
 fn execute_storage_request(
     env: Rc<dyn Environment>,
-    engine: Rc<RefCell<SyncEngine>>,
+    engine: Rc<RefCell<GrooveEngine>>,
     request: StorageRequest,
 ) {
     wasm_bindgen_futures::spawn_local(async move {
@@ -559,7 +559,7 @@ fn execute_storage_request(
 
 /// Open an SSE stream to the server.
 fn open_sse_stream(
-    engine: &Rc<RefCell<SyncEngine>>,
+    engine: &Rc<RefCell<GrooveEngine>>,
     active_streams: &Rc<RefCell<HashMap<(u64, u32), ActiveStream>>>,
     server_url: &str,
     auth_token: &str,
@@ -678,7 +678,7 @@ fn open_sse_stream(
 
 /// Send a push request to the server.
 fn send_push_request(
-    engine: &Rc<RefCell<SyncEngine>>,
+    engine: &Rc<RefCell<GrooveEngine>>,
     server_url: &str,
     auth_token: &str,
     upstream_id: UpstreamId,

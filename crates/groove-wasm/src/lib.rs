@@ -1,7 +1,7 @@
 //! groove-wasm - WASM bindings for Groove database
 //!
 //! Browser-side database with:
-//! - `WasmDatabase` - In-memory or IndexedDB-backed database
+//! - `WasmQueryManager` - In-memory or IndexedDB-backed database
 //! - `WasmQueryHandle*` - Incremental query subscriptions (string, binary, delta)
 //! - `WasmBlobWriter` - Streaming blob creation
 //! - `WasmSyncDriver` - Runtime-less sync driver (state machine + EventSource)
@@ -9,13 +9,13 @@
 //!
 //! ## Modules
 //!
-//! - `driver` - Runtime-less sync driver using SyncEngine
+//! - `driver` - Runtime-less sync driver using GrooveEngine
 //! - `indexeddb` - IndexedDB storage implementation
 
 use bytes::Bytes;
-use groove::ListenerId;
+use groove::sql::query_graph::SubscriptionId;
 use groove::sql::{
-    Database, ExecuteResult, IncrementalQuery, encode_delta, encode_rows,
+    ExecuteResult, IncrementalQuery, QueryManager, encode_delta, encode_rows,
     query_graph::DeltaBatch,
     row_buffer::{OwnedRow, RowBuilder, RowDescriptor},
 };
@@ -108,22 +108,22 @@ impl BlobWriterState {
     }
 }
 
-// ==================== WASM Database ====================
+// ==================== WASM QueryManager ====================
 
 /// WASM-exposed database wrapper.
 #[wasm_bindgen]
-pub struct WasmDatabase {
-    db: Database,
+pub struct WasmQueryManager {
+    db: QueryManager,
     blob_registry: Rc<RefCell<BlobRegistry>>,
 }
 
 #[wasm_bindgen]
-impl WasmDatabase {
+impl WasmQueryManager {
     /// Create a new in-memory database.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        WasmDatabase {
-            db: Database::in_memory(),
+        WasmQueryManager {
+            db: QueryManager::in_memory(),
             blob_registry: Rc::new(RefCell::new(BlobRegistry::new())),
         }
     }
@@ -134,7 +134,7 @@ impl WasmDatabase {
     /// Otherwise, a new database will be created.
     ///
     /// @param db_name - Optional database name (defaults to "groove")
-    /// @returns Promise that resolves to WasmDatabase
+    /// @returns Promise that resolves to WasmQueryManager
     #[wasm_bindgen(js_name = "withIndexedDb")]
     pub fn with_indexeddb(db_name: Option<String>) -> Promise {
         future_to_promise(async move {
@@ -149,12 +149,12 @@ impl WasmDatabase {
                     .parse()
                     .map_err(|e| JsValue::from_str(&format!("invalid catalog_id: {:?}", e)))?;
 
-                Database::from_env(env.clone(), catalog_id)
+                QueryManager::from_env(env.clone(), catalog_id)
                     .await
                     .map_err(|e| JsValue::from_str(&format!("failed to load database: {:?}", e)))?
             } else {
                 // Create new database
-                let db = Database::new(env.clone());
+                let db = QueryManager::new(env.clone());
                 let catalog_id = db.catalog_object_id();
 
                 // Store catalog ID for future sessions
@@ -163,7 +163,7 @@ impl WasmDatabase {
                 db
             };
 
-            Ok(JsValue::from(WasmDatabase {
+            Ok(JsValue::from(WasmQueryManager {
                 db,
                 blob_registry: Rc::new(RefCell::new(BlobRegistry::new())),
             }))
@@ -174,7 +174,7 @@ impl WasmDatabase {
     ///
     /// @param db_name - Optional database name (defaults to "groove")
     /// @returns Promise that resolves to boolean
-    #[wasm_bindgen(js_name = "hasPersistedDatabase")]
+    #[wasm_bindgen(js_name = "hasPersistedQueryManager")]
     pub fn has_persisted_database(db_name: Option<String>) -> Promise {
         future_to_promise(async move {
             let name = db_name.as_deref().unwrap_or("groove");
@@ -188,7 +188,7 @@ impl WasmDatabase {
     ///
     /// @param db_name - Optional database name (defaults to "groove")
     /// @returns Promise that resolves when deleted
-    #[wasm_bindgen(js_name = "deletePersistedDatabase")]
+    #[wasm_bindgen(js_name = "deletePersistedQueryManager")]
     pub fn delete_persisted_database(db_name: Option<String>) -> Promise {
         future_to_promise(async move {
             let name = db_name.as_deref().unwrap_or("groove");
@@ -676,7 +676,7 @@ pub struct WasmQueryHandle {
     // Keep the query alive (it stays registered while we hold this)
     _query: IncrementalQuery,
     // Listener ID for unsubscribing
-    listener_id: Option<ListenerId>,
+    listener_id: Option<SubscriptionId>,
 }
 
 #[wasm_bindgen]
@@ -721,7 +721,7 @@ impl WasmQueryHandle {
 #[wasm_bindgen]
 pub struct WasmQueryHandleBinary {
     _query: IncrementalQuery,
-    listener_id: Option<ListenerId>,
+    listener_id: Option<SubscriptionId>,
 }
 
 #[wasm_bindgen]
@@ -760,7 +760,7 @@ impl WasmQueryHandleBinary {
 #[wasm_bindgen]
 pub struct WasmQueryHandleDelta {
     _query: IncrementalQuery,
-    listener_id: Option<ListenerId>,
+    listener_id: Option<SubscriptionId>,
 }
 
 #[wasm_bindgen]
@@ -897,7 +897,10 @@ impl WasmBlobWriter {
 /// Create a ReadableStream that reads from a blob.
 /// This is a convenience wrapper for JS interop.
 #[wasm_bindgen]
-pub fn create_blob_readable_stream(db: &WasmDatabase, handle_id: u64) -> Result<JsValue, JsValue> {
+pub fn create_blob_readable_stream(
+    db: &WasmQueryManager,
+    handle_id: u64,
+) -> Result<JsValue, JsValue> {
     // Get blob info first
     let registry = db.blob_registry.borrow();
     let content_ref = registry

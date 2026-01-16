@@ -686,8 +686,8 @@ impl<E: Environment> SyncServer<E> {
     /// * `commits` - The commits to broadcast
     /// * `frontier` - The new frontier after commits
     /// * `object_meta` - Optional object metadata
-    /// * `row_lookup` - Implementation for row lookups (typically Database)
-    /// * `policy_lookup` - Implementation for policy lookups (typically Database)
+    /// * `row_lookup` - Implementation for row lookups (typically QueryManager)
+    /// * `policy_lookup` - Implementation for policy lookups (typically QueryManager)
     /// * `exclude_session` - Optional session to exclude (typically the sender)
     #[allow(clippy::too_many_arguments)]
     pub async fn broadcast_commits_with_policy<R, P>(

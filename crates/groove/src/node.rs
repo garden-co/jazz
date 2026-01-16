@@ -11,7 +11,7 @@ use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
 use crate::sync::StorageRequest;
 
-/// Error types for LocalNode operations.
+/// Error types for ObjectManager operations.
 #[derive(Debug, Clone)]
 pub enum NodeError {
     /// Object not found.
@@ -23,7 +23,7 @@ pub enum NodeError {
 }
 
 /// Record of an object that changed during this pass.
-/// Used by SyncEngine to know which objects need to be pushed upstream.
+/// Used by GrooveEngine to know which objects need to be pushed upstream.
 #[derive(Debug, Clone)]
 pub struct ObjectChange {
     /// The object that changed.
@@ -39,7 +39,7 @@ pub struct ObjectChange {
 /// This callback is invoked after `apply_commits` adds commits to an object's branch.
 /// It receives the object ID, branch name, and the commits that were applied.
 ///
-/// This is used by the Database layer to be notified when sync applies commits,
+/// This is used by the QueryManager layer to be notified when sync applies commits,
 /// allowing it to update query graphs and column change metadata.
 ///
 /// Single-threaded: no Send/Sync bounds. The sync layer is single-threaded on all platforms.
@@ -63,9 +63,9 @@ pub fn generate_object_id() -> ObjectId {
     ObjectId::new(Uuid::new_v7(ts).as_u128())
 }
 
-/// A local node managing multiple objects.
+/// Manages in-memory objects (the object store).
 ///
-/// LocalNode is primarily an in-memory store for objects. Storage persistence
+/// ObjectManager is primarily an in-memory store for objects. Storage persistence
 /// is handled by the driver via the outbox system (StorageRequest).
 ///
 /// The optional Environment reference is only needed for:
@@ -73,26 +73,26 @@ pub fn generate_object_id() -> ObjectId {
 /// - Legacy compatibility with code that accesses env directly
 ///
 /// For new code, use the driver pattern where the driver owns storage and
-/// uses `restore_object` to populate LocalNode.
-pub struct LocalNode {
+/// uses `restore_object` to populate ObjectManager.
+pub struct ObjectManager {
     objects: RwLock<BTreeMap<ObjectId, Rc<RwLock<Object>>>>,
     /// Optional environment for legacy load_object support.
     /// New code should use restore_object instead.
     env: Option<Rc<dyn Environment>>,
     /// Optional callback invoked when commits are applied via `apply_commits`.
-    /// Used by Database to be notified of sync-applied commits.
+    /// Used by QueryManager to be notified of sync-applied commits.
     /// Single-threaded: uses RefCell on all platforms.
     on_commits_applied: RefCell<Option<CommitsAppliedCallback>>,
     /// Pending storage requests (for inbox/outbox architecture).
-    /// When using SyncEngine, these are drained into outboxes.
+    /// When using GrooveEngine, these are drained into outboxes.
     /// For standalone use, call `drain_storage_requests()` and execute them.
     pending_storage: RefCell<Vec<StorageRequest>>,
     /// Objects that changed during this pass (for sync).
-    /// SyncEngine drains these to know which objects to push upstream.
+    /// GrooveEngine drains these to know which objects to push upstream.
     changed_objects: RefCell<Vec<ObjectChange>>,
     /// Pending load requests (for lazy loading).
     /// When an object is needed but not in memory, add a request here.
-    /// SyncEngine drains these into storage outbox.
+    /// GrooveEngine drains these into storage outbox.
     pending_load_requests: RefCell<Vec<LoadRequest>>,
 }
 
@@ -105,28 +105,28 @@ pub struct LoadRequest {
     pub branch: String,
 }
 
-impl Default for LocalNode {
+impl Default for ObjectManager {
     fn default() -> Self {
         Self::in_memory()
     }
 }
 
-impl std::fmt::Debug for LocalNode {
+impl std::fmt::Debug for ObjectManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalNode")
+        f.debug_struct("ObjectManager")
             .field("objects", &self.objects.read().unwrap().len())
             .finish()
     }
 }
 
-impl LocalNode {
-    /// Create a new LocalNode with the given environment.
+impl ObjectManager {
+    /// Create a new ObjectManager with the given environment.
     ///
     /// The environment is used for `load_object` to read from storage.
     /// For new code using the driver pattern, consider using `new_without_env`
     /// and `restore_object` instead.
     pub fn new(env: Rc<dyn Environment>) -> Self {
-        LocalNode {
+        ObjectManager {
             objects: RwLock::new(BTreeMap::new()),
             env: Some(env),
             on_commits_applied: RefCell::new(None),
@@ -136,12 +136,12 @@ impl LocalNode {
         }
     }
 
-    /// Create a new LocalNode without environment.
+    /// Create a new ObjectManager without environment.
     ///
     /// Use this when the driver owns storage and will use `restore_object`
     /// to populate the node. Storage writes go through outboxes.
     pub fn new_without_env() -> Self {
-        LocalNode {
+        ObjectManager {
             objects: RwLock::new(BTreeMap::new()),
             env: None,
             on_commits_applied: RefCell::new(None),
@@ -153,7 +153,7 @@ impl LocalNode {
 
     /// Drain pending storage requests.
     ///
-    /// Called by SyncEngine during `pass()` to collect storage operations.
+    /// Called by GrooveEngine during `pass()` to collect storage operations.
     /// Also used by tests to execute storage directly.
     pub fn drain_storage_requests(&self) -> Vec<StorageRequest> {
         std::mem::take(&mut *self.pending_storage.borrow_mut())
@@ -166,7 +166,7 @@ impl LocalNode {
 
     /// Drain changed objects (for sync).
     ///
-    /// Called by SyncEngine during `pass()` to collect objects that need pushing.
+    /// Called by GrooveEngine during `pass()` to collect objects that need pushing.
     pub fn drain_changed_objects(&self) -> Vec<ObjectChange> {
         std::mem::take(&mut *self.changed_objects.borrow_mut())
     }
@@ -182,7 +182,7 @@ impl LocalNode {
 
     /// Drain pending load requests (for lazy loading).
     ///
-    /// Called by SyncEngine during `pass()` to collect objects that need loading.
+    /// Called by GrooveEngine during `pass()` to collect objects that need loading.
     pub fn drain_load_requests(&self) -> Vec<LoadRequest> {
         std::mem::take(&mut *self.pending_load_requests.borrow_mut())
     }
@@ -210,7 +210,7 @@ impl LocalNode {
 
     /// Set a callback to be invoked when commits are applied via `apply_commits`.
     ///
-    /// This is used by the Database layer to be notified when sync applies commits,
+    /// This is used by the QueryManager layer to be notified when sync applies commits,
     /// allowing it to update query graphs and rebuild column change metadata.
     ///
     /// The callback receives (object_id, branch, commits) after commits are successfully applied.
@@ -218,7 +218,7 @@ impl LocalNode {
         *self.on_commits_applied.borrow_mut() = callback;
     }
 
-    /// Create a new LocalNode with an in-memory environment.
+    /// Create a new ObjectManager with an in-memory environment.
     ///
     /// This creates a MemoryEnvironment for load_object support.
     /// For driver-owned storage, use `new_without_env()` instead.
@@ -685,7 +685,7 @@ impl LocalNode {
         // and std::sync::RwLock is not guaranteed to be re-entrant.
         drop(obj);
 
-        // Invoke the commits-applied callback if set (used by Database for query graph updates)
+        // Invoke the commits-applied callback if set (used by QueryManager for query graph updates)
         if !commits_to_persist.is_empty()
             && let Some(callback) = self.on_commits_applied.borrow().as_ref()
         {

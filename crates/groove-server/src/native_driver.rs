@@ -1,7 +1,7 @@
 //! Native Driver for the runtime-less sync engine.
 //!
 //! This module provides a tokio-based driver that:
-//! - Owns a `SyncEngine` from groove
+//! - Owns a `GrooveEngine` from groove
 //! - Handles SSE streams and HTTP requests via spawned tasks
 //! - Runs a tick timer via tokio::time
 //!
@@ -18,10 +18,10 @@ use tokio::sync::mpsc;
 
 use groove::ObjectId;
 use groove::sync::{
-    ConnectionEvent, ConnectionEventKind, Encode, Inboxes, LocalWriteEvent, MemoryStorage,
-    Notification, OutboundRequest, Outboxes, PushRequest, PushResponse, PushResponseEvent,
-    SseEvent, SseInboxEvent, StreamAction, SubscribeRequestEvent, SubscriptionOptions, SyncEngine,
-    TickEvent, UpstreamId,
+    ConnectionEvent, ConnectionEventKind, Encode, GrooveEngine, Inboxes, LocalWriteEvent,
+    MemoryStorage, Notification, OutboundRequest, Outboxes, PushRequest, PushResponse,
+    PushResponseEvent, SseEvent, SseInboxEvent, StreamAction, SubscribeRequestEvent,
+    SubscriptionOptions, TickEvent, UpstreamId,
 };
 
 // ============================================================================
@@ -67,7 +67,7 @@ enum DriverEvent {
 /// feeding events into the sync engine via inboxes.
 pub struct NativeSyncDriver {
     /// The sync engine
-    engine: SyncEngine,
+    engine: GrooveEngine,
     /// In-memory storage (owned by driver, not Environment)
     storage: MemoryStorage,
     /// Server URL for sync
@@ -88,7 +88,7 @@ pub struct NativeSyncDriver {
 
 impl NativeSyncDriver {
     /// Create a new native sync driver.
-    pub fn new(server_url: String, auth_token: String, engine: SyncEngine) -> Self {
+    pub fn new(server_url: String, auth_token: String, engine: GrooveEngine) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let upstream_id = UpstreamId(0); // Will be set when add_upstream is called
 
@@ -148,7 +148,7 @@ impl NativeSyncDriver {
         self.handle_outboxes(outboxes);
     }
 
-    /// Process a local write (e.g., from Database layer).
+    /// Process a local write (e.g., from QueryManager layer).
     pub fn write(&mut self, object_id: ObjectId, branch: String, content: Vec<u8>) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -386,12 +386,12 @@ impl NativeSyncDriver {
     }
 
     /// Get a reference to the sync engine.
-    pub fn engine(&self) -> &SyncEngine {
+    pub fn engine(&self) -> &GrooveEngine {
         &self.engine
     }
 
     /// Get a mutable reference to the sync engine.
-    pub fn engine_mut(&mut self) -> &mut SyncEngine {
+    pub fn engine_mut(&mut self) -> &mut GrooveEngine {
         &mut self.engine
     }
 }

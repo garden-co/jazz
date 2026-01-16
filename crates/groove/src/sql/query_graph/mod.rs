@@ -62,6 +62,3 @@ pub use delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 pub use graph::{GraphId, GraphState, QueryGraph};
 pub use node::{AccessReason, InputPort, MergedObjectState, NodeId, QueryNode};
 pub use predicate::{Predicate, PredicateValue};
-
-// Re-export from parent for internal use
-use super::database::DatabaseState;

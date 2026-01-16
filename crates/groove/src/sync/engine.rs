@@ -25,7 +25,7 @@
 //! │                    SYNC ENGINE                               │
 //! │  (Pure, synchronous, no async, no spawning)                 │
 //! │                                                              │
-//! │  LocalNode + SyncState + Database                           │
+//! │  ObjectManager + SyncState + QueryManager                           │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::commit::{Commit, CommitId};
-use crate::node::LocalNode;
+use crate::node::ObjectManager;
 use crate::object::ObjectId;
 use crate::sql::query_graph::SubscriptionId;
 use crate::storage::ChunkHash;
@@ -313,7 +313,7 @@ pub enum StreamAction {
 /// A notification for external subscribers.
 #[derive(Debug, Clone)]
 pub enum Notification {
-    /// Objects received from sync (for Database layer).
+    /// Objects received from sync (for QueryManager layer).
     ObjectsReceived {
         object_id: ObjectId,
         commits: Vec<Commit>,
@@ -450,9 +450,9 @@ impl Default for SyncConfig {
 ///
 /// This is a pure state machine that processes inboxes and produces outboxes.
 /// All I/O is handled externally by a "driver".
-pub struct SyncEngine {
-    /// Local object storage (shared with Database).
-    pub local_node: Rc<LocalNode>,
+pub struct GrooveEngine {
+    /// Local object storage (shared with QueryManager).
+    pub local_node: Rc<ObjectManager>,
 
     /// Configuration.
     pub config: SyncConfig,
@@ -476,17 +476,17 @@ pub struct SyncEngine {
     pending_subscription_chunks: HashMap<u64, (SubscriptionId, ChunkHash)>,
 }
 
-impl Default for SyncEngine {
+impl Default for GrooveEngine {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SyncEngine {
+impl GrooveEngine {
     /// Create a new sync engine with default configuration.
     pub fn new() -> Self {
         Self {
-            local_node: Rc::new(LocalNode::default()),
+            local_node: Rc::new(ObjectManager::default()),
             config: SyncConfig::default(),
             upstreams: HashMap::new(),
             next_upstream_id: 1,
@@ -497,8 +497,8 @@ impl SyncEngine {
         }
     }
 
-    /// Create a sync engine with a shared LocalNode.
-    pub fn with_local_node(local_node: Rc<LocalNode>) -> Self {
+    /// Create a sync engine with a shared ObjectManager.
+    pub fn with_local_node(local_node: Rc<ObjectManager>) -> Self {
         Self {
             local_node,
             config: SyncConfig::default(),
@@ -572,7 +572,7 @@ impl SyncEngine {
             self.process_local_write(write);
         }
 
-        // 4. Drain changed objects from LocalNode → add to pending_writes
+        // 4. Drain changed objects from ObjectManager → add to pending_writes
         self.drain_changed_objects(&mut outboxes);
 
         // 5. Process SSE events → apply commits, update state
@@ -600,12 +600,12 @@ impl SyncEngine {
             self.process_listener_chunk_request(request, &mut outboxes);
         }
 
-        // 10. Drain storage requests from LocalNode
+        // 10. Drain storage requests from ObjectManager
         outboxes
             .storage
             .extend(self.local_node.drain_storage_requests());
 
-        // 11. Drain load requests from LocalNode → emit LoadObject storage requests
+        // 11. Drain load requests from ObjectManager → emit LoadObject storage requests
         for load_req in self.local_node.drain_load_requests() {
             let request_id = self.next_storage_request_id();
             outboxes.storage.push(StorageRequest::LoadObject {
@@ -763,7 +763,7 @@ impl SyncEngine {
     /// Process a local write from inbox.
     /// The actual pending_writes tracking is done via drain_changed_objects.
     fn process_local_write(&mut self, write: LocalWriteEvent) {
-        // Apply write to LocalNode (this will record the change)
+        // Apply write to ObjectManager (this will record the change)
         let _ = self.local_node.write_with_meta(
             write.object_id,
             &write.branch,
@@ -774,7 +774,7 @@ impl SyncEngine {
         );
     }
 
-    /// Drain changed objects from LocalNode and add to pending_writes.
+    /// Drain changed objects from ObjectManager and add to pending_writes.
     fn drain_changed_objects(&mut self, outboxes: &mut Outboxes) {
         let changes = self.local_node.drain_changed_objects();
         if changes.is_empty() {
@@ -829,7 +829,7 @@ impl SyncEngine {
                 // Update server known state
                 upstream.server_known_state.insert(object_id, frontier);
 
-                // Apply commits to LocalNode
+                // Apply commits to ObjectManager
                 if !commits.is_empty() {
                     self.local_node
                         .apply_commits(object_id, "main", commits.clone());
@@ -852,7 +852,7 @@ impl SyncEngine {
                 object_id,
                 truncate_at,
             } => {
-                // Apply truncation to LocalNode
+                // Apply truncation to ObjectManager
                 let _ = self.local_node.truncate_at(object_id, "main", truncate_at);
             }
             SseEvent::Request {
@@ -940,7 +940,7 @@ impl SyncEngine {
                 frontier,
                 commits,
             } => {
-                // Restore the object into LocalNode
+                // Restore the object into ObjectManager
                 self.local_node
                     .restore_object(object_id, "", &branch, frontier, commits.clone());
 
@@ -1113,14 +1113,14 @@ mod tests {
 
     #[test]
     fn test_engine_creation() {
-        let engine = SyncEngine::new();
+        let engine = GrooveEngine::new();
         assert!(engine.upstreams.is_empty());
         assert!(engine.pending_writes.is_empty());
     }
 
     #[test]
     fn test_add_upstream() {
-        let mut engine = SyncEngine::new();
+        let mut engine = GrooveEngine::new();
         let id = engine.add_upstream();
         assert_eq!(id, UpstreamId(1));
         assert!(engine.upstream(id).is_some());
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn test_subscribe_request() {
-        let mut engine = SyncEngine::new();
+        let mut engine = GrooveEngine::new();
         let upstream_id = engine.add_upstream();
 
         let inboxes = Inboxes {
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_local_write_queues_debounce() {
-        let mut engine = SyncEngine::new();
+        let mut engine = GrooveEngine::new();
         let object_id = engine.local_node.create_object("test");
 
         let inboxes = Inboxes {
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_sse_commits_apply_and_notify() {
-        let mut engine = SyncEngine::new();
+        let mut engine = GrooveEngine::new();
         let upstream_id = engine.add_upstream();
 
         // Set upstream to connected
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn test_listener_chunk_request_flow() {
-        let mut engine = SyncEngine::new();
+        let mut engine = GrooveEngine::new();
         let subscription_id = SubscriptionId::new(42);
         let chunk_hash = ChunkHash::compute(b"test chunk data");
 

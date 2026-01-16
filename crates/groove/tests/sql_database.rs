@@ -1,4 +1,4 @@
-//! Integration tests for sql::Database
+//! Integration tests for sql::QueryManager
 
 use std::rc::Rc;
 use std::sync::RwLock;
@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use groove::ObjectId;
 use groove::sql::{
-    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, OwnedRow, RowBuilder,
+    ColumnDef, ColumnType, ExecuteResult, OwnedRow, QueryManager, QueryManagerError, RowBuilder,
     RowDescriptor, RowValue, TableSchema,
 };
 
@@ -24,7 +24,7 @@ where
 
 #[test]
 fn create_table() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let schema = TableSchema::new(
         "users",
@@ -45,7 +45,7 @@ fn create_table() {
     let schema2 = TableSchema::new("users", vec![]);
     assert!(matches!(
         db.create_table(schema2),
-        Err(DatabaseError::TableExists(_))
+        Err(QueryManagerError::TableExists(_))
     ));
 }
 
@@ -53,7 +53,7 @@ fn create_table() {
 
 #[test]
 fn insert_and_get() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let schema = TableSchema::new(
         "users",
@@ -82,7 +82,7 @@ fn insert_and_get() {
 
 #[test]
 fn insert_with_null() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let schema = TableSchema::new(
         "users",
@@ -104,7 +104,7 @@ fn insert_with_null() {
 
 #[test]
 fn insert_missing_required_column() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let schema = TableSchema::new(
         "users",
@@ -127,7 +127,7 @@ fn insert_missing_required_column() {
 
 #[test]
 fn update_row_test() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let schema = TableSchema::new(
         "users",
@@ -160,7 +160,7 @@ fn update_row_test() {
 
 #[test]
 fn delete_row_test() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let schema = TableSchema::new(
         "users",
@@ -184,7 +184,7 @@ fn delete_row_test() {
 
 #[test]
 fn select_all() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -226,7 +226,7 @@ fn select_all() {
 
 #[test]
 fn query_where() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -277,7 +277,7 @@ fn query_where() {
 
 #[test]
 fn execute_create_table() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     let result = db
         .execute("CREATE TABLE users (name STRING NOT NULL, age I64)")
@@ -289,7 +289,7 @@ fn execute_create_table() {
 
 #[test]
 fn execute_insert() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I64)")
         .unwrap();
@@ -310,7 +310,7 @@ fn execute_insert() {
 
 #[test]
 fn execute_select() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
@@ -336,7 +336,7 @@ fn execute_select() {
 
 #[test]
 fn execute_update() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I64)")
         .unwrap();
@@ -365,7 +365,7 @@ fn execute_update() {
 
 #[test]
 fn execute_delete() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
@@ -408,7 +408,7 @@ fn execute_delete() {
 
 #[test]
 fn execute_delete_by_condition() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
@@ -442,7 +442,7 @@ fn execute_delete_by_condition() {
 
 #[test]
 fn create_table_with_ref_requires_target_table() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Cannot create posts table before users table exists
     let result = db.create_table(TableSchema::new(
@@ -452,7 +452,7 @@ fn create_table_with_ref_requires_target_table() {
             ColumnDef::required("title", ColumnType::String),
         ],
     ));
-    assert!(matches!(result, Err(DatabaseError::TableNotFound(_))));
+    assert!(matches!(result, Err(QueryManagerError::TableNotFound(_))));
 
     // Create users first
     db.create_table(TableSchema::new(
@@ -474,7 +474,7 @@ fn create_table_with_ref_requires_target_table() {
 
 #[test]
 fn insert_validates_ref() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -499,7 +499,7 @@ fn insert_validates_ref() {
     });
     assert!(matches!(
         result,
-        Err(DatabaseError::InvalidReference { .. })
+        Err(QueryManagerError::InvalidReference { .. })
     ));
 
     // Create a user
@@ -522,7 +522,7 @@ fn insert_validates_ref() {
 
 #[test]
 fn find_referencing_uses_index() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -589,7 +589,7 @@ fn find_referencing_uses_index() {
 
 #[test]
 fn update_maintains_index() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -658,7 +658,7 @@ fn update_maintains_index() {
 
 #[test]
 fn delete_maintains_index() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -707,7 +707,7 @@ fn delete_maintains_index() {
 
 #[test]
 fn find_referencing_on_non_ref_column_fails() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -716,12 +716,12 @@ fn find_referencing_on_non_ref_column_fails() {
     .unwrap();
 
     let result = db.find_referencing("users", "name", ObjectId::new(123));
-    assert!(matches!(result, Err(DatabaseError::NotAReference(_))));
+    assert!(matches!(result, Err(QueryManagerError::NotAReference(_))));
 }
 
 #[test]
 fn nullable_ref_column() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -769,7 +769,7 @@ fn nullable_ref_column() {
 
 #[test]
 fn join_basic() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -826,7 +826,7 @@ fn join_basic() {
 
 #[test]
 fn join_with_where_on_primary_table() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -869,7 +869,7 @@ fn join_with_where_on_primary_table() {
 
 #[test]
 fn join_with_where_on_joined_table() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -935,7 +935,7 @@ fn join_with_where_on_joined_table() {
 
 #[test]
 fn join_no_matches() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -955,7 +955,7 @@ fn join_no_matches() {
 
 #[test]
 fn join_table_star_projection() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -992,7 +992,7 @@ fn join_table_star_projection() {
 
 #[test]
 fn join_multiple_conditions_where() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1126,7 +1126,7 @@ fn join_multiple_conditions_where() {
 
 #[test]
 fn incremental_query_returns_current_rows() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
@@ -1147,7 +1147,7 @@ fn incremental_query_returns_current_rows() {
 
 #[test]
 fn incremental_query_with_where_clause() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
@@ -1173,7 +1173,7 @@ fn incremental_query_with_where_clause() {
 
 #[test]
 fn incremental_query_auto_updates_on_insert() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1207,7 +1207,7 @@ fn incremental_query_auto_updates_on_insert() {
 
 #[test]
 fn incremental_query_auto_updates_on_update() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1241,7 +1241,7 @@ fn incremental_query_auto_updates_on_update() {
 
 #[test]
 fn incremental_query_auto_updates_on_delete() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1270,7 +1270,7 @@ fn incremental_query_auto_updates_on_delete() {
 
 #[test]
 fn incremental_query_callback_on_insert() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("INSERT INTO users (name) VALUES ('Alice')")
@@ -1311,7 +1311,7 @@ fn incremental_query_callback_on_insert() {
 
 #[test]
 fn incremental_query_callback_on_delete() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -1364,7 +1364,7 @@ fn incremental_query_callback_on_delete() {
 
 #[test]
 fn incremental_join_basic() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1404,7 +1404,7 @@ fn incremental_join_basic() {
 
 #[test]
 fn incremental_join_updates_on_post_insert() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1455,7 +1455,7 @@ fn incremental_join_updates_on_post_insert() {
 
 #[test]
 fn incremental_join_updates_on_user_change() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1498,7 +1498,7 @@ fn incremental_join_updates_on_user_change() {
 
 #[test]
 fn incremental_join_delete_post() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1547,7 +1547,7 @@ fn incremental_join_delete_post() {
 
 #[test]
 fn incremental_join_delete_user() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1608,7 +1608,7 @@ fn incremental_join_delete_user() {
 
 #[test]
 fn incremental_join_multiple_users() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
@@ -1685,7 +1685,7 @@ fn incremental_join_multiple_users() {
 
 #[test]
 fn array_subquery_correlated() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE folders (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE notes (folder REFERENCES folders NOT NULL, title STRING NOT NULL)")
@@ -1756,7 +1756,7 @@ fn array_subquery_correlated() {
 
 #[test]
 fn array_subquery_returns_whole_rows() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE folders (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE notes (folder REFERENCES folders NOT NULL, title STRING NOT NULL)")
@@ -1803,7 +1803,7 @@ fn array_subquery_returns_whole_rows() {
 
 #[test]
 fn array_subquery_empty_result() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE folders (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE notes (folder REFERENCES folders NOT NULL, title STRING NOT NULL)")
@@ -1838,7 +1838,7 @@ fn array_subquery_empty_result() {
 #[test]
 #[ignore = "non-correlated ARRAY subqueries not supported in incremental path"]
 fn array_subquery_non_correlated() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE folders (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE notes (title STRING NOT NULL)")
@@ -1868,7 +1868,7 @@ fn array_subquery_non_correlated() {
 
 #[test]
 fn test_note_with_i64_timestamps() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE User (name STRING NOT NULL, email STRING NOT NULL)")
         .unwrap();
@@ -1907,7 +1907,7 @@ fn test_note_with_i64_timestamps() {
 
 #[test]
 fn soft_delete_removes_row_from_queries() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.create_table(TableSchema::new(
         "users",
@@ -1934,7 +1934,7 @@ fn soft_delete_removes_row_from_queries() {
 
 #[test]
 fn hard_delete_via_sql() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1965,7 +1965,7 @@ fn hard_delete_via_sql() {
 
 #[test]
 fn soft_delete_via_sql() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1993,7 +1993,7 @@ fn soft_delete_via_sql() {
 
 #[test]
 fn delete_multiple_rows_hard() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
         .unwrap();
@@ -2028,7 +2028,7 @@ fn delete_multiple_rows_hard() {
 
 #[test]
 fn hard_delete_all_rows() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -2056,7 +2056,7 @@ fn hard_delete_all_rows() {
 
 #[test]
 fn select_limit() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2073,7 +2073,7 @@ fn select_limit() {
 
 #[test]
 fn query_offset() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2090,7 +2090,7 @@ fn query_offset() {
 
 #[test]
 fn query_limit_offset() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2107,7 +2107,7 @@ fn query_limit_offset() {
 
 #[test]
 fn query_limit_exceeds_rows() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2124,7 +2124,7 @@ fn query_limit_exceeds_rows() {
 
 #[test]
 fn query_offset_exceeds_rows() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2141,7 +2141,7 @@ fn query_offset_exceeds_rows() {
 
 #[test]
 fn incremental_query_limit() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2169,7 +2169,7 @@ fn incremental_query_limit() {
 
 #[test]
 fn incremental_query_offset() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2199,7 +2199,7 @@ fn incremental_query_offset() {
 
 #[test]
 fn incremental_query_limit_offset() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
 
@@ -2221,7 +2221,7 @@ fn incremental_query_limit_offset() {
 
 #[test]
 fn incremental_query_with_array_subquery() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create parent table (Issues)
     db.execute("CREATE TABLE Issues (title STRING NOT NULL)")
@@ -2301,7 +2301,7 @@ fn incremental_query_with_array_subquery() {
 fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
     use groove::sql::query_graph::{GraphId, QueryGraphBuilder};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Use FULL schema matching demo-app to reproduce the issue exactly
 
@@ -2467,7 +2467,7 @@ fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
 /// This tests the `build_join_graph` SQL parsing path rather than the direct API.
 #[test]
 fn incremental_query_sql_join_preserves_nullable_columns() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Projects: name, color, description (nullable)
     let projects_schema = TableSchema::new(
@@ -2555,7 +2555,7 @@ fn incremental_query_sql_join_preserves_nullable_columns() {
 /// This tests the exact flow used by TypeScript: build_join_graph + add_join_array_aggregates.
 #[test]
 fn incremental_query_sql_join_with_array_preserves_nullable_columns() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Projects: name, color, description (nullable)
     let projects_schema = TableSchema::new(
@@ -2694,7 +2694,7 @@ fn incremental_query_sql_join_with_array_preserves_nullable_columns() {
 /// rather than a separate Value::Row type.
 #[test]
 fn incremental_query_array_with_nested_join() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Labels: name, color
     let labels_schema = TableSchema::new(
@@ -2885,7 +2885,7 @@ fn incremental_query_array_with_nested_join() {
 ///   SELECT i.id, i.title, ..., Projects as project, ARRAY(...) as IssueLabels FROM Issues i JOIN Projects
 #[test]
 fn incremental_query_table_row_plus_array_subquery() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Projects: name, color, description (nullable)
     let projects_schema = TableSchema::new(
@@ -3005,7 +3005,7 @@ fn incremental_query_table_row_plus_array_subquery() {
 /// This verifies that multiple array columns are properly accumulated.
 #[test]
 fn incremental_query_multiple_array_subqueries() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create Projects table
     let projects_schema = TableSchema::new(
@@ -3122,7 +3122,7 @@ fn incremental_query_multiple_array_subqueries() {
 /// SQL: ARRAY(SELECT ... FROM IssueLabels il JOIN Labels ON il.label = Labels.id ...)
 #[test]
 fn incremental_query_array_with_inner_join() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create Labels table (the joined table inside ARRAY)
     let labels_schema = TableSchema::new(
@@ -3213,7 +3213,7 @@ fn incremental_query_array_with_inner_join() {
 /// Outer JOIN + multiple ARRAY subqueries with inner JOINs
 #[test]
 fn incremental_query_outer_join_with_inner_array_joins() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create all tables matching demo app schema
     let projects_schema = TableSchema::new(
@@ -3365,7 +3365,7 @@ fn incremental_query_array_with_inner_join_empty_start() {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create all tables (empty)
     let labels_schema = TableSchema::new(
@@ -3521,7 +3521,7 @@ fn incremental_query_array_inner_join_update() {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create tables
     let labels_schema = TableSchema::new(
@@ -3663,7 +3663,7 @@ fn incremental_query_outer_join_plus_array_inner_joins_empty_start() {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create all tables matching demo app schema (empty)
     let projects_schema = TableSchema::new(
@@ -3920,7 +3920,7 @@ fn incremental_query_outer_join_plus_array_inner_joins_empty_start() {
 /// Combined with ARRAY subqueries for includes.
 #[test]
 fn filter_join_plus_array_subqueries() {
-    let db = Database::in_memory();
+    let db = QueryManager::in_memory();
 
     // Create all tables matching demo app schema
     let projects_schema = TableSchema::new(

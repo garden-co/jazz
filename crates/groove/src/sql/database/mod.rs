@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::RwLock;
 
-use crate::node::{LocalNode, generate_object_id};
+use crate::node::{ObjectManager, generate_object_id};
 use crate::object::ObjectId;
 use crate::sql::catalog::{Catalog, DescriptorId, TableDescriptor};
 use crate::sql::index::RefIndex;
@@ -63,7 +63,7 @@ pub struct IncrementalQuery {
     /// The graph ID in the registry.
     graph_id: GraphId,
     /// Reference to database state for output retrieval.
-    db_state: Rc<DatabaseState>,
+    db_state: Rc<QueryManagerState>,
 }
 
 impl std::fmt::Debug for IncrementalQuery {
@@ -140,10 +140,10 @@ impl Drop for IncrementalQuery {
 
 /// Shared database state that can be held by queries for re-evaluation.
 /// This is the core data that queries need access to.
-pub struct DatabaseState {
+pub struct QueryManagerState {
     /// Shared reference to the underlying object store.
-    /// This can be shared with SyncedNode for sync operations.
-    node: Rc<LocalNode>,
+    /// This can be shared with GrooveEngine for sync operations.
+    node: Rc<ObjectManager>,
     /// Object ID for the database catalog.
     catalog_object_id: ObjectId,
     /// Map from table name to schema object ID.
@@ -167,9 +167,9 @@ pub struct DatabaseState {
     viewer: RwLock<Option<ObjectId>>,
 }
 
-impl std::fmt::Debug for DatabaseState {
+impl std::fmt::Debug for QueryManagerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DatabaseState")
+        f.debug_struct("QueryManagerState")
             .field(
                 "tables",
                 &self.tables.read().unwrap().keys().collect::<Vec<_>>(),
@@ -178,14 +178,14 @@ impl std::fmt::Debug for DatabaseState {
     }
 }
 
-impl DatabaseState {
-    /// Get a reference to the underlying LocalNode.
-    pub fn node(&self) -> &LocalNode {
+impl QueryManagerState {
+    /// Get a reference to the underlying ObjectManager.
+    pub fn node(&self) -> &ObjectManager {
         &self.node
     }
 
-    /// Get the underlying LocalNode as an Arc (for sharing with SyncedNode).
-    pub fn node_arc(&self) -> Rc<LocalNode> {
+    /// Get the underlying ObjectManager as an Rc (for sharing with GrooveEngine).
+    pub fn node_arc(&self) -> Rc<ObjectManager> {
         Rc::clone(&self.node)
     }
 
@@ -218,16 +218,16 @@ impl DatabaseState {
     ///
     /// This re-reads the catalog object and all table descriptors,
     /// refreshing the in-memory schema cache.
-    pub fn reload_catalog(&self) -> Result<(), DatabaseError> {
+    pub fn reload_catalog(&self) -> Result<(), QueryManagerError> {
         // Read the catalog object
         let catalog_bytes = self
             .node
             .read(self.catalog_object_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| QueryManagerError::Storage("catalog not found".to_string()))?;
 
         let catalog = Catalog::from_bytes(&catalog_bytes)
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         // Clear existing schema cache
         self.tables.write().unwrap().clear();
@@ -289,7 +289,7 @@ impl DatabaseState {
 
     #[allow(clippy::arc_with_non_send_sync)]
     fn new(env: Rc<dyn Environment>) -> Self {
-        let node = Rc::new(LocalNode::new(env));
+        let node = Rc::new(ObjectManager::new(env));
 
         // Create catalog object
         let catalog_object_id = node.create_object("catalog");
@@ -305,7 +305,7 @@ impl DatabaseState {
         )
         .expect("failed to initialize catalog");
 
-        DatabaseState {
+        QueryManagerState {
             node,
             catalog_object_id,
             tables: RwLock::new(HashMap::new()),
@@ -322,7 +322,7 @@ impl DatabaseState {
 
     #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory() -> Self {
-        let node = Rc::new(LocalNode::in_memory());
+        let node = Rc::new(ObjectManager::in_memory());
 
         // Create catalog object
         let catalog_object_id = node.create_object("catalog");
@@ -338,7 +338,7 @@ impl DatabaseState {
         )
         .expect("failed to initialize catalog");
 
-        DatabaseState {
+        QueryManagerState {
             node,
             catalog_object_id,
             tables: RwLock::new(HashMap::new()),
@@ -358,7 +358,7 @@ impl DatabaseState {
     /// This allows multiple clients to share the same catalog via sync.
     #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory_with_catalog(catalog_object_id: ObjectId) -> Self {
-        let node = Rc::new(LocalNode::in_memory());
+        let node = Rc::new(ObjectManager::in_memory());
 
         // Ensure catalog object exists (creates if new, reuses if exists)
         let is_new = node.ensure_object(catalog_object_id, "catalog");
@@ -376,7 +376,7 @@ impl DatabaseState {
             .expect("failed to initialize catalog");
         }
 
-        DatabaseState {
+        QueryManagerState {
             node,
             catalog_object_id,
             tables: RwLock::new(HashMap::new()),
@@ -398,12 +398,12 @@ impl DatabaseState {
     /// Use `has_catalog()` or `await_catalog()` to check/wait for catalog arrival.
     #[allow(clippy::arc_with_non_send_sync)]
     fn in_memory_replica(catalog_object_id: ObjectId) -> Self {
-        let node = Rc::new(LocalNode::in_memory());
+        let node = Rc::new(ObjectManager::in_memory());
 
         // Create the catalog object but don't write to it
         node.ensure_object(catalog_object_id, "catalog");
 
-        DatabaseState {
+        QueryManagerState {
             node,
             catalog_object_id,
             tables: RwLock::new(HashMap::new()),
@@ -429,16 +429,16 @@ impl DatabaseState {
 
     /// Set up the callback for sync-applied commits.
     ///
-    /// This must be called after the DatabaseState is wrapped in Arc, passing a clone
+    /// This must be called after the QueryManagerState is wrapped in Arc, passing a clone
     /// of the Arc. The callback will be invoked when commits are applied via
-    /// `LocalNode::apply_commits`, which happens during sync.
+    /// `ObjectManager::apply_commits`, which happens during sync.
     ///
     /// The callback:
     /// 1. Looks up the table name from object metadata
     /// 2. Rebuilds column change metadata for proper per-column LWW merge
     /// 3. Notifies query graphs of the change
     ///
-    fn setup_sync_callback(state: Rc<DatabaseState>) {
+    fn setup_sync_callback(state: Rc<QueryManagerState>) {
         let state_clone = Rc::clone(&state);
         let callback = Rc::new(
             move |object_id: ObjectId, branch: &str, _commits: &[crate::commit::Commit]| {
@@ -479,7 +479,7 @@ impl DatabaseState {
     /// Notify query graphs about an object change (for sync-applied commits).
     ///
     /// This is similar to notify_object_changed_internal but doesn't require
-    /// going through Database since we're already in the callback context.
+    /// going through QueryManager since we're already in the callback context.
     fn notify_object_changed_sync(&self, table: &str, object_id: ObjectId) {
         if let Some(obj_lock) = self.node.get_object(object_id)
             && let Ok(obj) = obj_lock.read()
@@ -497,7 +497,7 @@ impl DatabaseState {
         schemas.get(schema_id).cloned()
     }
 
-    /// Get an Object by ID from the underlying LocalNode.
+    /// Get an Object by ID from the underlying ObjectManager.
     ///
     /// This provides access to objects for branch-aware queries that need
     /// to read from the object's branches and perform per-column merging.
@@ -713,13 +713,13 @@ impl DatabaseState {
     }
 }
 
-/// Database providing SQL operations on top of LocalNode.
+/// QueryManager providing SQL operations on top of ObjectManager.
 ///
-/// The Database uses shared state internally so that reactive queries
+/// The QueryManager uses shared state internally so that reactive queries
 /// can hold references to the same data and auto-update when changes occur.
-pub struct Database {
+pub struct QueryManager {
     /// Shared database state.
-    state: Rc<DatabaseState>,
+    state: Rc<QueryManagerState>,
 }
 
 /// Result of executing a SQL statement.
@@ -781,9 +781,9 @@ struct InheritsChain {
     terminal_table: String,
 }
 
-/// Database errors.
+/// QueryManager errors.
 #[derive(Debug, Clone)]
-pub enum DatabaseError {
+pub enum QueryManagerError {
     /// Table already exists.
     TableExists(String),
     /// Table not found.
@@ -890,30 +890,30 @@ pub struct MigrationResult {
     pub warnings: Vec<LensWarning>,
 }
 
-impl From<MigrationError> for DatabaseError {
+impl From<MigrationError> for QueryManagerError {
     fn from(e: MigrationError) -> Self {
-        DatabaseError::Migration(e)
+        QueryManagerError::Migration(e)
     }
 }
 
-impl std::fmt::Display for DatabaseError {
+impl std::fmt::Display for QueryManagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DatabaseError::TableExists(name) => write!(f, "table '{}' already exists", name),
-            DatabaseError::TableNotFound(name) => write!(f, "table '{}' not found", name),
-            DatabaseError::RowNotFound(id) => write!(f, "row {} not found", id),
-            DatabaseError::ColumnNotFound(name) => write!(f, "column '{}' not found", name),
-            DatabaseError::Schema(e) => write!(f, "schema error: {}", e),
-            DatabaseError::Row(e) => write!(f, "row error: {}", e),
-            DatabaseError::Parse(e) => write!(f, "parse error: {}", e),
-            DatabaseError::ColumnMismatch { expected, got } => {
+            QueryManagerError::TableExists(name) => write!(f, "table '{}' already exists", name),
+            QueryManagerError::TableNotFound(name) => write!(f, "table '{}' not found", name),
+            QueryManagerError::RowNotFound(id) => write!(f, "row {} not found", id),
+            QueryManagerError::ColumnNotFound(name) => write!(f, "column '{}' not found", name),
+            QueryManagerError::Schema(e) => write!(f, "schema error: {}", e),
+            QueryManagerError::Row(e) => write!(f, "row error: {}", e),
+            QueryManagerError::Parse(e) => write!(f, "parse error: {}", e),
+            QueryManagerError::ColumnMismatch { expected, got } => {
                 write!(
                     f,
                     "column count mismatch: expected {}, got {}",
                     expected, got
                 )
             }
-            DatabaseError::TypeMismatch {
+            QueryManagerError::TypeMismatch {
                 column,
                 expected,
                 got,
@@ -924,9 +924,11 @@ impl std::fmt::Display for DatabaseError {
                     column, expected, got
                 )
             }
-            DatabaseError::MissingColumn(name) => write!(f, "missing required column: {}", name),
-            DatabaseError::Storage(e) => write!(f, "storage error: {}", e),
-            DatabaseError::InvalidReference {
+            QueryManagerError::MissingColumn(name) => {
+                write!(f, "missing required column: {}", name)
+            }
+            QueryManagerError::Storage(e) => write!(f, "storage error: {}", e),
+            QueryManagerError::InvalidReference {
                 column,
                 target_table,
                 target_id,
@@ -937,40 +939,42 @@ impl std::fmt::Display for DatabaseError {
                     column, target_id, target_table
                 )
             }
-            DatabaseError::NotAReference(name) => write!(f, "column '{}' is not a reference", name),
-            DatabaseError::Policy(e) => write!(f, "policy error: {}", e),
-            DatabaseError::PolicyDenied { action, reason } => {
+            QueryManagerError::NotAReference(name) => {
+                write!(f, "column '{}' is not a reference", name)
+            }
+            QueryManagerError::Policy(e) => write!(f, "policy error: {}", e),
+            QueryManagerError::PolicyDenied { action, reason } => {
                 write!(f, "{} denied: {}", action, reason)
             }
-            DatabaseError::Migration(e) => write!(f, "migration error: {}", e),
-            DatabaseError::Execution(e) => write!(f, "execution error: {}", e),
+            QueryManagerError::Migration(e) => write!(f, "migration error: {}", e),
+            QueryManagerError::Execution(e) => write!(f, "execution error: {}", e),
         }
     }
 }
 
-impl std::error::Error for DatabaseError {}
+impl std::error::Error for QueryManagerError {}
 
-impl From<SchemaError> for DatabaseError {
+impl From<SchemaError> for QueryManagerError {
     fn from(e: SchemaError) -> Self {
-        DatabaseError::Schema(e)
+        QueryManagerError::Schema(e)
     }
 }
 
-impl From<RowError> for DatabaseError {
+impl From<RowError> for QueryManagerError {
     fn from(e: RowError) -> Self {
-        DatabaseError::Row(e)
+        QueryManagerError::Row(e)
     }
 }
 
-impl From<PolicyError> for DatabaseError {
+impl From<PolicyError> for QueryManagerError {
     fn from(e: PolicyError) -> Self {
-        DatabaseError::Policy(e)
+        QueryManagerError::Policy(e)
     }
 }
 
-impl From<parser::ParseError> for DatabaseError {
+impl From<parser::ParseError> for QueryManagerError {
     fn from(e: parser::ParseError) -> Self {
-        DatabaseError::Parse(e)
+        QueryManagerError::Parse(e)
     }
 }
 
@@ -978,7 +982,7 @@ impl From<parser::ParseError> for DatabaseError {
 
 use crate::sql::policy::{PolicyLookup, RowLookup};
 
-impl RowLookup for Database {
+impl RowLookup for QueryManager {
     fn get_row(&self, table: &str, id: ObjectId) -> Option<(ObjectId, OwnedRow)> {
         self.state.get_row(table, id)
     }
@@ -988,7 +992,7 @@ impl RowLookup for Database {
     }
 }
 
-impl PolicyLookup for Database {
+impl PolicyLookup for QueryManager {
     fn get_policies(&self, table: &str) -> Option<TablePolicies> {
         let policies = self.state.policies.read().unwrap();
         policies.get(table).cloned()
@@ -1019,21 +1023,21 @@ enum ChainJoinInfo {
     },
 }
 
-impl Database {
+impl QueryManager {
     /// Create a new database with the given environment.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(env: Rc<dyn Environment>) -> Self {
-        let state = Rc::new(DatabaseState::new(env));
-        DatabaseState::setup_sync_callback(Rc::clone(&state));
-        Database { state }
+        let state = Rc::new(QueryManagerState::new(env));
+        QueryManagerState::setup_sync_callback(Rc::clone(&state));
+        QueryManager { state }
     }
 
     /// Create a new in-memory database (for testing).
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
-        let state = Rc::new(DatabaseState::in_memory());
-        DatabaseState::setup_sync_callback(Rc::clone(&state));
-        Database { state }
+        let state = Rc::new(QueryManagerState::in_memory());
+        QueryManagerState::setup_sync_callback(Rc::clone(&state));
+        QueryManager { state }
     }
 
     /// Create an in-memory database with a specific catalog ID.
@@ -1041,9 +1045,9 @@ impl Database {
     /// when synced, allowing INSERT/SELECT to work across clients.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
-        let state = Rc::new(DatabaseState::in_memory_with_catalog(catalog_id));
-        DatabaseState::setup_sync_callback(Rc::clone(&state));
-        Database { state }
+        let state = Rc::new(QueryManagerState::in_memory_with_catalog(catalog_id));
+        QueryManagerState::setup_sync_callback(Rc::clone(&state));
+        QueryManager { state }
     }
 
     /// Create an in-memory database as a replica waiting for catalog sync.
@@ -1053,9 +1057,9 @@ impl Database {
     /// Use `has_catalog()` to check if the catalog has arrived, then `reload_catalog()`.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_replica(catalog_id: ObjectId) -> Self {
-        let state = Rc::new(DatabaseState::in_memory_replica(catalog_id));
-        DatabaseState::setup_sync_callback(Rc::clone(&state));
-        Database { state }
+        let state = Rc::new(QueryManagerState::in_memory_replica(catalog_id));
+        QueryManagerState::setup_sync_callback(Rc::clone(&state));
+        QueryManager { state }
     }
 
     /// Check if the catalog has been synced (has readable content).
@@ -1066,25 +1070,25 @@ impl Database {
         self.state.has_catalog()
     }
 
-    /// Consume the Database and return the underlying Rc<DatabaseState>.
+    /// Consume the QueryManager and return the underlying Rc<QueryManagerState>.
     ///
-    /// This is useful when you need to wrap the DatabaseState in a SyncedNode.
-    pub fn into_state(self) -> Rc<DatabaseState> {
+    /// This is useful when you need to wrap the QueryManagerState in a GrooveEngine.
+    pub fn into_state(self) -> Rc<QueryManagerState> {
         self.state
     }
 
-    /// Create a Database from an existing Rc<DatabaseState>.
+    /// Create a QueryManager from an existing Rc<QueryManagerState>.
     ///
-    /// This is useful when you have a SyncedNode and want to perform SQL operations.
-    pub fn from_state(state: Rc<DatabaseState>) -> Self {
-        Database { state }
+    /// This is useful when you have a GrooveEngine and want to perform SQL operations.
+    pub fn from_state(state: Rc<QueryManagerState>) -> Self {
+        QueryManager { state }
     }
 
     /// Reload the catalog from storage, picking up any synced schema changes.
     ///
     /// Call this after schema objects (catalog, descriptors) have been synced
     /// from another node to refresh the in-memory schema cache.
-    pub fn reload_catalog(&self) -> Result<(), DatabaseError> {
+    pub fn reload_catalog(&self) -> Result<(), QueryManagerError> {
         self.state.reload_catalog()
     }
 
@@ -1099,24 +1103,24 @@ impl Database {
     pub async fn from_env(
         env: Rc<dyn Environment>,
         catalog_object_id: ObjectId,
-    ) -> Result<Self, DatabaseError> {
-        let node = Rc::new(LocalNode::new(env));
+    ) -> Result<Self, QueryManagerError> {
+        let node = Rc::new(ObjectManager::new(env));
 
         // Load catalog object from Environment
         node.load_object(catalog_object_id, "catalog", "main")
             .await
             .ok_or_else(|| {
-                DatabaseError::Storage("catalog not found in environment".to_string())
+                QueryManagerError::Storage("catalog not found in environment".to_string())
             })?;
 
         // Read catalog content
         let catalog_bytes = node
             .read(catalog_object_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-            .ok_or_else(|| DatabaseError::Storage("catalog content not found".to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| QueryManagerError::Storage("catalog content not found".to_string()))?;
 
         let catalog = Catalog::from_bytes(&catalog_bytes)
-            .map_err(|e| DatabaseError::Storage(format!("catalog parse error: {}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("catalog parse error: {}", e)))?;
 
         // Initialize state maps
         let mut tables = HashMap::new();
@@ -1137,7 +1141,7 @@ impl Database {
             node.load_object(descriptor_object_id, descriptor_key, "main")
                 .await
                 .ok_or_else(|| {
-                    DatabaseError::Storage(format!(
+                    QueryManagerError::Storage(format!(
                         "descriptor for {} not found in env",
                         table_name
                     ))
@@ -1146,13 +1150,14 @@ impl Database {
             // Read descriptor content
             let descriptor_bytes = node
                 .read(descriptor_object_id, "main")
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
                 .ok_or_else(|| {
-                    DatabaseError::Storage(format!("descriptor for {} not found", table_name))
+                    QueryManagerError::Storage(format!("descriptor for {} not found", table_name))
                 })?;
 
-            let descriptor = TableDescriptor::from_bytes(&descriptor_bytes)
-                .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
+            let descriptor = TableDescriptor::from_bytes(&descriptor_bytes).map_err(|e| {
+                QueryManagerError::Storage(format!("descriptor parse error: {}", e))
+            })?;
 
             // Load schema object
             node.load_object(
@@ -1196,11 +1201,11 @@ impl Database {
             // Restore row_table mapping by reading table_rows
             let rows_bytes = node
                 .read(descriptor.rows_object_id, "main")
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+                .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
             if let Some(bytes) = rows_bytes {
                 let table_rows = TableRows::from_bytes(&bytes).map_err(|e| {
-                    DatabaseError::Storage(format!("table_rows parse error: {}", e))
+                    QueryManagerError::Storage(format!("table_rows parse error: {}", e))
                 })?;
                 for row_id in table_rows.iter() {
                     // Load row object
@@ -1211,7 +1216,7 @@ impl Database {
             }
         }
 
-        let state = DatabaseState {
+        let state = QueryManagerState {
             node,
             catalog_object_id,
             tables: RwLock::new(tables),
@@ -1226,8 +1231,8 @@ impl Database {
         };
 
         let state = Rc::new(state);
-        DatabaseState::setup_sync_callback(Rc::clone(&state));
-        Ok(Database { state })
+        QueryManagerState::setup_sync_callback(Rc::clone(&state));
+        Ok(QueryManager { state })
     }
 
     /// Get the catalog object ID (for use with from_env).
@@ -1235,13 +1240,13 @@ impl Database {
         self.state.catalog_object_id
     }
 
-    /// Get the underlying LocalNode.
-    pub fn node(&self) -> &LocalNode {
+    /// Get the underlying ObjectManager.
+    pub fn node(&self) -> &ObjectManager {
         &self.state.node
     }
 
     /// Get the shared database state.
-    pub fn state(&self) -> &DatabaseState {
+    pub fn state(&self) -> &QueryManagerState {
         &self.state
     }
 
@@ -1260,17 +1265,17 @@ impl Database {
     // ========== Index Object Helpers ==========
 
     /// Read an index from its object.
-    fn read_index(&self, key: &IndexKey) -> Result<RefIndex, DatabaseError> {
+    fn read_index(&self, key: &IndexKey) -> Result<RefIndex, QueryManagerError> {
         let index_objects = self.state.index_objects.read().unwrap();
         let index_id = index_objects
             .get(key)
-            .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
+            .ok_or_else(|| QueryManagerError::ColumnNotFound(key.source_column.clone()))?;
 
         let data = self
             .state
             .node
             .read(*index_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
         if data.is_empty() {
@@ -1278,15 +1283,15 @@ impl Database {
         }
 
         RefIndex::from_bytes(&data)
-            .map_err(|e| DatabaseError::Storage(format!("index decode: {}", e)))
+            .map_err(|e| QueryManagerError::Storage(format!("index decode: {}", e)))
     }
 
     /// Write an index to its object.
-    fn write_index(&self, key: &IndexKey, index: &RefIndex) -> Result<(), DatabaseError> {
+    fn write_index(&self, key: &IndexKey, index: &RefIndex) -> Result<(), QueryManagerError> {
         let index_objects = self.state.index_objects.read().unwrap();
         let index_id = index_objects
             .get(key)
-            .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
+            .ok_or_else(|| QueryManagerError::ColumnNotFound(key.source_column.clone()))?;
 
         self.state
             .node
@@ -1297,7 +1302,7 @@ impl Database {
                 "system",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         Ok(())
     }
@@ -1310,17 +1315,17 @@ impl Database {
     // ========== Table Rows Object Helpers ==========
 
     /// Read table rows from its object.
-    fn read_table_rows(&self, table: &str) -> Result<TableRows, DatabaseError> {
+    fn read_table_rows(&self, table: &str) -> Result<TableRows, QueryManagerError> {
         let table_rows_objects = self.state.table_rows_objects.read().unwrap();
         let rows_id = table_rows_objects
             .get(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         let data = self
             .state
             .node
             .read(*rows_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
         if data.is_empty() {
@@ -1328,15 +1333,15 @@ impl Database {
         }
 
         TableRows::from_bytes(&data)
-            .map_err(|e| DatabaseError::Storage(format!("table rows decode: {}", e)))
+            .map_err(|e| QueryManagerError::Storage(format!("table rows decode: {}", e)))
     }
 
     /// Write table rows to its object.
-    fn write_table_rows(&self, table: &str, rows: &TableRows) -> Result<(), DatabaseError> {
+    fn write_table_rows(&self, table: &str, rows: &TableRows) -> Result<(), QueryManagerError> {
         let table_rows_objects = self.state.table_rows_objects.read().unwrap();
         let rows_id = table_rows_objects
             .get(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         self.state
             .node
@@ -1347,7 +1352,7 @@ impl Database {
                 "system",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         Ok(())
     }
@@ -1370,11 +1375,11 @@ impl Database {
     }
 
     /// Create a new table from schema.
-    pub fn create_table(&self, schema: TableSchema) -> Result<SchemaId, DatabaseError> {
+    pub fn create_table(&self, schema: TableSchema) -> Result<SchemaId, QueryManagerError> {
         {
             let tables = self.state.tables.read().unwrap();
             if tables.contains_key(&schema.name) {
-                return Err(DatabaseError::TableExists(schema.name.clone()));
+                return Err(QueryManagerError::TableExists(schema.name.clone()));
             }
 
             // Validate that referenced tables exist (for Ref columns)
@@ -1383,7 +1388,7 @@ impl Database {
                 if let ColumnType::Ref(target_table) = &col.ty {
                     // Skip validation for self-references
                     if target_table != &schema.name && !tables.contains_key(target_table) {
-                        return Err(DatabaseError::TableNotFound(target_table.clone()));
+                        return Err(QueryManagerError::TableNotFound(target_table.clone()));
                     }
                 }
             }
@@ -1399,7 +1404,7 @@ impl Database {
         self.state
             .node
             .write(schema_id, "main", &schema_bytes, "system", timestamp_now())
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         // Create table rows object with deterministic ID
         // NOTE: table_rows is node_private - each node tracks its own set of known rows
@@ -1420,7 +1425,7 @@ impl Database {
                 "system",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
         self.state
             .table_rows_objects
             .write()
@@ -1452,7 +1457,7 @@ impl Database {
                         "system",
                         timestamp_now(),
                     )
-                    .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+                    .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
                 index_object_ids.insert(col.name.clone(), index_id);
 
@@ -1494,7 +1499,7 @@ impl Database {
                 "system",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         // Create "v1" branch from main at the initial commit
         {
@@ -1502,10 +1507,12 @@ impl Database {
                 .state
                 .node
                 .get_object(descriptor_object_id)
-                .ok_or_else(|| DatabaseError::Storage("descriptor object not found".to_string()))?;
+                .ok_or_else(|| {
+                    QueryManagerError::Storage("descriptor object not found".to_string())
+                })?;
             let mut obj = object.write().unwrap();
             obj.create_branch("v1", "main", &initial_commit)
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+                .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
         }
 
         self.state
@@ -1537,17 +1544,17 @@ impl Database {
         &self,
         table_name: &str,
         descriptor_id: DescriptorId,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<(), QueryManagerError> {
         // Read current catalog
         let catalog_bytes = self
             .state
             .node
             .read(self.state.catalog_object_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| QueryManagerError::Storage("catalog not found".to_string()))?;
 
         let mut catalog = Catalog::from_bytes(&catalog_bytes)
-            .map_err(|e| DatabaseError::Storage(format!("catalog parse error: {}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("catalog parse error: {}", e)))?;
 
         // Add the new table
         catalog.tables.insert(table_name.to_string(), descriptor_id);
@@ -1562,7 +1569,7 @@ impl Database {
                 "system",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         Ok(())
     }
@@ -1581,14 +1588,14 @@ impl Database {
     }
 
     /// Create a policy for a table.
-    pub fn create_policy(&self, policy: Policy) -> Result<(), DatabaseError> {
+    pub fn create_policy(&self, policy: Policy) -> Result<(), QueryManagerError> {
         let table_name = policy.table.clone();
 
         // Verify table exists
         {
             let tables = self.state.tables.read().unwrap();
             if !tables.contains_key(&table_name) {
-                return Err(DatabaseError::TableNotFound(table_name.clone()));
+                return Err(QueryManagerError::TableNotFound(table_name.clone()));
             }
         }
 
@@ -1607,7 +1614,7 @@ impl Database {
     }
 
     /// Update the table descriptor with current policies.
-    fn update_table_descriptor_policies(&self, table_name: &str) -> Result<(), DatabaseError> {
+    fn update_table_descriptor_policies(&self, table_name: &str) -> Result<(), QueryManagerError> {
         // Get descriptor object ID
         let descriptor_id = self
             .state
@@ -1616,18 +1623,18 @@ impl Database {
             .unwrap()
             .get(table_name)
             .copied()
-            .ok_or_else(|| DatabaseError::TableNotFound(table_name.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table_name.to_string()))?;
 
         // Read current descriptor
         let descriptor_bytes = self
             .state
             .node
             .read(descriptor_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-            .ok_or_else(|| DatabaseError::Storage("descriptor not found".to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| QueryManagerError::Storage("descriptor not found".to_string()))?;
 
         let mut descriptor = TableDescriptor::from_bytes(&descriptor_bytes)
-            .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("descriptor parse error: {}", e)))?;
 
         // Update policies from current in-memory state
         let policies = self.state.policies.read().unwrap();
@@ -1643,7 +1650,7 @@ impl Database {
                 "system",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         Ok(())
     }
@@ -1666,7 +1673,7 @@ impl Database {
     ///     .build();
     /// db.insert_row("users", row)?;
     /// ```
-    pub fn insert_row(&self, table: &str, row: OwnedRow) -> Result<ObjectId, DatabaseError> {
+    pub fn insert_row(&self, table: &str, row: OwnedRow) -> Result<ObjectId, QueryManagerError> {
         let (row_id, _table_rows_id) = self.insert_row_returning_both(table, row)?;
         Ok(row_id)
     }
@@ -1677,10 +1684,10 @@ impl Database {
         &self,
         table: &str,
         row: OwnedRow,
-    ) -> Result<(ObjectId, ObjectId), DatabaseError> {
+    ) -> Result<(ObjectId, ObjectId), QueryManagerError> {
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         // Validate references: check that referenced rows exist
         {
@@ -1691,7 +1698,7 @@ impl Database {
                     if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
                         // Check target row exists
                         if !row_table.contains_key(&target_id) {
-                            return Err(DatabaseError::InvalidReference {
+                            return Err(QueryManagerError::InvalidReference {
                                 column: col.name.clone(),
                                 target_table: target_table.clone(),
                                 target_id,
@@ -1699,7 +1706,7 @@ impl Database {
                         }
                         // Also verify target row is in the correct table
                         if row_table.get(&target_id) != Some(target_table) {
-                            return Err(DatabaseError::InvalidReference {
+                            return Err(QueryManagerError::InvalidReference {
                                 column: col.name.clone(),
                                 target_table: target_table.clone(),
                                 target_id,
@@ -1750,7 +1757,7 @@ impl Database {
                 timestamp_now(),
                 &descriptor,
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
         self.state
@@ -1803,13 +1810,13 @@ impl Database {
     ///     .build()
     /// )?;
     /// ```
-    pub fn insert_with<F>(&self, table: &str, f: F) -> Result<ObjectId, DatabaseError>
+    pub fn insert_with<F>(&self, table: &str, f: F) -> Result<ObjectId, QueryManagerError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
         let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
         let row = f(RowBuilder::new(descriptor));
         self.insert_row(table, row)
@@ -1829,7 +1836,7 @@ impl Database {
     ///      .build()
     /// })?;
     /// ```
-    pub fn update_with<F>(&self, table: &str, id: ObjectId, f: F) -> Result<bool, DatabaseError>
+    pub fn update_with<F>(&self, table: &str, id: ObjectId, f: F) -> Result<bool, QueryManagerError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
@@ -1849,10 +1856,10 @@ impl Database {
         &self,
         table: &str,
         id: ObjectId,
-    ) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
+    ) -> Result<Option<(ObjectId, OwnedRow)>, QueryManagerError> {
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         // Check if row belongs to this table
         {
@@ -1893,10 +1900,10 @@ impl Database {
         &self,
         row_id: ObjectId,
         descriptor_id_str: &str,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<(), QueryManagerError> {
         // Parse descriptor ID
         let descriptor_id: ObjectId = descriptor_id_str.parse().map_err(|_| {
-            DatabaseError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str))
+            QueryManagerError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str))
         })?;
 
         // Find the table name by looking up which table has this descriptor ID
@@ -1909,7 +1916,7 @@ impl Database {
         };
 
         let table_name = table_name.ok_or_else(|| {
-            DatabaseError::Storage(format!(
+            QueryManagerError::Storage(format!(
                 "Descriptor {} not found in local catalog",
                 descriptor_id_str
             ))
@@ -1945,10 +1952,10 @@ impl Database {
         &self,
         row_id: ObjectId,
         table_name: &str,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<(), QueryManagerError> {
         // Verify table exists locally
         if self.get_table(table_name).is_none() {
-            return Err(DatabaseError::TableNotFound(table_name.to_string()));
+            return Err(QueryManagerError::TableNotFound(table_name.to_string()));
         }
 
         // Add to row_table mapping
@@ -1977,7 +1984,7 @@ impl Database {
     /// This is used when we receive synced commits for a row that was already
     /// registered (e.g., an update to an existing row). We don't need the
     /// descriptor since we already have the row in our row_table mapping.
-    pub fn notify_synced_row_update(&self, row_id: ObjectId) -> Result<bool, DatabaseError> {
+    pub fn notify_synced_row_update(&self, row_id: ObjectId) -> Result<bool, QueryManagerError> {
         // Look up the table from row_table
         let table_name = {
             let row_table = self.state.row_table.read().unwrap();
@@ -2035,7 +2042,7 @@ impl Database {
         branch: &str,
         commits: Vec<crate::commit::Commit>,
     ) -> Vec<crate::commit::CommitId> {
-        // Apply commits to the object's branch via LocalNode
+        // Apply commits to the object's branch via ObjectManager
         let frontier = self.state.node.apply_commits(object_id, branch, commits);
 
         // Rebuild column change metadata for per-column LWW merge
@@ -2075,10 +2082,10 @@ impl Database {
         table: &str,
         id: ObjectId,
         new_row: OwnedRow,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<bool, QueryManagerError> {
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         // Check row exists and belongs to table
         {
@@ -2113,14 +2120,14 @@ impl Database {
                     && let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name)
                 {
                     if !row_table.contains_key(&target_id) {
-                        return Err(DatabaseError::InvalidReference {
+                        return Err(QueryManagerError::InvalidReference {
                             column: col.name.clone(),
                             target_table: target_table.clone(),
                             target_id,
                         });
                     }
                     if row_table.get(&target_id) != Some(target_table) {
-                        return Err(DatabaseError::InvalidReference {
+                        return Err(QueryManagerError::InvalidReference {
                             column: col.name.clone(),
                             target_table: target_table.clone(),
                             target_id,
@@ -2145,7 +2152,7 @@ impl Database {
                 timestamp_now(),
                 &descriptor,
             )
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
         for col in schema.columns.iter() {
@@ -2187,22 +2194,27 @@ impl Database {
     /// Creates a commit with deleted=true metadata marker.
     /// The row remains in the system but is filtered from queries.
     /// Use `delete_hard` to also truncate history.
-    pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
+    pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool, QueryManagerError> {
         self.delete_impl(table, id, false)
     }
 
     /// Delete a row by ID with history truncation (hard delete).
     /// Creates a soft delete commit, then truncates history at that commit.
     /// This is the closest to a true hard delete in a distributed system.
-    pub fn delete_hard(&self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
+    pub fn delete_hard(&self, table: &str, id: ObjectId) -> Result<bool, QueryManagerError> {
         self.delete_impl(table, id, true)
     }
 
     /// Internal delete implementation.
-    fn delete_impl(&self, table: &str, id: ObjectId, hard: bool) -> Result<bool, DatabaseError> {
+    fn delete_impl(
+        &self,
+        table: &str,
+        id: ObjectId,
+        hard: bool,
+    ) -> Result<bool, QueryManagerError> {
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         // Check row exists and belongs to table
         {
@@ -2252,14 +2264,14 @@ impl Database {
             .state
             .node
             .write_with_meta(id, "main", &[], "system", timestamp_now(), Some(meta))
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
 
         // If hard delete, truncate history at the delete commit
         if hard {
             self.state
                 .node
                 .truncate_at(id, "main", commit_id)
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+                .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
         }
 
         // Remove from row_table (logically deleted)
@@ -2284,7 +2296,7 @@ impl Database {
         table: &str,
         id: ObjectId,
         viewer: ObjectId,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<bool, QueryManagerError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         // Get the existing row
@@ -2300,7 +2312,7 @@ impl Database {
 
         match result {
             PolicyResult::Denied { reason } => {
-                return Err(DatabaseError::PolicyDenied {
+                return Err(QueryManagerError::PolicyDenied {
                     action: PolicyAction::Delete,
                     reason,
                 });
@@ -2320,7 +2332,7 @@ impl Database {
         table: &str,
         row: OwnedRow,
         viewer: ObjectId,
-    ) -> Result<ObjectId, DatabaseError> {
+    ) -> Result<ObjectId, QueryManagerError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         let temp_id = ObjectId::default();
@@ -2332,7 +2344,7 @@ impl Database {
 
         match result {
             PolicyResult::Denied { reason } => {
-                return Err(DatabaseError::PolicyDenied {
+                return Err(QueryManagerError::PolicyDenied {
                     action: PolicyAction::Insert,
                     reason,
                 });
@@ -2350,13 +2362,13 @@ impl Database {
         table: &str,
         f: F,
         viewer: ObjectId,
-    ) -> Result<ObjectId, DatabaseError>
+    ) -> Result<ObjectId, QueryManagerError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
         let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
         let row = f(RowBuilder::new(descriptor));
         self.insert_row_as(table, row, viewer)
@@ -2371,7 +2383,7 @@ impl Database {
         id: ObjectId,
         new_row: OwnedRow,
         viewer: ObjectId,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<bool, QueryManagerError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         // Get the existing row
@@ -2387,7 +2399,7 @@ impl Database {
 
         match result {
             PolicyResult::Denied { reason } => {
-                return Err(DatabaseError::PolicyDenied {
+                return Err(QueryManagerError::PolicyDenied {
                     action: PolicyAction::Update,
                     reason,
                 });
@@ -2406,7 +2418,7 @@ impl Database {
         id: ObjectId,
         f: F,
         viewer: ObjectId,
-    ) -> Result<bool, DatabaseError>
+    ) -> Result<bool, QueryManagerError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
@@ -2432,7 +2444,7 @@ impl Database {
         table: &str,
         id: ObjectId,
         viewer: ViewerContext,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<bool, QueryManagerError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         // Get the existing row
@@ -2448,7 +2460,7 @@ impl Database {
 
         match result {
             PolicyResult::Denied { reason } => {
-                return Err(DatabaseError::PolicyDenied {
+                return Err(QueryManagerError::PolicyDenied {
                     action: PolicyAction::Delete,
                     reason,
                 });
@@ -2469,7 +2481,7 @@ impl Database {
         table: &str,
         row: OwnedRow,
         viewer: ViewerContext,
-    ) -> Result<ObjectId, DatabaseError> {
+    ) -> Result<ObjectId, QueryManagerError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         let temp_id = ObjectId::default();
@@ -2481,7 +2493,7 @@ impl Database {
 
         match result {
             PolicyResult::Denied { reason } => {
-                return Err(DatabaseError::PolicyDenied {
+                return Err(QueryManagerError::PolicyDenied {
                     action: PolicyAction::Insert,
                     reason,
                 });
@@ -2503,7 +2515,7 @@ impl Database {
         id: ObjectId,
         new_row: OwnedRow,
         viewer: ViewerContext,
-    ) -> Result<bool, DatabaseError> {
+    ) -> Result<bool, QueryManagerError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
         // Get the existing row
@@ -2519,7 +2531,7 @@ impl Database {
 
         match result {
             PolicyResult::Denied { reason } => {
-                return Err(DatabaseError::PolicyDenied {
+                return Err(QueryManagerError::PolicyDenied {
                     action: PolicyAction::Update,
                     reason,
                 });
@@ -2540,7 +2552,7 @@ impl Database {
         &self,
         sql: &str,
         viewer: ViewerContext,
-    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+    ) -> Result<Vec<(ObjectId, OwnedRow)>, QueryManagerError> {
         // For now, delegate to the simpler query_as which uses viewer.user_id
         // TODO: Full claims support in query execution requires threading
         // ViewerContext through the query graph builder
@@ -2554,17 +2566,17 @@ impl Database {
         source_table: &str,
         source_column: &str,
         target_id: ObjectId,
-    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+    ) -> Result<Vec<(ObjectId, OwnedRow)>, QueryManagerError> {
         let schema = self
             .get_table(source_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(source_table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(source_table.to_string()))?;
 
         // Verify column is a Ref type
         let col = schema
             .column(source_column)
-            .ok_or_else(|| DatabaseError::ColumnNotFound(source_column.to_string()))?;
+            .ok_or_else(|| QueryManagerError::ColumnNotFound(source_column.to_string()))?;
         if !matches!(col.ty, ColumnType::Ref(_)) {
-            return Err(DatabaseError::NotAReference(source_column.to_string()));
+            return Err(QueryManagerError::NotAReference(source_column.to_string()));
         }
 
         // Look up in index
@@ -2589,7 +2601,7 @@ impl Database {
     }
 
     /// Execute a SQL statement.
-    pub fn execute(&self, sql: &str) -> Result<ExecuteResult, DatabaseError> {
+    pub fn execute(&self, sql: &str) -> Result<ExecuteResult, QueryManagerError> {
         let stmt = parser::parse(sql)?;
 
         match stmt {
@@ -2608,11 +2620,11 @@ impl Database {
                 // Build row using RowBuilder with PredicateValue
                 let schema = self
                     .get_table(&ins.table)
-                    .ok_or_else(|| DatabaseError::TableNotFound(ins.table.clone()))?;
+                    .ok_or_else(|| QueryManagerError::TableNotFound(ins.table.clone()))?;
                 let descriptor = Rc::new(RowDescriptor::from_table_schema(&schema));
 
                 if ins.columns.len() != ins.values.len() {
-                    return Err(DatabaseError::ColumnMismatch {
+                    return Err(QueryManagerError::ColumnMismatch {
                         expected: ins.columns.len(),
                         got: ins.values.len(),
                     });
@@ -2624,7 +2636,7 @@ impl Database {
                     let resolved_value = match value {
                         PredicateValue::Viewer => {
                             let viewer_id = self.viewer().ok_or_else(|| {
-                                DatabaseError::Execution(
+                                QueryManagerError::Execution(
                                     "@viewer used but no viewer is set".to_string(),
                                 )
                             })?;
@@ -2664,7 +2676,7 @@ impl Database {
             Statement::Update(upd) => {
                 // Verify table exists
                 if self.get_table(&upd.table).is_none() {
-                    return Err(DatabaseError::TableNotFound(upd.table.clone()));
+                    return Err(QueryManagerError::TableNotFound(upd.table.clone()));
                 }
 
                 // Get all rows and filter by WHERE clause
@@ -2672,7 +2684,7 @@ impl Database {
                 for cond in &upd.where_clause {
                     let col_name = &cond.column.column;
                     let value = cond.value().ok_or_else(|| {
-                        DatabaseError::ColumnNotFound(
+                        QueryManagerError::ColumnNotFound(
                             "column references not supported in UPDATE WHERE".to_string(),
                         )
                     })?;
@@ -2697,7 +2709,7 @@ impl Database {
                 let count = rows_to_update.len();
                 let schema = self
                     .get_table(&upd.table)
-                    .ok_or_else(|| DatabaseError::TableNotFound(upd.table.clone()))?;
+                    .ok_or_else(|| QueryManagerError::TableNotFound(upd.table.clone()))?;
 
                 for (id, old_row) in rows_to_update {
                     // Build new row by copying existing values and applying updates
@@ -2743,7 +2755,7 @@ impl Database {
             Statement::Delete(del) => {
                 // Verify table exists
                 if self.get_table(&del.table).is_none() {
-                    return Err(DatabaseError::TableNotFound(del.table.clone()));
+                    return Err(QueryManagerError::TableNotFound(del.table.clone()));
                 }
 
                 // Get all rows and filter by WHERE clause
@@ -2751,7 +2763,7 @@ impl Database {
                 for cond in &del.where_clause {
                     let col_name = &cond.column.column;
                     let value = cond.value().ok_or_else(|| {
-                        DatabaseError::ColumnNotFound(
+                        QueryManagerError::ColumnNotFound(
                             "column references not supported in DELETE WHERE".to_string(),
                         )
                     })?;
@@ -2785,7 +2797,7 @@ impl Database {
 
                 Ok(ExecuteResult::Deleted(count))
             }
-            Statement::Select(_) => Err(DatabaseError::Parse(parser::ParseError {
+            Statement::Select(_) => Err(QueryManagerError::Parse(parser::ParseError {
                 message: "SELECT statements should use query() instead of execute()".to_string(),
                 position: 0,
             })),
@@ -2801,13 +2813,13 @@ impl Database {
     ///
     /// Supports single-table queries with optional WHERE filters, as well as
     /// JOIN queries between two tables.
-    pub fn incremental_query(&self, sql: &str) -> Result<IncrementalQuery, DatabaseError> {
+    pub fn incremental_query(&self, sql: &str) -> Result<IncrementalQuery, QueryManagerError> {
         let stmt = parser::parse(sql)?;
 
         let select = match stmt {
             Statement::Select(s) => s,
             _ => {
-                return Err(DatabaseError::Parse(parser::ParseError {
+                return Err(QueryManagerError::Parse(parser::ParseError {
                     message: "incremental_query only supports SELECT statements".to_string(),
                     position: 0,
                 }));
@@ -2845,13 +2857,13 @@ impl Database {
         &self,
         sql: &str,
         viewer: ObjectId,
-    ) -> Result<IncrementalQuery, DatabaseError> {
+    ) -> Result<IncrementalQuery, QueryManagerError> {
         let stmt = parser::parse(sql)?;
 
         let select = match stmt {
             Statement::Select(s) => s,
             _ => {
-                return Err(DatabaseError::Parse(parser::ParseError {
+                return Err(QueryManagerError::Parse(parser::ParseError {
                     message: "incremental_query_as only supports SELECT statements".to_string(),
                     position: 0,
                 }));
@@ -2860,7 +2872,7 @@ impl Database {
 
         // Only support single-table queries for now
         if !select.from.joins.is_empty() {
-            return Err(DatabaseError::Parse(parser::ParseError {
+            return Err(QueryManagerError::Parse(parser::ParseError {
                 message: "incremental_query_as does not yet support JOINs".to_string(),
                 position: 0,
             }));
@@ -2883,7 +2895,7 @@ impl Database {
     /// gets the current results, and automatically cleans up the query.
     ///
     /// For subscriptions to live updates, use `incremental_query()` instead.
-    pub fn query(&self, sql: &str) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+    pub fn query(&self, sql: &str) -> Result<Vec<(ObjectId, OwnedRow)>, QueryManagerError> {
         Ok(self.incremental_query(sql)?.rows())
     }
 
@@ -2897,7 +2909,7 @@ impl Database {
         &self,
         sql: &str,
         viewer: ObjectId,
-    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+    ) -> Result<Vec<(ObjectId, OwnedRow)>, QueryManagerError> {
         Ok(self.incremental_query_as(sql, viewer)?.rows())
     }
 
@@ -2906,13 +2918,13 @@ impl Database {
         &self,
         select: &Select,
         viewer: ObjectId,
-    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::QueryGraph, QueryManagerError> {
         let table = &select.from.table;
 
         // Validate table exists and get schema
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.clone()))?;
 
         // Get the SELECT policy for this table (if any)
         let policies = self.get_policies(table);
@@ -2989,11 +3001,11 @@ impl Database {
         expr: &PolicyExpr,
         source_table: &str,
         source_schema: &TableSchema,
-    ) -> Result<Option<InheritsInfo>, DatabaseError> {
+    ) -> Result<Option<InheritsInfo>, QueryManagerError> {
         match expr {
             PolicyExpr::Inherits { action, column } => {
                 if *action != PolicyAction::Select {
-                    return Err(DatabaseError::Parse(parser::ParseError {
+                    return Err(QueryManagerError::Parse(parser::ParseError {
                         message: format!(
                             "INHERITS {} not supported in incremental queries, only INHERITS SELECT",
                             action
@@ -3007,11 +3019,11 @@ impl Database {
                 // Find the target table from the Ref column
                 let col_def = source_schema
                     .column(col_name)
-                    .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
+                    .ok_or_else(|| QueryManagerError::ColumnNotFound(col_name.to_string()))?;
 
                 let target_table = match &col_def.ty {
                     ColumnType::Ref(t) => t.clone(),
-                    _ => return Err(DatabaseError::NotAReference(col_name.to_string())),
+                    _ => return Err(QueryManagerError::NotAReference(col_name.to_string())),
                 };
 
                 let is_self_referential = target_table == source_table;
@@ -3045,7 +3057,7 @@ impl Database {
                     if let Some(info) = self.extract_inherits(e, source_table, source_schema)? {
                         if inherits_info.is_some() {
                             // Multiple INHERITS in AND - not yet supported
-                            return Err(DatabaseError::Parse(parser::ParseError {
+                            return Err(QueryManagerError::Parse(parser::ParseError {
                                 message: "Multiple INHERITS in AND not yet supported".to_string(),
                                 position: 0,
                             }));
@@ -3074,7 +3086,7 @@ impl Database {
                     if let Some(info) = self.extract_inherits(e, source_table, source_schema)? {
                         if inherits_info.is_some() {
                             // Multiple INHERITS in OR - not yet supported
-                            return Err(DatabaseError::Parse(parser::ParseError {
+                            return Err(QueryManagerError::Parse(parser::ParseError {
                                 message: "Multiple INHERITS in OR not yet supported".to_string(),
                                 position: 0,
                             }));
@@ -3118,10 +3130,10 @@ impl Database {
         source_table: &str,
         viewer: ObjectId,
         visited: &mut Vec<String>,
-    ) -> Result<InheritsChain, DatabaseError> {
+    ) -> Result<InheritsChain, QueryManagerError> {
         // Prevent infinite loops (should already be caught by is_self_referential)
         if visited.contains(&initial_inherits.target_table) {
-            return Err(DatabaseError::Parse(parser::ParseError {
+            return Err(QueryManagerError::Parse(parser::ParseError {
                 message: format!(
                     "Circular INHERITS chain detected: {} -> {}",
                     source_table, initial_inherits.target_table
@@ -3133,7 +3145,9 @@ impl Database {
 
         let target_schema = self
             .get_table(&initial_inherits.target_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(initial_inherits.target_table.clone()))?;
+            .ok_or_else(|| {
+                QueryManagerError::TableNotFound(initial_inherits.target_table.clone())
+            })?;
 
         // Check if target table has a policy
         let target_policies = self.get_policies(&initial_inherits.target_table);
@@ -3150,7 +3164,7 @@ impl Database {
             {
                 if nested_inherits.is_self_referential {
                     // Self-referential in the chain - not supported yet
-                    return Err(DatabaseError::Parse(parser::ParseError {
+                    return Err(QueryManagerError::Parse(parser::ParseError {
                         message: "Self-referential INHERITS in chain not yet supported".to_string(),
                         position: 0,
                     }));
@@ -3224,14 +3238,14 @@ impl Database {
         select: &Select,
         viewer: ObjectId,
         inherits: &InheritsInfo,
-    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::QueryGraph, QueryManagerError> {
         let left_table = &select.from.table;
         let left_schema = self
             .get_table(left_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(left_table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(left_table.clone()))?;
         let right_schema = self
             .get_table(&inherits.target_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(inherits.target_table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(inherits.target_table.clone()))?;
 
         // Build a JOIN graph
         let mut builder = QueryGraphBuilder::new(left_table, left_schema.clone());
@@ -3324,7 +3338,7 @@ impl Database {
         _viewer: ObjectId, // Terminal predicate is already resolved in chain
         chain: &InheritsChain,
         source_schema: &TableSchema,
-    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::QueryGraph, QueryManagerError> {
         // For chains, we build from the end backwards:
         // The terminal table has a simple predicate (e.g., owner_id = @viewer)
         // Each intermediate table inherits from the next
@@ -3340,7 +3354,7 @@ impl Database {
 
         // Support arbitrary chain lengths
         if chain.hops.is_empty() {
-            return Err(DatabaseError::Parse(parser::ParseError {
+            return Err(QueryManagerError::Parse(parser::ParseError {
                 message: "Empty INHERITS chain".to_string(),
                 position: 0,
             }));
@@ -3350,7 +3364,7 @@ impl Database {
         let first_hop = &chain.hops[0];
         let first_target_schema = self
             .get_table(&first_hop.target_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(first_hop.target_table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(first_hop.target_table.clone()))?;
 
         // Build the first join: source → first target
         let mut builder = QueryGraphBuilder::new(left_table, source_schema.clone());
@@ -3359,7 +3373,7 @@ impl Database {
         for hop in chain.hops.iter().skip(1) {
             let target_schema = self
                 .get_table(&hop.target_table)
-                .ok_or_else(|| DatabaseError::TableNotFound(hop.target_table.clone()))?;
+                .ok_or_else(|| QueryManagerError::TableNotFound(hop.target_table.clone()))?;
             builder.add_schema(&hop.target_table, target_schema);
         }
 
@@ -3447,7 +3461,7 @@ impl Database {
         viewer: ObjectId,
         inherits: &InheritsInfo,
         schema: &TableSchema,
-    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::QueryGraph, QueryManagerError> {
         let table = &select.from.table;
 
         // Build the base predicate from the non-INHERITS part of the policy
@@ -3503,7 +3517,7 @@ impl Database {
         expr: &PolicyExpr,
         viewer: ObjectId,
         table_prefix: &str,
-    ) -> Result<Predicate, DatabaseError> {
+    ) -> Result<Predicate, QueryManagerError> {
         match expr {
             PolicyExpr::Eq(left, right) => {
                 let (column, value) =
@@ -3538,12 +3552,12 @@ impl Database {
                 .negate()),
             PolicyExpr::Inherits { .. } => {
                 // Nested INHERITS - would need recursive flattening
-                Err(DatabaseError::Parse(parser::ParseError {
+                Err(QueryManagerError::Parse(parser::ParseError {
                     message: "Nested INHERITS not yet supported in incremental queries".to_string(),
                     position: 0,
                 }))
             }
-            _ => Err(DatabaseError::Parse(parser::ParseError {
+            _ => Err(QueryManagerError::Parse(parser::ParseError {
                 message: "Unsupported policy expression in INHERITS target".to_string(),
                 position: 0,
             })),
@@ -3557,7 +3571,7 @@ impl Database {
         right: &PolicyValue,
         viewer: ObjectId,
         table_prefix: &str,
-    ) -> Result<(String, PredicateValue), DatabaseError> {
+    ) -> Result<(String, PredicateValue), QueryManagerError> {
         match (left, right) {
             (PolicyValue::Column(col), PolicyValue::Viewer) => Ok((
                 format!("{}.{}", table_prefix, col),
@@ -3573,7 +3587,7 @@ impl Database {
             (PolicyValue::Literal(val), PolicyValue::Column(col)) => {
                 Ok((format!("{}.{}", table_prefix, col), val.clone()))
             }
-            _ => Err(DatabaseError::Parse(parser::ParseError {
+            _ => Err(QueryManagerError::Parse(parser::ParseError {
                 message: "Unsupported policy comparison pattern in INHERITS target".to_string(),
                 position: 0,
             })),
@@ -3588,7 +3602,7 @@ impl Database {
         &self,
         expr: &PolicyExpr,
         viewer: ObjectId,
-    ) -> Result<Predicate, DatabaseError> {
+    ) -> Result<Predicate, QueryManagerError> {
         match expr {
             PolicyExpr::Eq(left, right) => {
                 let (column, value) = self.resolve_policy_comparison(left, right, viewer)?;
@@ -3623,7 +3637,7 @@ impl Database {
                 Ok(pred.negate())
             }
             // These require runtime evaluation
-            PolicyExpr::Inherits { .. } => Err(DatabaseError::Parse(parser::ParseError {
+            PolicyExpr::Inherits { .. } => Err(QueryManagerError::Parse(parser::ParseError {
                 message: "INHERITS cannot be converted to static predicate".to_string(),
                 position: 0,
             })),
@@ -3631,20 +3645,20 @@ impl Database {
             PolicyExpr::Lt(_, _)
             | PolicyExpr::Le(_, _)
             | PolicyExpr::Gt(_, _)
-            | PolicyExpr::Ge(_, _) => Err(DatabaseError::Parse(parser::ParseError {
+            | PolicyExpr::Ge(_, _) => Err(QueryManagerError::Parse(parser::ParseError {
                 message: "Comparison operators not yet supported in incremental queries"
                     .to_string(),
                 position: 0,
             })),
             PolicyExpr::IsNull(_) | PolicyExpr::IsNotNull(_) => {
-                Err(DatabaseError::Parse(parser::ParseError {
+                Err(QueryManagerError::Parse(parser::ParseError {
                     message: "NULL checks not yet supported in incremental queries".to_string(),
                     position: 0,
                 }))
             }
             // CONTAINS and IN require runtime claim evaluation
             PolicyExpr::Contains(_, _) | PolicyExpr::In(_, _) => {
-                Err(DatabaseError::Parse(parser::ParseError {
+                Err(QueryManagerError::Parse(parser::ParseError {
                     message: "CONTAINS/IN on claims cannot be converted to static predicate"
                         .to_string(),
                     position: 0,
@@ -3664,7 +3678,7 @@ impl Database {
         left: &PolicyValue,
         right: &PolicyValue,
         viewer: ObjectId,
-    ) -> Result<(String, PredicateValue), DatabaseError> {
+    ) -> Result<(String, PredicateValue), QueryManagerError> {
         match (left, right) {
             // column = @viewer
             (PolicyValue::Column(col), PolicyValue::Viewer) => {
@@ -3682,20 +3696,20 @@ impl Database {
             (PolicyValue::NewColumn(col), PolicyValue::Viewer)
             | (PolicyValue::Viewer, PolicyValue::NewColumn(col)) => {
                 // In SELECT context, @new doesn't apply - this is a misconfigured policy
-                Err(DatabaseError::Parse(parser::ParseError {
+                Err(QueryManagerError::Parse(parser::ParseError {
                     message: format!("@new.{} not valid in SELECT policy WHERE clause", col),
                     position: 0,
                 }))
             }
             // @old.column - not valid in SELECT
             (PolicyValue::OldColumn(col), _) | (_, PolicyValue::OldColumn(col)) => {
-                Err(DatabaseError::Parse(parser::ParseError {
+                Err(QueryManagerError::Parse(parser::ParseError {
                     message: format!("@old.{} not valid in SELECT policy WHERE clause", col),
                     position: 0,
                 }))
             }
             // Other combinations not supported
-            _ => Err(DatabaseError::Parse(parser::ParseError {
+            _ => Err(QueryManagerError::Parse(parser::ParseError {
                 message: "Unsupported policy comparison pattern".to_string(),
                 position: 0,
             })),
@@ -3706,14 +3720,14 @@ impl Database {
     fn build_single_table_graph(
         &self,
         select: &Select,
-    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::QueryGraph, QueryManagerError> {
         let table = &select.from.table;
         let outer_alias = select.from.alias.as_deref();
 
         // Validate table exists and get schema
         let schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.clone()))?;
 
         // Build the query graph
         let mut builder = QueryGraphBuilder::new(table, schema.clone());
@@ -3752,7 +3766,7 @@ impl Database {
         exprs: &[SelectExpr],
         outer_table: &str,
         outer_alias: Option<&str>,
-    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::NodeId, QueryManagerError> {
         let mut current = input;
 
         for expr in exprs.iter() {
@@ -3781,13 +3795,13 @@ impl Database {
         outer_table: &str,
         outer_alias: Option<&str>,
         column_index: i32,
-    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::NodeId, QueryManagerError> {
         match expr {
             SelectExpr::ArraySubquery(subquery) => {
                 let inner_table = &subquery.from.table;
                 let inner_schema = self
                     .get_table(inner_table)
-                    .ok_or_else(|| DatabaseError::TableNotFound(inner_table.clone()))?;
+                    .ok_or_else(|| QueryManagerError::TableNotFound(inner_table.clone()))?;
 
                 // Find the ref column from WHERE clause
                 // e.g., WHERE n.issue = i.id → ref_column is "issue"
@@ -3842,7 +3856,7 @@ impl Database {
         inner_alias: Option<&str>,
         outer_table: &str,
         outer_alias: Option<&str>,
-    ) -> Result<String, DatabaseError> {
+    ) -> Result<String, QueryManagerError> {
         for cond in where_clause {
             // Condition is a struct with `column` and `right` fields
             // column = the left-hand side column
@@ -3873,7 +3887,7 @@ impl Database {
             }
         }
 
-        Err(DatabaseError::Parse(parser::ParseError {
+        Err(QueryManagerError::Parse(parser::ParseError {
             message: format!(
                 "ARRAY subquery must have WHERE clause referencing outer table.id (inner: {}, outer: {})",
                 inner_table, outer_table
@@ -3891,14 +3905,14 @@ impl Database {
         inner_table: &str,
         inner_alias: Option<&str>,
         inner_schema: &TableSchema,
-    ) -> Result<Vec<(String, String, TableSchema)>, DatabaseError> {
+    ) -> Result<Vec<(String, String, TableSchema)>, QueryManagerError> {
         let mut result = Vec::new();
 
         for join in joins {
             let target_table = &join.table;
             let target_schema = self
                 .get_table(target_table)
-                .ok_or_else(|| DatabaseError::TableNotFound(target_table.clone()))?;
+                .ok_or_else(|| QueryManagerError::TableNotFound(target_table.clone()))?;
 
             // Find which column in the inner table references the join target
             // Check ON clause: inner.col = target.id or target.id = inner.col
@@ -3925,7 +3939,7 @@ impl Database {
         inner_alias: Option<&str>,
         target_table: &str,
         inner_schema: &TableSchema,
-    ) -> Result<String, DatabaseError> {
+    ) -> Result<String, QueryManagerError> {
         // Helper to check if a table reference matches inner table (by name or alias)
         let matches_inner =
             |t: &str| t == inner_table || inner_alias.map(|a| a == t).unwrap_or(false);
@@ -3978,7 +3992,7 @@ impl Database {
             }
         }
 
-        Err(DatabaseError::Parse(parser::ParseError {
+        Err(QueryManagerError::Parse(parser::ParseError {
             message: format!(
                 "Could not find ref column for JOIN {} in inner table {}",
                 target_table, inner_table
@@ -3991,9 +4005,9 @@ impl Database {
     fn build_join_graph(
         &self,
         select: &Select,
-    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::QueryGraph, QueryManagerError> {
         if select.from.joins.is_empty() {
-            return Err(DatabaseError::Parse(parser::ParseError {
+            return Err(QueryManagerError::Parse(parser::ParseError {
                 message: "build_join_graph called without JOINs".to_string(),
                 position: 0,
             }));
@@ -4006,10 +4020,10 @@ impl Database {
         // Get schemas for the first two tables
         let sql_left_schema = self
             .get_table(sql_left_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(sql_left_table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(sql_left_table.clone()))?;
         let sql_first_right_schema = self
             .get_table(sql_first_right_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(sql_first_right_table.clone()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(sql_first_right_table.clone()))?;
 
         // Determine the join column and direction for first join
         // The QueryGraphBuilder expects the "left" table to have the Ref column
@@ -4075,7 +4089,7 @@ impl Database {
             let target_table = &join.table;
             let target_schema = self
                 .get_table(target_table)
-                .ok_or_else(|| DatabaseError::TableNotFound(target_table.clone()))?;
+                .ok_or_else(|| QueryManagerError::TableNotFound(target_table.clone()))?;
 
             // Add schema so chain_join can find it
             builder.add_schema(target_table.clone(), target_schema.clone());
@@ -4174,7 +4188,7 @@ impl Database {
         existing_tables: &[(&str, Option<&str>, TableSchema)],
         target_table: &str,
         target_schema: &TableSchema,
-    ) -> Result<ChainJoinInfo, DatabaseError> {
+    ) -> Result<ChainJoinInfo, QueryManagerError> {
         // Helper to check if a reference matches a table (by name or alias)
         let matches_table = |ref_name: Option<&str>, table_name: &str, alias: Option<&str>| {
             ref_name == Some(table_name) || (alias.is_some() && ref_name == alias)
@@ -4250,7 +4264,7 @@ impl Database {
             }
         }
 
-        Err(DatabaseError::Parse(parser::ParseError {
+        Err(QueryManagerError::Parse(parser::ParseError {
             message: format!(
                 "Could not find ref column for chain JOIN with {}",
                 target_table
@@ -4267,7 +4281,7 @@ impl Database {
         &self,
         conditions: &[Condition],
         all_tables: &[(&str, Option<&str>, TableSchema)],
-    ) -> Result<Predicate, DatabaseError> {
+    ) -> Result<Predicate, QueryManagerError> {
         let mut predicates = Vec::new();
 
         for cond in conditions {
@@ -4281,7 +4295,7 @@ impl Database {
                     .find(|(name, alias, _)| *name == t || alias.is_some_and(|a| a == t))
                     .map(|(name, _, schema)| (*name, schema))
                     .ok_or_else(|| {
-                        DatabaseError::Parse(parser::ParseError {
+                        QueryManagerError::Parse(parser::ParseError {
                             message: format!("Unknown table {} in WHERE clause", t),
                             position: 0,
                         })
@@ -4294,7 +4308,7 @@ impl Database {
                         .first()
                         .map(|(name, _, schema)| (*name, schema))
                         .ok_or_else(|| {
-                            DatabaseError::Parse(parser::ParseError {
+                            QueryManagerError::Parse(parser::ParseError {
                                 message: "No tables in query".to_string(),
                                 position: 0,
                             })
@@ -4305,7 +4319,7 @@ impl Database {
                         .find(|(_, _, s)| s.column(col_name).is_some())
                         .map(|(name, _, schema)| (*name, schema))
                         .ok_or_else(|| {
-                            DatabaseError::Parse(parser::ParseError {
+                            QueryManagerError::Parse(parser::ParseError {
                                 message: format!("Unknown column {} in WHERE clause", col_name),
                                 position: 0,
                             })
@@ -4318,7 +4332,7 @@ impl Database {
                 ColumnType::String
             } else {
                 let column = _schema.column(col_name).ok_or_else(|| {
-                    DatabaseError::Parse(parser::ParseError {
+                    QueryManagerError::Parse(parser::ParseError {
                         message: format!("Column {} not found in table {}", col_name, table_name),
                         position: 0,
                     })
@@ -4360,7 +4374,7 @@ impl Database {
         conditions: &[Condition],
         target_table: &str,
         target_schema: &TableSchema,
-    ) -> Result<Option<Predicate>, DatabaseError> {
+    ) -> Result<Option<Predicate>, QueryManagerError> {
         let mut predicates = Vec::new();
 
         for cond in conditions {
@@ -4386,7 +4400,7 @@ impl Database {
                 ColumnType::String
             } else {
                 let column = target_schema.column(col_name).ok_or_else(|| {
-                    DatabaseError::Parse(parser::ParseError {
+                    QueryManagerError::Parse(parser::ParseError {
                         message: format!("Column {} not found in table {}", col_name, target_table),
                         position: 0,
                     })
@@ -4436,7 +4450,7 @@ impl Database {
         exprs: &[SelectExpr],
         outer_table: &str,
         outer_alias: Option<&str>,
-    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::NodeId, QueryManagerError> {
         let mut current = input;
 
         for expr in exprs.iter() {
@@ -4465,13 +4479,13 @@ impl Database {
         outer_table: &str,
         outer_alias: Option<&str>,
         column_index: i32,
-    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+    ) -> Result<crate::sql::query_graph::NodeId, QueryManagerError> {
         match expr {
             SelectExpr::ArraySubquery(subquery) => {
                 let inner_table = &subquery.from.table;
                 let inner_schema = self
                     .get_table(inner_table)
-                    .ok_or_else(|| DatabaseError::TableNotFound(inner_table.clone()))?;
+                    .ok_or_else(|| QueryManagerError::TableNotFound(inner_table.clone()))?;
 
                 // Find the ref column from WHERE clause
                 let ref_column = self.find_array_subquery_ref_column(
@@ -4525,7 +4539,7 @@ impl Database {
         right_table: &str,
         left_schema: &TableSchema,
         right_schema: &TableSchema,
-    ) -> Result<JoinDirection, DatabaseError> {
+    ) -> Result<JoinDirection, QueryManagerError> {
         // Helper to check if a table reference matches (by name or alias)
         let matches_left = |t: &str| t == left_table || left_alias == Some(t);
         let matches_right = |t: &str| t == right_table;
@@ -4626,7 +4640,7 @@ impl Database {
             }
         }
 
-        Err(DatabaseError::Parse(parser::ParseError {
+        Err(QueryManagerError::Parse(parser::ParseError {
             message: format!(
                 "Could not find Ref column connecting '{}' and '{}'",
                 left_table, right_table
@@ -4640,7 +4654,7 @@ impl Database {
         &self,
         conditions: &[parser::Condition],
         schema: &TableSchema,
-    ) -> Result<Predicate, DatabaseError> {
+    ) -> Result<Predicate, QueryManagerError> {
         if conditions.is_empty() {
             return Ok(Predicate::True);
         }
@@ -4652,7 +4666,7 @@ impl Database {
 
             // Validate column exists (or is 'id')
             if column != "id" && schema.column_index(column).is_none() {
-                return Err(DatabaseError::ColumnNotFound(column.clone()));
+                return Err(QueryManagerError::ColumnNotFound(column.clone()));
             }
 
             // Only handle literal values in predicates for now
@@ -4660,7 +4674,7 @@ impl Database {
                 Some(v) => v.clone(),
                 None => {
                     // Column references not yet supported in predicate building
-                    return Err(DatabaseError::ColumnNotFound(
+                    return Err(QueryManagerError::ColumnNotFound(
                         "column references not supported in predicate building".to_string(),
                     ));
                 }
@@ -4707,17 +4721,17 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `DatabaseError::Migration` if migration fails.
+    /// Returns `QueryManagerError::Migration` if migration fails.
     pub fn execute_migration(
         &self,
         table: &str,
         new_schema: TableSchema,
         options: LensGenerationOptions,
-    ) -> Result<MigrationResult, DatabaseError> {
+    ) -> Result<MigrationResult, QueryManagerError> {
         // Get the current schema
         let old_schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         // Generate lens from schema diff
         let diff = diff_schemas(&old_schema, &new_schema);
@@ -4732,21 +4746,21 @@ impl Database {
                 .state
                 .node
                 .read(self.state.catalog_object_id, "main")
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-                .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+                .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| QueryManagerError::Storage("catalog not found".to_string()))?;
             let catalog = Catalog::from_bytes(&catalog_bytes)
-                .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+                .map_err(|e| QueryManagerError::Storage(e.to_string()))?;
             let old_id = catalog
                 .get_descriptor_id(table)
-                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+                .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
             // Read the descriptor from the version branch
             let data = self
                 .state
                 .node
                 .read(old_id.as_object_id(), &old_id.version)
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+                .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
             let descriptor = TableDescriptor::from_bytes(&data)
                 .map_err(|e| MigrationError::CatalogError(e.to_string()))?;
@@ -4792,7 +4806,7 @@ impl Database {
                             timestamp_now(),
                         )
                         .map_err(|e| {
-                            DatabaseError::Storage(format!(
+                            QueryManagerError::Storage(format!(
                                 "failed to write migrated row {}: {:?}",
                                 row_id, e
                             ))
@@ -4832,18 +4846,17 @@ impl Database {
             let old_version_branch = &old_descriptor_id.version;
 
             // First, get the tip commit from the old version branch
-            let object =
-                self.state.node.get_object(desc_object_id).ok_or_else(|| {
-                    DatabaseError::Storage("descriptor object not found".to_string())
-                })?;
+            let object = self.state.node.get_object(desc_object_id).ok_or_else(|| {
+                QueryManagerError::Storage("descriptor object not found".to_string())
+            })?;
 
             let tip_commit = {
                 let obj = object.read().unwrap();
                 let old_branch = obj.branch(old_version_branch).ok_or_else(|| {
-                    DatabaseError::Storage("old version branch not found".to_string())
+                    QueryManagerError::Storage("old version branch not found".to_string())
                 })?;
                 *old_branch.frontier().first().ok_or_else(|| {
-                    DatabaseError::Storage("old version branch has no commits".to_string())
+                    QueryManagerError::Storage("old version branch has no commits".to_string())
                 })?
             };
 
@@ -4851,7 +4864,7 @@ impl Database {
             {
                 let mut obj = object.write().unwrap();
                 obj.create_branch(new_version_branch, old_version_branch, &tip_commit)
-                    .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+                    .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?;
             }
 
             // Write the new descriptor content to the new version branch
@@ -4865,7 +4878,7 @@ impl Database {
                     timestamp_now(),
                 )
                 .map_err(|e| {
-                    DatabaseError::Storage(format!("failed to write descriptor: {:?}", e))
+                    QueryManagerError::Storage(format!("failed to write descriptor: {:?}", e))
                 })?;
 
             // descriptor_objects map stays the same (same ObjectId)
@@ -4876,11 +4889,11 @@ impl Database {
             .state
             .node
             .read(self.state.catalog_object_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| QueryManagerError::Storage("catalog not found".to_string()))?;
 
         let mut catalog = Catalog::from_bytes(&catalog_data)
-            .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(e.to_string()))?;
 
         catalog.update_table(table.to_string(), new_descriptor_id.clone());
 
@@ -4893,7 +4906,7 @@ impl Database {
                 "migration",
                 timestamp_now(),
             )
-            .map_err(|e| DatabaseError::Storage(format!("failed to write catalog: {:?}", e)))?;
+            .map_err(|e| QueryManagerError::Storage(format!("failed to write catalog: {:?}", e)))?;
 
         // TODO: Notify query graphs about the schema change
         // This would invalidate queries and require re-building with new schema
@@ -4916,10 +4929,10 @@ impl Database {
         table: &str,
         new_schema: &TableSchema,
         options: &LensGenerationOptions,
-    ) -> Result<(Lens, Vec<LensWarning>), DatabaseError> {
+    ) -> Result<(Lens, Vec<LensWarning>), QueryManagerError> {
         let old_schema = self
             .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))?;
 
         let diff = diff_schemas(&old_schema, new_schema);
         let result = generate_lens(&diff, options);
@@ -4941,20 +4954,20 @@ impl Database {
     }
 
     /// Get the current descriptor ID for a table from the catalog.
-    pub fn get_descriptor_id(&self, table: &str) -> Result<DescriptorId, DatabaseError> {
+    pub fn get_descriptor_id(&self, table: &str) -> Result<DescriptorId, QueryManagerError> {
         let catalog_bytes = self
             .state
             .node
             .read(self.state.catalog_object_id, "main")
-            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| QueryManagerError::Storage("catalog not found".to_string()))?;
 
         let catalog = Catalog::from_bytes(&catalog_bytes)
-            .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+            .map_err(|e| QueryManagerError::Storage(e.to_string()))?;
 
         catalog
             .get_descriptor_id(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))
+            .ok_or_else(|| QueryManagerError::TableNotFound(table.to_string()))
     }
 }
 

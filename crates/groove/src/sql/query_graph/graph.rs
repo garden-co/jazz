@@ -12,7 +12,7 @@ use crate::sql::query_graph::node::{InputPort, NodeId, QueryNode};
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
-use super::DatabaseState;
+use crate::sql::QueryManagerState;
 
 /// Truncate a string to a maximum length, adding "..." if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
@@ -579,7 +579,7 @@ impl QueryGraph {
     pub fn get_output(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> Vec<(ObjectId, OwnedRow)> {
         self.ensure_initialized_skip(cache, db, None, None);
         self.collect_output(cache, db)
@@ -621,7 +621,7 @@ impl QueryGraph {
     fn ensure_initialized_skip(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
         skip_id: Option<ObjectId>,
         skip_table: Option<&str>,
     ) {
@@ -706,7 +706,7 @@ impl QueryGraph {
     fn init_join_query(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
         skip_id: Option<ObjectId>,
         skip_table: Option<&str>,
     ) {
@@ -783,7 +783,7 @@ impl QueryGraph {
     fn init_recursive_query(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
         skip_id: Option<ObjectId>,
         skip_table: Option<&str>,
     ) {
@@ -832,13 +832,13 @@ impl QueryGraph {
     ///
     /// This is the unified initialization path for all queries in the new architecture.
     /// For each row (object) in the table:
-    /// 1. Get the Object from LocalNode
+    /// 1. Get the Object from ObjectManager
     /// 2. Evaluate BranchMerge node to get the merged row
     /// 3. Route through downstream nodes (Filter, Projection, etc.)
     fn init_branch_merge_query(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
         skip_id: Option<ObjectId>,
         skip_table: Option<&str>,
     ) {
@@ -862,7 +862,7 @@ impl QueryGraph {
                 continue;
             }
 
-            // Get the Object from DatabaseState
+            // Get the Object from QueryManagerState
             let object = match db.get_object(row_id) {
                 Some(obj) => obj,
                 None => continue,
@@ -915,7 +915,7 @@ impl QueryGraph {
     fn init_inner_join_nodes(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
         skip_id: Option<ObjectId>,
         skip_table: Option<&str>,
     ) {
@@ -1011,7 +1011,7 @@ impl QueryGraph {
     fn init_array_aggregate_query(
         &mut self,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
         skip_id: Option<ObjectId>,
         skip_table: Option<&str>,
     ) {
@@ -1121,7 +1121,7 @@ impl QueryGraph {
         delta: RowDelta,
         source_table: &str,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> DeltaBatch {
         // Find all entry points for this table (with their input ports)
         let entries = self
@@ -1154,7 +1154,7 @@ impl QueryGraph {
         current: DeltaBatch,
         port: InputPort,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> DeltaBatch {
         if current.is_empty() {
             return DeltaBatch::new();
@@ -1197,7 +1197,7 @@ impl QueryGraph {
         current: DeltaBatch,
         port: InputPort,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> DeltaBatch {
         let node = &mut self.nodes[node_idx];
 
@@ -1302,7 +1302,11 @@ impl QueryGraph {
     }
 
     /// Collect output rows in buffer format from the final cached set.
-    fn collect_output(&self, cache: &RowCache, _db: &DatabaseState) -> Vec<(ObjectId, OwnedRow)> {
+    fn collect_output(
+        &self,
+        cache: &RowCache,
+        _db: &QueryManagerState,
+    ) -> Vec<(ObjectId, OwnedRow)> {
         // Find the node feeding into Output
         let output_idx = self.node_indices[&self.output_node];
         if let QueryNode::Output { input, .. } = &self.nodes[output_idx] {
@@ -1448,7 +1452,7 @@ impl QueryGraph {
         &mut self,
         delta: DeltaBatch,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> DeltaBatch {
         // Find the BranchMerge node
         let branch_merge_idx = self
@@ -1490,7 +1494,7 @@ impl QueryGraph {
         &mut self,
         delta: RowDelta,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> DeltaBatch {
         self.process_change_from_table(delta, &self.table.clone(), cache, db)
     }
@@ -1501,7 +1505,7 @@ impl QueryGraph {
         delta: RowDelta,
         source_table: &str,
         cache: &mut RowCache,
-        db: &DatabaseState,
+        db: &QueryManagerState,
     ) -> DeltaBatch {
         // Get the row ID being changed - we need to skip it during init
         let skip_id = Some(delta.row_id());
@@ -1680,7 +1684,7 @@ impl QueryGraph {
 mod tests {
     use super::*;
     use crate::object::ObjectId;
-    use crate::sql::Database;
+    use crate::sql::QueryManager;
     use crate::sql::query_graph::PredicateValue;
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
@@ -1730,7 +1734,7 @@ mod tests {
         let mut graph = builder.output(filter, GraphId(1));
 
         // Create a mock database state
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema).unwrap();
 
         let mut cache = RowCache::new();
@@ -1761,7 +1765,7 @@ mod tests {
         let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let mut graph = builder.output(filter, GraphId(1));
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(schema).unwrap();
 
         let mut cache = RowCache::new();
@@ -1856,7 +1860,7 @@ mod tests {
         assert!(graph.handles_table("notes"));
 
         // Create mock database
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(outer_schema).unwrap();
         db.create_table(inner_schema).unwrap();
 
@@ -1882,7 +1886,7 @@ mod tests {
             builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(outer_schema).unwrap();
         db.create_table(inner_schema).unwrap();
 
@@ -1917,7 +1921,7 @@ mod tests {
             builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(outer_schema).unwrap();
         db.create_table(inner_schema).unwrap();
 
@@ -1976,11 +1980,11 @@ mod tests {
         let inner_schema = note_schema();
 
         // Create database and add data BEFORE creating the query
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(outer_schema.clone()).unwrap();
         db.create_table(inner_schema.clone()).unwrap();
 
-        // Insert a folder using the Database API
+        // Insert a folder using the QueryManager API
         let folder_id = db
             .insert_with("folders", |b| b.set_string_by_name("name", "Work").build())
             .unwrap();
@@ -2060,8 +2064,8 @@ mod tests {
 
     /// Test that mimics the exact demo app flow:
     /// 1. Query is registered FIRST (before any data)
-    /// 2. Outer row (folder) is inserted via Database API
-    /// 3. Inner row (note) is inserted via Database API
+    /// 2. Outer row (folder) is inserted via QueryManager API
+    /// 3. Inner row (note) is inserted via QueryManager API
     /// 4. Check that arrays are populated via inner delta processing
     #[test]
     fn array_aggregate_inner_delta_via_database_api() {
@@ -2072,7 +2076,7 @@ mod tests {
         let inner_schema = note_schema();
 
         // Create database with tables
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(outer_schema.clone()).unwrap();
         db.create_table(inner_schema.clone()).unwrap();
 
@@ -2088,7 +2092,7 @@ mod tests {
             update_count_clone.fetch_add(1, Ordering::SeqCst);
         }));
 
-        // Insert a folder via Database API (should trigger outer delta)
+        // Insert a folder via QueryManager API (should trigger outer delta)
         let folder_id = db
             .insert_with("folders", |b| b.set_string_by_name("name", "Work").build())
             .unwrap();
@@ -2106,7 +2110,7 @@ mod tests {
             "Expected at least 1 update after folder insert"
         );
 
-        // Insert a note via Database API (should trigger inner delta)
+        // Insert a note via QueryManager API (should trigger inner delta)
         let note_id = db
             .insert_with("notes", |b| {
                 b.set_ref_by_name("folder", folder_id)
@@ -2189,7 +2193,7 @@ mod tests {
         );
 
         // Create database with all tables
-        let db = Database::in_memory();
+        let db = QueryManager::in_memory();
         db.create_table(folder_schema.clone()).unwrap();
         db.create_table(note_schema.clone()).unwrap();
         db.create_table(task_schema.clone()).unwrap();
