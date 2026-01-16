@@ -24,6 +24,8 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 **NB**: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
 - We have introduced a way to permanently [delete CoValues](/docs/core-concepts/covalues/deleting). This brings a new `deleted` loading state.
 - You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic.
+- The `removeMember` method now throws an error if the caller is not authorized.
+- The React context API in `jazz-tools/react-core` changed: `useJazzContextValue` replaces `useJazzContext` for value access, and nesting `JazzProvider` now throws.
 
 ## Breaking changes
 
@@ -199,7 +201,6 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 }
 ```
 </CodeGroup>
-
 ### New `deleted` loading state
 
 With the introduction of [CoValue deletion](/docs/core-concepts/covalues/deleting), there's a new `deleted` loading state. If you're handling loading states explicitly, you should add a case for `deleted`:
@@ -218,5 +219,36 @@ if (!project.$isLoaded) {
       return "Project deleted";
   }
 }
+```
+</CodeGroup>
+
+### React context/provider changes
+
+The React context API in `jazz-tools/react-core` changed to prevent nested providers and clarify context access:
+
+- `JazzContextManagerContext` was removed.
+- `useJazzContext` was renamed to `useJazzContextValue` for accessing the context value.
+- `useJazzContext` now returns the context manager instead of the value.
+- Nesting `JazzProvider` components now throws an error.
+
+If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
+
+<CodeGroup>
+```diff
+- import { useJazzContext } from "jazz-tools/react-core";
++ import { useJazzContextValue } from "jazz-tools/react-core";
+
+- const context = useJazzContext();
++ const context = useJazzContextValue();
+```
+</CodeGroup>
+
+If you need to provide context to children without creating a new context (e.g., for components that don't propagate React context), use:
+
+<CodeGroup>
+```tsx
+<JazzContext.Provider value={useJazzContext()}>
+  {children}
+</JazzContext.Provider>
 ```
 </CodeGroup>
