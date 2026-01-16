@@ -23,7 +23,7 @@ fn get_inserted_id(result: ExecuteResult) -> groove::ObjectId {
 /// This is needed in tests because storage goes through outboxes,
 /// and tests don't use a full driver/SyncEngine.
 fn flush_storage(db: &Database) {
-    let env = db.node().env().clone();
+    let env = db.node().env().expect("env required").clone();
     let requests = db.node().drain_storage_requests();
 
     futures::executor::block_on(async {

@@ -403,7 +403,7 @@ impl WasmDatabase {
             self.blob_registry.borrow_mut().register(content_ref)
         } else {
             // For large data, chunk it and store in Environment
-            let env = self.db.node().env();
+            let env = self.db.node().env().expect("env required");
             let hashes: Vec<ChunkHash> = data
                 .chunks(INLINE_THRESHOLD)
                 .map(|chunk| {
@@ -420,7 +420,10 @@ impl WasmDatabase {
     /// Call write_blob_chunk() to add data, then finish_blob() to get the handle.
     #[wasm_bindgen]
     pub fn create_blob_writer(&self) -> WasmBlobWriter {
-        WasmBlobWriter::new(Rc::clone(&self.blob_registry), self.db.node().env().clone())
+        WasmBlobWriter::new(
+            Rc::clone(&self.blob_registry),
+            self.db.node().env().expect("env required").clone(),
+        )
     }
 
     /// Read all bytes from a blob handle.
@@ -440,7 +443,7 @@ impl WasmDatabase {
             ContentRef::Inline(data) => Ok(Uint8Array::from(data.as_ref())),
             ContentRef::Chunked(hashes) => {
                 // Concatenate all chunks from Environment
-                let env = self.db.node().env();
+                let env = self.db.node().env().expect("env required");
                 let mut result = Vec::new();
                 for hash in hashes {
                     let chunk = block_on(env.get_chunk(hash))
@@ -506,7 +509,7 @@ impl WasmDatabase {
                 let idx = chunk_index as usize;
                 if idx < hashes.len() {
                     let hash = &hashes[idx];
-                    let env = self.db.node().env();
+                    let env = self.db.node().env().expect("env required");
                     let chunk = block_on(env.get_chunk(hash))
                         .ok_or_else(|| JsValue::from_str("chunk not found in environment"))?;
                     Ok(Uint8Array::from(chunk.as_ref()))

@@ -57,15 +57,21 @@ pub fn generate_object_id() -> ObjectId {
 
 /// A local node managing multiple objects with listener support.
 ///
-/// The node owns the Environment (storage) and ObjectListenerRegistry, providing methods
-/// for subscribing to objects and reading/writing with automatic listener notification.
+/// LocalNode is primarily an in-memory store for objects. Storage persistence
+/// is handled by the driver via the outbox system (StorageRequest).
 ///
-/// Uses internal mutability so that objects can be created and written to
-/// without requiring exclusive access to the node.
+/// The optional Environment reference is only needed for:
+/// - `load_object`: loading objects from storage at startup
+/// - Legacy compatibility with code that accesses env directly
+///
+/// For new code, use the driver pattern where the driver owns storage and
+/// uses `restore_object` to populate LocalNode.
 pub struct LocalNode {
     objects: RwLock<BTreeMap<ObjectId, Rc<RwLock<Object>>>>,
     listeners: ObjectListenerRegistry,
-    env: Rc<dyn Environment>,
+    /// Optional environment for legacy load_object support.
+    /// New code should use restore_object instead.
+    env: Option<Rc<dyn Environment>>,
     /// Optional callback invoked when commits are applied via `apply_commits`.
     /// Used by Database to be notified of sync-applied commits.
     /// Single-threaded: uses RefCell on all platforms.
@@ -81,7 +87,7 @@ pub struct LocalNode {
 
 impl Default for LocalNode {
     fn default() -> Self {
-        Self::new(Rc::new(MemoryEnvironment::new()))
+        Self::in_memory()
     }
 }
 
@@ -96,11 +102,30 @@ impl std::fmt::Debug for LocalNode {
 
 impl LocalNode {
     /// Create a new LocalNode with the given environment.
+    ///
+    /// The environment is used for `load_object` to read from storage.
+    /// For new code using the driver pattern, consider using `new_without_env`
+    /// and `restore_object` instead.
     pub fn new(env: Rc<dyn Environment>) -> Self {
         LocalNode {
             objects: RwLock::new(BTreeMap::new()),
             listeners: ObjectListenerRegistry::new(),
-            env,
+            env: Some(env),
+            on_commits_applied: RefCell::new(None),
+            pending_storage: RefCell::new(Vec::new()),
+            changed_objects: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Create a new LocalNode without environment.
+    ///
+    /// Use this when the driver owns storage and will use `restore_object`
+    /// to populate the node. Storage writes go through outboxes.
+    pub fn new_without_env() -> Self {
+        LocalNode {
+            objects: RwLock::new(BTreeMap::new()),
+            listeners: ObjectListenerRegistry::new(),
+            env: None,
             on_commits_applied: RefCell::new(None),
             pending_storage: RefCell::new(Vec::new()),
             changed_objects: RefCell::new(Vec::new()),
@@ -146,14 +171,20 @@ impl LocalNode {
         *self.on_commits_applied.borrow_mut() = callback;
     }
 
-    /// Create a new LocalNode with an in-memory environment (for testing).
+    /// Create a new LocalNode with an in-memory environment.
+    ///
+    /// This creates a MemoryEnvironment for load_object support.
+    /// For driver-owned storage, use `new_without_env()` instead.
     pub fn in_memory() -> Self {
-        Self::default()
+        Self::new(Rc::new(MemoryEnvironment::new()))
     }
 
-    /// Get the environment.
-    pub fn env(&self) -> &Rc<dyn Environment> {
-        &self.env
+    /// Get the environment, if one was provided.
+    ///
+    /// Returns None if the node was created with `new_without_env()`.
+    /// Prefer using the driver pattern with `restore_object` for new code.
+    pub fn env(&self) -> Option<&Rc<dyn Environment>> {
+        self.env.as_ref()
     }
 
     /// Load an object from the Environment by reading its commits and frontier.
@@ -161,14 +192,18 @@ impl LocalNode {
     ///
     /// This is async because it reads from the Environment, which may be backed
     /// by IndexedDB or other async storage.
+    ///
+    /// Returns None if no environment is available (use `restore_object` instead).
     pub async fn load_object(
         &self,
         id: ObjectId,
         prefix: impl Into<String>,
         branch: &str,
     ) -> Option<ObjectId> {
+        let env = self.env.as_ref()?;
+
         // Get frontier from Environment
-        let frontier = self.env.get_frontier(id.into(), branch).await;
+        let frontier = env.get_frontier(id.into(), branch).await;
         if frontier.is_empty() {
             return None;
         }
@@ -184,7 +219,7 @@ impl LocalNode {
             }
             loaded_ids.insert(commit_id);
 
-            if let Some(commit) = self.env.get_commit(&commit_id).await {
+            if let Some(commit) = env.get_commit(&commit_id).await {
                 // Add parent commits to load queue
                 for parent_id in &commit.parents {
                     if !loaded_ids.contains(parent_id) {
@@ -207,6 +242,48 @@ impl LocalNode {
             }
 
             // Set frontier explicitly from Environment
+            branch_guard.set_frontier(frontier);
+        }
+
+        // Register the object
+        self.objects
+            .write()
+            .unwrap()
+            .insert(id, Rc::new(RwLock::new(object)));
+
+        Some(id)
+    }
+
+    /// Restore an object from pre-loaded commits.
+    ///
+    /// This is the synchronous version of `load_object` - the caller (driver) is
+    /// responsible for loading the frontier and commits from storage.
+    ///
+    /// Returns the object ID if restoration succeeded.
+    pub fn restore_object(
+        &self,
+        id: ObjectId,
+        prefix: impl Into<String>,
+        branch: &str,
+        frontier: Vec<CommitId>,
+        commits: Vec<Commit>,
+    ) -> Option<ObjectId> {
+        if frontier.is_empty() {
+            return None;
+        }
+
+        // Create a new Object and add all commits
+        let object = Object::new(id, prefix);
+        let branch_ref = object.branch_ref(branch)?;
+        {
+            let mut branch_guard = branch_ref.write().unwrap();
+
+            // Restore all commits
+            for commit in commits {
+                branch_guard.restore_commit(commit);
+            }
+
+            // Set frontier explicitly
             branch_guard.set_frontier(frontier);
         }
 
@@ -325,11 +402,15 @@ impl LocalNode {
 
         // Ensure initial state is set (only if not already set)
         // This must happen BEFORE subscribe so the callback gets called with initial state
+        let env = self
+            .env
+            .clone()
+            .expect("subscribe requires environment; use new() not new_without_env()");
         self.listeners
-            .ensure_initial_state(&key, self.env.clone(), tips, branch_ref);
+            .ensure_initial_state(&key, env.clone(), tips, branch_ref);
 
         // Subscribe with the callback - it will be called immediately with current state
-        let id = self.listeners.subscribe(key, self.env.clone(), callback);
+        let id = self.listeners.subscribe(key, env, callback);
 
         Ok(id)
     }

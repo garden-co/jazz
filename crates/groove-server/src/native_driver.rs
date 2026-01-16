@@ -293,7 +293,7 @@ impl NativeSyncDriver {
         // For MemoryEnvironment, we run synchronously since it's instant.
         // A production driver with async storage would need Arc<dyn Environment + Send + Sync>.
         if !outboxes.storage.is_empty() {
-            let env = self.engine.local_node.env().clone();
+            let env = self.engine.local_node.env().expect("env required").clone();
             futures::executor::block_on(async {
                 for request in outboxes.storage {
                     match request {

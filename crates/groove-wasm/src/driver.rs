@@ -327,7 +327,12 @@ impl WasmSyncDriver {
             };
 
             let outboxes = engine.borrow_mut().pass(inboxes);
-            let env = engine.borrow().local_node.env().clone();
+            let env = engine
+                .borrow()
+                .local_node
+                .env()
+                .expect("env required")
+                .clone();
 
             // Handle outboxes inline (can't call self methods from closure)
             handle_outboxes_impl(
@@ -356,7 +361,13 @@ impl WasmSyncDriver {
 
     /// Handle outboxes from a pass.
     fn handle_outboxes(&self, outboxes: Outboxes) {
-        let env = self.engine.borrow().local_node.env().clone();
+        let env = self
+            .engine
+            .borrow()
+            .local_node
+            .env()
+            .expect("env required")
+            .clone();
         handle_outboxes_impl(
             &outboxes,
             &self.engine,
