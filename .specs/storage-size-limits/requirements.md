@@ -110,12 +110,13 @@ This feature adds configurable storage size limits with intelligent eviction of 
 
 1. **The system shall** NEVER evict CoValues that appear in the `unsynced_covalues` tracking table (data would be lost on crash).
 2. **The system shall** NEVER evict CoValues that are currently loaded in memory (would break incremental storage writes).
-3. **The system shall** only evict CoValues that are:
+3. **The system shall** treat the current account and profile CoValues as protected from eviction by default, since group CoValues are not garbage-collected unless `garbageCollectGroups` is explicitly enabled.
+4. **The system shall** only evict CoValues that are:
    - NOT in memory (have been unmounted by GarbageCollector), AND
    - Synced to server (data can be safely re-fetched)
-4. **When** no evictable CoValues remain (all are in-memory or unsynced), **the system shall** switch to memory-only mode and log a warning.
-5. **The system shall** resume normal storage operation automatically when CoValues are unmounted from memory or sync completes.
-6. **The system shall** use the in-memory `UnsyncedCoValuesTracker` as the authoritative source for sync status (not the storage table, which may have batching delays).
+5. **When** no evictable CoValues remain (all are in-memory or unsynced), **the system shall** switch to memory-only mode and log a warning.
+6. **The system shall** resume normal storage operation automatically when CoValues are unmounted from memory or sync completes.
+7. **The system shall** use the in-memory `UnsyncedCoValuesTracker` as the authoritative source for sync status (not the storage table, which may have batching delays).
 
 ---
 
