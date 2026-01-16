@@ -13,6 +13,8 @@ import {
   AnyRawCoValue,
   type CoID,
   type CoValueCore,
+  MessageChannelLike,
+  MessagePortLike,
   type RawAccount,
   RawAccountID,
   RawCoMap,
@@ -810,4 +812,81 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   }
 
   return map;
+}
+
+// ============================================================================
+// MessageChannel Test Helpers
+// ============================================================================
+
+/**
+ * Type guard to check if a message is a SyncMessage.
+ */
+export function isSyncMessage(msg: unknown): msg is SyncMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "action" in msg &&
+    typeof (msg as { action: unknown }).action === "string"
+  );
+}
+
+/**
+ * Creates a MessageChannel that logs all sync messages exchanged between ports.
+ * Similar to connectedPeersWithMessagesTracking but for MessageChannel.
+ */
+export function createTrackedMessageChannel(opts: {
+  port1Name?: string;
+  port2Name?: string;
+}) {
+  const { port1, port2 } = new MessageChannel();
+  const port1Name = opts.port1Name ?? "port1";
+  const port2Name = opts.port2Name ?? "port2";
+
+  // Wrap port1.postMessage to log messages
+  const originalPort1PostMessage = port1.postMessage.bind(port1);
+  port1.postMessage = (message, transfer) => {
+    if (isSyncMessage(message)) {
+      SyncMessagesLog.add({
+        from: port1Name,
+        to: port2Name,
+        msg: message,
+      });
+    }
+
+    originalPort1PostMessage(message, transfer);
+  };
+
+  // Wrap port2.postMessage to log messages
+  const originalPort2PostMessage = port2.postMessage.bind(port2);
+  port2.postMessage = (message, transfer) => {
+    if (isSyncMessage(message)) {
+      SyncMessagesLog.add({
+        from: port2Name,
+        to: port1Name,
+        msg: message,
+      });
+    }
+
+    originalPort2PostMessage(message, transfer);
+  };
+
+  return { port1, port2 };
+}
+
+/**
+ * Creates a mock worker target that simulates receiving a port
+ * and calling a callback with the received port (simulating a connection handshake).
+ */
+export function createMockWorkerWithAccept(
+  onPortReceived: (port: MessagePortLike) => Promise<void>,
+) {
+  return {
+    postMessage: vi.fn().mockImplementation((data, transfer) => {
+      if (data?.type === "jazz:port" && transfer?.[0]) {
+        const port = transfer[0] as MessagePortLike;
+        // Simulate the worker receiving the port and calling accept
+        onPortReceived(port);
+      }
+    }),
+  };
 }
