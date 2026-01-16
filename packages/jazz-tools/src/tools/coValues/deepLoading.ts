@@ -46,6 +46,7 @@ export type NotLoaded<T> = {
     id: ID<T>;
     loadingState:
       | typeof CoValueLoadingState.LOADING
+      | typeof CoValueLoadingState.DELETED
       | typeof CoValueLoadingState.UNAVAILABLE
       | typeof CoValueLoadingState.UNAUTHORIZED;
   };
@@ -70,6 +71,7 @@ export type Inaccessible<T> = {
   $jazz: {
     id: ID<T>;
     loadingState:
+      | typeof CoValueLoadingState.DELETED
       | typeof CoValueLoadingState.UNAVAILABLE
       | typeof CoValueLoadingState.UNAUTHORIZED;
   };

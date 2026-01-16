@@ -5,7 +5,7 @@ import {
   MeterProvider,
   MetricReader,
 } from "@opentelemetry/sdk-metrics";
-import { expect, onTestFinished, vi } from "vitest";
+import { assert, expect, onTestFinished, vi } from "vitest";
 import { ControlledAccount, ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import {
@@ -26,15 +26,12 @@ import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
-import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { CoValueHeader } from "../coValueCore/verifiedState.js";
 import { idforHeader } from "../coValueCore/coValueCore.js";
 
 let Crypto = await WasmCrypto.create();
 
-export function setCurrentTestCryptoProvider(
-  crypto: WasmCrypto | PureJSCrypto,
-) {
+export function setCurrentTestCryptoProvider(crypto: WasmCrypto) {
   Crypto = crypto;
 }
 
@@ -501,11 +498,11 @@ export function setupTestNode(
   }
 
   async function addAsyncStorage(
-    opts: { ourName?: string; filename?: string } = {},
+    opts: { ourName?: string; filename?: string; storageName?: string } = {},
   ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
       filename: opts.filename,
     });
     node.setStorage(storage);
@@ -638,10 +635,12 @@ export async function setupTestAccount(
     return { storage };
   }
 
-  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+  async function addAsyncStorage(
+    opts: { ourName?: string; storageName?: string } = {},
+  ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
     });
     ctx.node.setStorage(storage);
 
@@ -656,9 +655,14 @@ export async function setupTestAccount(
     await ctx.node.gracefulShutdown();
   });
 
+  const account = ctx.node
+    .getCoValue(ctx.accountID)
+    .getCurrentContent() as RawAccount;
+
   return {
     node: ctx.node,
     accountID: ctx.accountID,
+    account,
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
@@ -810,4 +814,19 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   }
 
   return map;
+}
+
+export function importContentIntoNode(
+  coValue: CoValueCore,
+  node: LocalNode,
+  chunks?: number,
+) {
+  const content = coValue.newContentSince(undefined);
+  assert(content);
+  for (const [i, chunk] of content.entries()) {
+    if (chunks && i >= chunks) {
+      break;
+    }
+    node.syncManager.handleNewContent(chunk, "import");
+  }
 }

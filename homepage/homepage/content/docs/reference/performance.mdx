@@ -10,12 +10,19 @@ export const metadata = {
 
 The fastest implementations are (in order):
 
-1. [Node-API crypto](/docs/server-side/setup#node-api) (only available in some Node/Deno environments) or [RNCrypto](/docs/project-setup/providers#react-native-crypto) and [RNQuickCrypto](/docs/react-native/project-setup/providers#quick-crypto) on React Native
+1. [Node-API crypto](/docs/server-side/setup#node-api) (only available in some Node/Deno environments) and RNCrypto on React Native (Default)
 2. [WASM crypto](/docs/server-side/setup#wasm-on-edge-runtimes)
-3. JavaScript fallback (slowest, but most compatible)
 
 Check whether your environment supports Node-API.
 Some edge runtimes may not enable WASM by default.
+
+## Initialize WASM asynchronously
+If you want to initialize the WASM asynchronously (**Suggested**), you can use the `initWasm` function.
+Otherwise, the WASM will be initialized synchronously and will block the main thread (**Not Recommended**).
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```ts index.ts#InitWasmAsync
+```
+</CodeGroup>
 
 ## Minimise group extensions
 

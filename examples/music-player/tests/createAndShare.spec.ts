@@ -209,3 +209,51 @@ test("create a new playlist, share with manager role who will add and remove a r
   await luigiHome.assertPlaylistNotExists("Save the princess");
   await peachHome.assertPlaylistNotExists("Save the princess");
 });
+
+test("delete account removes user data and shared playlists become inaccessible", async ({
+  page: marioPage,
+  browser,
+}) => {
+  // Create playlist with a song and share
+  await marioPage.goto("/");
+  const marioHome = new HomePage(marioPage);
+
+  await marioHome.fillUsername("Mario");
+  await marioPage.keyboard.press("Enter");
+
+  await marioHome.expectMusicTrack("Example song");
+  await marioHome.editTrackTitle("Example song", "Super Mario World");
+  await marioHome.createPlaylist("Save the princess");
+  await marioHome.navigateToPlaylist("All tracks");
+  await marioHome.addTrackToPlaylist("Super Mario World", "Save the princess");
+  await marioHome.navigateToPlaylist("Save the princess");
+  await marioHome.expectMusicTrack("Super Mario World");
+  await marioHome.signUp();
+  const inviteUrl = await marioHome.getShareLink();
+
+  await sleep(4000); // Wait for the sync to complete
+
+  // Retrieve shared playlist as Luigi
+  const luigiContext = await browser.newContext();
+  await mockAuthenticator(luigiContext);
+  const luigiPage = await luigiContext.newPage();
+  await luigiPage.goto("/");
+  const luigiHome = new HomePage(luigiPage);
+
+  await luigiHome.fillUsername("Luigi");
+  await luigiPage.keyboard.press("Enter");
+
+  await luigiHome.signUp();
+
+  await luigiPage.goto(inviteUrl);
+  await luigiHome.expectMusicTrack("Super Mario World");
+
+  // Now Mario deletes his account
+  await marioHome.navigateToSettings();
+  await marioHome.deleteAccount();
+
+  await sleep(4000); // Wait for the sync to complete
+
+  // Luigi should no longer have access to the playlist
+  await luigiHome.assertPlaylistNotExists("Save the princess");
+});

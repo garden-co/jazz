@@ -17,6 +17,8 @@ function ProjectView({ projectId }: { projectId: string }) {
         return "Project not found";
       case "loading":
         return "Loading project...";
+      case "deleted":
+        return "Project deleted";
     }
   }
 

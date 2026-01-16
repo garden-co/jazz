@@ -73,6 +73,10 @@ describe("Cloudflare Workers Integration Test", () => {
     const data = await response.json();
 
     // Verify response
-    expect(data).toEqual({ text: "Hello world!", isWasmCrypto: true });
+    expect(data).toEqual({
+      text: "Hello world!",
+      isWasmCrypto: true,
+      isWasmCryptoSync: true,
+    });
   });
 });

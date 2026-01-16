@@ -1,12 +1,21 @@
-import type { AgentSecret, RawCoID, SessionID, SyncMessage } from "cojson";
+import type {
+  AgentSecret,
+  RawCoID,
+  RawCoMap,
+  SessionID,
+  SyncMessage,
+} from "cojson";
 import {
   cojsonInternals,
   ControlledAgent,
   LocalNode,
   StorageApiAsync,
+  StorageAPI,
 } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { onTestFinished } from "vitest";
+
+const { knownStateFromContent } = cojsonInternals;
 
 export function trackMessages() {
   const messages: {
@@ -92,6 +101,32 @@ export function trackMessages() {
   };
 }
 
+export function getAllCoValuesWaitingForDelete(
+  storage: StorageAPI,
+): Promise<RawCoID[]> {
+  // @ts-expect-error - dbClient is private
+  return storage.dbClient.getAllCoValuesWaitingForDelete();
+}
+
+export async function getCoValueStoredSessions(
+  storage: StorageAPI,
+  id: RawCoID,
+): Promise<SessionID[]> {
+  return new Promise<SessionID[]>((resolve) => {
+    storage.load(
+      id,
+      (content) => {
+        if (content.id === id) {
+          resolve(
+            Object.keys(knownStateFromContent(content).sessions) as SessionID[],
+          );
+        }
+      },
+      () => {},
+    );
+  });
+}
+
 export function waitFor(
   callback: () => boolean | undefined | Promise<boolean | undefined>,
 ) {
@@ -122,47 +157,21 @@ export function waitFor(
   });
 }
 
-export async function clearObjectStore(
-  dbName: string,
-  storeName: string,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const openReq = indexedDB.open(dbName);
+export function fillCoMapWithLargeData(map: RawCoMap) {
+  const dataSize = 1 * 1024 * 200;
+  const chunkSize = 1024; // 1KB chunks
+  const chunks = dataSize / chunkSize;
 
-    openReq.onerror = () => reject(openReq.error);
+  const value = btoa(
+    new Array(chunkSize).fill("value$").join("").slice(0, chunkSize),
+  );
 
-    openReq.onsuccess = () => {
-      const db = openReq.result;
+  for (let i = 0; i < chunks; i++) {
+    const key = `key${i}`;
+    map.set(key, value, "trusting");
+  }
 
-      if (!db.objectStoreNames.contains(storeName)) {
-        db.close();
-        resolve();
-        return;
-      }
-
-      const tx = db.transaction(storeName, "readwrite");
-      const store = tx.objectStore(storeName);
-
-      const clearReq = store.clear();
-
-      clearReq.onerror = () => reject(clearReq.error);
-
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
-
-      tx.onabort = () => {
-        db.close();
-        reject(tx.error || new Error("Transaction aborted"));
-      };
-    };
-  });
+  return map;
 }
 
 const Crypto = await WasmCrypto.create();

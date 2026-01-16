@@ -1,7 +1,7 @@
 import {
   useAuthSecretStorage,
   useIsAuthenticated,
-  useJazzContext,
+  useJazzContextValue,
 } from "jazz-tools/react-core";
 import { useMemo } from "react";
 import { ReactNativePasskeyAuth } from "./PasskeyAuth.js";
@@ -52,7 +52,7 @@ export function usePasskeyAuth({
   appName: string;
   rpId: string;
 }) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
   const authSecretStorage = useAuthSecretStorage();
 
   if ("guest" in context) {

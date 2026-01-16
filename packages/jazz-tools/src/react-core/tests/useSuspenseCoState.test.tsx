@@ -218,6 +218,50 @@ describe("useSuspenseCoState", () => {
     );
   });
 
+  it("should throw error when CoValue is deleted", async () => {
+    const TestMap = co.map({
+      value: z.string(),
+    });
+
+    const owner = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map = TestMap.create(
+      {
+        value: "123",
+      },
+      Group.create(owner).makePublic("reader"),
+    );
+
+    map.$jazz.raw.core.deleteCoValue();
+
+    const TestComponent = () => {
+      const value = useSuspenseCoState(TestMap, map.$jazz.id);
+      return <div>{value.value}</div>;
+    };
+
+    const { container } = await act(async () => {
+      return render(
+        <ErrorBoundary FallbackComponent={ErrorFallback}>
+          <Suspense fallback={<div>Loading...</div>}>
+            <TestComponent />
+          </Suspense>
+        </ErrorBoundary>,
+        {
+          account: owner,
+        },
+      );
+    });
+
+    await waitFor(
+      () => {
+        expect(container.textContent).toContain("Error: deleted");
+      },
+      { timeout: 10_000 },
+    );
+  });
+
   it("should throw error when CoValue is unavailable due disabled network", async () => {
     disableJazzTestSync();
 

@@ -1,7 +1,10 @@
 "use client";
 
 import { createAuthClient } from "better-auth/client";
-import { useAuthSecretStorage, useJazzContext } from "jazz-tools/react-core";
+import {
+  useAuthSecretStorage,
+  useJazzContextValue,
+} from "jazz-tools/react-core";
 import { useEffect } from "react";
 import { type PropsWithChildren } from "react";
 import { jazzPluginClient } from "./client.js";
@@ -35,7 +38,7 @@ export function AuthProvider({
 }: PropsWithChildren<{
   betterAuthClient: AuthClient;
 }>) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
   const authSecretStorage = useAuthSecretStorage();
 
   if (betterAuthClient.jazz === undefined) {

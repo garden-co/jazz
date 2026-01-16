@@ -1,7 +1,13 @@
 import { base58 } from "@scure/base";
 import { ControlledAccountOrAgent, RawAccountID } from "../coValues/account.js";
-import { AgentID, RawCoID, TransactionID } from "../ids.js";
-import { SessionID } from "../ids.js";
+import {
+  AgentID,
+  RawCoID,
+  TransactionID,
+  SessionID,
+  ActiveSessionID,
+  DeleteSessionID,
+} from "../ids.js";
 import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
@@ -246,8 +252,14 @@ export abstract class CryptoProvider<Blake3State = any> {
     )}`;
   }
 
-  newRandomSessionID(accountID: RawAccountID | AgentID): SessionID {
-    return `${accountID}_session_z${base58.encode(this.randomBytes(8))}`;
+  newRandomSessionID(accountID: RawAccountID | AgentID): ActiveSessionID {
+    const randomPart = base58.encode(this.randomBytes(8));
+    return `${accountID}_session_z${randomPart}`;
+  }
+
+  newDeleteSessionID(accountID: RawAccountID | AgentID): DeleteSessionID {
+    const randomPart = base58.encode(this.randomBytes(7));
+    return `${accountID}_session_d${randomPart}$`;
   }
 
   abstract createSessionLog(

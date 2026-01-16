@@ -1,0 +1,68 @@
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+export const metadata = {
+  description: "Learn how to permanently delete CoValues and their nested references using the deleteCoValues function"
+};
+
+# Deleting CoValues
+
+The `deleteCoValues` function allows you to permanently delete CoValues from Jazz. When a CoValue is deleted, it becomes inaccessible to all users.
+
+<Alert variant="warning" className="my-4" title="Irreversible Operation">
+  Deletion is permanent and cannot be undone. Once a CoValue is deleted, it cannot be recovered. Make sure you have proper confirmation flows in your application before calling `deleteCoValues`.
+</Alert>
+
+<Alert variant="warning" className="my-4" title="Admin Permissions Required">
+  Only users with admin permissions on a CoValue's group can delete it. Attempting to delete a CoValue without admin access will throw an error.
+</Alert>
+
+Deleted values are not deleted from storage immediately, but are marked with a tombstone.
+
+To balance performance considerations, the actual physical deletion of the data from storage is done asynchronously in the background, and is dependent on the sync server's configuration.
+
+Jazz Cloud and `jazz-run sync` have delete enabled by default on a one minute schedule. If you're running a custom self-hosted sync server, you need to enable this feature.
+
+Deleted CoValues stored in Jazz Cloud may persist in back-ups until they are overwritten. These back-ups undergo no additional processing, and will only be restored for disaster recovery purposes.
+
+## Basic Usage
+
+To delete a CoValue, pass the schema and the CoValue's ID to `deleteCoValues`:
+
+<CodeGroup>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+After deletion, any attempt to load the CoValue will return a not-loaded state with `loadingState: "deleted"`.
+
+## Deleting Nested CoValues
+
+You can delete a CoValue along with its nested references by providing a `resolve` query. This works the same way as [resolve queries for loading](/docs/core-concepts/subscription-and-loading#using-resolve-queries).
+
+<CodeGroup>
+```ts index.ts#WithResolve
+```
+</CodeGroup>
+
+All CoValues specified in the resolve query will be deleted together. This is useful for cleaning up related data, such as deleting a document along with all its attachments and files.
+
+## Handling Inaccessible Data
+
+Jazz validates permissions on all CoValues in the resolve query **before** deleting anything. If any CoValue in the tree cannot be deleted (due to missing admin permissions or inaccessibility), the entire operation fails and no data is deleted.
+
+<CodeGroup>
+```ts index.ts#CollectionWithInaccessible
+```
+</CodeGroup>
+
+When working with collections that might contain values you don't have admin access to, iterate over the items and check permissions before attempting deletion. This allows you to handle mixed-permission scenarios gracefully rather than having the entire delete operation fail.
+
+## Groups and Accounts
+
+The `deleteCoValues` function skips Account and Group CoValues. Calling `deleteCoValues` on them has no effect:
+
+<CodeGroup>
+```ts index.ts#Limitations
+```
+</CodeGroup>
+

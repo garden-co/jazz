@@ -3,6 +3,7 @@ export type StoreName =
   | "sessions"
   | "transactions"
   | "signatureAfter"
+  | "deletedCoValues"
   | "unsyncedCoValues";
 
 const DEFAULT_TX_STORES: StoreName[] = [
@@ -10,6 +11,7 @@ const DEFAULT_TX_STORES: StoreName[] = [
   "sessions",
   "transactions",
   "signatureAfter",
+  "deletedCoValues",
 ];
 
 /**

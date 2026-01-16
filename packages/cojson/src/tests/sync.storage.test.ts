@@ -8,6 +8,7 @@ import {
   vi,
 } from "vitest";
 
+import type { JsonValue } from "../exports";
 import { cojsonInternals, emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
@@ -19,7 +20,7 @@ import {
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { Stringified } from "../jsonStringify";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -572,7 +573,9 @@ describe("client syncs with a server with storage", () => {
     const invalidMapContent = structuredClone(mapContent);
     invalidMapContent.new[bob.node.currentSessionID]!.newTransactions.push({
       privacy: "trusting",
-      changes: stableStringify([{ op: "set", key: "hello", value: "updated" }]),
+      changes: JSON.stringify([
+        { op: "set", key: "hello", value: "updated" },
+      ]) as Stringified<JsonValue[]>,
       madeAt: Date.now(),
     });
     client.node.syncManager.handleNewContent(invalidMapContent, "import");

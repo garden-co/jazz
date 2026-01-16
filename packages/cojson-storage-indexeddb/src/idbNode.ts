@@ -9,7 +9,7 @@ export function internal_setDatabaseName(name: string) {
 
 export async function getIndexedDBStorage(name = DATABASE_NAME) {
   const dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(name, 5);
+    const request = indexedDB.open(name, 6);
     request.onerror = () => {
       reject(request.error);
     };
@@ -60,6 +60,14 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
             unique: true,
           },
         );
+      }
+      if (ev.oldVersion <= 5) {
+        const deletedCoValues = db.createObjectStore("deletedCoValues", {
+          keyPath: "coValueID",
+        });
+        deletedCoValues.createIndex("deletedCoValuesByStatus", "status", {
+          unique: false,
+        });
       }
     };
   });

@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import {
-  clearObjectStore,
   connectToSyncServer,
   createTestNode,
+  getAllCoValuesWaitingForDelete,
+  getCoValueStoredSessions,
+  fillCoMapWithLargeData,
   trackMessages,
   waitFor,
 } from "./testUtils.js";
@@ -14,10 +16,11 @@ import {
 const Crypto = await WasmCrypto.create();
 let syncMessages: ReturnType<typeof trackMessages>;
 
-const DATABASE_NAME = "jazz-storage";
-internal_setDatabaseName(DATABASE_NAME);
+let dbName: string;
 
 beforeEach(() => {
+  dbName = `test-${crypto.randomUUID()}`;
+  internal_setDatabaseName(dbName);
   syncMessages = trackMessages();
   cojsonInternals.setSyncStateTrackingBatchDelay(0);
   cojsonInternals.setCoValueLoadingRetryDelay(10);
@@ -25,9 +28,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   syncMessages.restore();
-  cojsonInternals.setSyncStateTrackingBatchDelay(1000);
-
-  await clearObjectStore(DATABASE_NAME, "unsyncedCoValues");
+  indexedDB.deleteDatabase(dbName);
 });
 
 test("should sync and load data from storage", async () => {
@@ -138,6 +139,129 @@ test("should send an empty content message if there is no content", async () => 
       "storage -> CONTENT Map header: true new: ",
     ]
   `);
+});
+
+test("persists deleted coValue marker as a deletedCoValues work queue entry", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage = await getIndexedDBStorage();
+  node.setStorage(storage);
+
+  const group = node.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world");
+
+  const map2 = group.createMap();
+  map2.set("hello2", "world2");
+
+  await map.core.waitForSync();
+  await map2.core.waitForSync();
+
+  map.core.deleteCoValue();
+  map2.core.deleteCoValue();
+
+  await map.core.waitForSync();
+  await map2.core.waitForSync();
+
+  const deletedCoValueIDs = await getAllCoValuesWaitingForDelete(storage);
+  expect(deletedCoValueIDs).toContain(map.id);
+  expect(deletedCoValueIDs).toContain(map2.id);
+});
+
+test("delete flow: eraseAllDeletedCoValues removes history, preserves tombstone, drains queue, and keeps only delete session in knownState", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node1 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage1 = await getIndexedDBStorage();
+  node1.setStorage(storage1);
+
+  const group = node1.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world");
+  await map.core.waitForSync();
+
+  map.core.deleteCoValue();
+  await map.core.waitForSync();
+
+  await waitFor(async () => {
+    const queued = await getAllCoValuesWaitingForDelete(storage1);
+    expect(queued).toContain(map.id);
+    return true;
+  });
+
+  await storage1.eraseAllDeletedCoValues();
+
+  // Queue drained
+  await waitFor(async () => {
+    const queued = await getAllCoValuesWaitingForDelete(storage1);
+    expect(queued).not.toContain(map.id);
+    return true;
+  });
+
+  // Tombstone-only load from storage (new node with same IDB dbName)
+  node1.gracefulShutdown();
+  syncMessages.clear();
+
+  const node2 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage2 = await getIndexedDBStorage();
+  node2.setStorage(storage2);
+
+  const map2 = await node2.load(map.id);
+  if (map2 === "unavailable") {
+    throw new Error("Map is unavailable");
+  }
+
+  expect(map2.core.isDeleted).toBe(true);
+  expect(map2.get("hello")).toBeUndefined();
+
+  const sessionIDs = await getCoValueStoredSessions(storage2, map.id);
+  expect(sessionIDs).toHaveLength(1);
+  expect(sessionIDs[0]).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
+});
+
+test("eraseAllDeletedCoValues does not break when called while a coValue is streaming from storage", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage = await getIndexedDBStorage();
+  node.setStorage(storage);
+
+  const group = node.createGroup();
+  const map = group.createMap();
+  fillCoMapWithLargeData(map);
+  await map.core.waitForSync();
+  map.core.deleteCoValue();
+  await map.core.waitForSync();
+
+  storage.close();
+
+  const newStorage = await getIndexedDBStorage();
+
+  const callback = vi.fn();
+
+  const loadPromise = new Promise((resolve) => {
+    newStorage.load(map.id, callback, resolve);
+  });
+  await newStorage.eraseAllDeletedCoValues();
+
+  expect(await loadPromise).toBe(true);
 });
 
 test("should load dependencies correctly (group inheritance)", async () => {

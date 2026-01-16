@@ -239,6 +239,74 @@ describe("useSuspenseAccount", () => {
     });
   });
 
+  it("should throw error when a required resolved child is deleted", async () => {
+    const AccountRoot = co.map({
+      value: z.string(),
+    });
+
+    const MyAppAccount = co
+      .account({
+        profile: co.profile({
+          name: z.string(),
+        }),
+        root: AccountRoot,
+      })
+      .withMigration((account, creationProps) => {
+        if (!account.$jazz.refs.profile) {
+          account.$jazz.set("profile", {
+            name: creationProps?.name || "John Doe",
+          });
+        }
+        if (!account.$jazz.refs.root) {
+          account.$jazz.set("root", {
+            value: "123",
+          });
+        }
+      });
+
+    const account = await createJazzTestAccount({
+      AccountSchema: MyAppAccount,
+      isCurrentActiveAccount: true,
+      creationProps: {
+        name: "John Doe",
+      },
+    });
+
+    // Ensure root exists, then delete it.
+    const loaded = await account.$jazz.ensureLoaded({
+      resolve: { root: true },
+    });
+    loaded.root.$jazz.raw.core.deleteCoValue();
+
+    const TestComponent = () => {
+      const account = useSuspenseAccount(MyAppAccount, {
+        resolve: {
+          root: true,
+          profile: true,
+        },
+      });
+      return <div>{account.profile.name}</div>;
+    };
+
+    const { container } = await act(async () => {
+      return render(
+        <ErrorBoundary FallbackComponent={ErrorFallback}>
+          <Suspense fallback={<div>Loading...</div>}>
+            <TestComponent />
+          </Suspense>
+        </ErrorBoundary>,
+        { account },
+      );
+    });
+
+    await waitFor(
+      () => {
+        expect(container.textContent).toContain("Error: deleted");
+      },
+      { timeout: 10_000 },
+    );
+  });
+
   it("should throw error for anonymous agent", async () => {
     const MyAppAccount = co.account({
       profile: co.profile({

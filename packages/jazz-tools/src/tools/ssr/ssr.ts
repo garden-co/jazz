@@ -1,10 +1,10 @@
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
-import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { createAnonymousJazzContext } from "jazz-tools";
 
 export function createSSRJazzAgent(opts: { peer: string }) {
   const ssrNode = createAnonymousJazzContext({
-    crypto: new PureJSCrypto(),
+    crypto: WasmCrypto.createSync(),
     peers: [],
   });
 

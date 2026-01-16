@@ -1,6 +1,5 @@
 use cojson_core::hash;
 
-
 #[derive(thiserror::Error, Debug, uniffi::Error)]
 pub enum Blake3Error {
     #[error("Failed to acquire lock")]
@@ -148,25 +147,24 @@ mod tests {
 
         // First update with [1,2,3,4,5]
         let data1 = &[1u8, 2, 3, 4, 5];
-        state.update(data1);
+        state.update(data1).unwrap();
 
         // Check that this matches a direct hash
         let direct_hash = blake3_hash_once(data1);
         let state_hash = state.finalize().unwrap();
         assert_eq!(
-            state_hash,
-            direct_hash,
+            state_hash, direct_hash,
             "First update should match direct hash"
         );
 
         // Create new state for second test
         let state = Blake3Hasher::new();
-        state.update(data1);
+        state.update(data1).unwrap();
 
         // Verify the exact expected hash from the TypeScript test for the first update
         let expected_first_hash = vec![
-            2, 79, 103, 192, 66, 90, 61, 192, 47, 186, 245, 140, 185, 61, 229, 19, 46, 61, 117, 197,
-            25, 250, 160, 186, 218, 33, 73, 29, 136, 201, 112, 87,
+            2, 79, 103, 192, 66, 90, 61, 192, 47, 186, 245, 140, 185, 61, 229, 19, 46, 61, 117,
+            197, 25, 250, 160, 186, 218, 33, 73, 29, 136, 201, 112, 87,
         ];
         assert_eq!(
             state.finalize().unwrap(),
@@ -178,8 +176,8 @@ mod tests {
         let state = Blake3Hasher::new();
         let data1 = &[1u8, 2, 3, 4, 5];
         let data2 = &[6u8, 7, 8, 9, 10];
-        state.update(data1);
-        state.update(data2);
+        state.update(data1).unwrap();
+        state.update(data2).unwrap();
 
         // Compare with a single hash of all data
         let mut all_data = Vec::new();
@@ -195,8 +193,8 @@ mod tests {
 
         // Test final hash matches expected value
         let state = Blake3Hasher::new();
-        state.update(data1);
-        state.update(data2);
+        state.update(data1).unwrap();
+        state.update(data2).unwrap();
 
         let expected_final_hash = vec![
             165, 131, 141, 69, 2, 69, 39, 236, 196, 244, 180, 213, 147, 124, 222, 39, 68, 223, 54,
@@ -209,4 +207,3 @@ mod tests {
         );
     }
 }
-

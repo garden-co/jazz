@@ -7,7 +7,7 @@ import type {
   Signature,
   SignerID,
 } from "../crypto/crypto.js";
-import { RawCoID, SessionID } from "../ids.js";
+import { isDeleteSessionID, RawCoID, SessionID } from "../ids.js";
 import { parseJSON, Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
@@ -34,6 +34,7 @@ export type SessionLog = {
 };
 
 export class SessionMap {
+  private isDeleted: boolean = false;
   sessions: Map<SessionID, SessionLog> = new Map();
 
   // Known state related properies, mutated when adding transactions to the session map
@@ -60,7 +61,32 @@ export class SessionMap {
     }
   }
 
+  markAsDeleted() {
+    this.isDeleted = true;
+
+    // We reset the known state to report only the deleted session/transaction
+    this.knownState = { id: this.id, header: true, sessions: {} };
+
+    // We remove the streaming statuses, because once deleted we don't need
+    // to wait for any streaming to be completed
+    this.knownStateWithStreaming = undefined;
+    this.streamingKnownState = undefined;
+    this.invalidateKnownStateCache();
+
+    for (const [sessionID, sessionLog] of this.sessions.entries()) {
+      if (!isDeleteSessionID(sessionID)) {
+        continue;
+      }
+
+      this.knownState.sessions[sessionID] = sessionLog.transactions.length;
+    }
+  }
+
   setStreamingKnownState(streamingKnownState: KnownStateSessions) {
+    if (this.isDeleted) {
+      return;
+    }
+
     // if the streaming known state is a subset of the current known state, we can skip the update
     if (isKnownStateSubsetOf(streamingKnownState, this.knownState.sessions)) {
       return;
@@ -148,6 +174,10 @@ export class SessionMap {
     newSignature: Signature,
     skipVerify: boolean = false,
   ) {
+    if (this.isDeleted && !isDeleteSessionID(sessionID)) {
+      throw new Error("Cannot add transactions to a deleted coValue");
+    }
+
     const sessionLog = this.getOrCreateSessionLog(sessionID, signerID);
 
     sessionLog.impl.tryAdd(newTransactions, newSignature, skipVerify);
@@ -164,6 +194,12 @@ export class SessionMap {
     meta: JsonObject | undefined,
     madeAt: number,
   ): { signature: Signature; transaction: Transaction } {
+    if (this.isDeleted) {
+      throw new Error(
+        "Cannot make new private transaction on a deleted coValue",
+      );
+    }
+
     const sessionLog = this.getOrCreateSessionLog(
       sessionID,
       signerAgent.currentSignerID(),
@@ -194,6 +230,12 @@ export class SessionMap {
     meta: JsonObject | undefined,
     madeAt: number,
   ): { signature: Signature; transaction: Transaction } {
+    if (this.isDeleted) {
+      throw new Error(
+        "Cannot make new trusting transaction on a deleted coValue",
+      );
+    }
+
     const sessionLog = this.getOrCreateSessionLog(
       sessionID,
       signerAgent.currentSignerID(),

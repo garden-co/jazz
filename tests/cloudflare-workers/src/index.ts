@@ -26,6 +26,7 @@ const syncServer = "wss://cloud.jazz.tools/?key=jazz@jazz.tools";
 
 app.get("/", async (c) => {
   const crypto = await WasmCrypto.create();
+  const cryptoSync = WasmCrypto.createSync();
 
   const peer = createWebSocketPeer({
     id: "upstream",
@@ -58,6 +59,7 @@ app.get("/", async (c) => {
   return c.json({
     text: root.text,
     isWasmCrypto: crypto instanceof WasmCrypto,
+    isWasmCryptoSync: cryptoSync instanceof WasmCrypto,
   });
 });
 

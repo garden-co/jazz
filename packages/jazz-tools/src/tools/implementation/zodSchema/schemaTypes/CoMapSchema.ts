@@ -11,6 +11,7 @@ import {
   RefsToResolveStrict,
   Resolved,
   Simplify,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coMapDefiner,
   coOptionalDefiner,
@@ -32,6 +33,11 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+
+type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
+  CoMapInstanceCoValuesMaybeLoaded<Shape>
+> &
+  CoMap;
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -150,28 +156,43 @@ export class CoMapSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-      R
-    >,
-    listener: (
-      value: Resolved<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        R
-      >,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoMapSchemaInstance<Shape>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
+    id: string,
+    options: SubscribeListenerOptions<CoMapSchemaInstance<Shape>, R>,
+    listener: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+  ): () => void;
+  subscribe<const R extends RefsToResolve<CoMapSchemaInstance<Shape>>>(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoMapSchemaInstance<Shape>, R>
+      | SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+    maybeListener?: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      // @ts-expect-error
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     // @ts-expect-error
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 
