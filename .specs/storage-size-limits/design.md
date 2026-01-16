@@ -730,6 +730,31 @@ function getStorageSize(db: SQLiteDatabaseDriver): number {
 }
 ```
 
+**SQLite free-space estimation (for eviction scheduling):**
+```typescript
+function getFreeSpaceBytes(db: SQLiteDatabaseDriver): number {
+  const result = db.get<{
+    page_size: number;
+    freelist_count: number;
+  }>(
+    "SELECT (SELECT page_size FROM pragma_page_size) as page_size, (SELECT freelist_count FROM pragma_freelist_count) as freelist_count"
+  );
+  if (!result) return 0;
+  return result.page_size * result.freelist_count;
+}
+```
+
+**SQLite hard-limit enforcement:**
+```typescript
+function setMaxPageCount(db: SQLiteDatabaseDriver, maxStorageBytes: number) {
+  const pageSize = db.get<{ page_size: number }>(
+    "SELECT (SELECT page_size FROM pragma_page_size) as page_size"
+  )?.page_size ?? 4096;
+  const maxPages = Math.max(1, Math.floor(maxStorageBytes / pageSize));
+  db.exec(`PRAGMA max_page_count = ${maxPages}`);
+}
+```
+
 **IndexedDB:**
 ```typescript
 async function getStorageSize(): Promise<number> {
@@ -835,6 +860,9 @@ Evicting storage for a CoValue that's still in memory would break the incrementa
 3. Would lose all transaction history before that point
 
 This would cause data corruption when the CoValue is later reloaded from storage.
+
+**Account/Profile protection note:**
+Account and profile CoValues are group CoValues and are not garbage-collected by default. Because they remain loaded in memory unless `garbageCollectGroups` is explicitly enabled, they are naturally excluded by the "in-memory" protection rule, so no extra eviction rule is required.
 
 ```typescript
 async function getEvictionCandidates(
@@ -1016,6 +1044,16 @@ loadCoValue(
 ---
 
 ## Error Handling
+
+### SQLite hard-limit write failure (max_page_count)
+
+When SQLite is configured with `PRAGMA max_page_count`, a write that would grow the database beyond the limit fails (e.g. `SQLITE_FULL`). In that case the storage layer should:
+
+1. Trigger eviction to free space (using eviction metadata).
+2. Retry the failed write once.
+3. If it still fails, fall back to memory-only mode and log a warning.
+
+This provides **true hard-limit enforcement** at the SQLite level while still using eviction to make room opportunistically.
 
 ### Graceful Degradation to Memory-Only Mode
 
