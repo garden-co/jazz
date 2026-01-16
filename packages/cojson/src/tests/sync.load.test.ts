@@ -1643,7 +1643,6 @@ describe("lazy storage load optimization", () => {
       [
         "client -> server | CONTENT Map header: false new: After: 0 New: 1",
         "server -> storage | LOAD Map sessions: empty",
-        "storage -> server | CONTENT Group header: true new: After: 0 New: 5",
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | KNOWN Map sessions: header/2",
         "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
@@ -1702,7 +1701,6 @@ describe("lazy storage load optimization", () => {
       [
         "client -> server | CONTENT Map header: false new: After: 0 New: 1",
         "server -> storage | LOAD Map sessions: empty",
-        "storage -> server | CONTENT Group header: true new: After: 0 New: 5",
         "storage -> server | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/201",
         "server -> client | KNOWN Map sessions: header/74",
         "server -> storage | CONTENT Map header: false new: After: 0 New: 1",

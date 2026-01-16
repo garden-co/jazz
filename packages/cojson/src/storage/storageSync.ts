@@ -37,6 +37,10 @@ import { getPriorityFromHeader } from "../priority.js";
 
 export class StorageApiSync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceSync;
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
   private loadedCoValues = new Set<RawCoID>();
 
   /**
@@ -244,7 +248,7 @@ export class StorageApiSync implements StorageAPI {
     });
   }
 
-  async pushContentWithDependencies(
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -353,6 +357,8 @@ export class StorageApiSync implements StorageAPI {
       });
     }
 
+    this.loadedCoValues.add(id);
+
     this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
@@ -455,6 +461,7 @@ export class StorageApiSync implements StorageAPI {
   }
 
   close() {
+    this.loadedCoValues.clear();
     return undefined;
   }
 }

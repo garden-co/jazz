@@ -34,6 +34,10 @@ import type {
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
   private loadedCoValues = new Set<RawCoID>();
 
   // Track pending loads to deduplicate concurrent requests
@@ -224,7 +228,7 @@ export class StorageApiAsync implements StorageAPI {
     done?.(true);
   }
 
-  async pushContentWithDependencies(
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -364,6 +368,8 @@ export class StorageApiAsync implements StorageAPI {
       });
     }
 
+    this.loadedCoValues.add(id);
+
     this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
@@ -465,6 +471,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   close() {
+    this.loadedCoValues.clear();
     return this.storeQueue.close();
   }
 }
