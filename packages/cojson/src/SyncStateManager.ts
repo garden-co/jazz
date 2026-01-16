@@ -4,14 +4,14 @@ import {
   areCurrentSessionsInSyncWith,
 } from "./knownState.js";
 import { PeerState } from "./PeerState.js";
-import { PeerID, SyncManager } from "./sync.js";
+import { Peer, PeerID, SyncManager } from "./sync.js";
 
 export type SyncState = {
   uploaded: boolean;
 };
 
 export type GlobalSyncStateListenerCallback = (
-  peerId: PeerID,
+  peer: Peer,
   knownState: CoValueKnownState,
   sync: SyncState,
 ) => void;
@@ -93,10 +93,10 @@ export class SyncStateManager {
     };
   }
 
-  triggerUpdate(peerId: PeerID, id: RawCoID, knownState: CoValueKnownState) {
+  triggerUpdate(peer: Peer, id: RawCoID, knownState: CoValueKnownState) {
     const globalListeners = this.listeners;
     const coValueListeners = this.listenersByCoValues.get(id);
-    const peerMap = this.listenersByPeersAndCoValues.get(peerId);
+    const peerMap = this.listenersByPeersAndCoValues.get(peer.id);
     const coValueAndPeerListeners = peerMap?.get(id);
 
     if (
@@ -113,12 +113,12 @@ export class SyncStateManager {
     };
 
     for (const listener of this.listeners) {
-      listener(peerId, knownState, syncState);
+      listener(peer, knownState, syncState);
     }
 
     if (coValueListeners) {
       for (const listener of coValueListeners) {
-        listener(peerId, knownState, syncState);
+        listener(peer, knownState, syncState);
       }
     }
 

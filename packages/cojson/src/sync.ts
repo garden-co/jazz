@@ -102,6 +102,10 @@ export interface Peer {
   persistent?: boolean;
 }
 
+function isPersistentServerPeer(peer: Peer | PeerState): boolean {
+  return peer.role === "server" && (peer.persistent ?? false);
+}
+
 export type ServerPeerSelector = (
   id: RawCoID,
   serverPeers: PeerState[],
@@ -361,7 +365,7 @@ export class SyncManager {
   }
 
   startPeerReconciliation(peer: PeerState) {
-    if (peer.role === "server" && peer.persistent) {
+    if (isPersistentServerPeer(peer)) {
       // Resume syncing unsynced CoValues asynchronously
       this.resumeUnsyncedCoValues().catch((error) => {
         logger.warn("Failed to resume unsynced CoValues:", error);
@@ -532,7 +536,7 @@ export class SyncManager {
 
     const unsubscribeFromKnownStatesUpdates =
       peerState.subscribeToKnownStatesUpdates((id, knownState) => {
-        this.syncState.triggerUpdate(peer.id, id, knownState.value());
+        this.syncState.triggerUpdate(peer, id, knownState.value());
       });
 
     if (!skipReconciliation && peerState.role === "server") {
@@ -718,8 +722,8 @@ export class SyncManager {
 
     peer.combineWith(msg.id, knownStateFrom(msg));
 
-    // The header is a boolean value that tells us if the other peer do have information about the header.
-    // If it's false in this point it means that the coValue is unavailable on the other peer.
+    // The header is a boolean value that tells us if the other peer has information about the header.
+    // If it's false at this point it means that the coValue is unavailable on the other peer.
     const availableOnPeer = peer.getOptimisticKnownState(msg.id)?.header;
 
     if (!availableOnPeer) {
@@ -1110,6 +1114,18 @@ export class SyncManager {
     const isSyncRequired = this.local.syncWhen !== "never";
     if (isSyncRequired && peers.length === 0) {
       this.unsyncedTracker.add(coValueId);
+
+      // Mark CoValue as synced once a persistent server peer is added and
+      // the CoValue is synced
+      const unsubscribe = this.syncState.subscribeToCoValueUpdates(
+        coValueId,
+        (peer, _knownState, syncState) => {
+          if (isPersistentServerPeer(peer) && syncState.uploaded) {
+            this.unsyncedTracker.remove(coValueId);
+            unsubscribe();
+          }
+        },
+      );
       return;
     }
 
@@ -1166,6 +1182,19 @@ export class SyncManager {
 
       return value.newContentSince(correction);
     });
+  }
+
+  /**
+   * Returns true if the local CoValue changes have been synced to all persistent server peers.
+   *
+   * Used during garbage collection to determine if the coValue is pending sync.
+   */
+  isSyncedToServerPeers(id: RawCoID): boolean {
+    // If there are currently no server peers, go ahead with GC.
+    // The CoValue will be reloaded into memory and synced when a peer is added.
+    return this.getPersistentServerPeers(id).every((peer) =>
+      this.syncState.isSynced(peer, id),
+    );
   }
 
   waitForSyncWithPeer(peerId: PeerID, id: RawCoID, timeout: number) {
