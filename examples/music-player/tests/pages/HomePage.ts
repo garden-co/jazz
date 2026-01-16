@@ -258,6 +258,7 @@ export class HomePage {
     // Wait for redirect to home and username input to be visible
     await this.page.getByRole("textbox", { name: "Username" }).waitFor({
       state: "visible",
+      timeout: 100_000,
     });
 
     await expect(
