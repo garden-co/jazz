@@ -12,7 +12,6 @@ import {
   LucideUsers,
   LucideCloud,
   LucideDatabaseZap,
-  LucideImagePlay,
   LucideFileDown,
   LucideAppWindowMac,
 } from "lucide-react";
@@ -23,7 +22,6 @@ import {
   EnterpriseTierLogo,
 } from "./TierLogos";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
-import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 
 export function ListItem({
   variant = "blue",
@@ -83,7 +81,8 @@ export function Pricing() {
               </h3>
 
               <p className="text-base text-stone-600 dark:text-stone-400">
-                Self-host Jazz for complete control. Can be combined with Jazz Cloud for hybrid deployments.
+                Self-host Jazz for complete control. Can be combined with Jazz
+                Cloud for hybrid deployments.
               </p>
             </div>
 
@@ -260,8 +259,12 @@ export function Pricing() {
           <p className="text-sm">Jazz Cloud tailored for enterprise.</p>
 
           <ul className="my-4 flex w-full flex-col text-sm lg:text-base">
-            <ListItem variant="enterprise" icon={LucideServer}>Dedicated / on-prem cloud</ListItem>
-            <ListItem variant="enterprise" icon={LucideDatabase}>Unlimited CoValues</ListItem>
+            <ListItem variant="enterprise" icon={LucideServer}>
+              Dedicated / on-prem cloud
+            </ListItem>
+            <ListItem variant="enterprise" icon={LucideDatabase}>
+              Unlimited CoValues
+            </ListItem>
 
             <li aria-hidden="true" className="my-2 list-none border-t-2" />
             <ListItem variant="enterprise" icon={LucideUsers}>

@@ -14,7 +14,7 @@ export function cleanDescription(description) {
       // Remove line breaks and extra spaces
       .replace(/\s+/g, " ")
       // Clean up backticks
-      .replace(/\`/g, "'")
+      .replace(/`/g, "'")
   );
 }
 

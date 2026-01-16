@@ -33,7 +33,10 @@ export function SideNav({
 }) {
   return (
     <div
-      className={clsx(className, "text-sm h-full flex flex-col gap-4 px-2 overflow-y-auto")}
+      className={clsx(
+        className,
+        "text-sm h-full flex flex-col gap-4 px-2 overflow-y-auto",
+      )}
     >
       {children}
     </div>
@@ -45,7 +48,13 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
     !!items?.length && (
       <ul>
         {items.map((item) => {
-          const { name, href, items: childItems, done, excludeFromNavigation } = item;
+          const {
+            name,
+            href,
+            items: childItems,
+            done,
+            excludeFromNavigation,
+          } = item;
 
           // Skip items that are excluded from navigation
           if (excludeFromNavigation) {
@@ -67,9 +76,7 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
           return (
             <li key={name}>
               <SideNavItem href={href}>
-                <span className={done === 0 ? "text-muted" : ""}>
-                  {name}
-                </span>
+                <span className={done === 0 ? "text-muted" : ""}>{name}</span>
               </SideNavItem>
             </li>
           );
@@ -86,7 +93,8 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
   const currentNormalizedPath = normalizePath(pathname);
 
   // Determine if this is a framework change (same normalized path, different raw path)
-  const isFrameworkChange = lastNormalizedPath !== null &&
+  const isFrameworkChange =
+    lastNormalizedPath !== null &&
     currentNormalizedPath === lastNormalizedPath &&
     lastRawPath !== null &&
     pathname !== lastRawPath; // Raw paths differ but normalized paths match
@@ -128,7 +136,7 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
     const updatePadding = () => {
       const scrollbarWidth = div.offsetWidth - div.clientWidth;
       // If we're dealing with overlay scroll bars, then we'll set extra padding
-      setExtraPadding(scrollbarWidth === 0)
+      setExtraPadding(scrollbarWidth === 0);
     };
 
     updatePadding();
@@ -140,9 +148,16 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
   const shouldScrollToActive = !isFrameworkChange;
 
   return (
-    <SideNavContext.Provider value={{ shouldScrollToActive, scrollContainerRef: ref }}>
-      <div ref={ref}
-        className={clsx("flex-1 relative overflow-y-auto -mx-2", extraPadding ? 'px-2 pr-4' : 'px-2')}>
+    <SideNavContext.Provider
+      value={{ shouldScrollToActive, scrollContainerRef: ref }}
+    >
+      <div
+        ref={ref}
+        className={clsx(
+          "flex-1 relative overflow-y-auto -mx-2",
+          extraPadding ? "px-2 pr-4" : "px-2",
+        )}
+      >
         {children}
         <div
           aria-hidden

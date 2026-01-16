@@ -1,6 +1,6 @@
 <script lang="ts">
   import AuthProvider from "jazz-tools/better-auth/auth/svelte";
-  import { betterAuthClient } from "@/lib/auth-client";
+  import { betterAuthClient } from "./auth-client";
   import { JazzSvelteProvider } from "jazz-tools/svelte";
   import { SyncConfig } from "jazz-tools";
   const { children } = $props();

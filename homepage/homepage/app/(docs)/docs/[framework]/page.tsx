@@ -1,7 +1,5 @@
-import { Framework, frameworks, isValidFramework } from "@/content/framework";
+import { Framework, frameworks } from "@/content/framework";
 import { DocPage, getDocMetadata } from "@/lib/docMdxContent";
-import { redirect } from "next/navigation";
-
 export async function generateMetadata({
   params,
 }: {
@@ -9,6 +7,7 @@ export async function generateMetadata({
 }) {
   const { framework } = await params;
 
+  // TODO: this returns something different to the Promise<Metadata> Next expects
   return getDocMetadata(framework, []);
 }
 

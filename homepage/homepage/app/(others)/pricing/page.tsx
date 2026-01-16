@@ -5,8 +5,8 @@ import { Metadata } from "next";
 const metaTags = {
   title: "Jazz Cloud Pricing",
   description: "Starter, Indie, Pro and Enterprise Tiers",
-  url:  "https://jazz.tools",
-}
+  url: "https://jazz.tools",
+};
 
 export const metadata: Metadata = {
   title: metaTags.title,
@@ -25,13 +25,14 @@ export const metadata: Metadata = {
 };
 
 export default function PricingPage() {
-  return (<div className="container flex flex-col gap-6">
-    <HeroHeader
-      title="Pricing"
-      slogan="Real-time sync and storage infrastructure that scales up to millions of
+  return (
+    <div className="container flex flex-col gap-6">
+      <HeroHeader
+        title="Pricing"
+        slogan="Real-time sync and storage infrastructure that scales up to millions of
         users."
-    />
+      />
       <Pricing />
-      </div>
+    </div>
   );
 }

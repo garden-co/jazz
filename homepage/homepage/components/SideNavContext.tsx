@@ -9,7 +9,14 @@ export function normalizePath(path: string): string {
   }
   const parts = path.split("/");
   // Check if second segment is a framework (after /docs/)
-  const frameworks = ["react", "svelte", "vue", "react-native", "react-native-expo", "vanilla"];
+  const frameworks = [
+    "react",
+    "svelte",
+    "vue",
+    "react-native",
+    "react-native-expo",
+    "vanilla",
+  ];
   if (parts.length >= 3 && frameworks.includes(parts[2])) {
     // Remove the framework segment
     return "/docs/" + parts.slice(3).join("/");

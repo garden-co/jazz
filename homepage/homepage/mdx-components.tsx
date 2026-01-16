@@ -13,7 +13,9 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
     ...components,
     CodeWithInterpolation: ({
       highlightedCode,
-    }: { highlightedCode: string }) => {
+    }: {
+      highlightedCode: string;
+    }) => {
       return <div dangerouslySetInnerHTML={{ __html: highlightedCode }} />;
     },
   } satisfies MDXComponents;
@@ -23,7 +25,9 @@ export function InterpolateInCode(replace: { [key: string]: string }) {
   return {
     CodeWithInterpolation: ({
       highlightedCode,
-    }: { highlightedCode: string }) => {
+    }: {
+      highlightedCode: string;
+    }) => {
       const newHighlightedCode = Object.entries(replace).reduce(
         (acc, [key, value]) => {
           return acc.replaceAll(key, value);

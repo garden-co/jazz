@@ -1,5 +1,9 @@
 import { Framework, frameworks } from "@/content/framework";
-import { DocPage, generateOGMetadata, getDocMetadata } from "@/lib/docMdxContent";
+import {
+  DocPage,
+  generateOGMetadata,
+  getDocMetadata,
+} from "@/lib/docMdxContent";
 import fs from "fs";
 import path from "path";
 
@@ -8,19 +12,16 @@ type Params = {
   slug?: string[];
 };
 
-type Frontmatter = {
-  title: string;
-  description: string;
-  image?: string;
-  topic?: string;
-  subtopic?: string;
-};
-
-export async function generateMetadata({ params }: { params: Promise<Params> }) {
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<Params>;
+}) {
   const awaitedParams = await params;
   const framework = awaitedParams.framework;
   const slug = awaitedParams.slug ?? [];
 
+  // TODO: this returns something different to the Promise<Metadata> Next expects
   const docMeta = await getDocMetadata(framework, slug);
 
   return generateOGMetadata(framework, slug, docMeta.fm);
@@ -85,7 +86,7 @@ function getAllDocPaths() {
 
   // Don't generate empty slugs here - those are handled by /docs/[framework]/page.tsx
   // The required catch-all [...slug] only handles paths with at least one segment
-  return allPaths.filter(path => path.slug.length > 0);
+  return allPaths.filter((path) => path.slug.length > 0);
 }
 
 export async function generateStaticParams() {

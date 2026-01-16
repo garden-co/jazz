@@ -16,9 +16,10 @@ import todoImage from "@/components/examples/images/todo.jpg";
 
 const metaTags = {
   title: "Examples",
-  description: "Find an example app with code most similar to what you want to build.",
+  description:
+    "Find an example app with code most similar to what you want to build.",
   url: "https://jazz.tools",
-}
+};
 
 export const metadata: Metadata = {
   title: metaTags.title,
@@ -253,22 +254,6 @@ const FileUploadIllustration = () => (
   </div>
 );
 
-const ReactionsIllustration = () => (
-  <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent">
-    <div className="inline-flex justify-center gap-1.5 mx-auto">
-      {["😍", "😮", "🤩", "😂", "👍"].map((emoji) => (
-        <button
-          type="button"
-          key={emoji}
-          className="size-10 text-xl rounded-sm shadow-xs bg-white leading-none"
-        >
-          {emoji}
-        </button>
-      ))}
-    </div>
-  </div>
-);
-
 const MultiCursorIllustration = () => (
   <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent p-4">
     <div className=" bg-white min-w-64 md:aspect-3/2 flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">
@@ -386,12 +371,16 @@ const reactExamples: Example[] = [
   {
     name: "Personal Journal with vector search",
     slug: "vector-search",
-    description: "A personal journal app with local-first vector search, 100% Jazz.",
+    description:
+      "A personal journal app with local-first vector search, 100% Jazz.",
     tech: [tech.react],
     features: [features.vectorSearch],
     demoUrl: "https://vector-search.demo.jazz.tools/",
     illustration: (
-      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${journalImage.src})` }}></div>
+      <div
+        className="h-full w-full bg-cover bg-bottom-left"
+        style={{ backgroundImage: `url(${journalImage.src})` }}
+      ></div>
     ),
   },
   {
@@ -412,7 +401,10 @@ const reactExamples: Example[] = [
     features: [features.nextjs],
     demoUrl: "https://jazz-nextjs.vercel.app/",
     illustration: (
-      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${ssrTodoImage.src})` }}></div>
+      <div
+        className="h-full w-full bg-cover bg-bottom-left"
+        style={{ backgroundImage: `url(${ssrTodoImage.src})` }}
+      ></div>
     ),
   },
   {
@@ -423,7 +415,10 @@ const reactExamples: Example[] = [
     features: [features.inviteLink],
     demoUrl: "https://todo.demo.jazz.tools",
     illustration: (
-      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${todoImage.src})` }}></div>
+      <div
+        className="h-full w-full bg-cover bg-bottom-left"
+        style={{ backgroundImage: `url(${todoImage.src})` }}
+      ></div>
     ),
   },
   {
@@ -516,8 +511,7 @@ const rnExamples: Example[] = [
   {
     name: "Clerk",
     slug: "clerk-expo",
-    description:
-      "An example Expo app that uses Clerk for authentication.",
+    description: "An example Expo app that uses Clerk for authentication.",
     tech: [tech.reactNative, tech.expo],
     features: [features.clerk],
     illustration: <ClerkIllustration />,

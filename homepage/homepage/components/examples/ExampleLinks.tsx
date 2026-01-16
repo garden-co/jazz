@@ -25,16 +25,33 @@ export function ExampleLinks({ example }: { example: Example }) {
   return (
     <>
       <div className="flex gap-2">
-        <Button intent="primary" variant="inverted" size="sm" onClick={() => setIsOpen(true)}>
+        <Button
+          intent="primary"
+          variant="inverted"
+          size="sm"
+          onClick={() => setIsOpen(true)}
+        >
           Use as template
         </Button>
-        <Button href={githubUrl} newTab intent="primary" variant="inverted" size="sm">
+        <Button
+          href={githubUrl}
+          newTab
+          intent="primary"
+          variant="inverted"
+          size="sm"
+        >
           <span className="md:hidden">Code</span>
           <span className="hidden md:inline">View code</span>
         </Button>
 
         {demoUrl && (
-          <Button href={demoUrl} newTab intent="primary" variant="inverted" size="sm">
+          <Button
+            href={demoUrl}
+            newTab
+            intent="primary"
+            variant="inverted"
+            size="sm"
+          >
             <span className="md:hidden">Demo</span>
             <span className="hidden md:inline">View demo</span>
           </Button>

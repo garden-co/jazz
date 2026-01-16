@@ -1,11 +1,17 @@
 import { docNavigationItems } from "../../content/docs/docNavigationItems.js";
 // Can't import from framework.ts because node doesn't support enum types
-export const FRAMEWORKS = ["react", "react-native", "react-native-expo", "svelte", "vanilla"];
+export const FRAMEWORKS = [
+  "react",
+  "react-native",
+  "react-native-expo",
+  "svelte",
+  "vanilla",
+];
 
 // Recursively collect all pages from an item and its nested items
 function collectPages(item) {
   const pages = [];
-  
+
   // If the item has an href and is done, add it as a page
   if (item.href && item.done !== 0) {
     pages.push({
@@ -13,14 +19,14 @@ function collectPages(item) {
       url: item.href,
     });
   }
-  
+
   // If the item has nested items, recursively collect pages from them
   if (item.items && Array.isArray(item.items)) {
     for (const subItem of item.items) {
       pages.push(...collectPages(subItem));
     }
   }
-  
+
   return pages;
 }
 

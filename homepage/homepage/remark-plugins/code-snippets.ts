@@ -213,7 +213,7 @@ function parseMeta(meta: string | undefined) {
   meta = meta.replace(/\btwoslash\b/g, "").trim();
 
   // Compact form without snippet= prefix: examples/foo.ts#Bar or test/example.tsx#Region
-  const direct = meta.match(/^([^#\s]+?\.\w+)(?:#([\w\-]+))?$/);
+  const direct = meta.match(/^([^#\s]+?\.\w+)(?:#([\w-]+))?$/);
   if (direct) {
     result.snippet = direct[1];
     if (direct[2]) result.region = direct[2];

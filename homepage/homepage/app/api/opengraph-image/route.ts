@@ -1,7 +1,5 @@
 import { NextRequest } from "next/server";
-import {
-  OpenGraphImage
-} from "@garden-co/design-system/src/components/organisms/OpenGraphImage";
+import { OpenGraphImage } from "@garden-co/design-system/src/components/organisms/OpenGraphImage";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);

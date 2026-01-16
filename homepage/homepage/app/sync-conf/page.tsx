@@ -1,7 +1,5 @@
 import { ChatDemoSection } from "@/components/home/ChatDemoSection";
-import { CollaborationFeaturesSection } from "@/components/home/CollaborationFeaturesSection";
 import { EarlyAdopterSection } from "@/components/home/EarlyAdopterSection";
-import { EncryptionSection } from "@/components/home/EncryptionSection";
 import { FeaturesSection } from "@/components/home/FeaturesSection";
 import { HeroSection } from "@/components/home/HeroSection2";
 import { LocalFirstFeaturesSection } from "@/components/home/LocalFirstFeaturesSection";

@@ -8,4 +8,3 @@ export const socials = {
   x: "https://x.com/jazz_tools",
   bluesky: "https://bsky.app/profile/jazz.tools",
 };
-

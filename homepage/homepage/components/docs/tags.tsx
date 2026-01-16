@@ -6,7 +6,16 @@ import { jazzDark } from "../../themes/jazzDark.mjs";
 import { jazzLight } from "../../themes/jazzLight.mjs";
 
 const highlighterPromise = createHighlighter({
-  langs: ["typescript", "bash", "tsx", "json", "ruby", "groovy", "svelte", "vue"],
+  langs: [
+    "typescript",
+    "bash",
+    "tsx",
+    "json",
+    "ruby",
+    "groovy",
+    "svelte",
+    "vue",
+  ],
   themes: [jazzLight as any, jazzDark as any],
 });
 
@@ -23,12 +32,10 @@ export function Example({ children }: { children: ReactNode }) {
 
 export async function Highlight({
   children,
-  hide,
   lang = "typescript",
   className = "",
 }: {
   children: string;
-  hide?: number[];
   lang?: string;
   className?: string;
 }) {
@@ -47,7 +54,6 @@ export async function Highlight({
 }
 
 export function ClassOrInterface({
-  inPackage,
   name,
   typeParameters,
   children,
@@ -88,7 +94,7 @@ export function ClassOrInterface({
 }
 
 export function ClassRef({ name }: { name: string }) {
-  return <Highlight hide={[0]}>{`class\n${name}`}</Highlight>;
+  return <Highlight>{`class\n${name}`}</Highlight>;
 }
 
 export function PropRef({ on, prop }: { on?: string; prop: string }) {
@@ -121,9 +127,7 @@ export function PropDecl({
           {"  "}
           {type && (
             <span className="opacity-75 text-xs pl-1">
-              <Highlight
-                hide={[0, 1, 2 + type.split("\n").length]}
-              >{`class X {\nprop:\n${type}`}</Highlight>
+              <Highlight>{`class X {\nprop:\n${type}`}</Highlight>
             </span>
           )}
         </div>
@@ -168,16 +172,12 @@ export function FnDecl({
         <div className="pl-4 text-xs flex flex-col gap-2">
           {typeParams.length > 0 && (
             <div>
-              <Highlight
-                hide={[0, 1 + typeParams.length]}
-              >{`class Thing<\n${typeParams.join(",\n")}\n]> {}`}</Highlight>
+              <Highlight>{`class Thing<\n${typeParams.join(",\n")}\n]> {}`}</Highlight>
             </div>
           )}
           {paramTypes.length > 0 && (
             <div>
-              <Highlight
-                hide={[0, 1 + paramTypes.length]}
-              >{`function fn(...args: [\n${paramTypes.join(
+              <Highlight>{`function fn(...args: [\n${paramTypes.join(
                 ",\n",
               )}\n]) {}`}</Highlight>
             </div>

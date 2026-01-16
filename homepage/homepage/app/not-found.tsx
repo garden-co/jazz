@@ -1,11 +1,9 @@
 "use client";
-import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { SiDiscord } from "@icons-pack/react-simple-icons";
 import { JazzMobileNav } from "@/components/nav";
 import { usePathname } from "next/navigation";
 import { JazzNav } from "@/components/nav";
-import { SearchBoxWithResults } from '@/components/SearchBoxWithResults';
-import Link from "next/link";
+import { SearchBoxWithResults } from "@/components/SearchBoxWithResults";
 
 export default function NotFound() {
   const path = usePathname();
@@ -20,19 +18,28 @@ export default function NotFound() {
               Page Not Found
             </h1>
             <p className="text-lg text-pretty leading-relaxed max-w-3xl dark:text-stone-200 md:text-xl">
-              Either the link you followed is broken or the content has moved.</p>
+              Either the link you followed is broken or the content has moved.
+            </p>
           </hgroup>
-          <label htmlFor="search-in-searchbox" className="font-medium">Were you looking for...</label>
-          <SearchBoxWithResults searchTerms={path.replace('/docs', '').split('/').join(' ').trim()} />
+          <label htmlFor="search-in-searchbox" className="font-medium">
+            Were you looking for...
+          </label>
+          <SearchBoxWithResults
+            searchTerms={path.replace("/docs", "").split("/").join(" ").trim()}
+          />
 
-          <p className="my-4">Still couldn't find what you were looking for? <a href="https://discord.gg/utDMjHYg42" className="underline inline-flex items-center gap-2">Let us know on Discord! <SiDiscord /></a></p>
-
-
-          <p>
+          <p className="my-4">
+            Still couldn't find what you were looking for?{" "}
             <a
               href="https://discord.gg/utDMjHYg42"
-              className="underline"
+              className="underline inline-flex items-center gap-2"
             >
+              Let us know on Discord! <SiDiscord />
+            </a>
+          </p>
+
+          <p>
+            <a href="https://discord.gg/utDMjHYg42" className="underline">
               Go home &rarr;
             </a>
           </p>

@@ -1,4 +1,4 @@
-import { visit, SKIP } from "unist-util-visit";
+import { visit } from "unist-util-visit";
 import { createHighlighter } from "shiki";
 import { transformerNotationDiff } from "@shikijs/transformers";
 import { transformerTwoslash } from "@shikijs/twoslash";

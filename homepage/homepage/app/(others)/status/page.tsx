@@ -8,7 +8,7 @@ const metaTags = {
   title: "Status",
   description: "View Jazz system status and latency across probes",
   url: "https://jazz.tools",
-}
+};
 
 export const dynamic = "force-static";
 
@@ -323,9 +323,9 @@ export default async function Page() {
           )}
         </tbody>
       </table>
-        <p className="text-sm text-gray-500 text-right">
-          All times are expressed in <span className="font-bold">UTC</span>
-        </p>
+      <p className="text-sm text-gray-500 text-right">
+        All times are expressed in <span className="font-bold">UTC</span>
+      </p>
     </div>
   );
 }
@@ -336,7 +336,10 @@ function formatUptime(upRatio: number) {
   const upPercentage = upRatio * 100;
 
   // count leading nines and truncate after first non-nine
-  const firstNonNine = upPercentage.toString().split("").findIndex((char) => char !== "9" && char !== ".");
+  const firstNonNine = upPercentage
+    .toString()
+    .split("")
+    .findIndex((char) => char !== "9" && char !== ".");
   if (firstNonNine === 1) {
     return upPercentage.toString().slice(0, 4) + "%";
   }

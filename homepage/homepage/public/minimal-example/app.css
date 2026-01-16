@@ -1,8 +1,8 @@
 /* Blue color for light color scheme (Default) */
 /* Can be forced with data-theme="light" */
-[data-theme='light'],
-:root:not([data-theme='dark']),
-:host:not([data-theme='dark']) {
+[data-theme="light"],
+:root:not([data-theme="dark"]),
+:host:not([data-theme="dark"]) {
   --pico-text-selection-color: rgba(20, 106, 255, 0.25);
   --pico-primary: #146aff;
   --pico-primary-background: #146aff;
@@ -31,7 +31,7 @@
 
 /* Blue color for dark color scheme (Forced) */
 /* Enabled if forced with data-theme="dark" */
-[data-theme='dark'] {
+[data-theme="dark"] {
   --pico-text-selection-color: rgba(92, 146, 255, 0.1875);
   --pico-primary: #5c92ff;
   --pico-primary-background: #146aff;

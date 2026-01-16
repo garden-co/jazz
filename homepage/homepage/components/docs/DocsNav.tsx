@@ -5,7 +5,11 @@ import { SideNavSection } from "@/components/SideNavSection";
 import { FrameworkSelect } from "@/components/docs/FrameworkSelect";
 import { docNavigationItems } from "@/content/docs/docNavigationItems";
 import { DocNavigationSection } from "@/content/docs/docNavigationItemsTypes";
-import { Framework, isValidFramework, DEFAULT_FRAMEWORK } from "@/content/framework";
+import {
+  Framework,
+  isValidFramework,
+  DEFAULT_FRAMEWORK,
+} from "@/content/framework";
 import { usePathname } from "next/navigation";
 import React, { useEffect, useState } from "react";
 
@@ -17,7 +21,9 @@ export function DocNav() {
     const extractedFramework = pathParts[2];
 
     // Validate that we have a valid framework value
-    const validFramework = isValidFramework(extractedFramework) ? extractedFramework as Framework : DEFAULT_FRAMEWORK;
+    const validFramework = isValidFramework(extractedFramework)
+      ? (extractedFramework as Framework)
+      : DEFAULT_FRAMEWORK;
 
     setFramework(validFramework);
   }, [path]);
@@ -37,7 +43,6 @@ export function DocNav() {
       const frameworkDone = (item.done as any)?.[validFramework] ?? 0;
       const done = typeof item.done === "number" ? item.done : frameworkDone;
       const href = item.href.replace("/docs", `/docs/${validFramework}`);
-
 
       processedItem = {
         ...processedItem,
@@ -64,9 +69,7 @@ export function DocNav() {
     (headerItem) => {
       return {
         ...headerItem,
-        items: headerItem.items
-          .map(processNavigationItem)
-          .filter(Boolean), // Remove null items (filtered out by framework)
+        items: headerItem.items.map(processNavigationItem).filter(Boolean), // Remove null items (filtered out by framework)
       };
     },
   );

@@ -16,20 +16,26 @@ const CWD = process.cwd();
 
 const htmlToMarkdown = new NodeHtmlMarkdown();
 
-const mockMdxComponentsPath = path.resolve(__dirname, "mock-mdx-components.mjs");
+const mockMdxComponentsPath = path.resolve(
+  __dirname,
+  "mock-mdx-components.mjs",
+);
 
 export async function mdxToMd(filePath, framework) {
   let source = await fs.readFile(filePath, "utf-8");
-  
+
   // Replace code snippet references with actual code content
   source = replaceCodeSnippets(source, filePath);
-  
-  const mockComponentsContent = await fs.readFile(mockMdxComponentsPath, "utf-8");
+
+  const mockComponentsContent = await fs.readFile(
+    mockMdxComponentsPath,
+    "utf-8",
+  );
 
   // We need to pass these to esbuild
   const snippetsDir = path.join(CWD, "components/docs/snippets");
   const snippetFilenames = (await fs.readdir(snippetsDir)).filter((file) =>
-    file.endsWith(".mdx")
+    file.endsWith(".mdx"),
   );
 
   // Read all snippet files concurrently
@@ -38,7 +44,7 @@ export async function mdxToMd(filePath, framework) {
       const content = await fs.readFile(path.join(snippetsDir, name), "utf-8");
       const importPath = `@/components/docs/snippets/${name}`;
       return [importPath, content];
-    })
+    }),
   );
 
   const { code } = await bundleMDX({
@@ -46,7 +52,7 @@ export async function mdxToMd(filePath, framework) {
     cwd: path.dirname(filePath),
     files: {
       // Mock all the components
-      "@/components/forMdx": mockComponentsContent, 
+      "@/components/forMdx": mockComponentsContent,
       // Adds all snippet files for bundling
       ...Object.fromEntries(snippetEntries),
     },
@@ -54,20 +60,25 @@ export async function mdxToMd(filePath, framework) {
       options.platform = "node";
       options.external = [...(options.external || []), "next/navigation"];
       options.alias = {
-        ...(options.alias || {}),
+        ...options.alias,
         "@/components/forMdx": mockMdxComponentsPath,
       };
       // Define CURRENT_FRAMEWORK as a build-time constant
       options.define = {
-        ...(options.define || {}),
-        'CURRENT_FRAMEWORK': framework ? `"${framework}"` : 'null',
+        ...options.define,
+        CURRENT_FRAMEWORK: framework ? `"${framework}"` : "null",
       };
       return options;
     },
     globals: {
       "next/navigation": {
         varName: "nextNavigation",
-        namedExports: ["useParams", "usePathname", "useRouter", "useSearchParams"],
+        namedExports: [
+          "useParams",
+          "usePathname",
+          "useRouter",
+          "useSearchParams",
+        ],
       },
     },
   });
@@ -76,7 +87,7 @@ export async function mdxToMd(filePath, framework) {
   const Component = getMDXComponent(code, {
     nextNavigation: mockNextNavigation,
   });
-  
+
   const element = createElement(Component);
   const html = renderToString(element);
 

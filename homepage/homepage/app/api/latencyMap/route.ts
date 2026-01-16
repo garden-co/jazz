@@ -1,5 +1,5 @@
 import * as turf from "@turf/turf";
-import type { FeatureCollection, Point, Position } from "geojson";
+import type { FeatureCollection, Point } from "geojson";
 import { type NextRequest } from "next/server";
 import land from "../../../components/cloud/ne_110m_land.json";
 
@@ -97,10 +97,10 @@ export async function GET(req: NextRequest) {
   // create a grid of dots that are green if on land (contained in landOutlines) and blue if not
   const extentX = 720;
   const extentY = 160;
-  const grid = new Array(Math.round(extentX / spacing))
+  const grid = Array.from({ length: Math.round(extentX / spacing) })
     .fill(0)
     .map((_, i) =>
-      new Array(Math.round(extentY / spacing))
+      Array.from({ length: Math.round(extentY / spacing) })
         .fill(0)
         .map((_, j) => ({ x: i, y: j })),
     );
@@ -135,7 +135,7 @@ export async function GET(req: NextRequest) {
         }
       </style>
       ${dotsOnLand.features
-        .map((dot, index) => {
+        .map((dot) => {
           const nearestMeasurement = pings.results.reduce(
             (minDistance, ping) => {
               if (

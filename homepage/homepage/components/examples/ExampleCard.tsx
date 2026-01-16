@@ -6,7 +6,10 @@ import { clsx } from "clsx";
 export function ExampleCard({
   example,
   className,
-}: { example: Example; className?: string }) {
+}: {
+  example: Example;
+  className?: string;
+}) {
   const { name, description, illustration } = example;
 
   return (

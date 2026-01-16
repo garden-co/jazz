@@ -37,8 +37,7 @@ export const products = [
   },
   {
     name: "Tilly",
-    description:
-      "A relationship journal so simple that you actually use it.",
+    description: "A relationship journal so simple that you actually use it.",
     url: "https://tilly.social",
     imageUrl: tillyScreenImage.src,
   },
@@ -53,7 +52,8 @@ export const products = [
     name: "Cuppl",
     imageUrl: cupplImage.src,
     url: "https://www.getcuppl.com",
-    description: "An all-in-one app for couples to manage tasks, schedules, and shopping lists.",
+    description:
+      "An all-in-one app for couples to manage tasks, schedules, and shopping lists.",
   },
   {
     name: "MTOR",
@@ -72,12 +72,13 @@ export const products = [
     name: "Motley",
     imageUrl: motleyImage.src,
     url: "https://trymotley.com",
-    description: "Collect and connect anything - a mix between Are.na, mymind, and a regular read-later app.",
+    description:
+      "Collect and connect anything - a mix between Are.na, mymind, and a regular read-later app.",
   },
   {
     name: "Spicy Golf",
     imageUrl: spicyGolfImage.src,
     url: "https://spicy.golf",
     description: "Golf Games Kicked up a Notch.",
-  }
+  },
 ];

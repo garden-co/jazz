@@ -25,24 +25,23 @@ export async function getDocModule(framework: string, slug?: string[]) {
   if (slugPath) {
     try {
       return await import(`../content/docs/${slugPath}/${framework}.mdx`);
-    } catch { }
+    } catch {}
   }
 
   // Fallback to generic MDX
   if (slugPath) {
     try {
       return await import(`../content/docs/${slugPath}.mdx`);
-    } catch { }
+    } catch {}
   }
 
   // Top-level index fallback
   try {
     return await import(`../content/docs/index.mdx`);
-  } catch { }
+  } catch {}
 
   return null;
 }
-
 
 /**
  * Get content and TOC for the page
@@ -56,10 +55,15 @@ export async function getMdxWithToc(framework: string, slug?: string[]) {
 
   const Content = mdxModule.default;
   const tableOfContents = mdxModule.tableOfContents ?? [];
-  const headingsFrameworkVisibility = mdxModule.headingsFrameworkVisibility ?? {};
+  const headingsFrameworkVisibility =
+    mdxModule.headingsFrameworkVisibility ?? {};
   const ex = mdxModule.metadata ?? {};
 
-  const tocItems = filterTocItemsForFramework(tableOfContents, framework, headingsFrameworkVisibility);
+  const tocItems = filterTocItemsForFramework(
+    tableOfContents,
+    framework,
+    headingsFrameworkVisibility,
+  );
 
   return { Content, tocItems, ex };
 }
@@ -70,7 +74,7 @@ export async function getMdxWithToc(framework: string, slug?: string[]) {
 function filterTocItemsForFramework(
   tocItems: Toc,
   framework: string,
-  headingsFrameworkVisibility: Record<string, string[]>
+  headingsFrameworkVisibility: Record<string, string[]>,
 ): Toc {
   return tocItems
     .map((item) => {
@@ -82,7 +86,11 @@ function filterTocItemsForFramework(
       if (!isVisible) return null;
 
       const filteredChildren = item.children
-        ? filterTocItemsForFramework(item.children, framework, headingsFrameworkVisibility)
+        ? filterTocItemsForFramework(
+            item.children,
+            framework,
+            headingsFrameworkVisibility,
+          )
         : [];
 
       return { ...item, children: filteredChildren };
@@ -101,7 +109,7 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
     const subtopic = slug?.[1] ?? "";
     const capitalizedFramework = framework
       .split("-")
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(" ");
 
     return {
@@ -125,11 +133,14 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
 
   const capitalizedFramework = framework
     .split("-")
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
 
   const title = titleFromToc ?? fm.title ?? `${capitalizedFramework} Docs`;
-  const description = fm.description ?? ex.description ?? `Documentation for ${capitalizedFramework}`;
+  const description =
+    fm.description ??
+    ex.description ??
+    `Documentation for ${capitalizedFramework}`;
   const image = fm.image ?? ex.image ?? "/jazz-logo.png";
 
   const topic = slug?.[0] ?? "";
@@ -144,11 +155,21 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
 /**
  * Page component
  */
-export async function DocPage({ framework, slug }: { framework: string; slug?: string[] }) {
+export async function DocPage({
+  framework,
+  slug,
+}: {
+  framework: string;
+  slug?: string[];
+}) {
   try {
     const { Content, tocItems } = await getMdxWithToc(framework, slug);
     return (
-      <DocsLayout nav={<DocNav />} tocItems={tocItems} pagefindLowPriority={slug?.length ? slug[0] === "upgrade" : false}>
+      <DocsLayout
+        nav={<DocNav />}
+        tocItems={tocItems}
+        pagefindLowPriority={slug?.length ? slug[0] === "upgrade" : false}
+      >
         <DocProse>
           <Content />
           <FeedbackAffordances />
@@ -162,7 +183,9 @@ export async function DocPage({ framework, slug }: { framework: string; slug?: s
     );
   } catch (err) {
     console.error("Error loading MDX:", err);
-    const { default: ComingSoon } = await import("../content/docs/coming-soon.mdx");
+    const { default: ComingSoon } = await import(
+      "../content/docs/coming-soon.mdx"
+    );
     return (
       <DocsLayout nav={<DocNav />} tocItems={[]} pagefindIgnore>
         <DocProse>
@@ -179,14 +202,20 @@ export async function DocPage({ framework, slug }: { framework: string; slug?: s
 export function generateOGMetadata(
   framework: string,
   slug: string[],
-  docMeta: { title: string; description: string; image?: string; topic?: string; subtopic?: string }
+  docMeta: {
+    title: string;
+    description: string;
+    image?: string;
+    topic?: string;
+    subtopic?: string;
+  },
 ) {
   const { title, description, image, topic, subtopic } = docMeta;
   const baseUrl = "https://jazz.tools";
   const imageUrl = image
     ? `${baseUrl}/api/opengraph-image?title=${encodeURIComponent(title)}&framework=${encodeURIComponent(
-      framework
-    )}${topic ? `&topic=${encodeURIComponent(topic)}` : ""}${subtopic ? `&subtopic=${encodeURIComponent(subtopic)}` : ""}`
+        framework,
+      )}${topic ? `&topic=${encodeURIComponent(topic)}` : ""}${subtopic ? `&subtopic=${encodeURIComponent(subtopic)}` : ""}`
     : "/jazz-logo.png";
 
   return {
@@ -199,6 +228,11 @@ export function generateOGMetadata(
       url: `/docs/${[framework, ...slug].join("/")}`,
       images: [{ url: imageUrl, width: 1200, height: 630, alt: title }],
     },
-    twitter: { card: "summary_large_image", title, description, images: [imageUrl] },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: [imageUrl],
+    },
   };
 }

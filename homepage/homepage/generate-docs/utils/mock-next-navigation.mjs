@@ -6,4 +6,3 @@ export const useRouter = () => ({
   prefetch: () => {},
 });
 export const useSearchParams = () => new URLSearchParams();
-

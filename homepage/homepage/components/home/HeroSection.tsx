@@ -1,16 +1,11 @@
 "use client";
 
-import { marketingCopy } from "@/content/marketingCopy";
 import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
 import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
-import Link from "next/link";
 import { CodeTabs } from "@/components/home/CodeTabs";
-import { JazzSyncs } from "@/components/icons/JazzSyncs";
 import NpxCreateJazzApp from "@/components/home/NpxCreateJazzApp.mdx";
-import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
-import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import clsx from "clsx";
 import { track } from "@vercel/analytics";
 import { SupportedEnvironmentsSection } from "./SupportedEnvironmentsSection";
@@ -33,7 +28,7 @@ export function HeroSection() {
           </p>
           <p>
             Efficiently sync data, files and LLM streams. Use them like reactive
-             local JSON state.
+            local JSON state.
           </p>
         </Prose>
 

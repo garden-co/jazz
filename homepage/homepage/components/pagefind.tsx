@@ -62,7 +62,10 @@ const processSubUrl = (url: string): { path: string; hash: string } => {
   return { path, hash };
 };
 
-const navigateToUrl = (url: string, close: (resultSelected: boolean) => void) => {
+const navigateToUrl = (
+  url: string,
+  close: (resultSelected: boolean) => void,
+) => {
   if (!url) return;
   window.location.href = `${window.location.origin}${url}`;
   close(true);
@@ -135,7 +138,7 @@ const prioritizeResultsByFramework = (
 };
 
 export const usePagefindSearch = singletonHook(
-  { open: false, setOpen: () => { } },
+  { open: false, setOpen: () => {} },
   () => {
     const [open, setOpen] = useState(false);
     return { open, setOpen };
@@ -226,7 +229,7 @@ export function PagefindSearch() {
           console.warn("Failed to load Pagefind:", e);
           window.pagefind = {
             search: async () => ({ results: [] }),
-            options: async () => { },
+            options: async () => {},
           };
         }
       }
