@@ -1,7 +1,7 @@
 import type ImageResizerType from "@bam.tech/react-native-image-resizer";
 import type ImageManipulatorType from "expo-image-manipulator";
 import type { Account, Group } from "jazz-tools";
-import { co, FileStream } from "jazz-tools";
+import { co, type FileStream } from "jazz-tools";
 import { Image } from "react-native";
 import { createImageFactory } from "../create-image-factory";
 
