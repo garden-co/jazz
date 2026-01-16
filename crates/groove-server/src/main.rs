@@ -1,6 +1,7 @@
-//! Sync server binary.
+//! Sync server binary using hyper.
 //!
 //! A standalone HTTP server for Jazz sync protocol.
+//! Runs single-threaded for simplicity and compatibility with Rc-based internals.
 //!
 //! Usage:
 //!   cargo run -p groove-server -- [OPTIONS]
@@ -11,34 +12,36 @@
 //!   --port PORT     Port to listen on (default: 8080)
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::rc::Rc;
 
-use axum::Router;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tokio::task::LocalSet;
 
 use groove::MemoryEnvironment;
 use groove::sync::jwt::JwtTokenValidator;
 use groove::sync::{AcceptAllTokens, TokenValidator};
 use groove_server::{
     AppState, AuthProvider, InMemoryUserResolver, ProvisioningTokenValidator, ServerConfig,
-    sync_router,
+    SyncResponse, handle_request,
 };
 
 /// Create a token validator based on the server configuration.
-fn create_token_validator(config: &ServerConfig) -> Arc<dyn TokenValidator> {
+fn create_token_validator(config: &ServerConfig) -> Rc<dyn TokenValidator> {
     let resolver = InMemoryUserResolver::new();
     let auto_provision = config.auth.provisioning.auto_provision;
 
     match config.auth.provider {
         AuthProvider::AcceptAll => {
             if auto_provision {
-                Arc::new(ProvisioningTokenValidator::with_auto_provision(
+                Rc::new(ProvisioningTokenValidator::with_auto_provision(
                     AcceptAllTokens,
                     resolver,
                 ))
             } else {
-                Arc::new(AcceptAllTokens)
+                Rc::new(AcceptAllTokens)
             }
         }
         AuthProvider::BetterAuth | AuthProvider::WorkOS | AuthProvider::Jwt => {
@@ -46,12 +49,12 @@ fn create_token_validator(config: &ServerConfig) -> Arc<dyn TokenValidator> {
             let jwt_validator = JwtTokenValidator::new(jwt_config);
 
             if auto_provision {
-                Arc::new(ProvisioningTokenValidator::with_auto_provision(
+                Rc::new(ProvisioningTokenValidator::with_auto_provision(
                     jwt_validator,
                     resolver,
                 ))
             } else {
-                Arc::new(ProvisioningTokenValidator::without_auto_provision(
+                Rc::new(ProvisioningTokenValidator::without_auto_provision(
                     jwt_validator,
                     resolver,
                 ))
@@ -60,8 +63,7 @@ fn create_token_validator(config: &ServerConfig) -> Arc<dyn TokenValidator> {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
     let mut config_path: Option<String> = None;
@@ -115,20 +117,6 @@ async fn main() {
                 println!("Configuration:");
                 println!("  The server looks for groove-server.toml in the current directory");
                 println!("  if no --config option is specified.");
-                println!();
-                println!("Example config (groove-server.toml):");
-                println!("  host = \"0.0.0.0\"");
-                println!("  port = 8080");
-                println!();
-                println!("  [auth]");
-                println!("  provider = \"jwt\"  # or \"betterauth\", \"workos\", \"accept_all\"");
-                println!();
-                println!("  [auth.jwt]");
-                println!("  secret = \"your-secret-key\"");
-                println!("  issuer = \"https://auth.example.com\"");
-                println!();
-                println!("  [auth.provisioning]");
-                println!("  auto_provision = true");
                 std::process::exit(0);
             }
             other => {
@@ -157,27 +145,37 @@ async fn main() {
         config.port = port;
     }
 
-    // Create in-memory environment (for MVP - production would use persistent storage)
-    let env = Arc::new(MemoryEnvironment::new());
+    // Create single-threaded runtime
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
-    // Create token validator based on configuration
+    // Run the server in a LocalSet for spawn_local support
+    rt.block_on(async {
+        let local = LocalSet::new();
+        local.run_until(run_server(config)).await;
+    });
+}
+
+async fn run_server(config: ServerConfig) {
+    // Create in-memory environment
+    let env = Rc::new(MemoryEnvironment::new());
+
+    // Create token validator
     let token_validator = create_token_validator(&config);
 
     // Create app state
-    let state = Arc::new(AppState::new(env, token_validator));
+    let state = Rc::new(AppState::new(env, token_validator));
 
-    // Configure CORS for development (allow any origin)
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    // Build router
-    let app: Router = sync_router().with_state(state).layer(cors);
-
-    // Bind and serve
+    // Bind to address
     let addr: SocketAddr = config.socket_addr().parse().unwrap_or_else(|_| {
         eprintln!("Error: Invalid address {}", config.socket_addr());
+        std::process::exit(1);
+    });
+
+    let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
+        eprintln!("Error binding to {}: {}", addr, e);
         std::process::exit(1);
     });
 
@@ -192,14 +190,42 @@ async fn main() {
     println!("  POST /sync/unsubscribe - Unsubscribe from a query");
     println!("  POST /sync/push        - Push commits for an object");
     println!("  POST /sync/reconcile   - Request full reconciliation");
+    println!("  GET  /sync/events      - SSE event stream");
 
-    let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
-        eprintln!("Error binding to {}: {}", addr, e);
-        std::process::exit(1);
-    });
+    // Accept connections
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("Accept error: {}", e);
+                continue;
+            }
+        };
 
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        eprintln!("Server error: {}", e);
-        std::process::exit(1);
-    });
+        let io = TokioIo::new(stream);
+        let state = Rc::clone(&state);
+
+        // Handle connection in a local task (not spawned across threads)
+        tokio::task::spawn_local(async move {
+            let service = service_fn(|req| {
+                let state = Rc::clone(&state);
+                async move {
+                    let response = handle_request(state, req).await;
+                    // Convert SyncResponse to a type hyper can use
+                    match response {
+                        SyncResponse::Regular(resp) => Ok::<_, std::convert::Infallible>(
+                            resp.map(|b| http_body_util::Either::Left(b)),
+                        ),
+                        SyncResponse::Sse(resp) => {
+                            Ok(resp.map(|b| http_body_util::Either::Right(b)))
+                        }
+                    }
+                }
+            });
+
+            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                eprintln!("Connection error: {}", e);
+            }
+        });
+    }
 }
