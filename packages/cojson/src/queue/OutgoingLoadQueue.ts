@@ -2,7 +2,7 @@ import { CO_VALUE_LOADING_CONFIG } from "../config.js";
 import { CoValueCore } from "../exports.js";
 import { logger } from "../logger.js";
 import type { PeerID } from "../sync.js";
-import { LinkedList } from "./LinkedList.js";
+import { LinkedList, meteredList } from "./LinkedList.js";
 
 interface PendingLoad {
   value: CoValueCore;
@@ -20,7 +20,7 @@ interface PendingLoad {
  */
 export class OutgoingLoadQueue {
   private inFlightLoads: Map<CoValueCore, number> = new Map();
-  private pending: LinkedList<PendingLoad> = new LinkedList();
+  private pending: LinkedList<PendingLoad> = meteredList("load-requests-queue");
   private requestedSet: Set<CoValueCore["id"]> = new Set();
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
