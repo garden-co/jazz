@@ -7,7 +7,6 @@
 //! - `branch` - Branch management, delete/truncation → spec: docs/content/docs/internals/deletes-and-truncation.mdx
 //! - `node` - LocalNode for managing objects
 //! - `storage` - Content/commit storage traits → spec: docs/content/docs/internals/streaming-and-persistence.mdx
-//! - `listener` - Listener types (ListenerId, ListenerError)
 //! - `merge` - Merge strategies (LWW)
 //! - `sql/` - SQL layer → spec: docs/content/docs/internals/sql-layer.mdx
 //!   - `sql/query_graph/` - Incremental queries → spec: docs/content/docs/internals/incremental-queries.mdx
@@ -17,7 +16,6 @@
 
 mod branch;
 mod commit;
-mod listener;
 mod merge;
 mod node;
 mod object;
@@ -27,9 +25,8 @@ pub mod sync;
 
 pub use branch::{Branch, BranchError, DEFAULT_ENV, DEFAULT_USER_BRANCH, SchemaBranchName};
 pub use commit::{Commit, CommitId};
-pub use listener::{ListenerError, ListenerId};
 pub use merge::{LastWriterWins, MergeStrategy};
-pub use node::{LoadRequest, LocalNode, ObjectChange, generate_object_id};
+pub use node::{LoadRequest, LocalNode, NodeError, ObjectChange, generate_object_id};
 pub use object::{Object, ObjectId, ObjectIdParseError, SchemaId};
 pub use storage::{
     ChunkHash, ChunkStore, CommitMeta, CommitStore, ContentRef, Environment, INLINE_THRESHOLD,

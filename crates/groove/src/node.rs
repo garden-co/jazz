@@ -6,11 +6,21 @@ use std::sync::RwLock;
 use bytes::Bytes;
 
 use crate::commit::{Commit, CommitId};
-use crate::listener::ListenerError;
 use crate::object::{Object, ObjectId};
 use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
 use crate::sync::StorageRequest;
+
+/// Error types for LocalNode operations.
+#[derive(Debug, Clone)]
+pub enum NodeError {
+    /// Object not found.
+    NotFound,
+    /// Branch not found.
+    BranchNotFound,
+    /// Failed to load content from storage.
+    StorageError(String),
+}
 
 /// Record of an object that changed during this pass.
 /// Used by SyncEngine to know which objects need to be pushed upstream.
@@ -402,18 +412,14 @@ impl LocalNode {
 
     /// Read content from the frontier of an object's branch.
     /// Returns None if the branch is empty or has multiple tips.
-    pub fn read(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-    ) -> Result<Option<Vec<u8>>, ListenerError> {
+    pub fn read(&self, object_id: ObjectId, branch: &str) -> Result<Option<Vec<u8>>, NodeError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(ListenerError::NotFound)?;
+            .ok_or(NodeError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         Ok(obj.read_sync(branch))
@@ -430,7 +436,7 @@ impl LocalNode {
         content: &[u8],
         author: &str,
         timestamp: u64,
-    ) -> Result<CommitId, ListenerError> {
+    ) -> Result<CommitId, NodeError> {
         self.write_with_meta(object_id, branch, content, author, timestamp, None)
     }
 
@@ -447,14 +453,14 @@ impl LocalNode {
         author: &str,
         timestamp: u64,
         meta: Option<std::collections::BTreeMap<String, String>>,
-    ) -> Result<CommitId, ListenerError> {
+    ) -> Result<CommitId, NodeError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(ListenerError::NotFound)?;
+            .ok_or(NodeError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
@@ -501,14 +507,14 @@ impl LocalNode {
         author: &str,
         timestamp: u64,
         descriptor: &RowDescriptor,
-    ) -> Result<CommitId, ListenerError> {
+    ) -> Result<CommitId, NodeError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(ListenerError::NotFound)?;
+            .ok_or(NodeError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         let commit_id =
@@ -546,14 +552,14 @@ impl LocalNode {
         &self,
         object_id: ObjectId,
         branch: &str,
-    ) -> Result<Option<Vec<CommitId>>, ListenerError> {
+    ) -> Result<Option<Vec<CommitId>>, NodeError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(ListenerError::NotFound)?;
+            .ok_or(NodeError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         Ok(obj.frontier(branch))
@@ -571,22 +577,22 @@ impl LocalNode {
         object_id: ObjectId,
         branch: &str,
         commit_id: CommitId,
-    ) -> Result<usize, ListenerError> {
+    ) -> Result<usize, NodeError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(ListenerError::NotFound)?;
+            .ok_or(NodeError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        let branch_ref = obj.branch_ref(branch).ok_or(ListenerError::NotFound)?;
+        let branch_ref = obj.branch_ref(branch).ok_or(NodeError::NotFound)?;
 
         let mut branch_guard = branch_ref.write().unwrap();
         branch_guard
             .truncate_at(commit_id)
-            .map_err(|e| ListenerError::StorageError(e.to_string()))
+            .map_err(|e| NodeError::StorageError(e.to_string()))
     }
 
     // ========== Helper: Load content for a commit ==========

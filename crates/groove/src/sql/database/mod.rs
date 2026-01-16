@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::RwLock;
 
-use crate::listener::ListenerId;
 use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
 use crate::sql::catalog::{Catalog, DescriptorId, TableDescriptor};
@@ -18,6 +17,7 @@ use crate::sql::policy::ViewerContext;
 use crate::sql::policy::{
     Policy, PolicyAction, PolicyError, PolicyExpr, PolicyValue, TablePolicies,
 };
+use crate::sql::query_graph::SubscriptionId;
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
     DeltaBatch, GraphId, Predicate, PredicateValue, QueryGraphBuilder, RowDelta,
@@ -91,8 +91,8 @@ impl IncrementalQuery {
     /// **Important**: The callback is immediately called with the current state
     /// as a batch of "Added" deltas, so subscribers always see the initial data.
     ///
-    /// Returns a `ListenerId` that can be used to unsubscribe.
-    pub fn subscribe(&self, callback: OutputCallback) -> Option<ListenerId> {
+    /// Returns a `SubscriptionId` that can be used to unsubscribe.
+    pub fn subscribe(&self, callback: OutputCallback) -> Option<SubscriptionId> {
         // Get current state and send as initial "Added" deltas
         let initial_rows = self.rows();
 
@@ -109,7 +109,7 @@ impl IncrementalQuery {
     }
 
     /// Unsubscribe a callback.
-    pub fn unsubscribe(&self, listener_id: ListenerId) -> bool {
+    pub fn unsubscribe(&self, listener_id: SubscriptionId) -> bool {
         self.db_state
             .graph_registry
             .unsubscribe(self.graph_id, listener_id)

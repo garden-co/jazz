@@ -58,9 +58,9 @@ pub mod jwt;
 // Engine types (runtime-less state machine)
 // Note: QueryId not exported to avoid conflict with server::QueryId
 pub use engine::{
-    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, ListenerChunkRequest,
-    LocalWriteEvent, Notification, OutboundRequest, Outboxes, PendingWrite, PushResponseEvent,
-    SseInboxEvent, StorageRequest, StorageResponse, StreamAction, SubscribeRequestEvent,
+    ConnectionEvent, ConnectionEventKind, ConnectionState, Inboxes, LocalWriteEvent, Notification,
+    OutboundRequest, Outboxes, PendingWrite, PushResponseEvent, SseInboxEvent, StorageRequest,
+    StorageResponse, StreamAction, SubscribeRequestEvent, SubscriptionChunkRequest,
     SubscriptionState, SyncConfig, SyncEngine, TickEvent, TimerId, TimerPurpose, TimerRequest,
     UpstreamId, UpstreamState,
 };

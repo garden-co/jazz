@@ -44,6 +44,17 @@ mod node;
 mod predicate;
 pub mod registry;
 
+/// Unique ID for a query subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SubscriptionId(u64);
+
+impl SubscriptionId {
+    /// Create a new SubscriptionId from a raw id.
+    pub(crate) fn new(id: u64) -> Self {
+        SubscriptionId(id)
+    }
+}
+
 // Re-export main types
 pub use builder::QueryGraphBuilder;
 pub use cache::{BufferRowCache, RowCache};

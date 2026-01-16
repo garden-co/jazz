@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::RwLock;
 
-use crate::listener::ListenerId;
+use super::SubscriptionId;
 use crate::object::ObjectId;
 use crate::sql::DatabaseState;
 use crate::sql::catalog::DescriptorId;
@@ -28,7 +28,7 @@ type RcCallback = Rc<dyn Fn(&DeltaBatch)>;
 /// A registered query with its graph and callbacks.
 struct RegisteredQuery {
     graph: QueryGraph,
-    callbacks: HashMap<ListenerId, RcCallback>,
+    callbacks: HashMap<SubscriptionId, RcCallback>,
     next_listener_id: u64,
 }
 
@@ -41,15 +41,15 @@ impl RegisteredQuery {
         }
     }
 
-    fn subscribe(&mut self, callback: OutputCallback) -> ListenerId {
-        let id = ListenerId::new(self.next_listener_id);
+    fn subscribe(&mut self, callback: OutputCallback) -> SubscriptionId {
+        let id = SubscriptionId::new(self.next_listener_id);
         self.next_listener_id += 1;
         // Convert Box to Arc for clonability
         self.callbacks.insert(id, std::rc::Rc::from(callback));
         id
     }
 
-    fn unsubscribe(&mut self, id: ListenerId) -> bool {
+    fn unsubscribe(&mut self, id: SubscriptionId) -> bool {
         self.callbacks.remove(&id).is_some()
     }
 
@@ -148,7 +148,7 @@ impl GraphRegistry {
     /// Subscribe to a query's output changes.
     ///
     /// Returns the listener ID, or None if the graph doesn't exist.
-    pub fn subscribe(&self, graph_id: GraphId, callback: OutputCallback) -> Option<ListenerId> {
+    pub fn subscribe(&self, graph_id: GraphId, callback: OutputCallback) -> Option<SubscriptionId> {
         self.queries
             .write()
             .unwrap()
@@ -157,7 +157,7 @@ impl GraphRegistry {
     }
 
     /// Unsubscribe from a query.
-    pub fn unsubscribe(&self, graph_id: GraphId, listener_id: ListenerId) -> bool {
+    pub fn unsubscribe(&self, graph_id: GraphId, listener_id: SubscriptionId) -> bool {
         self.queries
             .write()
             .unwrap()

@@ -33,9 +33,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::commit::{Commit, CommitId};
-use crate::listener::ListenerId;
 use crate::node::LocalNode;
 use crate::object::ObjectId;
+use crate::sql::query_graph::SubscriptionId;
 use crate::storage::ChunkHash;
 
 use super::protocol::{PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscriptionOptions};
@@ -103,7 +103,7 @@ pub struct Inboxes {
     pub storage_responses: Vec<StorageResponse>,
 
     /// Chunk requests from listeners (routed through engine for tracking).
-    pub listener_chunk_requests: Vec<ListenerChunkRequest>,
+    pub subscription_chunk_requests: Vec<SubscriptionChunkRequest>,
 }
 
 /// A chunk request from a listener.
@@ -112,9 +112,9 @@ pub struct Inboxes {
 /// the engine. The engine tracks pending requests and routes responses back
 /// to the appropriate listener.
 #[derive(Debug, Clone)]
-pub struct ListenerChunkRequest {
+pub struct SubscriptionChunkRequest {
     /// The listener that needs this chunk.
-    pub listener_id: ListenerId,
+    pub subscription_id: SubscriptionId,
     /// The chunk hash to load.
     pub hash: ChunkHash,
 }
@@ -328,8 +328,8 @@ pub enum Notification {
     ///
     /// Sent when a listener's chunk request has been fulfilled.
     /// The driver should route this to the appropriate listener.
-    ListenerChunkLoaded {
-        listener_id: ListenerId,
+    SubscriptionChunkLoaded {
+        subscription_id: SubscriptionId,
         hash: ChunkHash,
         data: Option<Vec<u8>>,
     },
@@ -472,8 +472,8 @@ pub struct SyncEngine {
     /// Next storage request ID.
     next_storage_request_id: u64,
 
-    /// Pending listener chunk requests: request_id -> (listener_id, hash).
-    pending_listener_chunks: HashMap<u64, (ListenerId, ChunkHash)>,
+    /// Pending listener chunk requests: request_id -> (subscription_id, hash).
+    pending_subscription_chunks: HashMap<u64, (SubscriptionId, ChunkHash)>,
 }
 
 impl Default for SyncEngine {
@@ -493,7 +493,7 @@ impl SyncEngine {
             pending_writes: HashMap::new(),
             next_timer_id: 1,
             next_storage_request_id: 1,
-            pending_listener_chunks: HashMap::new(),
+            pending_subscription_chunks: HashMap::new(),
         }
     }
 
@@ -507,7 +507,7 @@ impl SyncEngine {
             pending_writes: HashMap::new(),
             next_timer_id: 1,
             next_storage_request_id: 1,
-            pending_listener_chunks: HashMap::new(),
+            pending_subscription_chunks: HashMap::new(),
         }
     }
 
@@ -596,7 +596,7 @@ impl SyncEngine {
         }
 
         // 9. Process listener chunk requests → emit GetChunk with tracking
-        for request in inboxes.listener_chunk_requests {
+        for request in inboxes.subscription_chunk_requests {
             self.process_listener_chunk_request(request, &mut outboxes);
         }
 
@@ -915,8 +915,8 @@ impl SyncEngine {
                 data,
             } => {
                 // Check if this chunk was requested by a listener
-                if let Some((listener_id, expected_hash)) =
-                    self.pending_listener_chunks.remove(&request_id)
+                if let Some((subscription_id, expected_hash)) =
+                    self.pending_subscription_chunks.remove(&request_id)
                 {
                     // Sanity check
                     debug_assert_eq!(hash, expected_hash);
@@ -924,8 +924,8 @@ impl SyncEngine {
                     // Notify the listener
                     outboxes
                         .notifications
-                        .push(Notification::ListenerChunkLoaded {
-                            listener_id,
+                        .push(Notification::SubscriptionChunkLoaded {
+                            subscription_id,
                             hash,
                             data,
                         });
@@ -958,14 +958,14 @@ impl SyncEngine {
 
     fn process_listener_chunk_request(
         &mut self,
-        request: ListenerChunkRequest,
+        request: SubscriptionChunkRequest,
         outboxes: &mut Outboxes,
     ) {
         let request_id = self.next_storage_request_id();
 
         // Track this request so we can route the response
-        self.pending_listener_chunks
-            .insert(request_id, (request.listener_id, request.hash));
+        self.pending_subscription_chunks
+            .insert(request_id, (request.subscription_id, request.hash));
 
         // Emit GetChunk request to storage
         outboxes.storage.push(StorageRequest::GetChunk {
@@ -1257,13 +1257,13 @@ mod tests {
     #[test]
     fn test_listener_chunk_request_flow() {
         let mut engine = SyncEngine::new();
-        let listener_id = ListenerId::new(42);
+        let subscription_id = SubscriptionId::new(42);
         let chunk_hash = ChunkHash::compute(b"test chunk data");
 
         // Request a chunk for a listener
         let inboxes = Inboxes {
-            listener_chunk_requests: vec![ListenerChunkRequest {
-                listener_id,
+            subscription_chunk_requests: vec![SubscriptionChunkRequest {
+                subscription_id,
                 hash: chunk_hash,
             }],
             ..Default::default()
@@ -1282,7 +1282,7 @@ mod tests {
         };
 
         // Should have tracked the pending request
-        assert!(engine.pending_listener_chunks.contains_key(&request_id));
+        assert!(engine.pending_subscription_chunks.contains_key(&request_id));
 
         // Now simulate the chunk being loaded
         let chunk_data = b"test chunk data".to_vec();
@@ -1297,17 +1297,17 @@ mod tests {
 
         let response_outboxes = engine.pass(response_inboxes);
 
-        // Should have emitted a ListenerChunkLoaded notification
+        // Should have emitted a SubscriptionChunkLoaded notification
         assert!(response_outboxes.notifications.iter().any(|n| matches!(
             n,
-            Notification::ListenerChunkLoaded {
-                listener_id: lid,
+            Notification::SubscriptionChunkLoaded {
+                subscription_id: lid,
                 hash,
                 data: Some(d),
-            } if *lid == listener_id && *hash == chunk_hash && *d == chunk_data
+            } if *lid == subscription_id && *hash == chunk_hash && *d == chunk_data
         )));
 
         // Pending request should be removed
-        assert!(!engine.pending_listener_chunks.contains_key(&request_id));
+        assert!(!engine.pending_subscription_chunks.contains_key(&request_id));
     }
 }
