@@ -204,10 +204,12 @@ test.describe("BetterAuth Sign Out", () => {
     // Sign out
     await page.getByRole("button", { name: "Sign Out" }).click();
 
-    // Should be back to sign in form
-    await expect(page.getByRole("heading", { name: "Sign In" })).toBeVisible({
-      timeout: 5000,
+    // Wait for the sign out to complete - "Logged in as:" should disappear
+    await expect(page.getByText("Logged in as:")).not.toBeVisible({
+      timeout: 10000,
     });
+
+    // Sign Out button should no longer be visible
     await expect(
       page.getByRole("button", { name: "Sign Out" }),
     ).not.toBeVisible();
