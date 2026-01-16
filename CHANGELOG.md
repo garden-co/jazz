@@ -1,7 +1,11 @@
 
 Released Jazz 0.20.0:
 
-With this release we complete the migration to a pure native Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+With this release, we introduce a new, simple to use API for [permanently deleting CoValues](https://jazz.tools/docs/react/core-concepts/deleting). 
+
+For auditing and data recovery purposes, we still recommend using soft-deletes wherever possible. However, we appreciate that for various reasons (data privacy, storage space), it may be preferable to delete data permanently. From Jazz 0.20.0 onwards, you'll be able to do this easily, and build experiences where your users can manage their own data.
+
+Additionally, with this release we complete the migration to a pure native Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
 
 The JavaScript crypto implementation is much slower than native Rust crypto. Although workarounds like RNQuickCrypto for React Native improved performance, they still only wrapped certain native libraries, rather than running Jazz's full Rust crypto.
 
