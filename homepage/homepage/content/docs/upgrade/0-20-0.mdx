@@ -25,7 +25,7 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 - Optimized the JS-to-Rust communication by implementing native data type exchange, eliminating serialization overhead.
 - You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic. See [A more strict `unique` param](#a-more-strict-unique-param).
 - The `removeMember` method now throws an error if the caller is not authorized.
-- We have introduced a way to permanently [delete CoValues](/docs/core-concepts/covalues/deleting). This brings a new `deleted` loading state. See [New `deleted` loading state](#new-deleted-loading-state).
+- We have introduced a way to permanently [delete CoValues](/docs/react/core-concepts/deleting). This brings a new `deleted` loading state. See [New `deleted` loading state](#new-deleted-loading-state).
 - The React context API in `jazz-tools/react-core` changed: `useJazzContextValue` replaces `useJazzContext` for value access, and nesting `JazzProvider` now throws. See [React context/provider changes](#react-contextprovider-changes).
 
 ## Breaking changes
@@ -205,7 +205,7 @@ Task.create({ text: "X" }, { unique: 123 }); // SUPPORTED (but use string instea
 
 ### New `deleted` loading state
 
-With the introduction of [CoValue deletion](/docs/core-concepts/covalues/deleting), there's a new `deleted` loading state. If you're handling loading states explicitly, you should add a case for `deleted`:
+With the introduction of [CoValue deletion](/docs/react/core-concepts/deleting), there's a new `deleted` loading state. If you're handling loading states explicitly, you should add a case for `deleted`:
 
 <CodeGroup>
 ```tsx

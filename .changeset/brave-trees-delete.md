@@ -11,4 +11,4 @@ Added `deleteCoValues` function to permanently delete CoValues and their nested 
 - Introduces new `deleted` loading state for deleted CoValues
 - Groups and Accounts are skipped during deletion
 
-See documentation: https://jazz.tools/docs/core-concepts/covalues/deleting
+See documentation: https://jazz.tools/docs/react/core-concepts/deleting
