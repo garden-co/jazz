@@ -83,6 +83,19 @@ pub struct LocalNode {
     /// Objects that changed during this pass (for sync).
     /// SyncEngine drains these to know which objects to push upstream.
     changed_objects: RefCell<Vec<ObjectChange>>,
+    /// Pending load requests (for lazy loading).
+    /// When an object is needed but not in memory, add a request here.
+    /// SyncEngine drains these into storage outbox.
+    pending_load_requests: RefCell<Vec<LoadRequest>>,
+}
+
+/// A request to load an object from storage.
+#[derive(Debug, Clone)]
+pub struct LoadRequest {
+    /// Object ID to load.
+    pub object_id: ObjectId,
+    /// Branch to load.
+    pub branch: String,
 }
 
 impl Default for LocalNode {
@@ -114,6 +127,7 @@ impl LocalNode {
             on_commits_applied: RefCell::new(None),
             pending_storage: RefCell::new(Vec::new()),
             changed_objects: RefCell::new(Vec::new()),
+            pending_load_requests: RefCell::new(Vec::new()),
         }
     }
 
@@ -129,6 +143,7 @@ impl LocalNode {
             on_commits_applied: RefCell::new(None),
             pending_storage: RefCell::new(Vec::new()),
             changed_objects: RefCell::new(Vec::new()),
+            pending_load_requests: RefCell::new(Vec::new()),
         }
     }
 
@@ -159,6 +174,34 @@ impl LocalNode {
             branch: branch.to_string(),
             timestamp,
         });
+    }
+
+    /// Drain pending load requests (for lazy loading).
+    ///
+    /// Called by SyncEngine during `pass()` to collect objects that need loading.
+    pub fn drain_load_requests(&self) -> Vec<LoadRequest> {
+        std::mem::take(&mut *self.pending_load_requests.borrow_mut())
+    }
+
+    /// Request an object to be loaded from storage.
+    ///
+    /// This queues a load request that will be processed by the driver.
+    /// Use this for lazy loading instead of calling `load_object` directly.
+    pub fn request_load(&self, object_id: ObjectId, branch: &str) {
+        // Don't request if already loaded
+        if self.objects.read().unwrap().contains_key(&object_id) {
+            return;
+        }
+
+        self.pending_load_requests.borrow_mut().push(LoadRequest {
+            object_id,
+            branch: branch.to_string(),
+        });
+    }
+
+    /// Check if an object is loaded in memory.
+    pub fn is_loaded(&self, object_id: ObjectId) -> bool {
+        self.objects.read().unwrap().contains_key(&object_id)
     }
 
     /// Set a callback to be invoked when commits are applied via `apply_commits`.

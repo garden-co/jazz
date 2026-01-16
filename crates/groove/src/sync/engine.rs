@@ -605,6 +605,16 @@ impl SyncEngine {
             .storage
             .extend(self.local_node.drain_storage_requests());
 
+        // 11. Drain load requests from LocalNode → emit LoadObject storage requests
+        for load_req in self.local_node.drain_load_requests() {
+            let request_id = self.next_storage_request_id();
+            outboxes.storage.push(StorageRequest::LoadObject {
+                request_id,
+                object_id: load_req.object_id,
+                branch: load_req.branch,
+            });
+        }
+
         outboxes
     }
 

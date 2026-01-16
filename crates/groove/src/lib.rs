@@ -32,7 +32,7 @@ pub use listener::{
     ObjectListenerRegistry, ObjectState, compute_change_ranges,
 };
 pub use merge::{LastWriterWins, MergeStrategy};
-pub use node::{LocalNode, ObjectChange, generate_object_id};
+pub use node::{LoadRequest, LocalNode, ObjectChange, generate_object_id};
 pub use object::{Object, ObjectId, ObjectIdParseError, SchemaId};
 pub use storage::{
     ChunkHash, ChunkStore, CommitMeta, CommitStore, ContentRef, Environment, INLINE_THRESHOLD,
