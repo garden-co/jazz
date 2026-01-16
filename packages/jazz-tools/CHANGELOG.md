@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 0.19.22
+
+### Patch Changes
+
+- 89d8798: Adds a 512 variant for progressive image loading.
+- 30b5339: Fix an issue when generating image placeholders from clients using Expo Image Manipulator
+- Updated dependencies [3b70482]
+- Updated dependencies [6078ea5]
+  - cojson@0.19.22
+  - cojson-storage-indexeddb@0.19.22
+  - cojson-transport-ws@0.19.22
+
 ## 0.19.19
 
 ### Patch Changes
@@ -465,6 +477,7 @@
 ### Patch Changes
 
 - f2f478a: Add connection status API for React and Svelte
+
   - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
   - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
 
@@ -500,6 +513,7 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
+
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -883,6 +897,7 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
+
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 
