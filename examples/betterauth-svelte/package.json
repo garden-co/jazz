@@ -1,7 +1,7 @@
 {
   "name": "betterauth-svelte",
   "private": true,
-  "version": "0.0.35",
+  "version": "0.0.36",
   "type": "module",
   "packageManager": "pnpm@10.16.1",
   "scripts": {
