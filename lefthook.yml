@@ -1,0 +1,8 @@
+pre-commit:
+  commands:
+    rustfmt:
+      glob: "*.rs"
+      run: cargo fmt --manifest-path crates/groove/Cargo.toml -- --check
+    clippy:
+      glob: "*.rs"
+      run: cargo clippy --manifest-path crates/groove/Cargo.toml -- -D warnings

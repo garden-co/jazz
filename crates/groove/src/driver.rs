@@ -1,0 +1,239 @@
+use std::collections::{HashMap, HashSet};
+
+use crate::commit::{Commit, CommitId, StoredState};
+use crate::object::{BranchName, ObjectId};
+use crate::storage::{LoadDepth, LoadedBranch, StorageError, StorageRequest, StorageResponse};
+
+/// Trait for storage drivers that process storage requests.
+pub trait Driver {
+    fn process(&mut self, requests: Vec<StorageRequest>) -> Vec<StorageResponse>;
+}
+
+/// In-memory storage for testing.
+#[derive(Debug, Clone, Default)]
+pub struct TestDriver {
+    pub objects: HashMap<ObjectId, StoredObject>,
+}
+
+/// An object stored by TestDriver.
+#[derive(Debug, Clone, Default)]
+pub struct StoredObject {
+    pub metadata: HashMap<String, String>,
+    pub branches: HashMap<BranchName, StoredBranch>,
+}
+
+/// A branch stored by TestDriver.
+#[derive(Debug, Clone, Default)]
+pub struct StoredBranch {
+    pub commits: HashMap<CommitId, Commit>,
+    pub tips: HashSet<CommitId>,
+}
+
+impl TestDriver {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Driver for TestDriver {
+    fn process(&mut self, requests: Vec<StorageRequest>) -> Vec<StorageResponse> {
+        requests
+            .into_iter()
+            .map(|req| self.process_one(req))
+            .collect()
+    }
+}
+
+impl TestDriver {
+    fn process_one(&mut self, request: StorageRequest) -> StorageResponse {
+        match request {
+            StorageRequest::CreateObject { id, metadata } => {
+                self.objects.insert(
+                    id,
+                    StoredObject {
+                        metadata,
+                        branches: HashMap::new(),
+                    },
+                );
+                StorageResponse::CreateObject { id, result: Ok(()) }
+            }
+            StorageRequest::AppendCommit {
+                object_id,
+                branch_name,
+                mut commit,
+            } => {
+                let commit_id = commit.id();
+
+                let result = if let Some(obj) = self.objects.get_mut(&object_id) {
+                    let branch = obj.branches.entry(branch_name).or_default();
+
+                    // Update tips: remove parents, add new commit
+                    for parent in &commit.parents {
+                        branch.tips.remove(parent);
+                    }
+                    branch.tips.insert(commit_id);
+
+                    // Mark as stored and insert
+                    commit.stored_state = StoredState::Stored;
+                    branch.commits.insert(commit_id, commit);
+
+                    Ok(())
+                } else {
+                    Err(StorageError::NotFound)
+                };
+
+                StorageResponse::AppendCommit {
+                    object_id,
+                    commit_id,
+                    result,
+                }
+            }
+            StorageRequest::LoadObjectBranch {
+                object_id,
+                branch_name,
+                depth,
+            } => {
+                let result = if let Some(obj) = self.objects.get(&object_id) {
+                    if let Some(branch) = obj.branches.get(&branch_name) {
+                        let commits = match depth {
+                            LoadDepth::TipIdsOnly => HashMap::new(),
+                            LoadDepth::TipsOnly => branch
+                                .tips
+                                .iter()
+                                .filter_map(|id| branch.commits.get(id).map(|c| (*id, c.clone())))
+                                .collect(),
+                            LoadDepth::AllCommits => branch.commits.clone(),
+                        };
+
+                        Ok(LoadedBranch {
+                            tips: branch.tips.clone(),
+                            commits,
+                        })
+                    } else {
+                        Err(StorageError::NotFound)
+                    }
+                } else {
+                    Err(StorageError::NotFound)
+                };
+
+                StorageResponse::LoadObjectBranch {
+                    object_id,
+                    branch_name,
+                    result,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_driver_creates_object() {
+        let mut driver = TestDriver::new();
+        let id = ObjectId::new();
+
+        let responses = driver.process(vec![StorageRequest::CreateObject {
+            id,
+            metadata: HashMap::new(),
+        }]);
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(
+            &responses[0],
+            StorageResponse::CreateObject { id: resp_id, result: Ok(()) }
+            if *resp_id == id
+        ));
+        assert!(driver.objects.contains_key(&id));
+    }
+
+    #[test]
+    fn test_driver_appends_commit() {
+        let mut driver = TestDriver::new();
+        let object_id = ObjectId::new();
+        let author = ObjectId::new();
+
+        // Create object first
+        driver.process(vec![StorageRequest::CreateObject {
+            id: object_id,
+            metadata: HashMap::new(),
+        }]);
+
+        let commit = Commit {
+            parents: vec![],
+            content: b"test".to_vec(),
+            timestamp: 123,
+            author,
+            metadata: None,
+            stored_state: StoredState::Pending,
+        };
+        let commit_id = commit.id();
+
+        let responses = driver.process(vec![StorageRequest::AppendCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit,
+        }]);
+
+        assert_eq!(responses.len(), 1);
+        assert!(matches!(
+            &responses[0],
+            StorageResponse::AppendCommit { commit_id: cid, result: Ok(()), .. }
+            if *cid == commit_id
+        ));
+
+        // Verify stored
+        let branch = &driver.objects[&object_id].branches[&BranchName::new("main")];
+        assert!(branch.commits.contains_key(&commit_id));
+        assert!(branch.tips.contains(&commit_id));
+    }
+
+    #[test]
+    fn test_driver_loads_branch() {
+        let mut driver = TestDriver::new();
+        let object_id = ObjectId::new();
+        let author = ObjectId::new();
+
+        // Create object and commit
+        driver.process(vec![StorageRequest::CreateObject {
+            id: object_id,
+            metadata: HashMap::new(),
+        }]);
+
+        let commit = Commit {
+            parents: vec![],
+            content: b"test".to_vec(),
+            timestamp: 123,
+            author,
+            metadata: None,
+            stored_state: StoredState::Pending,
+        };
+        let commit_id = commit.id();
+
+        driver.process(vec![StorageRequest::AppendCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit,
+        }]);
+
+        // Load branch
+        let responses = driver.process(vec![StorageRequest::LoadObjectBranch {
+            object_id,
+            branch_name: BranchName::new("main"),
+            depth: LoadDepth::AllCommits,
+        }]);
+
+        assert_eq!(responses.len(), 1);
+        if let StorageResponse::LoadObjectBranch {
+            result: Ok(loaded), ..
+        } = &responses[0]
+        {
+            assert!(loaded.tips.contains(&commit_id));
+            assert!(loaded.commits.contains_key(&commit_id));
+        } else {
+            panic!("Expected LoadObjectBranch response");
+        }
+    }
+}
