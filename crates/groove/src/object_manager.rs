@@ -23,7 +23,7 @@ struct Subscription {
 /// Update sent to subscribers when commits are added or loaded.
 ///
 /// Contains the current frontier (tips) sorted by timestamp (oldest first).
-/// When branches diverge, you'll see multiple commits in the frontier.
+/// When twigs diverge, you'll see multiple commits in the frontier.
 /// When they merge, the frontier consolidates back to one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionUpdate {
@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn diverging_commits_create_multiple_tips() {
+    fn diverging_twigs_create_multiple_tips() {
         let mut manager = ObjectManager::new();
         let object_id = manager.create(None);
         let author = ObjectId::new();
@@ -1211,23 +1211,23 @@ mod tests {
             .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
             .unwrap();
 
-        let branch_a = manager
+        let twig_a = manager
             .add_commit(
                 object_id,
                 "main",
                 vec![root],
-                b"branch_a".to_vec(),
+                b"twig_a".to_vec(),
                 author,
                 None,
             )
             .unwrap();
 
-        let branch_b = manager
+        let twig_b = manager
             .add_commit(
                 object_id,
                 "main",
                 vec![root],
-                b"branch_b".to_vec(),
+                b"twig_b".to_vec(),
                 author,
                 None,
             )
@@ -1235,8 +1235,8 @@ mod tests {
 
         let tip_ids = manager.get_tip_ids(object_id, "main").unwrap();
         assert_eq!(tip_ids.len(), 2);
-        assert!(tip_ids.contains(&branch_a));
-        assert!(tip_ids.contains(&branch_b));
+        assert!(tip_ids.contains(&twig_a));
+        assert!(tip_ids.contains(&twig_b));
     }
 
     #[test]
@@ -1249,34 +1249,34 @@ mod tests {
             .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
             .unwrap();
 
-        let branch_a = manager
+        let twig_a = manager
             .add_commit(
                 object_id,
                 "main",
                 vec![root],
-                b"branch_a".to_vec(),
+                b"twig_a".to_vec(),
                 author,
                 None,
             )
             .unwrap();
 
-        let branch_b = manager
+        let twig_b = manager
             .add_commit(
                 object_id,
                 "main",
                 vec![root],
-                b"branch_b".to_vec(),
+                b"twig_b".to_vec(),
                 author,
                 None,
             )
             .unwrap();
 
-        // Merge both branches
+        // Merge both twigs
         let merge = manager
             .add_commit(
                 object_id,
                 "main",
-                vec![branch_a, branch_b],
+                vec![twig_a, twig_b],
                 b"merge".to_vec(),
                 author,
                 None,
@@ -2650,8 +2650,8 @@ mod tests {
     }
 
     #[test]
-    fn truncate_multiple_tails_diverged_history() {
-        // Test with diverged history retained:
+    fn truncate_multiple_tails_diverged_twigs() {
+        // Test with diverged twigs retained:
         //      root → a → a2
         //           → b → b2
         // truncate at {a, b} should delete only root

@@ -17,6 +17,8 @@ Object
 ### Branch
 A named DAG of commits within an object. Tracks the current frontier (tips) and optional truncation boundary (tails).
 
+When commits in a branch diverge (multiple children of the same parent), these divergent paths are called **twigs**. Twigs exist within a single branch and may later merge back together.
+
 ```
 Branch
 ├── commits: HashMap<CommitId, Commit>
@@ -249,13 +251,13 @@ enum LoadDepth {
 ### Tips (Frontier)
 The tips are commits with no children—the "current state" of a branch. When:
 - A commit is added: its parents leave tips, it joins tips
-- Branches diverge: multiple tips exist
-- Branches merge: merge commit becomes single tip
+- Twigs diverge: multiple tips exist (divergent paths within a branch)
+- Twigs merge: merge commit becomes single tip
 
 ```
 Linear:       root → c1 → c2 (tip)
 
-Diverged:     root → a (tip)
+Diverged:     root → a (tip)      # two twigs
                    → b (tip)
 
 Merged:       root → a ─┬─► merge (tip)
