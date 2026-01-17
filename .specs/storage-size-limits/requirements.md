@@ -63,14 +63,13 @@ This feature adds configurable storage size limits with intelligent eviction of 
 
 **Acceptance Criteria:**
 
-1. **The system shall** use a separate `lastAccessedEpoch` field (using `Date.now()` timestamps) for storage eviction, independent from `GarbageCollector`'s in-memory tracking.
-2. **When** a CoValue is loaded from storage, **the system shall** update its `lastAccessedEpoch` to the current time.
-3. **When** new content is stored for a CoValue, **the system shall** update both `lastAccessedEpoch` (current time) and `sizeBytes` (incrementally adding new transaction sizes).
-4. **The system shall** persist `lastAccessedEpoch` and `sizeBytes` in storage across app restarts.
-5. **When** a CoValue has no recorded `lastAccessedEpoch` in storage, **the system shall** treat it as the oldest (most eligible for eviction).
+1. **The system shall** update `GarbageCollector` to use `Date.now()` instead of `performance.now()`, allowing `verified.lastAccessed` to be persisted for storage eviction.
+2. **When** a CoValue is loaded from storage, **the system shall** update its `lastAccessed` to current time to prevent immediate eviction.
+3. **When** new content is stored for a CoValue, **the system shall** update both `lastAccessed` (from GC's `verified.lastAccessed`) and `sizeBytes` (incrementally adding new transaction sizes).
+4. **The system shall** persist `lastAccessed` and `sizeBytes` in storage across app restarts.
+5. **When** a CoValue has no recorded `lastAccessed` in storage, **the system shall** treat it as the oldest (most eligible for eviction).
 6. **When** a CoValue has no recorded `sizeBytes`, **the system shall** calculate it on first access by summing header and transaction sizes.
 7. **The system shall** estimate transaction size as the JSON-serialized length of the transaction data.
-8. **The system shall NOT** modify `GarbageCollector` or depend on its `performance.now()`-based `lastAccessed` field.
 
 ---
 
@@ -114,9 +113,8 @@ This feature adds configurable storage size limits with intelligent eviction of 
 4. **The system shall** only evict CoValues that are:
    - NOT in memory (have been unmounted by GarbageCollector), AND
    - Synced to server (data can be safely re-fetched)
-5. **When** no evictable CoValues remain (all are in-memory or unsynced), **the system shall** switch to memory-only mode and log a warning.
-6. **The system shall** resume normal storage operation automatically when CoValues are unmounted from memory or sync completes.
-7. **The system shall** use the in-memory `UnsyncedCoValuesTracker` as the authoritative source for sync status (not the storage table, which may have batching delays).
+5. **When** no evictable CoValues remain (all are in-memory or unsynced), **the system shall** throw a `StorageFullError`.
+6. **The system shall** use the in-memory `UnsyncedCoValuesTracker` as the authoritative source for sync status (not the storage table, which may have batching delays).
 
 ---
 
@@ -130,15 +128,15 @@ This feature adds configurable storage size limits with intelligent eviction of 
 
 1. **When** a CoValue is requested that was previously evicted, **the system shall** fetch it from the server using normal sync mechanisms.
 2. **The system shall not** maintain tombstones or records of evicted CoValues (clean deletion).
-3. **When** re-fetching an evicted CoValue, **the system shall** update its `lastAccessedEpoch` to current time.
+3. **When** re-fetching an evicted CoValue, **the system shall** update its `lastAccessed` via `GarbageCollector.trackCoValueAccess()`.
 
 ---
 
-### US7: Hard Storage Limit Enforcement with Graceful Degradation
+### US7: Hard Storage Limit Enforcement
 
 **As a** Jazz storage system  
-**I want to** enforce the storage limit as a hard constraint with graceful fallback  
-**So that** the database size never exceeds the configured maximum while the app continues to work
+**I want to** enforce the storage limit as a hard constraint  
+**So that** the database size never exceeds the configured maximum
 
 **Acceptance Criteria:**
 
@@ -147,12 +145,9 @@ This feature adds configurable storage size limits with intelligent eviction of 
 3. **When** a store operation would exceed the limit, **the system shall** trigger immediate eviction to make room BEFORE storing.
 4. **If** immediate eviction can free sufficient space, **the system shall** evict and then proceed with the store.
 5. **The system shall** only evict CoValues that are NOT in memory AND synced to server.
-6. **If** no evictable CoValues remain (all are in-memory or unsynced), **the system shall** skip the storage write and operate in memory-only mode.
-7. **The system shall NOT** throw errors to the application - it shall gracefully degrade to memory-only operation.
-8. **When** operating in memory-only mode, **the system shall** log a warning for debugging purposes.
-9. **The system shall** resume normal storage operation automatically when CoValues become evictable (unmounted from memory or sync completes).
-10. **The system shall not** block the main thread during eviction operations for extended periods.
-11. **When** eviction is running, **the system shall** process eviction in batches to avoid long-running transactions.
+6. **If** no evictable CoValues remain (all are in-memory or unsynced), **the system shall** throw a `StorageFullError`.
+7. **The system shall not** block the main thread during eviction operations for extended periods.
+8. **When** eviction is running, **the system shall** process eviction in batches to avoid long-running transactions.
 
 ---
 
