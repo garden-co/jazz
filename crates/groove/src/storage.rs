@@ -68,12 +68,33 @@ pub enum StorageRequest {
     LoadBlobAssociations {
         content_hash: ContentHash,
     },
+    /// Delete a commit from storage.
+    DeleteCommit {
+        object_id: ObjectId,
+        branch_name: BranchName,
+        commit_id: CommitId,
+    },
+    /// Atomically dissociate blob from commit; if no associations remain, delete the blob.
+    DissociateAndMaybeDeleteBlob {
+        content_hash: ContentHash,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        commit_id: CommitId,
+    },
+    /// Set the branch truncation tails.
+    SetBranchTails {
+        object_id: ObjectId,
+        branch_name: BranchName,
+        tails: Option<HashSet<CommitId>>,
+    },
 }
 
 /// Branch data loaded from storage.
 #[derive(Debug, Clone)]
 pub struct LoadedBranch {
     pub tips: HashSet<CommitId>,
+    /// Truncation boundary. None = full history.
+    pub tails: Option<HashSet<CommitId>>,
     /// May be partial based on LoadDepth.
     pub commits: HashMap<CommitId, Commit>,
 }
@@ -110,5 +131,24 @@ pub enum StorageResponse {
     LoadBlobAssociations {
         content_hash: ContentHash,
         result: Result<Vec<BlobAssociation>, StorageError>,
+    },
+    DeleteCommit {
+        object_id: ObjectId,
+        branch_name: BranchName,
+        commit_id: CommitId,
+        result: Result<(), StorageError>,
+    },
+    DissociateAndMaybeDeleteBlob {
+        content_hash: ContentHash,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        commit_id: CommitId,
+        /// True if blob was deleted (no remaining associations).
+        blob_deleted: Result<bool, StorageError>,
+    },
+    SetBranchTails {
+        object_id: ObjectId,
+        branch_name: BranchName,
+        result: Result<(), StorageError>,
     },
 }

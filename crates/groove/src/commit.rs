@@ -15,6 +15,7 @@ pub enum StoredState {
     Pending,
     Stored,
     Errored(String),
+    PendingDelete,
 }
 
 /// A commit in an object's history.
