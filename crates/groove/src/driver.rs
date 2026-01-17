@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{BranchName, ObjectId};
-use crate::storage::{LoadDepth, LoadedBranch, StorageError, StorageRequest, StorageResponse};
+use crate::storage::{
+    BlobAssociation, ContentHash, LoadDepth, LoadedBranch, StorageError, StorageRequest,
+    StorageResponse,
+};
 
 /// Trait for storage drivers that process storage requests.
 pub trait Driver {
@@ -13,6 +16,10 @@ pub trait Driver {
 #[derive(Debug, Clone, Default)]
 pub struct TestDriver {
     pub objects: HashMap<ObjectId, StoredObject>,
+    /// Blobs by content hash.
+    pub blobs: HashMap<ContentHash, Vec<u8>>,
+    /// Blob associations for GC.
+    pub blob_associations: HashMap<ContentHash, Vec<BlobAssociation>>,
 }
 
 /// An object stored by TestDriver.
@@ -119,6 +126,54 @@ impl TestDriver {
                 StorageResponse::LoadObjectBranch {
                     object_id,
                     branch_name,
+                    result,
+                }
+            }
+            StorageRequest::StoreBlob { content_hash, data } => {
+                self.blobs.insert(content_hash, data);
+                StorageResponse::StoreBlob {
+                    content_hash,
+                    result: Ok(()),
+                }
+            }
+            StorageRequest::LoadBlob { content_hash } => {
+                let result = self
+                    .blobs
+                    .get(&content_hash)
+                    .cloned()
+                    .ok_or(StorageError::NotFound);
+                StorageResponse::LoadBlob {
+                    content_hash,
+                    result,
+                }
+            }
+            StorageRequest::AssociateBlob {
+                content_hash,
+                object_id,
+                branch_name,
+                commit_id,
+            } => {
+                self.blob_associations
+                    .entry(content_hash)
+                    .or_default()
+                    .push(BlobAssociation {
+                        object_id,
+                        branch_name,
+                        commit_id,
+                    });
+                StorageResponse::AssociateBlob {
+                    content_hash,
+                    result: Ok(()),
+                }
+            }
+            StorageRequest::LoadBlobAssociations { content_hash } => {
+                let result = self
+                    .blob_associations
+                    .get(&content_hash)
+                    .cloned()
+                    .ok_or(StorageError::NotFound);
+                StorageResponse::LoadBlobAssociations {
+                    content_hash,
                     result,
                 }
             }
