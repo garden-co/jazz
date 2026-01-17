@@ -62,6 +62,9 @@ impl<T: Into<String>> From<T> for BranchName {
 pub struct Branch {
     pub commits: HashMap<CommitId, Commit>,
     pub tips: HashSet<CommitId>,
+    /// Truncation boundary. None = full history from roots.
+    /// Some(tails) = history only includes tails and their descendants.
+    pub tails: Option<HashSet<CommitId>>,
     pub loaded_state: BranchLoadedState,
 }
 

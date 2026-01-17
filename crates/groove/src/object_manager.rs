@@ -55,6 +55,8 @@ enum BlobState {
     Loading,
     /// Blob not found in storage (permanent error).
     NotFound,
+    /// Blob marked for deletion, awaiting storage confirmation.
+    PendingDelete,
 }
 
 /// Errors that can occur when managing objects and commits.
@@ -73,6 +75,28 @@ pub enum Error {
     BlobNotLoaded(ContentHash),
     /// Blob not found (permanent error).
     BlobNotFound(ContentHash),
+}
+
+/// Result of a branch truncation operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TruncateResult {
+    Success {
+        deleted_commits: usize,
+        deleted_blobs: usize,
+    },
+    Pending,
+    PermanentError(TruncateError),
+}
+
+/// Errors specific to branch truncation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TruncateError {
+    ObjectNotFound(ObjectId),
+    BranchNotFound(BranchName),
+    ObjectNotReady(ObjectId),
+    TailNotFound(CommitId),
+    /// Can't truncate past the frontier - tip is not a descendant of any tail.
+    TipBeforeTail(CommitId),
 }
 
 /// Manages a collection of objects.
@@ -192,6 +216,15 @@ impl ObjectManager {
                 for parent in &parents {
                     if !branch.commits.contains_key(parent) {
                         return Err(Error::ParentNotFound(*parent));
+                    }
+                }
+
+                // After truncation, reject commits whose parents are before tails
+                if let Some(tails) = &branch.tails {
+                    for parent in &parents {
+                        if !Self::is_descendant_of_any(&branch.commits, *parent, tails) {
+                            return Err(Error::ParentNotFound(*parent));
+                        }
                     }
                 }
             }
@@ -442,6 +475,7 @@ impl ObjectManager {
             Some(BlobState::Available { data, .. }) => Ok(data),
             Some(BlobState::Loading) => Err(Error::BlobNotLoaded(content_hash)),
             Some(BlobState::NotFound) => Err(Error::BlobNotFound(content_hash)),
+            Some(BlobState::PendingDelete) => Err(Error::BlobNotFound(content_hash)),
             None => unreachable!(), // Entry was occupied
         }
     }
@@ -498,6 +532,7 @@ impl ObjectManager {
                                 Branch {
                                     commits: loaded_branch.commits,
                                     tips: loaded_branch.tips,
+                                    tails: loaded_branch.tails,
                                     loaded_state: BranchLoadedState::AllCommits,
                                 },
                             );
@@ -510,6 +545,7 @@ impl ObjectManager {
                                 .entry(branch_name.clone())
                                 .or_insert_with(Branch::default);
                             branch.tips = loaded_branch.tips;
+                            branch.tails = loaded_branch.tails;
                             branch.commits.extend(loaded_branch.commits);
                             branch.loaded_state = BranchLoadedState::AllCommits;
                         }
@@ -568,6 +604,44 @@ impl ObjectManager {
                             }
                         }
                     }
+                }
+                StorageResponse::DeleteCommit {
+                    object_id,
+                    branch_name,
+                    commit_id,
+                    result,
+                } => {
+                    if result.is_ok()
+                        && let Some(object) = self.get_mut(object_id)
+                        && let Some(branch) = object.branches.get_mut(&branch_name)
+                    {
+                        branch.commits.remove(&commit_id);
+                    }
+                }
+                StorageResponse::DissociateAndMaybeDeleteBlob {
+                    content_hash,
+                    object_id,
+                    branch_name,
+                    commit_id,
+                    blob_deleted,
+                } => {
+                    // Remove from in-memory associations
+                    if let Some(associations) = self.blob_associations.get_mut(&content_hash) {
+                        associations.retain(|a| {
+                            !(a.object_id == object_id
+                                && a.branch_name == branch_name
+                                && a.commit_id == commit_id)
+                        });
+                    }
+
+                    // If blob was deleted, remove from blobs map
+                    if let Ok(true) = blob_deleted {
+                        self.blobs.remove(&content_hash);
+                        self.blob_associations.remove(&content_hash);
+                    }
+                }
+                StorageResponse::SetBranchTails { .. } => {
+                    // Already updated in-memory during truncate_branch
                 }
             }
         }
@@ -728,6 +802,213 @@ impl ObjectManager {
                 });
             }
         }
+    }
+
+    /// Truncate a branch by removing commits topologically earlier than the specified tails.
+    ///
+    /// All tips must be descendants of (or equal to) some tail. Commits before the tails
+    /// are deleted, their blob associations removed, and orphaned blobs deleted.
+    pub fn truncate_branch(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        tail_ids: HashSet<CommitId>,
+    ) -> TruncateResult {
+        let branch_name = branch_name.into();
+
+        // Validate object state
+        if self.is_loading(object_id) {
+            return TruncateResult::PermanentError(TruncateError::ObjectNotReady(object_id));
+        }
+
+        // Validate object exists
+        let object = match self.get(object_id) {
+            Some(obj) => obj,
+            None => {
+                return TruncateResult::PermanentError(TruncateError::ObjectNotFound(object_id));
+            }
+        };
+
+        // Validate branch exists
+        let branch = match object.branches.get(&branch_name) {
+            Some(b) => b,
+            None => {
+                return TruncateResult::PermanentError(TruncateError::BranchNotFound(
+                    branch_name.clone(),
+                ));
+            }
+        };
+
+        // Validate all tail_ids exist in branch
+        for tail_id in &tail_ids {
+            if !branch.commits.contains_key(tail_id) {
+                return TruncateResult::PermanentError(TruncateError::TailNotFound(*tail_id));
+            }
+        }
+
+        // Check invariant: all tips must be descendants of (or equal to) some tail
+        for tip in &branch.tips {
+            if !Self::is_descendant_of_any(&branch.commits, *tip, &tail_ids) {
+                return TruncateResult::PermanentError(TruncateError::TipBeforeTail(*tip));
+            }
+        }
+
+        // Find all commits to delete (ancestors of tails, not including tails themselves)
+        let commits_to_delete = Self::find_ancestors(&branch.commits, &tail_ids);
+
+        // If nothing to delete and tails already set to same value, return success immediately
+        if commits_to_delete.is_empty() && branch.tails.as_ref() == Some(&tail_ids) {
+            return TruncateResult::Success {
+                deleted_commits: 0,
+                deleted_blobs: 0,
+            };
+        }
+
+        // Collect blob associations for commits being deleted
+        let mut blobs_to_dissociate: Vec<(ContentHash, BlobAssociation)> = Vec::new();
+        for commit_id in &commits_to_delete {
+            for (content_hash, associations) in &self.blob_associations {
+                for assoc in associations {
+                    if assoc.object_id == object_id
+                        && assoc.branch_name == branch_name
+                        && assoc.commit_id == *commit_id
+                    {
+                        blobs_to_dissociate.push((*content_hash, assoc.clone()));
+                    }
+                }
+            }
+        }
+
+        // Queue SetBranchTails request
+        self.outbox.push(StorageRequest::SetBranchTails {
+            object_id,
+            branch_name: branch_name.clone(),
+            tails: Some(tail_ids.clone()),
+        });
+
+        // Queue DissociateAndMaybeDeleteBlob for each association
+        for (content_hash, assoc) in &blobs_to_dissociate {
+            self.outbox
+                .push(StorageRequest::DissociateAndMaybeDeleteBlob {
+                    content_hash: *content_hash,
+                    object_id: assoc.object_id,
+                    branch_name: assoc.branch_name.clone(),
+                    commit_id: assoc.commit_id,
+                });
+        }
+
+        // Queue DeleteCommit for each commit
+        for commit_id in &commits_to_delete {
+            self.outbox.push(StorageRequest::DeleteCommit {
+                object_id,
+                branch_name: branch_name.clone(),
+                commit_id: *commit_id,
+            });
+        }
+
+        // Update in-memory state
+        let object = self
+            .get_mut(object_id)
+            .expect("object existence already validated");
+        let branch = object.branches.get_mut(&branch_name).unwrap();
+
+        // Set tails
+        branch.tails = Some(tail_ids);
+
+        // Mark commits as PendingDelete
+        for commit_id in &commits_to_delete {
+            if let Some(commit) = branch.commits.get_mut(commit_id) {
+                commit.stored_state = StoredState::PendingDelete;
+            }
+        }
+
+        // Mark blobs as PendingDelete
+        for (content_hash, _) in &blobs_to_dissociate {
+            if let Some(blob_state) = self.blobs.get_mut(content_hash) {
+                *blob_state = BlobState::PendingDelete;
+            }
+        }
+
+        if commits_to_delete.is_empty() && blobs_to_dissociate.is_empty() {
+            TruncateResult::Success {
+                deleted_commits: 0,
+                deleted_blobs: 0,
+            }
+        } else {
+            TruncateResult::Pending
+        }
+    }
+
+    /// Check if `commit_id` is a descendant of any commit in `ancestors` (or is in ancestors itself).
+    fn is_descendant_of_any(
+        commits: &HashMap<CommitId, Commit>,
+        commit_id: CommitId,
+        ancestors: &HashSet<CommitId>,
+    ) -> bool {
+        if ancestors.contains(&commit_id) {
+            return true;
+        }
+
+        // BFS from commit_id backwards through parents
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(commit_id);
+
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+
+            if let Some(commit) = commits.get(&current) {
+                for parent in &commit.parents {
+                    if ancestors.contains(parent) {
+                        return true;
+                    }
+                    queue.push_back(*parent);
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Find all ancestors of the given commits (not including the commits themselves).
+    /// Only returns commits that actually exist in the commits map.
+    fn find_ancestors(
+        commits: &HashMap<CommitId, Commit>,
+        starting_points: &HashSet<CommitId>,
+    ) -> HashSet<CommitId> {
+        let mut ancestors = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        // Start from parents of the starting points
+        for start in starting_points {
+            if let Some(commit) = commits.get(start) {
+                for parent in &commit.parents {
+                    // Only consider parents that exist in the commits map
+                    if commits.contains_key(parent) {
+                        queue.push_back(*parent);
+                    }
+                }
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if !ancestors.insert(current) {
+                continue;
+            }
+
+            if let Some(commit) = commits.get(&current) {
+                for parent in &commit.parents {
+                    // Only consider parents that exist in the commits map
+                    if commits.contains_key(parent) {
+                        queue.push_back(*parent);
+                    }
+                }
+            }
+        }
+
+        ancestors
     }
 }
 
@@ -1313,7 +1594,11 @@ mod tests {
         manager.push_response(StorageResponse::LoadObjectBranch {
             object_id,
             branch_name: BranchName::new("main"),
-            result: Ok(LoadedBranch { tips, commits }),
+            result: Ok(LoadedBranch {
+                tips,
+                tails: None,
+                commits,
+            }),
         });
         manager.process_storage_responses();
 
@@ -1918,5 +2203,499 @@ mod tests {
         // Blob should still be loadable
         let result = manager.load_blob(&blob_id);
         assert!(result.is_ok());
+    }
+
+    // --- truncation tests ---
+
+    #[test]
+    fn truncate_linear_branch_deletes_ancestors() {
+        // root→c1→c2→c3, truncate at c2 → root,c1 deleted
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let c1 = manager
+            .add_commit(object_id, "main", vec![root], b"c1".to_vec(), author, None)
+            .unwrap();
+        let c2 = manager
+            .add_commit(object_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .unwrap();
+        let c3 = manager
+            .add_commit(object_id, "main", vec![c2], b"c3".to_vec(), author, None)
+            .unwrap();
+
+        manager.take_requests();
+
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([c2]));
+        assert!(matches!(result, TruncateResult::Pending));
+
+        // Verify requests queued
+        let requests = manager.take_requests();
+        // SetBranchTails + DeleteCommit for root, c1
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            StorageRequest::SetBranchTails { tails: Some(t), .. }
+            if t.contains(&c2)
+        )));
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            StorageRequest::DeleteCommit { commit_id, .. }
+            if *commit_id == root
+        )));
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            StorageRequest::DeleteCommit { commit_id, .. }
+            if *commit_id == c1
+        )));
+
+        // Verify in-memory state
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert_eq!(branch.tails, Some(HashSet::from([c2])));
+        assert!(matches!(
+            branch.commits[&root].stored_state,
+            StoredState::PendingDelete
+        ));
+        assert!(matches!(
+            branch.commits[&c1].stored_state,
+            StoredState::PendingDelete
+        ));
+
+        // Process delete responses
+        manager.push_response(StorageResponse::DeleteCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: root,
+            result: Ok(()),
+        });
+        manager.push_response(StorageResponse::DeleteCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: c1,
+            result: Ok(()),
+        });
+        manager.process_storage_responses();
+
+        // Verify commits removed
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert!(!branch.commits.contains_key(&root));
+        assert!(!branch.commits.contains_key(&c1));
+        assert!(branch.commits.contains_key(&c2));
+        assert!(branch.commits.contains_key(&c3));
+    }
+
+    #[test]
+    fn truncate_diamond_deletes_common_ancestor() {
+        // root→a,b→merge, truncate at {a,b} → root deleted
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let a = manager
+            .add_commit(object_id, "main", vec![root], b"a".to_vec(), author, None)
+            .unwrap();
+        let b = manager
+            .add_commit(object_id, "main", vec![root], b"b".to_vec(), author, None)
+            .unwrap();
+        let merge = manager
+            .add_commit(
+                object_id,
+                "main",
+                vec![a, b],
+                b"merge".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+
+        manager.take_requests();
+
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([a, b]));
+        assert!(matches!(result, TruncateResult::Pending));
+
+        // Verify only root is queued for deletion
+        let requests = manager.take_requests();
+        let delete_requests: Vec<_> = requests
+            .iter()
+            .filter_map(|r| match r {
+                StorageRequest::DeleteCommit { commit_id, .. } => Some(*commit_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delete_requests.len(), 1);
+        assert!(delete_requests.contains(&root));
+
+        // Verify in-memory tails
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert_eq!(branch.tails, Some(HashSet::from([a, b])));
+
+        // Process response
+        manager.push_response(StorageResponse::DeleteCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: root,
+            result: Ok(()),
+        });
+        manager.process_storage_responses();
+
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert!(!branch.commits.contains_key(&root));
+        assert!(branch.commits.contains_key(&a));
+        assert!(branch.commits.contains_key(&b));
+        assert!(branch.commits.contains_key(&merge));
+    }
+
+    #[test]
+    fn truncate_rejects_orphaned_tip() {
+        // root→a(tip), root→b(tip), truncate at {b} → TipBeforeTail(a)
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let a = manager
+            .add_commit(object_id, "main", vec![root], b"a".to_vec(), author, None)
+            .unwrap();
+        let _b = manager
+            .add_commit(object_id, "main", vec![root], b"b".to_vec(), author, None)
+            .unwrap();
+
+        // Both a and b are tips. Truncating at {b} only would orphan a
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([_b]));
+        assert_eq!(
+            result,
+            TruncateResult::PermanentError(TruncateError::TipBeforeTail(a))
+        );
+    }
+
+    #[test]
+    fn add_commit_rejects_truncated_parent() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let c1 = manager
+            .add_commit(object_id, "main", vec![root], b"c1".to_vec(), author, None)
+            .unwrap();
+        let c2 = manager
+            .add_commit(object_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .unwrap();
+
+        // Truncate at c2
+        manager.truncate_branch(object_id, "main", HashSet::from([c2]));
+
+        // Process responses to remove commits
+        manager.push_response(StorageResponse::DeleteCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: root,
+            result: Ok(()),
+        });
+        manager.push_response(StorageResponse::DeleteCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: c1,
+            result: Ok(()),
+        });
+        manager.process_storage_responses();
+
+        // Try to add commit with root as parent (should fail - root was deleted)
+        let result = manager.add_commit(
+            object_id,
+            "main",
+            vec![root],
+            b"orphan".to_vec(),
+            author,
+            None,
+        );
+        assert!(matches!(result, Err(Error::ParentNotFound(_))));
+    }
+
+    #[test]
+    fn orphaned_blob_deleted_after_truncation() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let c1 = manager
+            .add_commit(object_id, "main", vec![root], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        // Associate blob with root
+        let blob_id = manager.associate_blob(object_id, "main", root, b"blob data".to_vec());
+
+        manager.take_requests();
+
+        // Truncate at c1
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([c1]));
+        assert!(matches!(result, TruncateResult::Pending));
+
+        let requests = manager.take_requests();
+        // Should have DissociateAndMaybeDeleteBlob for the blob
+        assert!(requests.iter().any(|r| matches!(
+            r,
+            StorageRequest::DissociateAndMaybeDeleteBlob { content_hash, commit_id, .. }
+            if *content_hash == blob_id.content_hash && *commit_id == root
+        )));
+
+        // Process response - blob was deleted
+        manager.push_response(StorageResponse::DissociateAndMaybeDeleteBlob {
+            content_hash: blob_id.content_hash,
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: root,
+            blob_deleted: Ok(true),
+        });
+        manager.process_storage_responses();
+
+        // Blob should be gone
+        assert!(!manager.blobs.contains_key(&blob_id.content_hash));
+    }
+
+    #[test]
+    fn shared_blob_preserved_after_truncation() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let c1 = manager
+            .add_commit(object_id, "main", vec![root], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        let blob_data = b"shared blob".to_vec();
+
+        // Associate same blob with both commits
+        let blob_id1 = manager.associate_blob(object_id, "main", root, blob_data.clone());
+        let blob_id2 = manager.associate_blob(object_id, "main", c1, blob_data.clone());
+        assert_eq!(blob_id1.content_hash, blob_id2.content_hash);
+
+        manager.take_requests();
+
+        // Truncate at c1
+        manager.truncate_branch(object_id, "main", HashSet::from([c1]));
+
+        // Process response - blob was NOT deleted (still has association with c1)
+        manager.push_response(StorageResponse::DissociateAndMaybeDeleteBlob {
+            content_hash: blob_id1.content_hash,
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: root,
+            blob_deleted: Ok(false), // Not deleted because c1 still references it
+        });
+        manager.process_storage_responses();
+
+        // Blob should still exist
+        assert!(manager.blobs.contains_key(&blob_id1.content_hash));
+    }
+
+    #[test]
+    fn truncate_idempotent() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let c1 = manager
+            .add_commit(object_id, "main", vec![root], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        // First truncation
+        manager.truncate_branch(object_id, "main", HashSet::from([c1]));
+        manager.push_response(StorageResponse::DeleteCommit {
+            object_id,
+            branch_name: BranchName::new("main"),
+            commit_id: root,
+            result: Ok(()),
+        });
+        manager.push_response(StorageResponse::SetBranchTails {
+            object_id,
+            branch_name: BranchName::new("main"),
+            result: Ok(()),
+        });
+        manager.process_storage_responses();
+        manager.take_requests();
+
+        // Second truncation with same tails
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([c1]));
+        assert_eq!(
+            result,
+            TruncateResult::Success {
+                deleted_commits: 0,
+                deleted_blobs: 0
+            }
+        );
+    }
+
+    #[test]
+    fn truncate_at_tip_deletes_all_ancestors() {
+        // root→c1(tip), truncate at c1 → root deleted, c1 becomes tail
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let c1 = manager
+            .add_commit(object_id, "main", vec![root], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        manager.take_requests();
+
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([c1]));
+        assert!(matches!(result, TruncateResult::Pending));
+
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert_eq!(branch.tails, Some(HashSet::from([c1])));
+        assert!(branch.tips.contains(&c1));
+    }
+
+    #[test]
+    fn truncate_nonexistent_object_returns_error() {
+        let mut manager = ObjectManager::new();
+        let fake_id = ObjectId::new();
+
+        let result = manager.truncate_branch(fake_id, "main", HashSet::new());
+        assert_eq!(
+            result,
+            TruncateResult::PermanentError(TruncateError::ObjectNotFound(fake_id))
+        );
+    }
+
+    #[test]
+    fn truncate_nonexistent_branch_returns_error() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+
+        let result = manager.truncate_branch(object_id, "nonexistent", HashSet::new());
+        assert_eq!(
+            result,
+            TruncateResult::PermanentError(TruncateError::BranchNotFound(BranchName::new(
+                "nonexistent"
+            )))
+        );
+    }
+
+    #[test]
+    fn truncate_nonexistent_tail_returns_error() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+
+        let fake_tail = CommitId([99u8; 32]);
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([fake_tail]));
+        assert_eq!(
+            result,
+            TruncateResult::PermanentError(TruncateError::TailNotFound(fake_tail))
+        );
+    }
+
+    #[test]
+    fn loaded_branch_includes_tails() {
+        use crate::storage::LoadedBranch;
+
+        let mut manager = ObjectManager::new();
+        let object_id = ObjectId::new();
+        manager.start_loading(object_id);
+
+        let commit = Commit {
+            parents: vec![],
+            content: b"loaded".to_vec(),
+            timestamp: 12345,
+            author: ObjectId::new(),
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+        let commit_id = commit.id();
+        let mut commits = HashMap::new();
+        commits.insert(commit_id, commit);
+        let tips = HashSet::from([commit_id]);
+        let tails = Some(HashSet::from([commit_id]));
+
+        manager.push_response(StorageResponse::LoadObjectBranch {
+            object_id,
+            branch_name: BranchName::new("main"),
+            result: Ok(LoadedBranch {
+                tips: tips.clone(),
+                tails: tails.clone(),
+                commits,
+            }),
+        });
+        manager.process_storage_responses();
+
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert_eq!(branch.tails, tails);
+    }
+
+    #[test]
+    fn truncate_multiple_tails_diverged_history() {
+        // Test with diverged history retained:
+        //      root → a → a2
+        //           → b → b2
+        // truncate at {a, b} should delete only root
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let root = manager
+            .add_commit(object_id, "main", vec![], b"root".to_vec(), author, None)
+            .unwrap();
+        let a = manager
+            .add_commit(object_id, "main", vec![root], b"a".to_vec(), author, None)
+            .unwrap();
+        let b = manager
+            .add_commit(object_id, "main", vec![root], b"b".to_vec(), author, None)
+            .unwrap();
+        let a2 = manager
+            .add_commit(object_id, "main", vec![a], b"a2".to_vec(), author, None)
+            .unwrap();
+        let b2 = manager
+            .add_commit(object_id, "main", vec![b], b"b2".to_vec(), author, None)
+            .unwrap();
+
+        manager.take_requests();
+
+        // Truncate at both a and b
+        let result = manager.truncate_branch(object_id, "main", HashSet::from([a, b]));
+        assert!(matches!(result, TruncateResult::Pending));
+
+        let requests = manager.take_requests();
+        let delete_requests: Vec<_> = requests
+            .iter()
+            .filter_map(|r| match r {
+                StorageRequest::DeleteCommit { commit_id, .. } => Some(*commit_id),
+                _ => None,
+            })
+            .collect();
+        // Only root should be deleted
+        assert_eq!(delete_requests.len(), 1);
+        assert!(delete_requests.contains(&root));
+
+        let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
+        assert_eq!(branch.tails, Some(HashSet::from([a, b])));
+        assert!(branch.tips.contains(&a2));
+        assert!(branch.tips.contains(&b2));
     }
 }

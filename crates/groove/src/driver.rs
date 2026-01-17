@@ -34,6 +34,7 @@ pub struct StoredObject {
 pub struct StoredBranch {
     pub commits: HashMap<CommitId, Commit>,
     pub tips: HashSet<CommitId>,
+    pub tails: Option<HashSet<CommitId>>,
 }
 
 impl TestDriver {
@@ -114,6 +115,7 @@ impl TestDriver {
 
                         Ok(LoadedBranch {
                             tips: branch.tips.clone(),
+                            tails: branch.tails.clone(),
                             commits,
                         })
                     } else {
@@ -174,6 +176,79 @@ impl TestDriver {
                     .ok_or(StorageError::NotFound);
                 StorageResponse::LoadBlobAssociations {
                     content_hash,
+                    result,
+                }
+            }
+            StorageRequest::DeleteCommit {
+                object_id,
+                branch_name,
+                commit_id,
+            } => {
+                let result = if let Some(obj) = self.objects.get_mut(&object_id) {
+                    if let Some(branch) = obj.branches.get_mut(&branch_name) {
+                        branch.commits.remove(&commit_id);
+                        branch.tips.remove(&commit_id);
+                        Ok(())
+                    } else {
+                        Err(StorageError::NotFound)
+                    }
+                } else {
+                    Err(StorageError::NotFound)
+                };
+                StorageResponse::DeleteCommit {
+                    object_id,
+                    branch_name,
+                    commit_id,
+                    result,
+                }
+            }
+            StorageRequest::DissociateAndMaybeDeleteBlob {
+                content_hash,
+                object_id,
+                branch_name,
+                commit_id,
+            } => {
+                // Remove association
+                let mut blob_deleted = false;
+                if let Some(associations) = self.blob_associations.get_mut(&content_hash) {
+                    associations.retain(|a| {
+                        !(a.object_id == object_id
+                            && a.branch_name == branch_name
+                            && a.commit_id == commit_id)
+                    });
+                    // If no associations remain, delete the blob
+                    if associations.is_empty() {
+                        self.blob_associations.remove(&content_hash);
+                        self.blobs.remove(&content_hash);
+                        blob_deleted = true;
+                    }
+                }
+                StorageResponse::DissociateAndMaybeDeleteBlob {
+                    content_hash,
+                    object_id,
+                    branch_name,
+                    commit_id,
+                    blob_deleted: Ok(blob_deleted),
+                }
+            }
+            StorageRequest::SetBranchTails {
+                object_id,
+                branch_name,
+                tails,
+            } => {
+                let result = if let Some(obj) = self.objects.get_mut(&object_id) {
+                    if let Some(branch) = obj.branches.get_mut(&branch_name) {
+                        branch.tails = tails;
+                        Ok(())
+                    } else {
+                        Err(StorageError::NotFound)
+                    }
+                } else {
+                    Err(StorageError::NotFound)
+                };
+                StorageResponse::SetBranchTails {
+                    object_id,
+                    branch_name,
                     result,
                 }
             }
