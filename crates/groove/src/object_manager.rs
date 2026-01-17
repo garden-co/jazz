@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use blake3::Hasher;
+
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId, ObjectState};
-use crate::storage::{LoadDepth, StorageError, StorageRequest, StorageResponse};
+use crate::storage::{
+    BlobAssociation, ContentHash, LoadDepth, StorageError, StorageRequest, StorageResponse,
+};
 
 /// Unique identifier for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,6 +34,29 @@ pub struct SubscriptionUpdate {
     pub commit_ids: Vec<CommitId>,
 }
 
+/// Full blob identifier (for addressing within commit context).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BlobId {
+    pub object_id: ObjectId,
+    pub branch_name: BranchName,
+    pub commit_id: CommitId,
+    pub content_hash: ContentHash,
+}
+
+/// State of a blob in memory.
+#[derive(Debug, Clone)]
+enum BlobState {
+    /// Data in memory, storage state tracked.
+    Available {
+        data: Vec<u8>,
+        stored_state: StoredState,
+    },
+    /// Load requested, waiting for response.
+    Loading,
+    /// Blob not found in storage (permanent error).
+    NotFound,
+}
+
 /// Errors that can occur when managing objects and commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -42,6 +69,10 @@ pub enum Error {
     BranchNotLoaded(BranchName),
     /// Storage operation failed.
     StorageError(StorageError),
+    /// Blob not yet loaded, need to poll again.
+    BlobNotLoaded(ContentHash),
+    /// Blob not found (permanent error).
+    BlobNotFound(ContentHash),
 }
 
 /// Manages a collection of objects.
@@ -57,6 +88,10 @@ pub struct ObjectManager {
     pub subscription_outbox: Vec<SubscriptionUpdate>,
     /// Last timestamp used, for monotonic ordering.
     last_timestamp: u64,
+    /// Blobs by content hash (deduplicated storage).
+    blobs: HashMap<ContentHash, BlobState>,
+    /// Track which commits reference each blob (for GC).
+    blob_associations: HashMap<ContentHash, Vec<BlobAssociation>>,
 }
 
 impl ObjectManager {
@@ -328,6 +363,89 @@ impl ObjectManager {
         Ok(&branch.commits)
     }
 
+    /// Associate a blob with a commit, storing the data if new.
+    ///
+    /// Deduplicates by content hash. Returns full BlobId for addressing.
+    /// Queues StoreBlob (if new) and AssociateBlob requests.
+    pub fn associate_blob(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        commit_id: CommitId,
+        data: Vec<u8>,
+    ) -> BlobId {
+        let branch_name = branch_name.into();
+
+        // Compute content hash
+        let mut hasher = Hasher::new();
+        hasher.update(&data);
+        let content_hash = ContentHash(*hasher.finalize().as_bytes());
+
+        // Create association
+        let association = BlobAssociation {
+            object_id,
+            branch_name: branch_name.clone(),
+            commit_id,
+        };
+
+        // Check if blob already exists
+        if let std::collections::hash_map::Entry::Vacant(e) = self.blobs.entry(content_hash) {
+            // New blob - store data and add association
+            e.insert(BlobState::Available {
+                data: data.clone(),
+                stored_state: StoredState::Pending,
+            });
+
+            // Queue store request
+            self.outbox
+                .push(StorageRequest::StoreBlob { content_hash, data });
+        }
+
+        // Add association (whether blob was new or existing)
+        self.blob_associations
+            .entry(content_hash)
+            .or_default()
+            .push(association.clone());
+
+        // Always queue association request
+        self.outbox.push(StorageRequest::AssociateBlob {
+            content_hash,
+            object_id: association.object_id,
+            branch_name: association.branch_name,
+            commit_id: association.commit_id,
+        });
+
+        BlobId {
+            object_id,
+            branch_name,
+            commit_id,
+            content_hash,
+        }
+    }
+
+    /// Load a blob by its identifier.
+    ///
+    /// Returns the data if available, or triggers a load if not present.
+    pub fn load_blob(&mut self, blob_id: &BlobId) -> Result<&[u8], Error> {
+        use std::collections::hash_map::Entry;
+
+        let content_hash = blob_id.content_hash;
+
+        // Check if blob exists, if not start loading
+        if let Entry::Vacant(e) = self.blobs.entry(content_hash) {
+            e.insert(BlobState::Loading);
+            self.outbox.push(StorageRequest::LoadBlob { content_hash });
+            return Err(Error::BlobNotLoaded(content_hash));
+        }
+
+        match self.blobs.get(&content_hash) {
+            Some(BlobState::Available { data, .. }) => Ok(data),
+            Some(BlobState::Loading) => Err(Error::BlobNotLoaded(content_hash)),
+            Some(BlobState::NotFound) => Err(Error::BlobNotFound(content_hash)),
+            None => unreachable!(), // Entry was occupied
+        }
+    }
+
     /// Process responses from the inbox, updating object/commit states.
     pub fn process_storage_responses(&mut self) {
         let responses = std::mem::take(&mut self.inbox);
@@ -398,6 +516,57 @@ impl ObjectManager {
 
                         // Notify subscribers of loaded commits
                         self.notify_subscribers_of_load(object_id, &branch_name, &commits, &tips);
+                    }
+                }
+                StorageResponse::StoreBlob {
+                    content_hash,
+                    result,
+                } => {
+                    if let Some(BlobState::Available { stored_state, .. }) =
+                        self.blobs.get_mut(&content_hash)
+                    {
+                        *stored_state = match result {
+                            Ok(()) => StoredState::Stored,
+                            Err(ref e) => StoredState::Errored(format!("{:?}", e)),
+                        };
+                    }
+                }
+                StorageResponse::LoadBlob {
+                    content_hash,
+                    result,
+                } => match result {
+                    Ok(data) => {
+                        self.blobs.insert(
+                            content_hash,
+                            BlobState::Available {
+                                data,
+                                stored_state: StoredState::Stored,
+                            },
+                        );
+                    }
+                    Err(StorageError::NotFound) => {
+                        // Mark as not found - subsequent load_blob will return BlobNotFound
+                        self.blobs.insert(content_hash, BlobState::NotFound);
+                    }
+                    Err(_) => {
+                        // Other errors - keep as Loading, could retry
+                    }
+                },
+                StorageResponse::AssociateBlob { .. } => {
+                    // Could track association state, but for now just ignore
+                }
+                StorageResponse::LoadBlobAssociations {
+                    content_hash,
+                    result,
+                } => {
+                    if let Ok(associations) = result {
+                        // Merge loaded associations
+                        let entry = self.blob_associations.entry(content_hash).or_default();
+                        for assoc in associations {
+                            if !entry.contains(&assoc) {
+                                entry.push(assoc);
+                            }
+                        }
                     }
                 }
             }
@@ -565,6 +734,7 @@ impl ObjectManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{ContentHash, StorageError};
 
     #[test]
     fn create_object_without_metadata() {
@@ -1541,5 +1711,212 @@ mod tests {
             .unwrap();
         let updates = manager.take_subscription_updates();
         assert_eq!(updates[0].commit_ids, vec![merge_all]);
+    }
+
+    // --- blob tests ---
+
+    #[test]
+    fn associate_blob_stores_and_returns_blob_id() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let commit_id = manager
+            .add_commit(object_id, "main", vec![], b"initial".to_vec(), author, None)
+            .unwrap();
+
+        manager.take_requests(); // Clear previous requests
+
+        let data = b"hello blob".to_vec();
+        let blob_id = manager.associate_blob(object_id, "main", commit_id, data.clone());
+
+        // Verify blob_id has correct fields
+        assert_eq!(blob_id.object_id, object_id);
+        assert_eq!(blob_id.branch_name, BranchName::new("main"));
+        assert_eq!(blob_id.commit_id, commit_id);
+
+        // Verify requests queued
+        let requests = manager.take_requests();
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(
+            &requests[0],
+            StorageRequest::StoreBlob { content_hash, data: d }
+            if *content_hash == blob_id.content_hash && *d == data
+        ));
+        assert!(matches!(
+            &requests[1],
+            StorageRequest::AssociateBlob { content_hash, .. }
+            if *content_hash == blob_id.content_hash
+        ));
+    }
+
+    #[test]
+    fn associate_blob_deduplicates_by_content() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let c1 = manager
+            .add_commit(object_id, "main", vec![], b"first".to_vec(), author, None)
+            .unwrap();
+        let c2 = manager
+            .add_commit(
+                object_id,
+                "main",
+                vec![c1],
+                b"second".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+
+        manager.take_requests();
+
+        let data = b"same data".to_vec();
+
+        // First association
+        let blob_id1 = manager.associate_blob(object_id, "main", c1, data.clone());
+        let requests1 = manager.take_requests();
+
+        // Second association with same data
+        let blob_id2 = manager.associate_blob(object_id, "main", c2, data.clone());
+        let requests2 = manager.take_requests();
+
+        // Same content hash
+        assert_eq!(blob_id1.content_hash, blob_id2.content_hash);
+
+        // First should have StoreBlob + AssociateBlob
+        assert_eq!(requests1.len(), 2);
+        assert!(matches!(&requests1[0], StorageRequest::StoreBlob { .. }));
+
+        // Second should only have AssociateBlob (no duplicate store)
+        assert_eq!(requests2.len(), 1);
+        assert!(matches!(
+            &requests2[0],
+            StorageRequest::AssociateBlob { .. }
+        ));
+    }
+
+    #[test]
+    fn load_blob_returns_available_data() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let commit_id = manager
+            .add_commit(object_id, "main", vec![], b"initial".to_vec(), author, None)
+            .unwrap();
+
+        let data = b"blob content".to_vec();
+        let blob_id = manager.associate_blob(object_id, "main", commit_id, data.clone());
+
+        // Blob should be immediately available
+        let result = manager.load_blob(&blob_id);
+        assert_eq!(result.unwrap(), data.as_slice());
+    }
+
+    #[test]
+    fn load_blob_triggers_load_for_unknown_blob() {
+        let mut manager = ObjectManager::new();
+
+        let blob_id = BlobId {
+            object_id: ObjectId::new(),
+            branch_name: BranchName::new("main"),
+            commit_id: CommitId([0u8; 32]),
+            content_hash: ContentHash([42u8; 32]),
+        };
+
+        manager.take_requests();
+
+        let result = manager.load_blob(&blob_id);
+        assert!(matches!(result, Err(Error::BlobNotLoaded(_))));
+
+        let requests = manager.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0],
+            StorageRequest::LoadBlob { content_hash }
+            if *content_hash == blob_id.content_hash
+        ));
+    }
+
+    #[test]
+    fn load_blob_returns_data_after_load_response() {
+        let mut manager = ObjectManager::new();
+
+        let content_hash = ContentHash([42u8; 32]);
+        let blob_id = BlobId {
+            object_id: ObjectId::new(),
+            branch_name: BranchName::new("main"),
+            commit_id: CommitId([0u8; 32]),
+            content_hash,
+        };
+
+        // Trigger load
+        let _ = manager.load_blob(&blob_id);
+
+        // Simulate storage response
+        let data = b"loaded data".to_vec();
+        manager.push_response(StorageResponse::LoadBlob {
+            content_hash,
+            result: Ok(data.clone()),
+        });
+        manager.process_storage_responses();
+
+        // Now should return data
+        let result = manager.load_blob(&blob_id);
+        assert_eq!(result.unwrap(), data.as_slice());
+    }
+
+    #[test]
+    fn load_blob_returns_not_found_after_not_found_response() {
+        let mut manager = ObjectManager::new();
+
+        let content_hash = ContentHash([42u8; 32]);
+        let blob_id = BlobId {
+            object_id: ObjectId::new(),
+            branch_name: BranchName::new("main"),
+            commit_id: CommitId([0u8; 32]),
+            content_hash,
+        };
+
+        // Trigger load
+        let _ = manager.load_blob(&blob_id);
+
+        // Simulate not found response
+        manager.push_response(StorageResponse::LoadBlob {
+            content_hash,
+            result: Err(StorageError::NotFound),
+        });
+        manager.process_storage_responses();
+
+        // Should return BlobNotFound
+        let result = manager.load_blob(&blob_id);
+        assert!(matches!(result, Err(Error::BlobNotFound(_))));
+    }
+
+    #[test]
+    fn store_blob_response_updates_stored_state() {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(None);
+        let author = ObjectId::new();
+
+        let commit_id = manager
+            .add_commit(object_id, "main", vec![], b"initial".to_vec(), author, None)
+            .unwrap();
+
+        let data = b"blob content".to_vec();
+        let blob_id = manager.associate_blob(object_id, "main", commit_id, data);
+
+        // Simulate successful store response
+        manager.push_response(StorageResponse::StoreBlob {
+            content_hash: blob_id.content_hash,
+            result: Ok(()),
+        });
+        manager.process_storage_responses();
+
+        // Blob should still be loadable
+        let result = manager.load_blob(&blob_id);
+        assert!(result.is_ok());
     }
 }
