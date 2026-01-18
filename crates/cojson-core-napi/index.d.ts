@@ -186,6 +186,8 @@ export declare function seal(message: Uint8Array, senderSecret: string, recipien
  */
 export declare function sign(message: Uint8Array, secret: Uint8Array): string
 
+export declare function stableStringify(value: string): string
+
 /**
  * NAPI-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
  * Provides authenticated decryption with perfect forward secrecy.

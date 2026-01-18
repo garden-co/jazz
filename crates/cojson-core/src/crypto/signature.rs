@@ -2,6 +2,7 @@ use crate::crypto::ed25519::{
   ed25519_sign, ed25519_verify, ed25519_verifying_key,
 };
 use crate::crypto::error::CryptoError;
+use crate::stable_stringify;
 use bs58;
 
 /// Internal function to sign a message using Ed25519.
@@ -9,13 +10,14 @@ use bs58;
 /// - `secret`: Base58-encoded signing key with "signerSecret_z" prefix
 /// Returns base58-encoded signature with "signature_z" prefix or error string.
 pub fn sign(message: &[u8], secret: &str) -> Result<String, CryptoError> {
+  let message = stable_stringify(&serde_json::from_slice(message)?)?;
   let secret_bytes = bs58::decode(secret.strip_prefix("signerSecret_z").ok_or(
     CryptoError::InvalidPrefix("signer secret", "signerSecret_z"),
   )?)
   .into_vec()
   .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
-  let signature = ed25519_sign(&secret_bytes, message)
+  let signature = ed25519_sign(&secret_bytes, message.as_bytes())
     .map_err(|e| CryptoError::InvalidVerifyingKey(e.to_string()))?;
   Ok(format!(
     "signature_z{}",
@@ -29,6 +31,7 @@ pub fn sign(message: &[u8], secret: &str) -> Result<String, CryptoError> {
 /// - `id`: Base58-encoded verifying key with "signer_z" prefix
 /// Returns true if signature is valid, false otherwise, or error string if formats are invalid.
 pub fn verify(signature: &str, message: &[u8], id: &str) -> Result<bool, CryptoError> {
+  let message = stable_stringify(&serde_json::from_slice(message)?)?;
   let signature_bytes = bs58::decode(
     signature
       .strip_prefix("signature_z")
@@ -44,7 +47,7 @@ pub fn verify(signature: &str, message: &[u8], id: &str) -> Result<bool, CryptoE
   .into_vec()
   .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
-  ed25519_verify(&verifying_key, message, &signature_bytes)
+  ed25519_verify(&verifying_key, message.as_bytes(), &signature_bytes)
     .map_err(|e| CryptoError::InvalidVerifyingKey(e.to_string()))
 }
 
@@ -74,7 +77,7 @@ mod tests {
 
   #[test]
   fn test_sign_and_verify() {
-    let message = b"hello world";
+    let message = b"{\"a\":1,\"b\":2}";
 
     // Create a test signing key
     let signing_key = new_ed25519_signing_key();
@@ -96,7 +99,7 @@ mod tests {
 
   #[test]
   fn test_invalid_inputs() {
-    let message = b"hello world";
+    let message = b"{\"a\":1,\"b\":2}";
 
     // Test invalid base58 in secret
     let result = sign(message, "signerSecret_z!!!invalid!!!");
