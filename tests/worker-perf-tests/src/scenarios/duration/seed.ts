@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
-import { cojsonInternals, type RawCoID, type RawCoList } from "cojson";
+import {
+  cojsonInternals,
+  CoValueCore,
+  type RawCoID,
+  type RawCoList,
+} from "cojson";
 
 import type { ParsedArgs } from "../../utils/args.ts";
 import { getFlagNumber, getFlagString } from "../../utils/args.ts";
@@ -44,7 +49,7 @@ export async function seed(args: ParsedArgs): Promise<DurationSeedResult> {
 
   const fileIds: RawCoID[] = [];
   const mapIds: RawCoID[] = [];
-  const toSync: { core: { unmount: () => void } }[] = [];
+  const toSync: { core: CoValueCore }[] = [];
 
   for (let i = 1; i <= items; i++) {
     if (i % 2 === 0) {

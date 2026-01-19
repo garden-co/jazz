@@ -1,4 +1,4 @@
-# Load Balancing Test Harness
+# Worker Performance Tests
 
 A runnable Node harness for benchmarking Jazz sync server performance with SQLite storage.
 
@@ -7,31 +7,31 @@ A runnable Node harness for benchmarking Jazz sync server performance with SQLit
 From the repo root:
 
 ```bash
-pnpm -C tests/load-balancing install
+pnpm -C tests/worker-perf-tests install
 ```
 
-For the duration scenario, place a PDF in the assets folder:
+For the duration scenario, a sample PDF is included in the assets folder:
 
 ```
-tests/load-balancing/assets/sample.pdf
+tests/worker-perf-tests/assets/sample.pdf
 ```
 
 ## Quick Start
 
-Prepare both scenarios with default settings (10k items each):
+Prepare both scenarios with default settings (10k items for duration, 15k maps for batch):
 
 ```bash
-pnpm -C tests/load-balancing run seed
+pnpm -C tests/worker-perf-tests run seed
 ```
 
 Then run either scenario:
 
 ```bash
 # Batch scenario - benchmark cold-cache map loading
-pnpm -C tests/load-balancing run batch
+pnpm -C tests/worker-perf-tests run batch
 
 # Duration scenario - sustained load test with files and maps
-pnpm -C tests/load-balancing run duration
+pnpm -C tests/worker-perf-tests run duration
 ```
 
 ## Scenarios
@@ -43,20 +43,20 @@ Loads a set of CoMaps across N workers, runs multiple iterations, and calculates
 **Seed:**
 
 ```bash
-pnpm -C tests/load-balancing run seed:batch -- --db ./batch.db --maps 1000 --minSize 100 --maxSize 1024
+pnpm -C tests/worker-perf-tests run seed:batch -- --db ./batch.db --maps 1000 --minSize 100 --maxSize 1024
 ```
 
 **Run:**
 
 ```bash
-pnpm -C tests/load-balancing run batch -- --db ./batch.db --workers 8 --runs 50 --maps 500
+pnpm -C tests/worker-perf-tests run batch -- --db ./batch.db --workers 8 --runs 50 --maps 500
 ```
 
 Options:
 - `--maps <n>` - Number of maps to create when seeding (default: 100)
 - `--minSize <bytes>` - Minimum payload size (default: 100)
 - `--maxSize <bytes>` - Maximum payload size (default: 1024)
-- `--runs <n>` - Number of benchmark runs (default: 50)
+- `--runs <n>` - Number of benchmark runs (default: 5)
 - `--maps <n>` - Limit maps to load per run (default: all available)
 
 **Push to Remote Sync Server:**
@@ -88,13 +88,13 @@ Generates sustained mixed load (files + maps) for a specified duration. Useful f
 **Seed:**
 
 ```bash
-pnpm -C tests/load-balancing run seed:duration -- --db ./duration.db --items 100 --pdf ./assets/sample.pdf
+pnpm -C tests/worker-perf-tests run seed:duration -- --db ./duration.db --items 100 --pdf ./assets/sample.pdf
 ```
 
 **Run:**
 
 ```bash
-pnpm -C tests/load-balancing run duration -- --db ./duration.db --workers 8 --durationMs 60000 --inflight 4 --mix 1f:1m
+pnpm -C tests/worker-perf-tests run duration -- --db ./duration.db --workers 8 --durationMs 60000 --inflight 4 --mix 1f:1m
 ```
 
 Options:
@@ -109,7 +109,7 @@ Options:
 
 These options apply to both scenarios:
 
-- `--db <path>` - Path to SQLite database
+- `--db <path>` - Path to SQLite database (default: ./seed.db)
 - `--workers <n>` - Number of worker threads (default: 8)
 - `--host <host>` - Sync server host (default: 127.0.0.1)
 - `--port <port>` - Sync server port (default: 4200)
@@ -120,7 +120,7 @@ These options apply to both scenarios:
 Inspect the seeded CoValues in a database:
 
 ```bash
-pnpm -C tests/load-balancing run query -- --db ./batch.db --limit 50
+pnpm -C tests/worker-perf-tests run query -- --db ./batch.db --limit 50
 ```
 
 ## Metrics Dashboard

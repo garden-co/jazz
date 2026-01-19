@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { LocalNode, type RawCoID } from "cojson";
+import { CoValueCore, LocalNode, type RawCoID } from "cojson";
 import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { getBetterSqliteStorage } from "cojson-storage-sqlite";
 
@@ -103,10 +103,10 @@ export async function finalizeSeedContext(
  * Helper to sync pending values periodically.
  */
 export async function syncPendingValues(
-  toSync: { core: { unmount: () => void } }[],
+  toSync: { core: CoValueCore }[],
 ): Promise<void> {
   if (toSync.length >= 10) {
-    await sleep(0);
+    await Promise.all(toSync.map((value) => value.core.waitForSync()));
     for (const value of toSync) {
       value.core.unmount();
     }

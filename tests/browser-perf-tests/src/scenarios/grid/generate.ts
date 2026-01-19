@@ -46,11 +46,10 @@ export function generateGrid(
     setTimeout(() => {
       const totalCells = size * size;
       for (let i = 0; i < totalCells; i++) {
-        const cell = PixelCell.create({
+        cells.$jazz.push({
           color: randomColor(),
           padding: generatePadding(minPaddingBytes, maxPaddingBytes),
         });
-        cells.$jazz.push(cell);
       }
 
       Promise.all(cells.map((cell) => cell.$jazz.waitForSync())).then(() =>

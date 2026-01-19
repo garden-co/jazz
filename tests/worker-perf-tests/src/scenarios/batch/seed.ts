@@ -1,4 +1,4 @@
-import type { RawCoID, RawCoList } from "cojson";
+import type { CoValueCore, RawCoID, RawCoList } from "cojson";
 
 import type { ParsedArgs } from "../../utils/args.ts";
 import { getFlagNumber, getFlagString } from "../../utils/args.ts";
@@ -35,7 +35,7 @@ export async function seed(args: ParsedArgs): Promise<BatchSeedResult> {
   const mapIdsList = group.createList<RawCoList<RawCoID>>();
 
   const mapIds: RawCoID[] = [];
-  const toSync: { core: { unmount: () => void } }[] = [];
+  const toSync: { core: CoValueCore }[] = [];
   const baseSeed = Date.now();
 
   for (let i = 0; i < mapCount; i++) {

@@ -1,4 +1,8 @@
-import { co, z } from "jazz-tools";
+import { co, setDefaultSchemaPermissions, z } from "jazz-tools";
+
+setDefaultSchemaPermissions({
+  onInlineCreate: "sameAsContainer",
+});
 
 /**
  * PixelCell: Each cell in the grid

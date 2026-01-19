@@ -80,7 +80,7 @@ async function executeRun(
 
       if (workerMaps.length === 0) {
         doneCount++;
-        if (doneCount === workerCount) resolve();
+        if (doneCount >= workerCount) resolve();
         continue;
       }
 
@@ -108,7 +108,7 @@ async function executeRun(
         } else if (msg.type === "done") {
           w.terminate();
           doneCount++;
-          if (doneCount === workerCount) resolve();
+          if (doneCount >= workerCount) resolve();
         }
       });
 
