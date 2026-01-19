@@ -214,31 +214,31 @@ describe("garbage collector", () => {
     client.addStorage({
       ourName: "client",
     });
-    client.connectToSyncServer();
     client.node.enableGarbageCollector();
 
     const garbageCollector = client.node.garbageCollector;
 
     assert(garbageCollector);
 
+    await vi.advanceTimersByTimeAsync(100);
+
     const group = client.node.createGroup();
     const map1 = group.createMap();
     const map2 = group.createMap();
 
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(800);
 
+    // Access map1 again, to prevent it from being garbage collected
     map1.set("hello", "world", "trusting");
 
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(300);
 
     garbageCollector.collect();
 
     const coValue = client.node.getCoValue(map1.id);
-
     expect(coValue.isAvailable()).toBe(true);
 
     const coValue2 = client.node.getCoValue(map2.id);
-
     expect(coValue2.isAvailable()).toBe(false);
   });
 });
