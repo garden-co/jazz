@@ -90,7 +90,7 @@ describe("concurrent load", () => {
     );
     expect(allLoadMessages.length).toBe(3);
 
-    // Verify both were loaded successfully despite throttling
+    // Verify all were loaded successfully despite throttling
     expect(
       SyncMessagesLog.getMessages({
         Group: group.core,
