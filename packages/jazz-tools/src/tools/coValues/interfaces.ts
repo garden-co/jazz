@@ -331,17 +331,6 @@ export function subscribeToCoValue<
   },
   listener: SubscribeListener<V, R>,
 ): () => void {
-  if (options.onUnavailable) {
-    console.warn(
-      "jazz: onUnavailable is deprecated. Use onError instead. This callback will be removed in a future version.",
-    );
-  }
-  if (options.onUnauthorized) {
-    console.warn(
-      "jazz: onUnauthorized is deprecated. Use onError instead. This callback will be removed in a future version.",
-    );
-  }
-
   const loadAs = options.loadAs ?? activeAccountContext.get();
   const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
 
