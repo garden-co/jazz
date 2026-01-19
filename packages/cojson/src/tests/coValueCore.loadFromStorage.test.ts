@@ -45,6 +45,7 @@ function createMockStorage(
       callback: (unsyncedCoValueIDs: RawCoID[]) => void,
     ) => void;
     stopTrackingSyncState?: (id: RawCoID) => void;
+    onCoValueUnmounted?: (id: RawCoID) => void;
     close?: () => Promise<unknown> | undefined;
     markDeleteAsValid?: (id: RawCoID) => void;
     enableDeletedCoValuesErasure?: () => void;
@@ -64,6 +65,7 @@ function createMockStorage(
     trackCoValuesSyncState: opts.trackCoValuesSyncState || vi.fn(),
     getUnsyncedCoValueIDs: opts.getUnsyncedCoValueIDs || vi.fn(),
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
+    onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
   };
 }

@@ -84,7 +84,7 @@ describe("client with storage syncs with server", () => {
 
     await loadCoValueOrFail(client.node, map.id);
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer();
     client.addStorage({
@@ -168,7 +168,7 @@ describe("client with storage syncs with server", () => {
 
     await map.core.waitForSync();
 
-    client.restart();
+    await client.restart();
 
     client.addStorage({
       storage,
@@ -218,7 +218,7 @@ describe("client with storage syncs with server", () => {
     branch.set("branchKey", "branchValue");
     await branch.core.waitForSync();
 
-    client.restart();
+    await client.restart();
     client.addStorage({
       storage,
     });
@@ -389,7 +389,7 @@ describe("client syncs with a server with storage", () => {
 
     SyncMessagesLog.clear();
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -458,7 +458,7 @@ describe("client syncs with a server with storage", () => {
 
     expect(correctionSpy).not.toHaveBeenCalled();
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -774,7 +774,7 @@ describe("client syncs with a server with storage", () => {
 
     SyncMessagesLog.clear();
 
-    syncServer.restart();
+    await syncServer.restart();
     syncServer.addStorage({
       ourName: "syncServer",
       storage,
@@ -851,7 +851,7 @@ describe("client syncs with a server with storage", () => {
       ]);
 
       // Restart to load from storage
-      client.restart();
+      await client.restart();
       client.addStorage({ storage });
 
       // Load all maps concurrently from storage
@@ -895,7 +895,7 @@ describe("client syncs with a server with storage", () => {
       SyncMessagesLog.clear();
 
       // Restart client with storage
-      client.restart();
+      await client.restart();
       client.connectToSyncServer();
       client.addStorage({ storage });
 
@@ -988,7 +988,7 @@ describe("client syncs with a server with storage", () => {
 
       SyncMessagesLog.clear();
 
-      syncServer.restart();
+      await syncServer.restart();
       syncServer.addStorage({
         ourName: "syncServer",
         storage,

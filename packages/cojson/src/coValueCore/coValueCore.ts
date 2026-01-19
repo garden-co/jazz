@@ -432,16 +432,17 @@ export class CoValueCore {
    *
    * @returns true if the coValue was successfully unmounted, false otherwise
    */
-  unmount(garbageCollectGroups = false): boolean {
-    if (
-      !garbageCollectGroups &&
-      this.verified?.header.ruleset.type === "group"
-    ) {
+  unmount(): boolean {
+    if (this.listeners.size > 0) {
+      // The coValue is still in use
       return false;
     }
 
-    if (this.listeners.size > 0) {
-      return false; // The coValue is still in use
+    for (const dependant of this.dependant) {
+      if (this.node.hasCoValue(dependant)) {
+        // Another in-memory coValue depends on this coValue
+        return false;
+      }
     }
 
     if (!this.node.syncManager.isSyncedToServerPeers(this.id)) {
@@ -1559,6 +1560,15 @@ export class CoValueCore {
     return matchingTransactions;
   }
 
+  /**
+   * The CoValues that this CoValue depends on.
+   * We currently track dependencies for:
+   * - Ownership (a CoValue depends on its account/group owner)
+   * - Group membership (a group depends on its direct account/group members)
+   * - Sessions (a CoValue depends on Accounts that made changes to it)
+   * - Branches (a branched CoValue depends on its branch source)
+   * See {@link dependant} for the CoValues that depend on this CoValue.
+   */
   dependencies: Set<RawCoID> = new Set();
   incompleteDependencies: Set<RawCoID> = new Set();
   private addDependency(dependency: RawCoID) {
@@ -1604,6 +1614,10 @@ export class CoValueCore {
     }
   }
 
+  /**
+   * The CoValues that depend on this CoValue.
+   * This is the inverse relationship of {@link dependencies}.
+   */
   dependant: Set<RawCoID> = new Set();
   private addDependant(dependant: RawCoID) {
     this.dependant.add(dependant);

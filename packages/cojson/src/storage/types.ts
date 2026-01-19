@@ -98,6 +98,12 @@ export interface StorageAPI {
     callback: (knownState: CoValueKnownState | undefined) => void,
   ): void;
 
+  /**
+   * Called when a CoValue is unmounted from memory.
+   * Used to clean up the metadata associated with that CoValue.
+   */
+  onCoValueUnmounted(id: RawCoID): void;
+
   close(): Promise<unknown> | undefined;
 }
 

@@ -41,10 +41,15 @@ const MAX_DELETE_SCHEDULE_DURATION_MS = 100;
 
 export class StorageApiSync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceSync;
-  private loadedCoValues = new Set<RawCoID>();
+
   private deletedCoValuesEraserScheduler:
     | DeletedCoValuesEraserScheduler
     | undefined;
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
+  private inMemoryCoValues = new Set<RawCoID>();
 
   /**
    * Queue for streaming content that will be pulled by SyncManager.
@@ -145,7 +150,7 @@ export class StorageApiSync implements StorageAPI {
       );
     }
 
-    this.loadedCoValues.add(coValueRow.id);
+    this.inMemoryCoValues.add(coValueRow.id);
 
     const priority = getPriorityFromHeader(coValueRow.header);
     const contentMessage = createContentMessage(
@@ -251,7 +256,7 @@ export class StorageApiSync implements StorageAPI {
     });
   }
 
-  async pushContentWithDependencies(
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -262,7 +267,7 @@ export class StorageApiSync implements StorageAPI {
     );
 
     for (const dependedOnCoValue of dependedOnCoValuesList) {
-      if (this.loadedCoValues.has(dependedOnCoValue)) {
+      if (this.inMemoryCoValues.has(dependedOnCoValue)) {
         continue;
       }
 
@@ -363,6 +368,8 @@ export class StorageApiSync implements StorageAPI {
         }
       });
     }
+
+    this.inMemoryCoValues.add(id);
 
     this.knownStates.handleUpdate(id, knownState);
 
@@ -506,8 +513,13 @@ export class StorageApiSync implements StorageAPI {
     this.dbClient.stopTrackingSyncState(id);
   }
 
+  onCoValueUnmounted(id: RawCoID): void {
+    this.inMemoryCoValues.delete(id);
+  }
+
   close() {
     this.deletedCoValuesEraserScheduler?.dispose();
+    this.inMemoryCoValues.clear();
     return undefined;
   }
 }

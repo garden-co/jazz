@@ -128,7 +128,7 @@ describe("garbage collector", () => {
     expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
   });
 
-  test("group or account coValues are garbage collected if garbageCollectGroups is true", async () => {
+  test("account coValues are not garbage collected if they have dependencies", async () => {
     const client = await setupTestAccount({
       // Add storage before creating the account so it's persisted
       storage: createSyncStorage({
@@ -136,11 +136,40 @@ describe("garbage collector", () => {
         storageName: "storage",
       }),
     });
+    // The account is created along with its profile, and the group that owns the profile
+    const profile = client.node.expectProfileLoaded(client.accountID);
+    const profileId = profile.id;
+    const profileOwnerId = profile.group.id;
 
     client.connectToSyncServer();
-    client.node.enableGarbageCollector({
-      garbageCollectGroups: true,
+    client.node.enableGarbageCollector();
+
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // First collect removes the profile
+    client.node.garbageCollector?.collect();
+    expect(client.node.getCoValue(profileId).isAvailable()).toBe(false);
+    expect(client.node.getCoValue(profileOwnerId).isAvailable()).toBe(true);
+    expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(true);
+
+    // Second collect removes the profile owner
+    client.node.garbageCollector?.collect();
+    expect(client.node.getCoValue(profileOwnerId).isAvailable()).toBe(false);
+    expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(true);
+
+    // Third collect removes the account
+    client.node.garbageCollector?.collect();
+    expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(false);
+  });
+
+  test("group coValues are garbage collected if they have no dependencies", async () => {
+    const client = setupTestNode();
+
+    client.addStorage({
+      ourName: "client",
     });
+    client.connectToSyncServer();
+    client.node.enableGarbageCollector();
 
     const group = client.node.createGroup();
 
@@ -149,11 +178,10 @@ describe("garbage collector", () => {
     client.node.garbageCollector?.collect();
 
     expect(client.node.getCoValue(group.id).isAvailable()).toBe(false);
-    expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(false);
   });
 
-  test("coValues are not garbage collected if they are a group or account", async () => {
-    const client = await setupTestAccount();
+  test("group coValues are not garbage collected if they have dependencies", async () => {
+    const client = setupTestNode();
 
     client.addStorage({
       ourName: "client",
@@ -161,13 +189,19 @@ describe("garbage collector", () => {
     client.node.enableGarbageCollector();
 
     const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await client.node.syncManager.waitForAllCoValuesSync();
 
+    // First collect removes the map
     client.node.garbageCollector?.collect();
-
     expect(client.node.getCoValue(group.id).isAvailable()).toBe(true);
-    expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(true);
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
+
+    // Second collect removes the group
+    client.node.garbageCollector?.collect();
+    expect(client.node.getCoValue(group.id).isAvailable()).toBe(false);
   });
 
   test("coValues are not garbage collected if the maxAge is not reached", async () => {

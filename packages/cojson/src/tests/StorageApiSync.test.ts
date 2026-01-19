@@ -899,6 +899,55 @@ describe("StorageApiSync", () => {
       const mapOnNode = await loadCoValueOrFail(client.node, map.id);
       expect(mapOnNode.get("test")).toEqual("value");
     });
+
+    test("should load dependencies again if they were unmounted", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { node, storage } = await createTestNode(dbPath);
+
+      // Create a group and a map owned by that group
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      const map = group.createMap({ test: "value" });
+      await group.core.waitForSync();
+      await map.core.waitForSync();
+
+      const callback = vi.fn((content) =>
+        node.syncManager.handleNewContent(content, "storage"),
+      );
+      const done = vi.fn();
+
+      // Load the map (and its group)
+      await storage.load(map.id, callback, done);
+      callback.mockClear();
+      done.mockClear();
+
+      // Unmount the map and its group
+      storage.onCoValueUnmounted(map.id);
+      storage.onCoValueUnmounted(group.id);
+
+      // Load the map. The group dependency should be loaded again
+      await storage.load(map.id, callback, done);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          id: group.id,
+        }),
+      );
+      expect(callback).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          id: map.id,
+        }),
+      );
+
+      expect(done).toHaveBeenCalledWith(true);
+
+      node.setStorage(storage);
+      const mapOnNode = await loadCoValueOrFail(node, map.id);
+      expect(mapOnNode.get("test")).toEqual("value");
+    });
   });
 
   describe("waitForSync", () => {

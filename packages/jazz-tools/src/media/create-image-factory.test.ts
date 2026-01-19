@@ -162,8 +162,8 @@ describe("createImage", async () => {
     expect(image).toBeDefined();
     expect(image.originalSize).toEqual([1920, 400]);
     expect(image.placeholderDataURL).not.toBeDefined();
-
     expect(image[`256x53`]).toBeDefined();
+    expect(image[`512x107`]).toBeDefined();
     expect(image[`1024x213`]).toBeDefined();
     expect(image[`2048x427`]).not.toBeDefined();
 

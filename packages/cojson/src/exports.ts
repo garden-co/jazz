@@ -208,6 +208,7 @@ export type {
 };
 
 export * from "./storage/index.js";
+export * from "./CojsonMessageChannel/index.js";
 
 // biome-ignore format: off
 // eslint-disable-next-line @typescript-eslint/no-namespace
