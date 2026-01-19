@@ -23,6 +23,12 @@ describe("CoJsonIDBTransaction", () => {
         });
         db.createObjectStore("transactions", { keyPath: "id" });
         db.createObjectStore("signatureAfter", { keyPath: "id" });
+        const deletedCoValues = db.createObjectStore("deletedCoValues", {
+          keyPath: "coValueID",
+        });
+        deletedCoValues.createIndex("deletedCoValuesByStatus", "status", {
+          unique: false,
+        });
         const unsyncedCoValues = db.createObjectStore("unsyncedCoValues", {
           keyPath: "rowID",
         });

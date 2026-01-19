@@ -23,6 +23,8 @@ export default defineConfig({
   workers: isCI ? 1 : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: "html",
+  /* Increase timeout on CI since operations like account deletion are slower */
+  timeout: isCI ? 120_000 : 30_000,
 
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {

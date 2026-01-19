@@ -9,6 +9,7 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
@@ -131,16 +132,44 @@ export class CoListSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-    listener: (
-      value: Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>>,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>
+      | SubscribeCallback<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+      maybeListener,
     );
   }
 

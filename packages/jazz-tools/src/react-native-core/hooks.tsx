@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 import { CoValueClassOrSchema, parseInviteLink } from "jazz-tools";
-import { useJazzContext } from "jazz-tools/react-core";
+import { useJazzContextValue } from "jazz-tools/react-core";
 import { Linking } from "react-native";
 
 export {
@@ -10,7 +10,7 @@ export {
   experimental_useInboxSender,
   useDemoAuth,
   usePassphraseAuth,
-  useJazzContext,
+  useJazzContextValue,
   useAuthSecretStorage,
   useIsAuthenticated,
   useAccount,
@@ -34,7 +34,7 @@ export function useAcceptInviteNative<S extends CoValueClassOrSchema>({
   onAccept: (projectID: string) => void;
   forValueHint?: string;
 }): void {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
 
   if (!("me" in context)) {
     throw new Error(

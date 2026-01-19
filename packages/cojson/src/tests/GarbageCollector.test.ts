@@ -205,6 +205,8 @@ describe("garbage collector", () => {
   });
 
   test("coValues are not garbage collected if the maxAge is not reached", async () => {
+    vi.useFakeTimers();
+
     setGarbageCollectorMaxAge(1000);
 
     const client = setupTestNode();
@@ -219,21 +221,15 @@ describe("garbage collector", () => {
 
     assert(garbageCollector);
 
-    const getCurrentTime = vi.spyOn(garbageCollector, "getCurrentTime");
-
-    getCurrentTime.mockReturnValue(1);
-
     const group = client.node.createGroup();
     const map1 = group.createMap();
     const map2 = group.createMap();
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(900);
 
     map1.set("hello", "world", "trusting");
 
-    getCurrentTime.mockReturnValue(2000);
-
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.advanceTimersByTimeAsync(200);
 
     garbageCollector.collect();
 

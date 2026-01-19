@@ -6,6 +6,7 @@ export class JazzError {
     public id: ID<CoValue> | undefined,
     public type:
       | typeof CoValueLoadingState.UNAVAILABLE
+      | typeof CoValueLoadingState.DELETED
       | typeof CoValueLoadingState.UNAUTHORIZED,
     public issues: JazzErrorIssue[],
   ) {}
@@ -49,8 +50,10 @@ export class JazzError {
 export type JazzErrorIssue = {
   code:
     | typeof CoValueLoadingState.UNAVAILABLE
+    | typeof CoValueLoadingState.DELETED
     | typeof CoValueLoadingState.UNAUTHORIZED
-    | "validationError";
+    | "validationError"
+    | "deleteError";
   message: string;
   params: Record<string, any>;
   path: string[];

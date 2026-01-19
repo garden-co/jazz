@@ -309,6 +309,7 @@ const person = co
       name: "Fido",
     },
   });
+
 // #region Refs
 // Check if a reference exists without loading it
 if (person.$jazz.refs.pet) {

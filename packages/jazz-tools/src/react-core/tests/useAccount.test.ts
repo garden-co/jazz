@@ -3,12 +3,7 @@
 import { CoValueLoadingState, Group, RefsToResolve, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, it } from "vitest";
-import {
-  useAccount,
-  useAgent,
-  useJazzContextManager,
-  useLogOut,
-} from "../hooks.js";
+import { useAccount, useAgent, useJazzContext, useLogOut } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
 import {
   createJazzTestAccount,
@@ -66,6 +61,61 @@ describe("useAccount", () => {
 
     assertLoaded(result.current);
     expect(result.current.root.value).toBe("123");
+  });
+
+  it("should return a 'deleted' value when a required resolved child is deleted", async () => {
+    const AccountRoot = co.map({
+      value: z.string(),
+    });
+
+    const AccountSchema = co
+      .account({
+        root: AccountRoot,
+        profile: co.profile(),
+      })
+      .withMigration((account) => {
+        if (!account.$jazz.refs.root) {
+          account.$jazz.set("root", { value: "123" });
+        }
+      });
+
+    const account = await createJazzTestAccount({
+      AccountSchema,
+      isCurrentActiveAccount: true,
+    });
+
+    const { result } = renderHook(
+      () =>
+        useAccount(AccountSchema, {
+          resolve: {
+            root: true,
+          },
+        }),
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      assertLoaded(result.current);
+      assertLoaded(result.current.root);
+      expect(result.current.root.value).toBe("123");
+    });
+
+    assertLoaded(result.current);
+    assertLoaded(result.current.root);
+    // Capture the root reference before deletion; after deletion the account may become NotLoaded.
+    const root = result.current.root;
+
+    act(() => {
+      root.$jazz.raw.core.deleteCoValue();
+    });
+
+    await waitFor(() => {
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.DELETED,
+      );
+    });
   });
 
   it("should be in sync with useIsAuthenticated when logOut is called", async () => {
@@ -140,7 +190,7 @@ describe("useAccount", () => {
       () => {
         const isAuthenticated = useIsAuthenticated();
         const account = useAccount();
-        const contextManager = useJazzContextManager();
+        const contextManager = useJazzContext();
 
         if (account) {
           if (!accounts.includes(account.$jazz.id)) {

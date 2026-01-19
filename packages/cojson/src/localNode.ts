@@ -101,6 +101,21 @@ export class LocalNode {
     this.syncManager.removeStorage();
   }
 
+  /**
+   * Enable background erasure of deleted coValues (space reclamation).
+   *
+   * Deleted coValues are immediately blocked from syncing via tombstones; this feature
+   * only reclaims local storage space by deleting historical content while preserving
+   * the tombstone (header + delete session).
+   *
+   * This is opt-in and affects only the currently configured storage (if any)
+   *
+   * @category 3. Low-level
+   */
+  enableDeletedCoValuesErasure() {
+    this.storage?.enableDeletedCoValuesErasure();
+  }
+
   hasCoValue(id: RawCoID) {
     const coValue = this.coValues.get(id);
 
