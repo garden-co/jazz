@@ -297,7 +297,7 @@ You can also subscribe to an existing CoValue instance using the `$jazz.subscrib
 </CodeGroup>
 
 ### Error handling for manual subscriptions
-You can also pass `onUnauthorized` and `onUnavailable` handlers as options to your subscription which will run reactively whenever the CoValue you're subscribing to is unavailable, or you do not have the appropriate permissions to read it.
+You can pass an `onError` handler as an option to your subscription. This handler will run reactively whenever the CoValue you're subscribing to is inaccessible&hairsp;—&hairsp;for example, when the CoValue is unavailable (not found or network timeout) or when you do not have the appropriate permissions to read it. You can check `$jazz.loadingState` to determine the specific reason.
 
 <CodeGroup preferWrap>
 ```ts error-handling-in-manual.ts#ErrorHandling

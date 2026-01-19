@@ -5,8 +5,9 @@ import {
   setupTestNode,
   setupTestAccount,
 } from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { Stringified } from "../jsonStringify";
 import { WasmCrypto } from "../crypto/WasmCrypto";
+import { JsonValue } from "../jsonValue";
 
 const wasmCrypto = await WasmCrypto.create();
 setCurrentTestCryptoProvider(wasmCrypto);
@@ -109,7 +110,9 @@ describe("WasmCrypto", () => {
       [
         {
           privacy: "trusting",
-          changes: stableStringify([{ op: "set", key: "count", value: 1 }]),
+          changes: JSON.stringify([
+            { op: "set", key: "count", value: 1 },
+          ]) as Stringified<JsonValue[]>,
           madeAt: Date.now(),
         },
       ],
@@ -203,7 +206,9 @@ describe("WasmCrypto", () => {
         [
           {
             privacy: "trusting",
-            changes: stableStringify([{ op: "set", key: "count", value: 1 }]),
+            changes: JSON.stringify([
+              { op: "set", key: "count", value: 1 },
+            ]) as Stringified<JsonValue[]>,
             madeAt: Date.now(),
           },
         ],

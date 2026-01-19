@@ -3,176 +3,167 @@ import { x25519 } from "@noble/curves/ed25519";
 import { blake3 } from "@noble/hashes/blake3";
 import { base58, base64url } from "@scure/base";
 import { expect, test, vi } from "vitest";
-import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
 
-const wasmCrypto = await WasmCrypto.create();
-const pureJSCrypto = await PureJSCrypto.create();
+const crypto = await WasmCrypto.create();
 
-[wasmCrypto, pureJSCrypto].forEach((crypto) => {
-  const name = crypto.constructor.name;
+const name = crypto.constructor.name;
 
-  test(`Signatures round-trip and use stable stringify [${name}]`, () => {
-    const data = { b: "world", a: "hello" };
-    const signer = crypto.newRandomSigner();
-    const signature = crypto.sign(signer, data);
+test(`Signatures round-trip and use stable stringify [${name}]`, () => {
+  const data = { b: "world", a: "hello" };
+  const signer = crypto.newRandomSigner();
+  const signature = crypto.sign(signer, data);
 
-    expect(signature).toMatch(/^signature_z/);
-    expect(
-      crypto.verify(
-        signature,
-        { a: "hello", b: "world" },
-        crypto.getSignerID(signer),
-      ),
-    ).toBe(true);
+  expect(signature).toMatch(/^signature_z/);
+  expect(
+    crypto.verify(
+      signature,
+      { a: "hello", b: "world" },
+      crypto.getSignerID(signer),
+    ),
+  ).toBe(true);
+});
+
+test(`Invalid signatures don't verify [${name}]`, () => {
+  const data = { b: "world", a: "hello" };
+  const signer = crypto.newRandomSigner();
+  const signer2 = crypto.newRandomSigner();
+  const wrongSignature = crypto.sign(signer2, data);
+
+  expect(crypto.verify(wrongSignature, data, crypto.getSignerID(signer))).toBe(
+    false,
+  );
+});
+
+test(`encrypting round-trips, but invalid receiver can't unseal [${name}]`, () => {
+  const data = { b: "world", a: "hello" };
+  const sender = crypto.newRandomSealer();
+  const sealer = crypto.newRandomSealer();
+  const wrongSealer = crypto.newRandomSealer();
+
+  const nOnceMaterial = {
+    in: "co_zTEST",
+    tx: { sessionID: "co_zTEST_session_zTEST" as SessionID, txIndex: 0 },
+  } as const;
+
+  const sealed = crypto.seal({
+    message: data,
+    from: sender,
+    to: crypto.getSealerID(sealer),
+    nOnceMaterial,
   });
 
-  test(`Invalid signatures don't verify [${name}]`, () => {
-    const data = { b: "world", a: "hello" };
-    const signer = crypto.newRandomSigner();
-    const signer2 = crypto.newRandomSigner();
-    const wrongSignature = crypto.sign(signer2, data);
-
-    expect(
-      crypto.verify(wrongSignature, data, crypto.getSignerID(signer)),
-    ).toBe(false);
-  });
-
-  test(`encrypting round-trips, but invalid receiver can't unseal [${name}]`, () => {
-    const data = { b: "world", a: "hello" };
-    const sender = crypto.newRandomSealer();
-    const sealer = crypto.newRandomSealer();
-    const wrongSealer = crypto.newRandomSealer();
-
-    const nOnceMaterial = {
-      in: "co_zTEST",
-      tx: { sessionID: "co_zTEST_session_zTEST" as SessionID, txIndex: 0 },
-    } as const;
-
-    const sealed = crypto.seal({
-      message: data,
-      from: sender,
-      to: crypto.getSealerID(sealer),
-      nOnceMaterial,
-    });
-
-    expect(
-      crypto.unseal(sealed, sealer, crypto.getSealerID(sender), nOnceMaterial),
-    ).toEqual(data);
-    expect(() =>
-      crypto.unseal(
-        sealed,
-        wrongSealer,
-        crypto.getSealerID(sender),
-        nOnceMaterial,
-      ),
-    ).toThrow(name === "PureJSCrypto" ? "invalid tag" : "Wrong tag");
-
-    // trying with wrong sealer secret, by hand
-    const nOnce = blake3(
-      new TextEncoder().encode(stableStringify(nOnceMaterial)),
-    ).slice(0, 24);
-    const sealer3priv = base58.decode(
-      wrongSealer.substring("sealerSecret_z".length),
-    );
-    const senderPub = base58.decode(
-      crypto.getSealerID(sender).substring("sealer_z".length),
-    );
-    const sealedBytes = base64url.decode(sealed.substring("sealed_U".length));
-    const sharedSecret = x25519.getSharedSecret(sealer3priv, senderPub);
-
-    expect(() => {
-      const _ = xsalsa20poly1305(sharedSecret, nOnce).decrypt(sealedBytes);
-    }).toThrow("invalid tag");
-  });
-
-  test(`Hashing is deterministic [${name}]`, () => {
-    expect(crypto.secureHash({ b: "world", a: "hello" })).toEqual(
-      crypto.secureHash({ a: "hello", b: "world" }),
-    );
-
-    expect(crypto.shortHash({ b: "world", a: "hello" })).toEqual(
-      crypto.shortHash({ a: "hello", b: "world" }),
-    );
-  });
-
-  test(`Encryption of keySecrets round-trips [${name}]`, () => {
-    const toEncrypt = crypto.newRandomKeySecret();
-    const encrypting = crypto.newRandomKeySecret();
-
-    const keys = {
-      toEncrypt,
-      encrypting,
-    };
-
-    const encrypted = crypto.encryptKeySecret(keys);
-
-    const decrypted = crypto.decryptKeySecret(encrypted, encrypting.secret);
-
-    expect(decrypted).toEqual(toEncrypt.secret);
-  });
-
-  test(`Encryption of keySecrets doesn't decrypt with a wrong key [${name}]`, () => {
-    const toEncrypt = crypto.newRandomKeySecret();
-    const encrypting = crypto.newRandomKeySecret();
-    const encryptingWrong = crypto.newRandomKeySecret();
-
-    const keys = {
-      toEncrypt,
-      encrypting,
-    };
-
-    const encrypted = crypto.encryptKeySecret(keys);
-
-    const decrypted = crypto.decryptKeySecret(
-      encrypted,
-      encryptingWrong.secret,
-    );
-
-    expect(decrypted).toBeUndefined();
-  });
-
-  test(`Unsealing malformed JSON logs error [${name}]`, () => {
-    const data = "not valid json";
-    const sender = crypto.newRandomSealer();
-    const sealer = crypto.newRandomSealer();
-
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    const nOnceMaterial = {
-      in: "co_zTEST",
-      tx: { sessionID: "co_zTEST_session_zTEST" as SessionID, txIndex: 0 },
-    } as const;
-
-    // Create a sealed message with invalid JSON
-    const nOnce = blake3(
-      new TextEncoder().encode(stableStringify(nOnceMaterial)),
-    ).slice(0, 24);
-
-    const senderPriv = base58.decode(sender.substring("sealerSecret_z".length));
-    const sealerPub = base58.decode(
-      crypto.getSealerID(sealer).substring("sealer_z".length),
-    );
-
-    const plaintext = new TextEncoder().encode(data);
-    const sharedSecret = x25519.getSharedSecret(senderPriv, sealerPub);
-    const sealedBytes = xsalsa20poly1305(sharedSecret, nOnce).encrypt(
-      plaintext,
-    );
-    const sealed = `sealed_U${base64url.encode(sealedBytes)}`;
-
-    const result = crypto.unseal(
-      sealed as any,
-      sealer,
+  expect(
+    crypto.unseal(sealed, sealer, crypto.getSealerID(sender), nOnceMaterial),
+  ).toEqual(data);
+  expect(() =>
+    crypto.unseal(
+      sealed,
+      wrongSealer,
       crypto.getSealerID(sender),
       nOnceMaterial,
-    );
+    ),
+  ).toThrow("Wrong tag");
 
-    expect(result).toBeUndefined();
-    expect(consoleSpy.mock.lastCall?.[0]).toContain(
-      "Failed to decrypt/parse sealed message",
-    );
-  });
+  // trying with wrong sealer secret, by hand
+  const nOnce = blake3(
+    new TextEncoder().encode(stableStringify(nOnceMaterial)),
+  ).slice(0, 24);
+  const sealer3priv = base58.decode(
+    wrongSealer.substring("sealerSecret_z".length),
+  );
+  const senderPub = base58.decode(
+    crypto.getSealerID(sender).substring("sealer_z".length),
+  );
+  const sealedBytes = base64url.decode(sealed.substring("sealed_U".length));
+  const sharedSecret = x25519.getSharedSecret(sealer3priv, senderPub);
+
+  expect(() => {
+    const _ = xsalsa20poly1305(sharedSecret, nOnce).decrypt(sealedBytes);
+  }).toThrow("invalid tag");
+});
+
+test(`Hashing is deterministic [${name}]`, () => {
+  expect(crypto.secureHash({ b: "world", a: "hello" })).toEqual(
+    crypto.secureHash({ a: "hello", b: "world" }),
+  );
+
+  expect(crypto.shortHash({ b: "world", a: "hello" })).toEqual(
+    crypto.shortHash({ a: "hello", b: "world" }),
+  );
+});
+
+test(`Encryption of keySecrets round-trips [${name}]`, () => {
+  const toEncrypt = crypto.newRandomKeySecret();
+  const encrypting = crypto.newRandomKeySecret();
+
+  const keys = {
+    toEncrypt,
+    encrypting,
+  };
+
+  const encrypted = crypto.encryptKeySecret(keys);
+
+  const decrypted = crypto.decryptKeySecret(encrypted, encrypting.secret);
+
+  expect(decrypted).toEqual(toEncrypt.secret);
+});
+
+test(`Encryption of keySecrets doesn't decrypt with a wrong key [${name}]`, () => {
+  const toEncrypt = crypto.newRandomKeySecret();
+  const encrypting = crypto.newRandomKeySecret();
+  const encryptingWrong = crypto.newRandomKeySecret();
+
+  const keys = {
+    toEncrypt,
+    encrypting,
+  };
+
+  const encrypted = crypto.encryptKeySecret(keys);
+
+  const decrypted = crypto.decryptKeySecret(encrypted, encryptingWrong.secret);
+
+  expect(decrypted).toBeUndefined();
+});
+
+test(`Unsealing malformed JSON logs error [${name}]`, () => {
+  const data = "not valid json";
+  const sender = crypto.newRandomSealer();
+  const sealer = crypto.newRandomSealer();
+
+  const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  const nOnceMaterial = {
+    in: "co_zTEST",
+    tx: { sessionID: "co_zTEST_session_zTEST" as SessionID, txIndex: 0 },
+  } as const;
+
+  // Create a sealed message with invalid JSON
+  const nOnce = blake3(
+    new TextEncoder().encode(stableStringify(nOnceMaterial)),
+  ).slice(0, 24);
+
+  const senderPriv = base58.decode(sender.substring("sealerSecret_z".length));
+  const sealerPub = base58.decode(
+    crypto.getSealerID(sealer).substring("sealer_z".length),
+  );
+
+  const plaintext = new TextEncoder().encode(data);
+  const sharedSecret = x25519.getSharedSecret(senderPriv, sealerPub);
+  const sealedBytes = xsalsa20poly1305(sharedSecret, nOnce).encrypt(plaintext);
+  const sealed = `sealed_U${base64url.encode(sealedBytes)}`;
+
+  const result = crypto.unseal(
+    sealed as any,
+    sealer,
+    crypto.getSealerID(sender),
+    nOnceMaterial,
+  );
+
+  expect(result).toBeUndefined();
+  expect(consoleSpy.mock.lastCall?.[0]).toContain(
+    "Failed to decrypt/parse sealed message",
+  );
 });

@@ -17,6 +17,10 @@ export const CoValueLoadingState = {
    */
   LOADING: "loading",
   /**
+   * The coValue existed but has been deleted (tombstoned).
+   */
+  DELETED: "deleted",
+  /**
    * The coValue was loaded but the account is not authorized to access it.
    */
   UNAUTHORIZED: "unauthorized",
@@ -31,6 +35,7 @@ export type CoValueLoadingState =
 
 export type CoValueErrorState =
   | typeof CoValueLoadingState.UNAVAILABLE
+  | typeof CoValueLoadingState.DELETED
   | typeof CoValueLoadingState.UNAUTHORIZED;
 
 export type NotLoadedCoValueState =
