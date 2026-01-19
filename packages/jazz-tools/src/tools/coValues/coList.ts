@@ -43,7 +43,10 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoListSchema,
+  AnyZodOrCoValueSchema,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -109,6 +112,8 @@ export class CoList<out Item = any>
     this.prototype[TypeSym] = "CoList";
   }
 
+  coListSchema: CoListSchema<AnyZodOrCoValueSchema> | undefined;
+
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
   /** @internal */
@@ -119,7 +124,14 @@ export class CoList<out Item = any>
     return Array;
   }
 
-  constructor(options: { fromRaw: RawCoList } | undefined) {
+  constructor(
+    options:
+      | {
+          fromRaw: RawCoList;
+          coListSchema?: CoListSchema<AnyZodOrCoValueSchema>;
+        }
+      | undefined,
+  ) {
     super();
 
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
@@ -127,7 +139,11 @@ export class CoList<out Item = any>
     if (options && "fromRaw" in options) {
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoListJazzApi(proxy, () => options.fromRaw),
+          value: new CoListJazzApi(
+            proxy,
+            () => options.fromRaw,
+            options.coListSchema,
+          ),
           enumerable: false,
         },
         $isLoaded: { value: true, enumerable: false },
@@ -166,6 +182,8 @@ export class CoList<out Item = any>
       | {
           owner: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: "strict" | "loose";
+          coListSchema?: CoListSchema<AnyZodOrCoValueSchema>;
         }
       | Account
       | Group,
@@ -175,7 +193,13 @@ export class CoList<out Item = any>
 
     Object.defineProperties(instance, {
       $jazz: {
-        value: new CoListJazzApi(instance, () => raw),
+        value: new CoListJazzApi(
+          instance,
+          () => raw,
+          options && "coListSchema" in options
+            ? options.coListSchema
+            : undefined,
+        ),
         enumerable: false,
       },
       $isLoaded: { value: true, enumerable: false },
@@ -518,8 +542,36 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
+    private coListSchema?: CoListSchema<AnyZodOrCoValueSchema>,
   ) {
     super(coList);
+  }
+
+  private getItemSchema(): z.core.$ZodTypes {
+    const listSchema = this.coListSchema?.getValidationSchema();
+
+    if (listSchema?.type !== "union") {
+      throw new Error("List schema is not a union");
+    }
+
+    const fieldSchema = listSchema.options[1]?.element as
+      | z.core.$ZodTypes
+      | undefined;
+
+    // ignore codecs/pipes
+    // even if they are optional and nullable
+    if (
+      // @ts-expect-error
+      fieldSchema?._def?.type === "pipe" ||
+      // @ts-expect-error
+      fieldSchema?._def?.innerType?._def?.type === "pipe" ||
+      // @ts-expect-error
+      fieldSchema?._def?.innerType?._def?.innerType?._def?.type === "pipe"
+    ) {
+      return z.any();
+    }
+
+    return fieldSchema ?? z.any();
   }
 
   /** @category Collaboration */
@@ -527,7 +579,16 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return getCoValueOwner(this.coList);
   }
 
-  set(index: number, value: CoFieldInit<CoListItem<L>>): void {
+  set(
+    index: number,
+    value: CoFieldInit<CoListItem<L>>,
+    options?: { validation?: "strict" | "loose" },
+  ): void {
+    if (options?.validation !== "loose" && this.coListSchema) {
+      const fieldSchema = this.getItemSchema();
+      value = z.parse(fieldSchema, value) as CoFieldInit<CoListItem<L>>;
+    }
+
     const itemDescriptor = this.schema[ItemsSym];
     const rawValue = toRawItems([value], itemDescriptor, this.owner)[0]!;
     if (rawValue === null && !itemDescriptor.optional) {
@@ -543,6 +604,22 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   push(...items: CoFieldInit<CoListItem<L>>[]): number {
+    if (this.coListSchema) {
+      const schema = z.array(this.getItemSchema());
+
+      items = z.parse(schema, items) as CoFieldInit<CoListItem<L>>[];
+    }
+    return this.pushLoose(...items);
+  }
+
+  /**
+   * Appends new elements to the end of an array, and returns the new length of the array.
+   * Schema validation is not applied to the items.
+   * @param items New elements to add to the array.
+   *
+   * @category Content
+   */
+  pushLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
     this.raw.appendItems(
       toRawItems(items, this.schema[ItemsSym], this.owner),
       undefined,

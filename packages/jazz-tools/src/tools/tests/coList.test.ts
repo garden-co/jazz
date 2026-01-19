@@ -13,7 +13,12 @@ import {
   runWithoutActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  expectValidationError,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -100,6 +105,22 @@ describe("Simple CoList operations", async () => {
     });
   });
 
+  test("create CoList with validation errors", () => {
+    const List = co.list(z.string());
+    expect(
+      // @ts-expect-error - number is not a string
+      () => List.create([2]),
+    ).toThrow();
+  });
+
+  test("create CoList with validation errors with loose validation", () => {
+    const List = co.list(z.string());
+    expect(
+      // @ts-expect-error - number is not a string
+      () => List.create([2], { validation: "loose" }),
+    ).not.toThrow();
+  });
+
   test("list with nullable content", () => {
     const List = co.list(z.string().nullable());
     const list = List.create(["a", "b", "c", null]);
@@ -152,6 +173,37 @@ describe("Simple CoList operations", async () => {
       expect(list[1]).toBe("margarine");
     });
 
+    test("assignment with validation errors", () => {
+      const list = TestList.create(["bread", "butter", "onion"], {
+        owner: me,
+      });
+
+      expectValidationError(
+        // @ts-expect-error - number is not a string
+        () => list.$jazz.set(1, 2),
+        [
+          expect.objectContaining({
+            message: "Invalid input: expected string, received number",
+          }),
+        ],
+      );
+    });
+
+    test("assignment with validation errors with loose validation", () => {
+      const list = TestList.create(["bread", "butter", "onion"], {
+        owner: me,
+      });
+
+      list.$jazz.set(
+        1,
+        // @ts-expect-error - number is not a string
+        2,
+        { validation: "loose" },
+      );
+
+      expect(list[1]).toBe(2);
+    });
+
     test("assignment with ref using CoValue", () => {
       const Ingredient = co.map({
         name: z.string(),
@@ -191,7 +243,9 @@ describe("Simple CoList operations", async () => {
       );
 
       expect(() => {
-        recipe.$jazz.set(1, undefined as unknown as Loaded<typeof Ingredient>);
+        recipe.$jazz.set(1, undefined as unknown as Loaded<typeof Ingredient>, {
+          validation: "loose",
+        });
       }).toThrow("Cannot set required reference 1 to undefined");
 
       expect(recipe[1]?.name).toBe("butter");
@@ -248,6 +302,40 @@ describe("Simple CoList operations", async () => {
           "onion",
           "cheese",
         ]);
+      });
+
+      test("push with validation errors", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.push(2),
+          [
+            expect.objectContaining({
+              message: "Invalid input: expected string, received number",
+            }),
+          ],
+        );
+
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.push("test", 2),
+        );
+      });
+
+      test("push with validation errors with loose validation", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.pushLoose(2);
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.pushLoose("test", 2);
+
+        expect(list).toEqual(["bread", "butter", "onion", 2, "test", 2]);
       });
 
       test("push CoValue into list of CoValues", () => {

@@ -113,10 +113,10 @@ export class CoListSchema<
       options,
       this.permissions,
     );
-    return this.coValueClass.create(
-      items as any,
-      optionsWithPermissions,
-    ) as CoListInstance<T>;
+    return this.coValueClass.create(items as any, {
+      ...optionsWithPermissions,
+      coListSchema: this,
+    }) as CoListInstance<T>;
   }
 
   load<
