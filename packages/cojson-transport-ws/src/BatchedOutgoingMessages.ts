@@ -152,11 +152,7 @@ export class BatchedOutgoingMessages
   }
 
   private appendMessage(msg: string) {
-    if (this.backlog.length > 0) {
-      this.backlog.push(msg);
-    } else {
-      this.backlog.push(msg);
-    }
+    this.backlog.push(msg);
   }
 
   private sendMessagesInBulk() {
