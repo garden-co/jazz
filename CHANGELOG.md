@@ -24,6 +24,12 @@ Changes:
 
 Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
 
+Released Jazz 0.19.22:
+- Added a 512 variant for progressive image loading
+- Bugfix: fixed an issue when generating image placeholders from clients using Expo Image Manipulator (cc @andreibudoi)
+- Bugfix: wait for CoValues to be synced before garbage-collecting them
+- Bugfix: wait for CoValues' dependencies to be garbage-collected before collecting them. This makes accounts and groups safe to be collected
+
 Released Jazz 0.19.21:
   - Added `useCoStates` & `useSuspenseCoStates` React hooks to load multiple CoValues at the same time
   - Added Clerk authentication support for Svelte with `useClerkAuth` hook and `JazzSvelteProviderWithClerk` component
