@@ -25,8 +25,6 @@ import {
 import type { BatchSeedConfig } from "../../schema.ts";
 import type { BatchWorkerResult, BatchWorkerData } from "./types.ts";
 
-cojsonInternals.setMaxInFlightLoadsPerPeer(100);
-
 type ServerHandle = {
   localNode: LocalNode;
   close: () => void;
@@ -144,7 +142,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   const remotePeer = getFlagString(args, "peer");
   const isRemote = !!remotePeer;
 
-  const workerCount = getFlagNumber(args, "workers") ?? 8;
+  const workerCount = getFlagNumber(args, "workers") ?? 3;
   const runs = getFlagNumber(args, "runs") ?? 50;
   const mapsLimit = getFlagNumber(args, "maps");
 
