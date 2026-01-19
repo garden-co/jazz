@@ -31,6 +31,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
       host: { type: "string" },
       port: { type: "string" },
+      peer: { type: "string" },
       "random-port": { type: "boolean" },
 
       mix: { type: "string" },

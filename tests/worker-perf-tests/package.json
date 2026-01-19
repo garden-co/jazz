@@ -7,6 +7,7 @@
     "seed": "node --experimental-strip-types ./src/cli.ts prepare",
     "seed:duration": "node --experimental-strip-types ./src/cli.ts seed:duration",
     "seed:batch": "node --experimental-strip-types ./src/cli.ts seed:batch",
+    "push:batch": "node --experimental-strip-types ./src/cli.ts push:batch",
     "query": "node --experimental-strip-types ./src/cli.ts query",
     "duration": "node --inspect --experimental-strip-types ./src/cli.ts duration",
     "batch": "node --inspect --experimental-strip-types ./src/cli.ts batch"

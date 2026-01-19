@@ -27,6 +27,11 @@ import type { BatchWorkerResult, BatchWorkerData } from "./types.ts";
 
 cojsonInternals.setMaxInFlightLoadsPerPeer(100);
 
+type ServerHandle = {
+  localNode: LocalNode;
+  close: () => void;
+} | null;
+
 /**
  * Clear all loaded coValues from the server's LocalNode cache.
  * This simulates a cold cache for each benchmark run.
@@ -125,30 +130,44 @@ async function executeRun(
  * Load a set of X maps with sizes between minSize and maxSize on N workers concurrently.
  * Run N runs and calculate median and percentiles.
  * Loads the SeedConfig CoValue first to get the IDs to use.
+ *
+ * Can run against:
+ * - Local server (default): starts a local sync server using --db
+ * - Remote server: connects to --peer URL (requires --config-id)
  */
 export async function run(args: ParsedArgs): Promise<void> {
+  // Local mode: start a local sync server
   const dbPath = assertNonEmptyString(
     getFlagString(args, "db") ?? "./batch.db",
     "--db",
   );
+  const remotePeer = getFlagString(args, "peer");
+  const isRemote = !!remotePeer;
 
   const workerCount = getFlagNumber(args, "workers") ?? 8;
   const runs = getFlagNumber(args, "runs") ?? 50;
   const mapsLimit = getFlagNumber(args, "maps");
+
+  let peer: string;
+  let metrics: string | undefined;
+  let server: ServerHandle = null;
+  let configId: string;
+
   const host = getFlagString(args, "host") ?? "127.0.0.1";
   const randomPort = getFlagBoolean(args, "random-port");
   const port = getFlagString(args, "port") ?? (randomPort ? "0" : "4000");
 
   // Read the seed config ID from the config file
-  const configId = readConfigId(dbPath);
-  if (!configId) {
+  const localConfigId = readConfigId(dbPath);
+  if (!localConfigId) {
     throw new Error(
       `No seed config found. Expected config file at: ${getConfigFilePath(dbPath)}. Run seed first.`,
     );
   }
+  configId = localConfigId;
 
   // Start the sync server
-  const server = await startSyncServer({
+  const localServer = await startSyncServer({
     host,
     port,
     inMemory: false,
@@ -157,19 +176,26 @@ export async function run(args: ParsedArgs): Promise<void> {
     middleware: setupMetrics().middleware,
   });
 
-  const addr = server.address();
+  const addr = localServer.address();
   if (!addr || typeof addr === "string") {
     throw new Error("Unexpected server address()");
   }
-  const peer = `ws://${addr.address}:${addr.port}`;
-  const metrics = `http://${addr.address}:${addr.port}/metrics`;
+  peer = `ws://${addr.address}:${addr.port}`;
+  metrics = `http://${addr.address}:${addr.port}/metrics`;
+  server = localServer;
+
+  if (isRemote) {
+    // Remote mode: connect to existing sync server
+    peer = remotePeer;
+    console.log(`Using remote sync server: ${peer}`);
+  }
 
   // Load the seed config from the server to get IDs
   console.log("Loading seed configuration...");
-  const seedConfig = await loadSeedConfig(peer, configId);
+  const seedConfig = await loadSeedConfig(peer, configId as any);
 
   if (seedConfig.scenario !== "batch") {
-    server.close();
+    server?.close();
     throw new Error(
       `Database was seeded for "${seedConfig.scenario}" scenario, but "batch" was requested`,
     );
@@ -179,7 +205,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   let mapIds = config.mapIds as string[];
 
   if (mapIds.length === 0) {
-    server.close();
+    server?.close();
     throw new Error("No CoMap targets found in seed config");
   }
 
@@ -192,7 +218,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     JSON.stringify(
       {
         scenario: "batch",
-        db: dbPath,
+        mode: isRemote ? "remote" : "local",
         peer,
         metrics,
         workers: workerCount,
@@ -237,8 +263,10 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   try {
     for (let runIdx = 0; runIdx < runs; runIdx++) {
-      // Clear coValues cache before each run to simulate cold cache
-      clearCoValuesCache(server);
+      // Clear coValues cache before each run to simulate cold cache (only for local server)
+      if (server) {
+        clearCoValuesCache(server);
+      }
       console.log(`\nStarting run ${runIdx + 1}/${runs}...`);
 
       // Calculate current stats (from previous runs)
@@ -345,7 +373,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     );
   } finally {
     clearScenarioState();
-    server.close();
+    server?.close();
   }
 
   console.log("\nDone");

@@ -59,6 +59,28 @@ Options:
 - `--runs <n>` - Number of benchmark runs (default: 50)
 - `--maps <n>` - Limit maps to load per run (default: all available)
 
+**Push to Remote Sync Server:**
+
+After seeding locally, push the data to a remote sync server for testing:
+
+```bash
+pnpm -C tests/worker-perf-tests run push:batch -- --db ./batch.db --peer wss://your-server.com
+```
+
+The push command outputs the `configId` you'll need for remote runs.
+
+**Run Against Remote Server:**
+
+Test against a remote sync server (no local server started, no cache clearing):
+
+```bash
+pnpm -C tests/worker-perf-tests run batch -- --peer wss://your-server.com --config-id co_abc123 --workers 8 --runs 50
+```
+
+Remote mode options:
+- `--peer <url>` - Remote sync server URL (triggers remote mode)
+- `--config-id <id>` - Config ID from push command (required for remote mode)
+
 ### Duration Scenario
 
 Generates sustained mixed load (files + maps) for a specified duration. Useful for testing throughput under continuous load.
@@ -127,8 +149,11 @@ The batch scenario dashboard includes a **Save Result** feature:
 
 This is useful for comparing performance across different configurations or code changes.
 
-## Scaling Guidance- Start with small seeds (100-1000 items) and scale up
+## Scaling Guidance
+
+- Start with small seeds (100-1000 items) and scale up
 - Keep `--inflight` moderate (2-8) to avoid saturating the event loop
 - Increase `--workers` to test concurrency
 - For batch scenario, use `--maps` to limit items per run for faster iteration
-- The batch scenario clears the cache between runs for consistent cold-cache measurements
+- The batch scenario clears the cache between runs for consistent cold-cache measurements (local mode only)
+- Remote mode does not clear cache (no access to remote server's internal state)

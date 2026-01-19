@@ -1,7 +1,6 @@
 import { useCoState } from "jazz-tools/react-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ResetDbButton } from "../../components/ResetDbButton";
 import { GridRoot, PixelCell } from "./schema";
 import { getCurrentSyncUrl } from "../../utils/connectionStorage";
 
@@ -194,8 +193,6 @@ export function GridScreen() {
             ({cellIds.length} cells)
           </span>
         </div>
-
-        <ResetDbButton />
       </div>
 
       {/* Canvas Grid */}

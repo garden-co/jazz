@@ -13,12 +13,18 @@ function usage(): string {
     "  pnpm run seed:duration [-- --db ./duration.db --items 100 --pdf ./assets/sample.pdf]",
     "  pnpm run seed:batch [-- --db ./batch.db --maps 100 --minSize 100 --maxSize 1024]",
     "",
+    "  # Push batch data to remote sync server",
+    "  pnpm run push:batch [-- --db ./batch.db --peer wss://remote-server.com]",
+    "",
     "  # Query seeded data",
     "  pnpm run query [-- --db ./seed.db]",
     "",
-    "  # Run scenarios directly",
+    "  # Run scenarios (local mode)",
     "  pnpm run duration [-- --db ./duration.db --workers 8 --durationMs 60000 --inflight 4 --mix 1f:1m]",
     "  pnpm run batch [-- --db ./batch.db --workers 8 --runs 5 --maps 1000]",
+    "",
+    "  # Run batch scenario (remote mode)",
+    "  pnpm run batch [-- --peer wss://remote-server.com --config-id co_abc123 --workers 8 --runs 5]",
     "",
     "Scenarios:",
     "  duration  - Load files and comaps for a specified duration",
@@ -33,6 +39,10 @@ function usage(): string {
     "  --minSize <bytes>   - Minimum payload size (default: 100)",
     "  --maxSize <bytes>   - Maximum payload size (default: 1024)",
     "",
+    "Push options (batch scenario):",
+    "  --db <path>         - Path to local SQLite database",
+    "  --peer <url>        - Remote sync server URL (e.g., wss://remote-server.com)",
+    "",
     "Run options (duration scenario):",
     "  --durationMs <ms>   - Duration to run the test (default: 60000)",
     "  --inflight <n>      - Max concurrent operations per worker (default: 4)",
@@ -42,6 +52,8 @@ function usage(): string {
     "Run options (batch scenario):",
     "  --runs <n>          - Number of benchmark runs (default: 5)",
     "  --maps <n>          - Limit number of maps to load per run (default: all)",
+    "  --peer <url>        - Remote sync server URL (uses remote mode)",
+    "  --config-id <id>    - Config ID (required for remote mode)",
     "",
     "Common options:",
     "  --db <path>         - Path to SQLite database (default: ./seed.db)",
@@ -54,6 +66,7 @@ function usage(): string {
     "  - The seed command stores a SeedConfig CoValue containing all IDs",
     "  - The run command loads this CoValue to get the IDs before starting workers",
     "  - The sync server uses the seeded SQLite DB as its persistence layer",
+    "  - Remote mode: use --peer to connect to a remote sync server (no cache clearing)",
   ].join("\n");
 }
 
@@ -74,6 +87,12 @@ async function main() {
 
   if (cmd === "seed:batch") {
     await batch.seed(args);
+    return;
+  }
+
+  // Push batch data to remote sync server
+  if (cmd === "push:batch") {
+    await batch.push(args);
     return;
   }
 
