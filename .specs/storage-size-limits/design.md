@@ -924,9 +924,16 @@ async function getEvictionCandidates(
 ### 4. Size Tracking on Store
 
 ```typescript
+// Factor to account for JSON overhead (property names, quotes, brackets)
+// when estimating transaction sizes from string field lengths
+const JSON_OVERHEAD_FACTOR = 1.3;
+
 function calculateTransactionSize(tx: Transaction): number {
-  // Estimate as JSON string length (close to actual storage size)
-  return JSON.stringify(tx).length;
+  // Estimate size without JSON.stringify for performance
+  // tx.changes and tx.madeAt are strings, use their lengths directly
+  const changesLen = tx.changes?.length ?? 0;
+  const madeAtLen = tx.madeAt?.length ?? 0;
+  return Math.ceil((changesLen + madeAtLen) * JSON_OVERHEAD_FACTOR);
 }
 
 function updateSizeOnStore(
@@ -1005,37 +1012,105 @@ class LocalNode {
 
 **Location:** `packages/cojson/src/storage/storageSync.ts` and `storageAsync.ts`
 
-```typescript
-// In store() method, add limit check before storing:
+#### Race Condition Prevention
 
-async store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
-  // NEW: Check storage limit before storing
+A naive implementation could have a race condition between space check and store:
+```
+Thread 1: ensureSpaceForWrite(100KB) ✓  → [gap] → store(100KB)
+Thread 2: ensureSpaceForWrite(100KB) ✓  → [gap] → store(100KB)
+// Both pass the check, but combined they exceed the limit
+```
+
+**Multi-layer protection strategy:**
+
+1. **Sync storage** - No race condition (single-threaded, synchronous operations)
+2. **Async storage** - Space check inside queue processing (already serialized)
+3. **SQLite hard limit** - `PRAGMA max_page_count` as ultimate safety net
+
+#### Synchronous Storage (no race condition)
+
+```typescript
+// StorageApiSync - synchronous, no race condition possible
+store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
+  // Check runs synchronously before store - no interleaving possible
   if (this.evictionManager) {
     const writeSize = this.estimateWriteSize(msg);
-    await this.evictionManager.ensureSpaceForWrite(writeSize);
+    this.evictionManager.ensureSpaceForWrite(writeSize);
   }
   
-  // Proceed with existing store logic
   return this.storeSingle(msg, correctionCallback);
 }
+```
 
+#### Asynchronous Storage (queue serialization)
+
+```typescript
+// StorageApiAsync - leverage existing storeQueue for serialization
+async store(msg: NewContentMessage, correctionCallback: CorrectionCallback) {
+  // Push to queue - processed one at a time
+  this.storeQueue.push(msg, correctionCallback);
+
+  this.storeQueue.processQueue(async (data, correctionCallback) => {
+    // Space check happens INSIDE queue processing
+    // This ensures no concurrent stores between check and write
+    if (this.evictionManager) {
+      const writeSize = this.estimateWriteSize(data);
+      await this.evictionManager.ensureSpaceForWrite(writeSize);
+    }
+    
+    return this.storeSingle(data, correctionCallback);
+  });
+}
+```
+
+#### Shared Helper
+
+```typescript
 private estimateWriteSize(msg: NewContentMessage): number {
   let size = 0;
   
   // Header size (only for new CoValues)
+  // Header has fixed structure, estimate ~200 bytes
   if (msg.header) {
-    size += JSON.stringify(msg.header).length;
+    size += 200;
   }
   
-  // Transaction sizes
+  // Transaction sizes - avoid JSON.stringify for performance
+  // tx.changes and tx.madeAt are strings, use their lengths directly
   for (const sessionData of Object.values(msg.new)) {
     for (const tx of sessionData.newTransactions) {
-      size += JSON.stringify(tx).length;
+      const changesLen = tx.changes?.length ?? 0;
+      const metaLen = tx.madeAt?.length ?? 0;  // madeAt is a timestamp string
+      size += Math.ceil((changesLen + metaLen) * JSON_OVERHEAD_FACTOR);
     }
   }
   
   return size;
 }
+```
+
+#### Protection Layers Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     MULTI-LAYER PROTECTION                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Layer 1: Soft Check (ensureSpaceForWrite)
+  ├─ Sync storage: runs synchronously, no race possible
+  └─ Async storage: runs inside serialized queue, no race possible
+
+  Layer 2: SQLite Hard Limit (PRAGMA max_page_count)
+  ├─ True hard limit enforced by SQLite engine
+  ├─ If write would exceed, SQLite returns SQLITE_FULL error
+  └─ Storage layer catches error, triggers eviction, retries once
+
+  Layer 3: IndexedDB Quota
+  ├─ Browser-enforced quota per origin
+  ├─ QuotaExceededError caught and triggers eviction
+  └─ Less precise than SQLite (shared across origin)
+
+  Result: No race condition can cause unbounded growth
 ```
 
 ### 3. Load Operation with Metadata Update
