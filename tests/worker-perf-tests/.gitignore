@@ -1,0 +1,7 @@
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Seed config files (contain CoValue IDs)
+*.db.config
