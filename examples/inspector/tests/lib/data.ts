@@ -72,19 +72,25 @@ export const createFile = () => {
 };
 
 export const createImage = () => {
-  return ImageDefinition.create({
-    originalSize: [1920, 1080],
-    placeholderDataURL: "data:image/jpeg;base64,...",
-  });
+  return ImageDefinition.create(
+    {
+      originalSize: [1920, 1080],
+      placeholderDataURL: "data:image/jpeg;base64,...",
+    },
+    { validation: "loose" },
+  );
 };
 
 export const createOrganization = () => {
   return Organization.create({
     name: "Garden Computing",
-    image: ImageDefinition.create({
-      originalSize: [1920, 1080],
-      placeholderDataURL: "data:image/jpeg;base64,...",
-    }),
+    image: ImageDefinition.create(
+      {
+        originalSize: [1920, 1080],
+        placeholderDataURL: "data:image/jpeg;base64,...",
+      },
+      { validation: "loose" },
+    ),
     projects: co.list(Project).create(
       projectsData.map((project) =>
         Project.create({
