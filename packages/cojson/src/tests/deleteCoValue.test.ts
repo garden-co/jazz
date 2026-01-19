@@ -17,7 +17,7 @@ import { CO_VALUE_PRIORITY } from "../priority.js";
 const Crypto = await WasmCrypto.create();
 
 function makeDeleteMarkerTransaction(core: CoValueCore, madeAt?: number) {
-  core.makeTransaction([], "trusting", { deleted: true }, madeAt);
+  core.makeTransaction([], "trusting", { deleted: core.id }, madeAt);
   const deleteSessionID = Object.keys(core.knownState().sessions).find(
     (sessionID) => isDeleteSessionID(sessionID as SessionID),
   ) as SessionID;
@@ -71,7 +71,7 @@ test("deleteCoValue throws when called by a non-admin on a group-owned CoValue",
   );
 });
 
-test("deleteCoValue creates a trusting {deleted:true} tombstone tx, marks the session, and flips core.isDeleted", async () => {
+test("deleteCoValue creates a trusting {deleted:id} tombstone tx, marks the session, and flips core.isDeleted", async () => {
   const alice = await setupTestAccount({ connected: true });
 
   const group = alice.node.createGroup();
@@ -89,7 +89,7 @@ test("deleteCoValue creates a trusting {deleted:true} tombstone tx, marks the se
 
   expect(last!.tx.privacy).toBe("trusting");
   expect(last!.changes).toEqual([]);
-  expect(last!.meta).toMatchObject({ deleted: true });
+  expect(last!.meta).toMatchObject({ deleted: map.id });
   expect(last!.txID.sessionID).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
 });
 
@@ -469,4 +469,60 @@ test("waitForSync should wait only for the delete session/transaction even if th
     ),
   ).toBe(true);
   expect(jazzCloud.node.expectCoValueLoaded(map.id).isDeleted).toBe(true);
+});
+
+test("rejects delete transaction with mismatched coValueId", async () => {
+  const alice = await setupTestAccount({ connected: true });
+  const bob = await setupTestAccount({ connected: true });
+
+  await loadCoValueOrFail(alice.node, bob.accountID);
+  await loadCoValueOrFail(bob.node, alice.accountID);
+
+  const group = alice.node.createGroup();
+  const bobAccount = await loadCoValueOrFail(alice.node, bob.accountID);
+  group.addMember(bobAccount, "admin");
+  await group.core.waitForSync();
+
+  // Create two maps owned by the same group
+  const mapA = group.createMap();
+  const mapB = group.createMap();
+
+  await loadCoValueOrFail(bob.node, group.id);
+  const mapAOnBob = await loadCoValueOrFail(bob.node, mapA.id);
+  const mapBOnBob = await loadCoValueOrFail(bob.node, mapB.id);
+
+  // Create a delete transaction for mapA
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
+    mapA.core,
+  );
+
+  // Try to apply mapA's delete transaction to mapB - should be rejected due to ID mismatch
+  const error = mapBOnBob.core.tryAddTransactions(
+    deleteSessionID,
+    [tx],
+    signature,
+    false,
+  );
+
+  expect(error).toMatchObject({
+    type: "DeleteTransactionRejected",
+    reason: "InvalidDeleteTransaction",
+  });
+  expect(error && "error" in error).toBe(true);
+  const err = (error as { error: unknown }).error;
+  expect(err).toBeInstanceOf(Error);
+  if (err instanceof Error) {
+    expect(err.message).toMatch(/Delete transaction ID mismatch/);
+  }
+  expect(mapBOnBob.core.isDeleted).toBe(false);
+
+  // Verify mapA's delete transaction can still be applied correctly to mapA
+  const successError = mapAOnBob.core.tryAddTransactions(
+    deleteSessionID,
+    [tx],
+    signature,
+    false,
+  );
+  expect(successError).toBeUndefined();
+  expect(mapAOnBob.core.isDeleted).toBe(true);
 });
