@@ -178,9 +178,7 @@ export function loadCoValue<
         loadAs: options.loadAs,
         syncResolution: true,
         skipRetry: options.skipRetry,
-        onUnavailable: resolve,
         onError: resolve,
-        onUnauthorized: resolve,
         unstable_branch: options.unstable_branch,
       },
       (value, unsubscribe) => {
