@@ -54,7 +54,6 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
-  AnyCoreCoValueSchema,
   CoreCoMapSchema,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";

@@ -1,4 +1,4 @@
-import { z } from "../../../exports.js";
+import { AnyZodSchema } from "../zodSchema.js";
 
 /**
  * "Core" CoValue schemas contain all data necessary to represent a CoValue schema.
@@ -20,7 +20,7 @@ export interface CoreCoValueSchema {
 
   resolveQuery: CoreResolveQuery;
 
-  getValidationSchema: () => z.z.core.$ZodTypes;
+  getValidationSchema: () => AnyZodSchema;
 }
 
 /**

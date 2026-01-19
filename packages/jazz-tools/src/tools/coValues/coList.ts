@@ -136,7 +136,7 @@ export class CoList<out Item = any>
           value: new CoListJazzApi(
             proxy,
             () => options.fromRaw!,
-            options.schema as CoListSchema<AnyZodOrCoValueSchema>,
+            options.schema,
           ),
           enumerable: false,
         },
@@ -186,11 +186,7 @@ export class CoList<out Item = any>
 
     Object.defineProperties(instance, {
       $jazz: {
-        value: new CoListJazzApi(
-          instance,
-          () => raw,
-          this.coValueSchema as CoListSchema<AnyZodOrCoValueSchema>,
-        ),
+        value: new CoListJazzApi(instance, () => raw, this.coValueSchema),
         enumerable: false,
       },
       $isLoaded: { value: true, enumerable: false },
