@@ -12,7 +12,7 @@ const argsConfig = {
     runs: { type: "string" as const, short: "n" },
     id: { type: "string" as const },
     sync: { type: "string" as const, short: "s" },
-    headless: { type: "boolean" as const, default: true },
+    headful: { type: "boolean" as const, default: false },
     "cold-storage": { type: "boolean" as const, default: false },
     help: { type: "boolean" as const, short: "h" },
     // Grid scenario options
@@ -47,7 +47,7 @@ function buildConfig(
   const runs = values.runs ? parseInt(String(values.runs), 10) : 50;
   const id = values.id ? String(values.id) : undefined;
   const sync = values.sync ? String(values.sync) : undefined;
-  const headless = values.headless !== false; // Default to true
+  const headless = values.headful !== true; // Default to headless (true)
   const coldStorage = values["cold-storage"] === true; // Default to false (warm storage)
 
   // Build scenario-specific options
@@ -103,7 +103,7 @@ async function main(): Promise<void> {
     if (config.sync) {
       console.log(`  Sync Server: ${config.sync}`);
     }
-    console.log(`  Headless: ${config.headless}`);
+    console.log(`  Headful: ${!config.headless}`);
     console.log(
       `  Storage: ${config.coldStorage ? "cold (fresh each run)" : "warm (reused)"}`,
     );

@@ -44,7 +44,7 @@ pnpm bench <scenario> [options]
 | `--runs, -n <n>` | Number of benchmark runs | 50 |
 | `--id <covalue-id>` | Use existing CoValue ID (skips fixture generation) | - |
 | `--sync, -s <url>` | Sync server URL | ws://localhost:4200 |
-| `--headless` | Run browser in headless mode | true |
+| `--headful` | Run browser with visible window | false (headless) |
 | `--cold-storage` | Clear browser storage between runs | false |
 
 ### Grid Scenario Options

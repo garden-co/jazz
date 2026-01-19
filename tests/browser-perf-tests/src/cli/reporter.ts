@@ -157,7 +157,7 @@ Options:
   --runs, -n <n>       Number of benchmark runs (default: 50)
   --id <covalue-id>    Use existing CoValue ID (skips fixture generation)
   --sync, -s <url>     Sync server URL (default: ws://localhost:4200)
-  --headless           Run browser in headless mode (default: true)
+  --headful            Run browser with visible window (default: headless)
   --cold-storage       Clear browser storage between runs (default: false)
 
 Grid scenario options (when not using --id):
