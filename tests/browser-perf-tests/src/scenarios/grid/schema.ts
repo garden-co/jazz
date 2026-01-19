@@ -1,8 +1,4 @@
-import { co, setDefaultSchemaPermissions, z } from "jazz-tools";
-
-setDefaultSchemaPermissions({
-  onInlineCreate: "sameAsContainer",
-});
+import { co, z } from "jazz-tools";
 
 /**
  * PixelCell: Each cell in the grid
@@ -20,8 +16,14 @@ export type PixelCell = co.loaded<typeof PixelCell>;
  * - size: N (grid is NxN)
  * - cells: flat list of PixelCells, accessed as [row * N + col]
  */
-export const GridRoot = co.map({
-  size: z.number(),
-  cells: co.list(PixelCell),
-});
+export const GridRoot = co
+  .map({
+    size: z.number(),
+    cells: co.list(PixelCell),
+  })
+  .withPermissions({
+    onCreate: (newGroup) => {
+      newGroup.makePublic();
+    },
+  });
 export type GridRoot = co.loaded<typeof GridRoot>;

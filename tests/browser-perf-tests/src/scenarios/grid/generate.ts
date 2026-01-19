@@ -1,4 +1,4 @@
-import { GridRoot, PixelCell } from "./schema";
+import { GridRoot } from "./schema";
 
 /**
  * Generate a random hex color
@@ -32,31 +32,36 @@ export function generateGrid(
   minPaddingBytes: number,
   maxPaddingBytes: number,
 ) {
-  // Create the cells list first
-  const cells = GridRoot.shape.cells.create([]);
-
   // Create the grid
   const grid = GridRoot.create({
     size,
-    cells,
+    cells: [],
   });
 
-  // Populate cells asynchronously to avoid blocking
-  const done = new Promise<void>((resolve) => {
-    setTimeout(() => {
-      const totalCells = size * size;
-      for (let i = 0; i < totalCells; i++) {
-        cells.$jazz.push({
-          color: randomColor(),
-          padding: generatePadding(minPaddingBytes, maxPaddingBytes),
-        });
-      }
+  const totalCells = size * size;
 
-      Promise.all(cells.map((cell) => cell.$jazz.waitForSync())).then(() =>
-        resolve(),
-      );
-    }, 10);
+  const cells = grid.cells;
+
+  const done = nonBlocking(() => {
+    for (let i = 0; i < totalCells; i++) {
+      cells.$jazz.push({
+        color: randomColor(),
+        padding: generatePadding(minPaddingBytes, maxPaddingBytes),
+      });
+    }
+
+    return Promise.all(cells.map((cell) => cell.$jazz.waitForSync()));
   });
 
   return { grid, done };
+}
+
+function nonBlocking<T>(callback: () => T) {
+  return new Promise<T>((resolve) => {
+    requestAnimationFrame(() => {
+      queueMicrotask(() => {
+        resolve(callback());
+      });
+    });
+  });
 }
