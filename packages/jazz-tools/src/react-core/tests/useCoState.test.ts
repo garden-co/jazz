@@ -593,7 +593,7 @@ describe("useCoState", () => {
 
   it("should immediately load deeploaded data when available locally", async () => {
     const Message = co.map({
-      content: CoRichText,
+      content: co.richText(),
     });
     const Messages = co.list(Message);
     const Thread = co.map({
