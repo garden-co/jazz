@@ -662,6 +662,114 @@ impl ObjectManager {
         self.objects.insert(object_id, ObjectState::Loading);
     }
 
+    /// Receive an object from a remote source (with specified ID).
+    ///
+    /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
+    /// Used by sync layer to receive objects from peers.
+    pub fn receive_object(&mut self, object_id: ObjectId, metadata: HashMap<String, String>) {
+        let object = Object {
+            id: object_id,
+            metadata: metadata.clone(),
+            branches: HashMap::new(),
+        };
+
+        self.outbox.push(StorageRequest::CreateObject {
+            id: object_id,
+            metadata,
+        });
+
+        self.objects
+            .insert(object_id, ObjectState::Creating(object));
+    }
+
+    /// Receive a commit from a remote source.
+    ///
+    /// Unlike `add_commit`, this accepts a pre-built Commit (with existing timestamp/id).
+    /// Validates parent references but doesn't require parents to be tips.
+    pub fn receive_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        commit: Commit,
+    ) -> Result<CommitId, Error> {
+        let branch_name = branch_name.into();
+        let commit_id = commit.id();
+
+        // Check object state
+        if self.is_loading(object_id) {
+            return Err(Error::ObjectNotReady(object_id));
+        }
+
+        // Ensure object exists
+        if self.get(object_id).is_none() {
+            return Err(Error::ObjectNotFound(object_id));
+        }
+
+        // Queue storage request
+        self.outbox.push(StorageRequest::AppendCommit {
+            object_id,
+            branch_name: branch_name.clone(),
+            commit: commit.clone(),
+        });
+
+        // Get mutable reference to update
+        let object = self.get_mut(object_id).expect("validated above");
+
+        // Create branch if needed
+        let branch = object
+            .branches
+            .entry(branch_name.clone())
+            .or_insert_with(|| Branch {
+                loaded_state: BranchLoadedState::AllCommits,
+                ..Default::default()
+            });
+
+        // Check if commit already exists (idempotent)
+        if branch.commits.contains_key(&commit_id) {
+            return Ok(commit_id);
+        }
+
+        // Update tips: remove any parents that are tips, add this commit as tip
+        for parent in &commit.parents {
+            branch.tips.remove(parent);
+        }
+        branch.tips.insert(commit_id);
+
+        branch.commits.insert(commit_id, commit);
+
+        // Notify subscribers
+        self.notify_subscribers_of_commit(object_id, &branch_name);
+
+        Ok(commit_id)
+    }
+
+    /// Store a blob directly, returning its content hash.
+    ///
+    /// Simpler interface than `associate_blob` for sync layer use.
+    pub fn put_blob(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        commit_id: CommitId,
+        data: Vec<u8>,
+    ) -> Result<ContentHash, Error> {
+        let blob_id = self.associate_blob(object_id, branch_name, commit_id, data);
+        Ok(blob_id.content_hash)
+    }
+
+    /// Get blob data by content hash.
+    ///
+    /// Returns the data if available in memory. Does NOT trigger loading.
+    pub fn get_blob(&self, content_hash: &ContentHash) -> Result<&[u8], Error> {
+        match self.blobs.get(content_hash) {
+            Some(BlobState::Available { data, .. }) => Ok(data),
+            Some(BlobState::Loading) => Err(Error::BlobNotLoaded(*content_hash)),
+            Some(BlobState::NotFound) => Err(Error::BlobNotFound(*content_hash)),
+            Some(BlobState::PendingDelete) => Err(Error::BlobNotFound(*content_hash)),
+            None => Err(Error::BlobNotFound(*content_hash)),
+        }
+    }
+
     /// Subscribe to updates on a branch.
     ///
     /// If the branch is already loaded at sufficient depth, queues an immediate
