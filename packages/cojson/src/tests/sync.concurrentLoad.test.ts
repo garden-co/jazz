@@ -7,7 +7,7 @@ import {
   blockMessageTypeOnOutgoingPeer,
   fillCoMapWithLargeData,
   loadCoValueOrFail,
-  moveContentToNode,
+  importContentIntoNode,
   setupTestNode,
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -450,7 +450,7 @@ describe("concurrent load", () => {
     // Wait for the Map content to be sent
     await waitFor(() => SyncMessagesLog.messages.length >= 2);
 
-    moveContentToNode(group.core, server.node);
+    importContentIntoNode(group.core, server.node, 1);
 
     const result = await promise;
     expect(result.get("key")).toBe("value");
