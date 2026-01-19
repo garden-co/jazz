@@ -223,6 +223,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         metrics,
         workers: workerCount,
         runs,
+        warmupRun: isRemote,
         mapsToLoad: mapIds.length,
         totalMapsAvailable: config.mapIds.length,
         minSize: config.minSize,
@@ -262,9 +263,32 @@ export async function run(args: ParsedArgs): Promise<void> {
   });
 
   try {
+    // For remote mode, run a warmup run first (results discarded)
+    if (isRemote) {
+      console.log("\n=== WARMUP RUN (results discarded) ===");
+      const warmupStartTime = performance.now();
+      const warmupResults = await executeRun(
+        -1, // warmup run index
+        1,
+        mapIds,
+        peer,
+        workerScript,
+      );
+      const warmupTime = performance.now() - warmupStartTime;
+      const warmupMaps = warmupResults.reduce((s, r) => s + r.mapsLoaded, 0);
+      console.log(
+        JSON.stringify({
+          run: "warmup",
+          totalTimeMs: warmupTime,
+          mapsLoaded: warmupMaps,
+          note: "Results discarded - cache warming",
+        }),
+      );
+    }
+
     for (let runIdx = 0; runIdx < runs; runIdx++) {
       // Clear coValues cache before each run to simulate cold cache (only for local server)
-      if (server) {
+      if (!isRemote) {
         clearCoValuesCache(server);
       }
       console.log(`\nStarting run ${runIdx + 1}/${runs}...`);
