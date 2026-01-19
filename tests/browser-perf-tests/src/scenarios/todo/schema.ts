@@ -7,7 +7,13 @@ export const Task = co.map({
 });
 
 /** Our top level object: a project with a title, referencing a list of tasks */
-export const TodoProject = co.map({
-  title: z.string(),
-  tasks: co.list(Task),
-});
+export const TodoProject = co
+  .map({
+    title: z.string(),
+    tasks: co.list(Task),
+  })
+  .withPermissions({
+    onCreate: (newGroup) => {
+      newGroup.makePublic();
+    },
+  });
