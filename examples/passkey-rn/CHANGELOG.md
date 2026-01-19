@@ -1,5 +1,16 @@
 # passkey-rn
 
+## 0.0.5
+
+### Patch Changes
+
+- Updated dependencies [6b9368a]
+- Updated dependencies [89332d5]
+- Updated dependencies [ee19292]
+- Updated dependencies [8934d8a]
+  - jazz-tools@0.20.0
+  - cojson-core-rn@0.20.0
+
 ## 0.0.4
 
 ### Patch Changes
