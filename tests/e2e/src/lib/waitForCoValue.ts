@@ -3,6 +3,7 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
+  CoValueLoadingState,
   ID,
   RefsToResolve,
   RefsToResolveStrict,
@@ -29,11 +30,14 @@ export function waitForCoValue<
         {
           loadAs: options.loadAs,
           resolve: options.resolve,
-          onUnavailable: () => {
-            setTimeout(subscribe, 100);
-          },
-          onUnauthorized: () => {
-            reject(new Error("Unauthorized"));
+          onError: (notLoaded) => {
+            if (
+              notLoaded.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
+            ) {
+              reject(new Error("Unauthorized"));
+            } else {
+              setTimeout(subscribe, 100);
+            }
           },
         },
         (value, unsubscribe) => {

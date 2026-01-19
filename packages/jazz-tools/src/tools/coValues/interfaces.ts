@@ -234,7 +234,13 @@ export type SubscribeListenerOptions<
   resolve?: RefsToResolveStrict<V, R>;
   loadAs?: Account | AnonymousJazzAgent;
   onError?: (value: NotLoaded<V>) => void;
+  /**
+   * @deprecated Use `onError` instead. This callback will be removed in a future version.
+   */
   onUnauthorized?: (value: NotLoaded<V>) => void;
+  /**
+   * @deprecated Use `onError` instead. This callback will be removed in a future version.
+   */
   onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
 };
@@ -311,7 +317,13 @@ export function subscribeToCoValue<
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
     onError?: (value: Inaccessible<V>) => void;
+    /**
+     * @deprecated Use `onError` instead. This callback will be removed in a future version.
+     */
     onUnavailable?: (value: Inaccessible<V>) => void;
+    /**
+     * @deprecated Use `onError` instead. This callback will be removed in a future version.
+     */
     onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
@@ -319,6 +331,17 @@ export function subscribeToCoValue<
   },
   listener: SubscribeListener<V, R>,
 ): () => void {
+  if (options.onUnavailable) {
+    console.warn(
+      "jazz: onUnavailable is deprecated. Use onError instead. This callback will be removed in a future version.",
+    );
+  }
+  if (options.onUnauthorized) {
+    console.warn(
+      "jazz: onUnauthorized is deprecated. Use onError instead. This callback will be removed in a future version.",
+    );
+  }
+
   const loadAs = options.loadAs ?? activeAccountContext.get();
   const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
 
@@ -392,7 +415,13 @@ export function subscribeToExistingCoValue<
     | {
         resolve?: RefsToResolveStrict<V, R>;
         onError?: (value: NotLoaded<V>) => void;
+        /**
+         * @deprecated Use `onError` instead. This callback will be removed in a future version.
+         */
         onUnavailable?: (value: NotLoaded<V>) => void;
+        /**
+         * @deprecated Use `onError` instead. This callback will be removed in a future version.
+         */
         onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
       }
