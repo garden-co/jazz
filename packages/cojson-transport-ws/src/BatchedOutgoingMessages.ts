@@ -73,10 +73,7 @@ export class BatchedOutgoingMessages
       isWebSocketOpen(this.websocket) &&
       !hasWebSocketTooMuchBufferedData(this.websocket)
     ) {
-      if (msg.action === "content") {
-        this.egressBytesCounter.add(getContentMessageSize(msg), this.meta);
-      }
-      this.websocket.send(this.serializeMessage(msg));
+      this.processMessage(msg, true);
       return;
     }
 
@@ -116,14 +113,14 @@ export class BatchedOutgoingMessages
     this.processing = false;
   }
 
-  private processMessage(msg: SyncMessage) {
+  private processMessage(msg: SyncMessage, skipBatching: boolean = false) {
     if (msg.action === "content") {
       this.egressBytesCounter.add(getContentMessageSize(msg), this.meta);
     }
 
     const stringifiedMsg = this.serializeMessage(msg);
 
-    if (!this.batching) {
+    if (!this.batching || skipBatching) {
       this.websocket.send(stringifiedMsg);
       return;
     }
