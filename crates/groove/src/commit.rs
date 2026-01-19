@@ -19,7 +19,7 @@ pub enum StoredState {
 }
 
 /// A commit in an object's history.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
     pub parents: Vec<CommitId>,
     pub content: Vec<u8>,
