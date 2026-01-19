@@ -82,12 +82,12 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
 
     const coValueClass = class ZCoMap extends ClassToExtend {
-      constructor(
-        options:
-          | { fromRaw: RawCoMap; validationSchema?: CoreCoMapSchema }
-          | undefined,
-      ) {
-        super(options);
+      static coValueSchema: CoreCoValueSchema;
+      constructor(options: { fromRaw: RawCoMap } | undefined) {
+        super({
+          ...options,
+          schema: ZCoMap.coValueSchema,
+        });
         for (const [fieldName, fieldType] of Object.entries(def.shape)) {
           (this as any)[fieldName] = schemaFieldToCoFieldDef(
             fieldType as SchemaField,
@@ -99,13 +99,6 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
           );
         }
       }
-
-      static fromRaw(raw: RawCoMap) {
-        return new this({
-          fromRaw: raw,
-          validationSchema: schema as CoreCoMapSchema,
-        });
-      }
     };
 
     const coValueSchema =
@@ -113,12 +106,18 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
         ? new AccountSchema(schema as any, coValueClass as any)
         : new CoMapSchema(schema as any, coValueClass as any);
 
+    coValueClass.coValueSchema = coValueSchema;
+
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
+      static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoList } | undefined) {
-        super(options);
+        super({
+          ...options,
+          schema: ZCoList.coValueSchema,
+        });
         (this as any)[coField.items] = schemaFieldToCoFieldDef(
           element as SchemaField,
         );
@@ -126,6 +125,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     };
 
     const coValueSchema = new CoListSchema(element, coValueClass as any);
+    coValueClass.coValueSchema = coValueSchema;
 
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {

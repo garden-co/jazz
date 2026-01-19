@@ -33,10 +33,12 @@ import {
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
 import { JazzError } from "../subscribe/JazzError.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface CoValueClass<Value extends CoValue = CoValue> {
+  coValueSchema?: CoreCoValueSchema;
   /** @ignore */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   new (...args: any[]): Value;

@@ -29,7 +29,12 @@ import {
   setActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  expectValidationError,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -1644,6 +1649,24 @@ describe("CoMap resolution", async () => {
 
     assertLoaded(person2);
     expect(person2.age).toStrictEqual(20);
+  });
+
+  test("loaded CoMap keeps schema validation", async () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const person1 = Person.create({ name: "John", age: 20 });
+    // person1.$jazz.waitForSync();
+
+    const person2 = await Person.load(person1.$jazz.id);
+
+    assertLoaded(person2);
+    expectValidationError(
+      // @ts-expect-error - string is not a number
+      () => person2.$jazz.set("age", "20"),
+    );
   });
 });
 

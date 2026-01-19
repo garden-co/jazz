@@ -121,6 +121,31 @@ describe("Simple CoList operations", async () => {
     ).not.toThrow();
   });
 
+  test("CoList's items keep schema validation", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const List = co.list(Person);
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => List.create([{ name: 2 }]),
+    );
+
+    const list = List.create([{ name: "John" }]);
+    expect(list[0]?.name).toBe("John");
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => list[0]?.$jazz.set("name", 2),
+      [
+        expect.objectContaining({
+          message: "Invalid input: expected string, received number",
+        }),
+      ],
+    );
+  });
+
   test("list with nullable content", () => {
     const List = co.list(z.string().nullable());
     const list = List.create(["a", "b", "c", null]);
@@ -161,6 +186,60 @@ describe("Simple CoList operations", async () => {
     const list = ["a", "b", "c", "d", "e"];
     const coList = TestList.create(list);
     expect(coList).toEqual(list);
+  });
+
+  test("loaded CoList keeps schema validation", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const List = co.list(Person);
+    const list = List.create([{ name: "John" }]);
+
+    const loadedList = await List.load(list.$jazz.id, {
+      resolve: { $each: true },
+    });
+    assertLoaded(loadedList);
+    expect(loadedList[0]?.name).toBe("John");
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => loadedList[0]?.$jazz.set("name", 2),
+      [
+        expect.objectContaining({
+          message: "Invalid input: expected string, received number",
+        }),
+      ],
+    );
+  });
+
+  test("loaded CoList keeps schema validation", async () => {
+    const Map = co.map({
+      list: co.list(
+        co.map({
+          name: z.string(),
+        }),
+      ),
+    });
+
+    const map = Map.create({
+      list: [{ name: "John" }, { name: "Jane" }],
+    });
+
+    const loadedMap = await Map.load(map.$jazz.id, {
+      resolve: { list: { $each: true } },
+    });
+    assertLoaded(loadedMap);
+    expect(loadedMap.list).toEqual([{ name: "John" }, { name: "Jane" }]);
+
+    expectValidationError(
+      // @ts-expect-error - number is not a person
+      () => loadedMap.list.$jazz.push(2),
+    );
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => loadedMap.list[0]?.$jazz.set("name", 2),
+    );
   });
 
   describe("Mutation", () => {
@@ -676,7 +755,7 @@ describe("CoList applyDiff operations", async () => {
     list.$jazz.applyDiff([row1, row2, winningRow]);
     expect(list.length).toBe(3);
     expect(list[2]?.toJSON()).toEqual(["O", "O", "X"]);
-    // Only elements with different $jazz.id are replaced
+    // elements with different $jazz.id are replaced
     expect(list[0]?.$jazz.id).toBe(row1?.$jazz.id);
     expect(list[1]?.$jazz.id).toBe(row2?.$jazz.id);
     expect(list[2]?.$jazz.id).not.toBe(row3?.$jazz.id);
@@ -1221,7 +1300,7 @@ describe("CoList subscription", async () => {
       (update) => {
         spy(update);
 
-        // The update should be triggered only when the new item is loaded
+        // The update should be triggered when the new item is loaded
         for (const item of update) {
           expect(item).toBeDefined();
         }

@@ -47,6 +47,7 @@ import {
   AnyZodOrCoValueSchema,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -112,8 +113,6 @@ export class CoList<out Item = any>
     this.prototype[TypeSym] = "CoList";
   }
 
-  coListSchema: CoListSchema<AnyZodOrCoValueSchema> | undefined;
-
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
   /** @internal */
@@ -125,24 +124,19 @@ export class CoList<out Item = any>
   }
 
   constructor(
-    options:
-      | {
-          fromRaw: RawCoList;
-          coListSchema?: CoListSchema<AnyZodOrCoValueSchema>;
-        }
-      | undefined,
+    options: { fromRaw?: RawCoList; schema?: CoreCoValueSchema } | undefined,
   ) {
     super();
 
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
 
-    if (options && "fromRaw" in options) {
+    if (options && "fromRaw" in options && options.fromRaw) {
       Object.defineProperties(this, {
         $jazz: {
           value: new CoListJazzApi(
             proxy,
-            () => options.fromRaw,
-            options.coListSchema,
+            () => options.fromRaw!,
+            options.schema as CoListSchema<AnyZodOrCoValueSchema>,
           ),
           enumerable: false,
         },
@@ -183,7 +177,6 @@ export class CoList<out Item = any>
           owner: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
           validation?: "strict" | "loose";
-          coListSchema?: CoListSchema<AnyZodOrCoValueSchema>;
         }
       | Account
       | Group,
@@ -196,9 +189,7 @@ export class CoList<out Item = any>
         value: new CoListJazzApi(
           instance,
           () => raw,
-          options && "coListSchema" in options
-            ? options.coListSchema
-            : undefined,
+          this.coValueSchema as CoListSchema<AnyZodOrCoValueSchema>,
         ),
         enumerable: false,
       },
@@ -542,7 +533,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
-    private coListSchema?: CoListSchema<AnyZodOrCoValueSchema>,
+    private coListSchema?: CoreCoValueSchema,
   ) {
     super(coList);
   }
@@ -550,10 +541,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   private getItemSchema(): z.core.$ZodTypes {
     const listSchema = this.coListSchema?.getValidationSchema();
 
-    if (listSchema?.type !== "union") {
+    if (!listSchema || ("type" in listSchema && listSchema.type !== "union")) {
       throw new Error("List schema is not a union");
     }
 
+    // @ts-expect-error as union, it has options fields and 2nd is the plain shape
     const fieldSchema = listSchema.options[1]?.element as
       | z.core.$ZodTypes
       | undefined;

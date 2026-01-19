@@ -113,7 +113,6 @@ type CoMapFieldSchema = {
 export class CoMap extends CoValueBase implements CoValue {
   /** @category Type Helpers */
   declare [TypeSym]: "CoMap";
-  coMapSchema: CoreCoMapSchema | undefined;
   static {
     this.prototype[TypeSym] = "CoMap";
   }
@@ -132,27 +131,19 @@ export class CoMap extends CoValueBase implements CoValue {
 
   /** @internal */
   constructor(
-    options: { fromRaw: RawCoMap; coMapSchema?: CoreCoMapSchema } | undefined,
+    options: { fromRaw: RawCoMap; schema?: CoreCoMapSchema } | undefined,
   ) {
     super();
 
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
 
-    if (options) {
-      if ("fromRaw" in options) {
-        Object.defineProperties(this, {
-          $jazz: {
-            value: new CoMapJazzApi(
-              proxy,
-              () => options.fromRaw,
-              options.coMapSchema,
-            ),
-            enumerable: false,
-          },
-        });
-      } else {
-        throw new Error("Invalid CoMap constructor arguments");
-      }
+    if (options && "fromRaw" in options) {
+      Object.defineProperties(this, {
+        $jazz: {
+          value: new CoMapJazzApi(proxy, () => options.fromRaw, options.schema),
+          enumerable: false,
+        },
+      });
     }
 
     return proxy;
@@ -185,14 +176,17 @@ export class CoMap extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
-          coMapSchema?: CoreCoMapSchema;
         }
       | Account
       | Group,
   ) {
     const instance = new this();
-
-    return CoMap._createCoMap(instance, init, options);
+    return CoMap._createCoMap(
+      instance,
+      this.coValueSchema as CoreCoMapSchema,
+      init,
+      options,
+    );
   }
 
   /**
@@ -254,12 +248,12 @@ export class CoMap extends CoValueBase implements CoValue {
    */
   static _createCoMap<M extends CoMap>(
     instance: M,
+    schema: CoreCoMapSchema,
     init: Simplify<CoMapInit_DEPRECATED<M>>,
     options?:
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
-          coMapSchema?: CoreCoMapSchema | undefined;
         }
       | Account
       | Group,
@@ -268,11 +262,7 @@ export class CoMap extends CoValueBase implements CoValue {
 
     Object.defineProperties(instance, {
       $jazz: {
-        value: new CoMapJazzApi(
-          instance,
-          () => raw,
-          options && "coMapSchema" in options ? options.coMapSchema : undefined,
-        ),
+        value: new CoMapJazzApi(instance, () => raw, schema),
         enumerable: false,
       },
     });

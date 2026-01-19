@@ -179,13 +179,13 @@ export async function createAccountAs<S extends AccountSchema<any, any>>(
   return account;
 }
 
-export async function expectValidationError(
+export function expectValidationError(
   fn: () => any | Promise<any>,
   expectedIssues?: any,
 ) {
   let thrown = false;
   try {
-    await fn();
+    fn();
   } catch (e: any) {
     thrown = true;
     if (e?.name !== "ZodError") {
