@@ -720,12 +720,26 @@ export class CoValueCore {
       }
 
       const firstTransaction = newTransactions[0];
+      const deleteMarker =
+        firstTransaction && this.#getDeleteMarker(firstTransaction);
 
-      if (
-        firstTransaction &&
-        this.#isDeleteMarkerTransaction(firstTransaction)
-      ) {
+      if (deleteMarker) {
         deleteTransaction = firstTransaction;
+
+        if (deleteMarker.deleted !== this.id) {
+          return {
+            value: true,
+            err: {
+              type: "DeleteTransactionRejected",
+              id: this.id,
+              sessionID,
+              reason: "InvalidDeleteTransaction",
+              error: new Error(
+                `Delete transaction ID mismatch: expected ${this.id}, got ${deleteMarker.deleted}`,
+              ),
+            } as const,
+          };
+        }
       }
 
       if (this.isGroupOrAccount()) {
@@ -859,15 +873,18 @@ export class CoValueCore {
     this.verified?.markAsDeleted();
   }
 
-  #isDeleteMarkerTransaction(tx: Transaction): boolean {
+  #getDeleteMarker(tx: Transaction): { deleted: RawCoID } | undefined {
     if (tx.privacy !== "trusting") {
-      return false;
+      return;
     }
     if (!tx.meta) {
-      return false;
+      return;
     }
     const meta = safeParseJSON(tx.meta);
-    return meta?.deleted === true;
+
+    return meta && typeof meta.deleted === "string"
+      ? (meta as { deleted: RawCoID })
+      : undefined;
   }
 
   #canAuthorDeleteCoValueAtTime(
@@ -1080,7 +1097,7 @@ export class CoValueCore {
     this.makeTransaction(
       [], // Empty changes array
       "trusting", // Unencrypted
-      { deleted: true }, // Delete metadata
+      { deleted: this.id }, // Delete metadata
     );
   }
 
@@ -1098,7 +1115,7 @@ export class CoValueCore {
         "CoValueCore: makeTransaction called on coValue without verified state",
       );
     }
-    const isDeleteTransaction = meta?.deleted;
+    const isDeleteTransaction = Boolean(meta?.deleted);
 
     if (this.isDeleted && !isDeleteTransaction) {
       logger.error("Cannot make transaction on a deleted coValue", {
