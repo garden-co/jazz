@@ -854,4 +854,29 @@ describe("setDefaultSchemaPermissions", () => {
     const map = ExistingMap.create({ name: "Hello" });
     expect(map.name.$jazz.owner.$jazz.id).toContain(map.$jazz.owner.$jazz.id);
   });
+
+  test("modifies default permissions for copied schemas", async () => {
+    const anotherAccount = await createJazzTestAccount();
+
+    const ExistingMap = co.map({
+      name: co.plainText(),
+    });
+    setDefaultSchemaPermissions({
+      onCreate() {
+        // Do nothing
+      },
+    });
+    const CopiedMap = ExistingMap.resolved({ name: true });
+    setDefaultSchemaPermissions({
+      onCreate(newGroup) {
+        newGroup.addMember(anotherAccount, "reader");
+      },
+    });
+
+    const map = CopiedMap.create({ name: "Hello" });
+    await map.$jazz.waitForSync();
+
+    const mapOwner = map.$jazz.owner;
+    expect(mapOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("reader");
+  });
 });

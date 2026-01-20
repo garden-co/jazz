@@ -265,7 +265,7 @@ export class CoListSchema<
       hydrateCoreCoValueSchema(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
-    copy.#permissions = permissions ?? this.permissions;
+    copy.#permissions = permissions ?? this.#permissions;
     return copy;
   }
 }
