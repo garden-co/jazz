@@ -44,11 +44,14 @@ export class CoListSchema<
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(
     public element: T,
@@ -262,7 +265,7 @@ export class CoListSchema<
       hydrateCoreCoValueSchema(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
-    copy.permissions = permissions ?? this.permissions;
+    copy.#permissions = permissions ?? this.permissions;
     return copy;
   }
 }
