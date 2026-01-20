@@ -747,8 +747,7 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
     const [startIndex, endIndex] = deferredRange;
     return [...entries]
       .sort((a, b) => a.startTime - b.startTime)
-      .slice(startIndex, endIndex + 1)
-      .reverse();
+      .slice(startIndex, endIndex + 1);
   }, [entries, deferredRange]);
 
   const overallTimeRange = useMemo(() => {
