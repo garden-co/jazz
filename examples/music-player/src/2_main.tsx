@@ -94,7 +94,6 @@ function Main() {
   return (
     <SidebarProvider>
       <AppContent mediaPlayer={mediaPlayer} />
-      <JazzInspector />
     </SidebarProvider>
   );
 }

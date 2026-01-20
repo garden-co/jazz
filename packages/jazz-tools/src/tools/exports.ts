@@ -41,6 +41,7 @@ export type {
   AccountCreationProps,
   BaseProfileShape,
   ExportedCoValue,
+  SubscriptionPerformanceDetail,
 } from "./internal.js";
 
 export {

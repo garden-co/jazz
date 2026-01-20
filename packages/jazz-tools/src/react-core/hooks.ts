@@ -101,6 +101,7 @@ export function useCoValueSubscription<
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
   },
+  source?: string,
 ): CoValueSubscription<S, R> | null {
   const resolve = getResolveQuery(Schema, options?.resolve);
   const subscriptions = useCoValueSubscriptions(
@@ -108,6 +109,7 @@ export function useCoValueSubscription<
     [id],
     resolve,
     options?.unstable_branch,
+    source,
   );
   return (subscriptions[0] ?? null) as CoValueSubscription<S, R> | null;
 }
@@ -140,6 +142,7 @@ function useCoValueSubscriptions(
   ids: readonly (string | undefined | null)[],
   resolve: ResolveQuery<any>,
   branch?: BranchDefinition,
+  source?: string,
 ): (SubscriptionScope<CoValue> | null)[] {
   const contextManager = useJazzContext();
   const agent = useAgent();
@@ -168,6 +171,9 @@ function useCoValueSubscriptions(
       if (callerStack) {
         subscription.callerStack = callerStack;
       }
+
+      // Track performance for root subscriptions
+      subscription.trackLoadingPerformance(source ?? "unknown");
 
       return subscription;
     });
@@ -428,7 +434,12 @@ export function useCoState<
   },
 ): TSelectorReturn {
   useImportCoValueContent(id, options?.preloaded);
-  const subscription = useCoValueSubscription(Schema, id, options);
+  const subscription = useCoValueSubscription(
+    Schema,
+    id,
+    options,
+    "useCoState",
+  );
   return useSubscriptionSelector(subscription, options);
 }
 
@@ -471,7 +482,12 @@ export function useSuspenseCoState<
 ): TSelectorReturn {
   useImportCoValueContent(id, options?.preloaded);
 
-  const subscription = useCoValueSubscription(Schema, id, options);
+  const subscription = useCoValueSubscription(
+    Schema,
+    id,
+    options,
+    "useSuspenseCoState",
+  );
 
   if (!subscription) {
     throw new Error("Subscription not found");
@@ -534,6 +550,7 @@ export function useAccountSubscription<
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
   },
+  source?: string,
 ) {
   const contextManager = useJazzContext();
 
@@ -569,6 +586,9 @@ export function useAccountSubscription<
     if (callerStack) {
       subscription.callerStack = callerStack;
     }
+
+    // Track performance for root subscriptions
+    subscription.trackLoadingPerformance(source ?? "unknown");
 
     return {
       subscription,
@@ -727,7 +747,11 @@ export function useAccount<
     unstable_branch?: BranchDefinition;
   },
 ): TSelectorReturn {
-  const subscription = useAccountSubscription(AccountSchema, options);
+  const subscription = useAccountSubscription(
+    AccountSchema,
+    options,
+    "useAccount",
+  );
   return useSubscriptionSelector(subscription, options);
 }
 
@@ -765,7 +789,11 @@ export function useSuspenseAccount<
     unstable_branch?: BranchDefinition;
   },
 ): TSelectorReturn {
-  const subscription = useAccountSubscription(AccountSchema, options);
+  const subscription = useAccountSubscription(
+    AccountSchema,
+    options,
+    "useSuspenseAccount",
+  );
 
   if (!subscription) {
     throw new Error(
@@ -1054,6 +1082,7 @@ export function useSuspenseCoStates<
     ids,
     resolve,
     options?.unstable_branch,
+    "useSuspenseCoStates",
   ) as SubscriptionScope<CoValue>[];
   useSuspendUntilLoaded(subscriptionScopes);
   return useSubscriptionsSelector(subscriptionScopes, options);
@@ -1123,6 +1152,7 @@ export function useCoStates<
     ids,
     resolve,
     options?.unstable_branch,
+    "useCoStates",
   ) as SubscriptionScope<CoValue>[];
   return useSubscriptionsSelector(subscriptionScopes, options);
 }

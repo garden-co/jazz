@@ -1,10 +1,4 @@
-import type {
-  Account,
-  CoValue,
-  Group,
-  RefsToResolve,
-  Resolved,
-} from "../internal.js";
+import type { Account, CoValue, Group, Resolved } from "../internal.js";
 import type { JazzError } from "./JazzError.js";
 
 export const CoValueLoadingState = {
@@ -55,3 +49,31 @@ export type SubscriptionValueLoading = {
 };
 
 export type BranchDefinition = { name: string; owner?: Group | Account };
+
+/**
+ * Detail structure for subscription performance marks and measures.
+ * Used by SubscriptionScope.trackLoadingPerformance() to emit performance data.
+ */
+export interface SubscriptionPerformanceDetail {
+  /** Unique identifier for this subscription instance */
+  uuid: string;
+  /** CoValue ID (e.g., "co_z1234...") */
+  id: string;
+  /** Source identifier (hook name or API) */
+  source: string;
+  /** The resolve query object */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  resolve: any;
+  /** Current status of the subscription */
+  status: "pending" | "loaded" | "error";
+  /** When the subscription started loading (DOMHighResTimeStamp) */
+  startTime: number;
+  /** When loading completed (if completed) */
+  endTime?: number;
+  /** Total load time in ms (if completed) */
+  duration?: number;
+  /** Error type if status is "error" */
+  errorType?: "unavailable" | "unauthorized" | "deleted";
+  /** Stack trace captured at subscription creation time */
+  callerStack?: string;
+}

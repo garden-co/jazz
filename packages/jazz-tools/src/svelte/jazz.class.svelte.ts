@@ -16,6 +16,7 @@ import type {
   ResolveQueryStrict,
 } from "jazz-tools";
 import {
+  captureStack,
   coValueClassFromCoValueClassOrSchema,
   CoValueLoadingState,
   getUnloadedCoValueWithoutId,
@@ -70,6 +71,7 @@ export class CoState<
     id: CoStateId | (() => CoStateId),
     options?: CoStateOptions<V, R> | (() => CoStateOptions<V, R>),
   ) {
+    const callerStack = captureStack();
     this.#id = $derived.by(typeof id === "function" ? id : () => id);
     this.#options = $derived.by(
       typeof options === "function" ? options : () => options,
@@ -105,6 +107,11 @@ export class CoState<
           false, // bestEffortResolution
           options?.unstable_branch,
         );
+
+        subscriptionScope.callerStack = callerStack;
+
+        // Track performance for Svelte subscriptions
+        subscriptionScope.trackLoadingPerformance("CoState");
 
         subscriptionScope.subscribe(() => {
           const value = subscriptionScope.getCurrentValue();
@@ -153,6 +160,7 @@ export class AccountCoState<
     Schema: A,
     options?: CoStateOptions<A, R> | (() => CoStateOptions<A, R>),
   ) {
+    const callerStack = captureStack();
     this.#options = $derived.by(
       typeof options === "function" ? options : () => options,
     );
@@ -186,6 +194,11 @@ export class AccountCoState<
           false, // bestEffortResolution
           options?.unstable_branch,
         );
+
+        subscriptionScope.callerStack = callerStack;
+
+        // Track performance for Svelte subscriptions
+        subscriptionScope.trackLoadingPerformance("AccountCoState");
 
         subscriptionScope.subscribe(() => {
           const value = subscriptionScope.getCurrentValue();

@@ -22,6 +22,7 @@ import {
 } from "./JazzError.js";
 import type {
   BranchDefinition,
+  SubscriptionPerformanceDetail,
   SubscriptionValue,
   SubscriptionValueLoading,
 } from "./types.js";
@@ -44,6 +45,13 @@ export class SubscriptionScope<D extends CoValue> {
   static setProfilingEnabled(enabled: boolean) {
     this.isProfilingEnabled = enabled;
   }
+
+  static enableProfiling() {
+    this.isProfilingEnabled = true;
+  }
+
+  private performanceUuid: string | undefined;
+  private performanceSource: string | undefined;
 
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
   childValues: Map<string, SubscriptionValue<CoValue>> = new Map();
@@ -143,8 +151,13 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  trackLoadingPerformance(context: string) {
+  trackLoadingPerformance(source: string) {
     if (!SubscriptionScope.isProfilingEnabled) {
+      return;
+    }
+
+    // Already tracking this subscription
+    if (this.performanceUuid) {
       return;
     }
 
@@ -154,11 +167,77 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    const uuid = crypto.randomUUID();
+    this.performanceUuid = crypto.randomUUID();
+    this.performanceSource = source;
 
-    // TODO: Use performance.mark and performance.measure to track the loading performance
-    // provide context, schema and resolve in the details
-    // Check the storage peer loading state to see if the value has been loaded from storage
+    const detail: SubscriptionPerformanceDetail = {
+      uuid: this.performanceUuid,
+      id: this.id,
+      source,
+      resolve: this.resolve,
+      status: "pending",
+      startTime: performance.now(),
+      callerStack: this.callerStack?.stack,
+    };
+
+    performance.mark(`jazz.subscription.start:${this.performanceUuid}`, {
+      detail,
+    });
+
+    // Subscribe to get notified when loading completes
+    const unsubscribe = this.subscribe(() => {
+      const rawValue = this.getCurrentRawValue();
+
+      if (rawValue === CoValueLoadingState.LOADING) {
+        return;
+      }
+
+      this.emitLoadingComplete(rawValue);
+      unsubscribe();
+    });
+  }
+
+  private emitLoadingComplete(rawValue: D | NotLoadedCoValueState) {
+    if (!this.performanceUuid) return;
+
+    const isError = typeof rawValue === "string";
+    const endTime = performance.now();
+
+    let errorType: SubscriptionPerformanceDetail["errorType"];
+    if (isError) {
+      if (
+        rawValue === CoValueLoadingState.UNAVAILABLE ||
+        rawValue === CoValueLoadingState.UNAUTHORIZED ||
+        rawValue === CoValueLoadingState.DELETED
+      ) {
+        errorType = rawValue;
+      }
+    }
+
+    const detail: SubscriptionPerformanceDetail = {
+      uuid: this.performanceUuid,
+      id: this.id,
+      source: this.performanceSource ?? "unknown",
+      resolve: this.resolve,
+      status: isError ? "error" : "loaded",
+      startTime: 0, // Will be calculated from measure
+      endTime,
+      errorType,
+    };
+
+    performance.mark(`jazz.subscription.end:${this.performanceUuid}`, {
+      detail,
+    });
+
+    try {
+      performance.measure(`jazz.subscription:${this.performanceUuid}`, {
+        start: `jazz.subscription.start:${this.performanceUuid}`,
+        end: `jazz.subscription.end:${this.performanceUuid}`,
+        detail,
+      });
+    } catch {
+      // Marks may have been cleared
+    }
   }
 
   updateValue(value: SubscriptionValue<D>) {

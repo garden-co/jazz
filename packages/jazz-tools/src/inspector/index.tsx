@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useState } from "react";
 import { setup } from "goober";
 import { useJazzContextValue } from "jazz-tools/react-core";
-import { Account } from "jazz-tools";
+import { Account, SubscriptionScope } from "jazz-tools";
 import { InspectorInApp } from "./in-app.js";
 import { Position } from "./viewer/inspector-button.js";
 
@@ -13,6 +13,10 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
   const [isCSR, setIsCSR] = useState(false);
   useEffect(() => {
     setIsCSR(true);
+  }, []);
+
+  useLayoutEffect(() => {
+    SubscriptionScope.enableProfiling();
   }, []);
 
   if (!isCSR) {
