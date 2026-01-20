@@ -292,22 +292,19 @@ Index objects have `nosync: "true"` metadata. SyncManager now filters them befor
 - `forward_truncation_to_servers()` and `forward_truncation_to_clients_except()` check nosync before sending ObjectTruncated
 - Tests in `sync_manager::tests::nosync_*` verify filtering behavior
 
+#### Followup 3: Sync Integration for Row Updates ✓
+
+Extended `AllObjectUpdate` with previous state to enable proper column index updates for synced commits:
+- Added `previous_commit_ids: Vec<CommitId>` - previous tips before the update
+- Added `old_content: Option<Vec<u8>>` - content of the "winning" tip (last by timestamp)
+- `add_commit()` and `receive_commit()` capture previous state before mutation
+- `handle_object_update()` uses `old_content` to compute index delta for updates
+- First commit on branch (empty `previous_commit_ids`) treated as insert
+- Tests: `local_update_updates_all_column_indices`, `synced_update_updates_column_indices`
+
+**TODO:** Currently uses last-writer-wins (newest tip by timestamp). Future work: merge strategies for concurrent updates.
+
 ### Pending Followups
-
-#### Followup 3: Sync Integration for Row Updates (Medium Priority)
-
-**Current limitation:** When rows are updated via sync (not local `update()` call), column indices may become stale. The `_id` index remains correct, but column indices won't reflect the new values because we don't have the old data to compute the index delta.
-
-**Design decision:** Require explicit `process()` calls (no auto-process).
-
-**Core need:** A way to get (old_data, new_data) on any object update, enabling:
-- Detection of which columns changed
-- Removal of old value from index before inserting new value
-
-**Implementation steps:**
-1. First: Add test verifying local insert+update updates ALL column indices (not just `_id`)
-2. Implement old_data/new_data tracking for object updates
-3. Integration test: QueryManager1 on SyncManager1/ObjectManager1 exchanging messages with QueryManager2 on SyncManager2/ObjectManager2
 
 #### Followup 4: Async Row Materialization (Medium Priority)
 

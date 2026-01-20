@@ -480,24 +480,34 @@ impl QueryManager {
             None => return,
         };
 
-        // Extract data we need from the object
-        let data = match self.load_row_from_object(update.object_id) {
+        // Extract current (new) data from the object
+        let new_data = match self.load_row_from_object(update.object_id) {
             Some((data, _)) => data,
             None => return,
         };
 
         let table_name = TableName::new(&table);
-        let descriptor = self.schema.get(&table_name).cloned();
+        let descriptor = match self.schema.get(&table_name).cloned() {
+            Some(desc) => desc,
+            None => return,
+        };
 
-        // New row - update indices (ignore persistence errors for synced objects)
-        // TODO: For updated rows from sync, we don't have old_data so we can't
-        // properly update column indices. This is tracked in Followup 3 - for now,
-        // the _id index is correct, but column indices may become stale for synced updates.
-        if let Some(desc) = descriptor
-            && update.is_new_object
-        {
-            let _ = self.update_indices_for_insert(&table, update.object_id, &data, &desc);
+        if update.is_new_object || update.previous_commit_ids.is_empty() {
+            // First commit on branch (new object or synced first commit) - insert into all indices
+            let _ =
+                self.update_indices_for_insert(&table, update.object_id, &new_data, &descriptor);
+        } else if let Some(old_data) = update.old_content {
+            // Synced update - compute index delta using old_content
+            // TODO: Future merge strategies - currently last-writer-wins by timestamp
+            let _ = self.update_indices_for_update(
+                &table,
+                update.object_id,
+                &old_data,
+                &new_data,
+                &descriptor,
+            );
         }
+        // If old_content is None with previous_commit_ids: truncated old data, accept staleness
 
         self.mark_subscriptions_dirty(&table);
     }
@@ -963,5 +973,236 @@ mod tests {
         assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
         assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
         assert_eq!(results[2][0], Value::Text("Bob".into())); // 50
+    }
+
+    #[test]
+    fn local_update_updates_all_column_indices() {
+        // Verifies that local update() correctly:
+        // 1. Removes old values from column indices
+        // 2. Adds new values to column indices
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert row with name="Alice", score=100
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Query by name="Alice" → finds row
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Query by score=100 → finds row
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Update to name="Bob", score=200
+        qm.update(
+            handle.row_id,
+            &[Value::Text("Bob".into()), Value::Integer(200)],
+        )
+        .unwrap();
+
+        // Query by name="Alice" → empty (old value removed from index)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Old name value should be removed from index"
+        );
+
+        // Query by name="Bob" → finds row (new value in index)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Bob".into()))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1, "New name value should be in index");
+
+        // Query by score=100 → empty (old value removed from index)
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Old score value should be removed from index"
+        );
+
+        // Query by score=200 → finds row (new value in index)
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(200))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1, "New score value should be in index");
+    }
+
+    #[test]
+    fn synced_update_updates_column_indices() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+        use std::collections::HashMap;
+
+        // This test verifies that updates received via sync (receive_commit)
+        // correctly update column indices using old_content from AllObjectUpdate.
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Simulate receiving a new object from sync
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        // Receive object with table metadata
+        let mut metadata = HashMap::new();
+        metadata.insert("table".to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(row_id, metadata);
+
+        // Subscribe to all objects so we get AllObjectUpdate notifications
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Encode the initial row data (name="Alice", score=100)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let initial_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+        // Receive the first commit (insert)
+        let commit1 = Commit {
+            parents: vec![],
+            content: initial_data.clone(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+        let commit1_id = qm
+            .sync_manager_mut()
+            .object_manager
+            .receive_commit(row_id, ROW_BRANCH, commit1)
+            .unwrap();
+
+        // Process to handle the AllObjectUpdate
+        qm.process();
+
+        // Query by name="Alice" → finds row
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find row by name=Alice after sync insert"
+        );
+
+        // Query by score=100 → finds row
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find row by score=100 after sync insert"
+        );
+
+        // Encode updated row data (name="Bob", score=200)
+        let updated_data = encode_row(
+            &descriptor,
+            &[Value::Text("Bob".into()), Value::Integer(200)],
+        )
+        .unwrap();
+
+        // Receive the second commit (update)
+        let commit2 = Commit {
+            parents: vec![commit1_id],
+            content: updated_data.clone(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(row_id, ROW_BRANCH, commit2)
+            .unwrap();
+
+        // Process to handle the AllObjectUpdate with old_content
+        qm.process();
+
+        // Query by name="Alice" → empty (old value removed from index)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Old name value should be removed from index after sync update"
+        );
+
+        // Query by name="Bob" → finds row (new value in index)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Bob".into()))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "New name value should be in index after sync update"
+        );
+
+        // Query by score=100 → empty (old value removed from index)
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Old score value should be removed from index after sync update"
+        );
+
+        // Query by score=200 → finds row (new value in index)
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(200))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "New score value should be in index after sync update"
+        );
     }
 }
