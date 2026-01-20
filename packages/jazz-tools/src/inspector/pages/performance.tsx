@@ -41,6 +41,20 @@ const Container = styled("div")`
   min-height: 0;
 `;
 
+const MainLayout = styled("div")`
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 1rem;
+`;
+
+const ListPanel = styled("div")`
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+`;
+
 const Grid = styled("div")`
   display: grid;
   grid-template-columns:
@@ -49,9 +63,11 @@ const Grid = styled("div")`
     minmax(100px, 200px)
     80px;
   grid-template-rows: min-content;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
   min-height: 0;
+  position: relative;
 `;
 
 const HeaderCell = styled("div")`
@@ -79,18 +95,25 @@ const RowWrapper = styled("div")`
     background-color: var(--j-foreground);
   }
 
-  &::after {
-    content: "";
-    position: absolute;
-    bottom: 0;
-    height: 4px;
-    border-radius: 2px;
-    left: var(--bar-left);
-    width: var(--bar-width);
-    background-color: var(--bar-color);
+`;
+
+const TimeBar = styled("div")`
+  position: absolute;
+  bottom: 0;
+  height: 4px;
+  transition: transform 0.15s ease;
+  z-index: 1;
+  container-type: inline-size;
+
+  .row-wrapper:hover &, [data-expanded="true"] & {
+    transform: scaleY(4);
+
+    .time-label {
+      opacity: 1;
+    }
   }
 
-  &[data-status="pending"]::after {
+  &[data-status="pending"] {
     animation: pulse 1.5s ease-in-out infinite;
   }
 
@@ -101,6 +124,34 @@ const RowWrapper = styled("div")`
     }
     50% {
       opacity: 0.5;
+    }
+  }
+`;
+
+const TimeLabel = styled("span")`
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%) scaleY(0.25);
+  font-size: 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: white;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+  left: 4px;
+
+  @container (max-width: 50px) {
+    left: 100%;
+    margin-left: 4px;
+  }
+
+  [data-near-edge="true"] & {
+    @container (max-width: 50px) {
+      left: auto;
+      right: 100%;
+      margin-left: 0;
+      margin-right: 4px;
     }
   }
 `;
@@ -146,20 +197,27 @@ const StatusBadge = styled("span")`
   }
 `;
 
-const ExpandIcon = styled("span")`
-  display: inline-block;
-  transition: transform 0.15s ease;
-
-  &[data-expanded="true"] {
-    transform: rotate(90deg);
-  }
-`;
-
-const ExpandedDetails = styled("div")`
-  grid-column: 1 / -1;
+const DetailPanel = styled("div")`
+  width: 320px;
+  flex-shrink: 0;
   padding: 0.75rem 1rem;
   background-color: var(--j-foreground);
-  border-bottom: 1px solid var(--j-border-color);
+  border: 1px solid var(--j-border-color);
+  border-radius: var(--j-radius-sm);
+  overflow-y: auto;
+`;
+
+const DetailPanelEmpty = styled("div")`
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--j-neutral-500);
+  font-size: 0.75rem;
+  background-color: var(--j-foreground);
+  border: 1px solid var(--j-border-color);
+  border-radius: var(--j-radius-sm);
 `;
 
 const DetailsGrid = styled("div")`
@@ -545,94 +603,120 @@ function TimeRangeSlider({
 
 interface SubscriptionRowProps {
   entry: SubscriptionEntry;
-  isExpanded: boolean;
-  onToggle: () => void;
-  onNavigate: (id: string) => void;
-  barStyle: CSSProperties;
+  isSelected: boolean;
+  onSelect: () => void;
+  barLeft: string;
+  barWidth: string;
+  barColor: string;
 }
 
 function SubscriptionRow({
   entry,
-  isExpanded,
-  onToggle,
-  onNavigate,
-  barStyle,
+  isSelected,
+  onSelect,
+  barLeft,
+  barWidth,
+  barColor,
 }: SubscriptionRowProps) {
   return (
-    <>
-      <RowWrapper
-        data-expanded={isExpanded}
+    <RowWrapper
+      className="row-wrapper"
+      data-expanded={isSelected}
+      onClick={onSelect}
+    >
+      <Cell>
+        <StatusBadge data-status={entry.status}>{entry.source}</StatusBadge>
+      </Cell>
+      <Cell>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "0.125rem",
+          }}
+        >
+          <span>{entry.id}</span>
+          <span style={{ color: "var(--j-neutral-500)" }}>{entry.resolve}</span>
+        </div>
+      </Cell>
+      <Cell>{getCallerLocation(entry.callerStack) ?? "-"}</Cell>
+      <Cell>
+        {entry.duration !== undefined ? (
+          formatDuration(entry.duration)
+        ) : (
+          <PendingDot />
+        )}
+      </Cell>
+      <TimeBar
+        className="time-bar"
         data-status={entry.status}
-        style={barStyle}
-        onClick={onToggle}
+        data-near-edge={parseFloat(barLeft) + parseFloat(barWidth) > 85}
+        style={{
+          left: barLeft,
+          width: barWidth,
+          backgroundColor: barColor,
+        }}
       >
-        <Cell>
-          <StatusBadge data-status={entry.status}>
-            <ExpandIcon data-expanded={isExpanded}>▶</ExpandIcon>
-            {entry.source}
-          </StatusBadge>
-        </Cell>
-        <Cell>
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.125rem",
-            }}
+        <TimeLabel className="time-label">
+          {formatDuration(entry.duration ?? 0)}
+        </TimeLabel>
+      </TimeBar>
+    </RowWrapper>
+  );
+}
+
+interface SubscriptionDetailPanelProps {
+  entry: SubscriptionEntry;
+  onNavigate: (id: string) => void;
+}
+
+function SubscriptionDetailPanel({
+  entry,
+  onNavigate,
+}: SubscriptionDetailPanelProps) {
+  return (
+    <DetailPanel>
+      <DetailsGrid>
+        <DetailLabel>Source</DetailLabel>
+        <DetailValue>
+          <StatusBadge data-status={entry.status}>{entry.source}</StatusBadge>
+        </DetailValue>
+
+        <DetailLabel>CoValue</DetailLabel>
+        <DetailValue>
+          <a
+            title="Click to navigate to CoValue"
+            onClick={() => onNavigate(entry.id)}
+            style={{ color: "var(--j-link-color)", cursor: "pointer" }}
           >
-            <span
-              data-clickable="true"
-              onClick={(e) => {
-                e.stopPropagation();
-                onNavigate(entry.id);
-              }}
-              style={{ color: "var(--j-link-color)", cursor: "pointer" }}
-            >
-              {entry.id}
-            </span>
-            <span style={{ color: "var(--j-neutral-500)" }}>
-              {entry.resolve}
-            </span>
-          </div>
-        </Cell>
-        <Cell>{getCallerLocation(entry.callerStack) ?? "-"}</Cell>
-        <Cell>
-          {entry.duration !== undefined ? (
-            formatDuration(entry.duration)
-          ) : (
-            <PendingDot />
-          )}
-        </Cell>
-      </RowWrapper>
-      {isExpanded && (
-        <ExpandedDetails>
-          <DetailsGrid>
-            <DetailLabel>Time</DetailLabel>
-            <DetailValue>
-              {formatTime(entry.startTime)} -{" "}
-              {entry.duration !== undefined
-                ? formatTime(entry.startTime + entry.duration)
-                : "Pending..."}
-            </DetailValue>
+            {entry.id}
+          </a>
+        </DetailValue>
 
-            <DetailLabel>Duration</DetailLabel>
-            <DetailValue>
-              {entry.duration !== undefined
-                ? formatDuration(entry.duration)
-                : "Pending..."}
-            </DetailValue>
+        <DetailLabel>Time</DetailLabel>
+        <DetailValue>
+          {formatTime(entry.startTime)} -{" "}
+          {entry.duration !== undefined
+            ? formatTime(entry.startTime + entry.duration)
+            : "Pending..."}
+        </DetailValue>
 
-            <DetailLabel>Resolve Query</DetailLabel>
-            <Pre>{JSON.stringify(JSON.parse(entry.resolve), null, 2)}</Pre>
+        <DetailLabel>Duration</DetailLabel>
+        <DetailValue>
+          {entry.duration !== undefined
+            ? formatDuration(entry.duration)
+            : "Pending..."}
+        </DetailValue>
 
-            <DetailLabel>Stack Trace</DetailLabel>
-            <Pre>
-              {getCallerStack(entry.callerStack) ?? "No stack trace available"}
-            </Pre>
-          </DetailsGrid>
-        </ExpandedDetails>
-      )}
-    </>
+        <DetailLabel>Resolve Query</DetailLabel>
+        <Pre>{JSON.stringify(JSON.parse(entry.resolve), null, 2)}</Pre>
+
+        <DetailLabel>Stack Trace</DetailLabel>
+        <Pre>
+          {getCallerStack(entry.callerStack) ?? "No stack trace available"}
+        </Pre>
+      </DetailsGrid>
+    </DetailPanel>
   );
 }
 
@@ -647,7 +731,7 @@ interface PerformancePageProps {
 
 export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
   const entries = usePerformanceEntries();
-  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const maxRange: [number, number] = [0, entries.length - 1];
   const [subscriptionRange, setSubscriptionRange] = useState<
     [number, number] | null
@@ -655,28 +739,17 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
   const deferredRange = useDeferredValue(subscriptionRange ?? maxRange);
   const { setPage } = useRouter();
 
-  const toggleRow = (uuid: string) => {
-    setExpandedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(uuid)) {
-        next.delete(uuid);
-      } else {
-        next.add(uuid);
-      }
-      return next;
-    });
+  const selectRow = (uuid: string) => {
+    setSelectedRow((prev) => (prev === uuid ? null : uuid));
   };
-
-  // Sort entries by start time (newest first)
-  const sortedEntries = useMemo(
-    () => [...entries].sort((a, b) => b.startTime - a.startTime),
-    [entries],
-  );
 
   const filteredEntries = useMemo(() => {
     const [startIndex, endIndex] = deferredRange;
-    return sortedEntries.slice(startIndex, endIndex + 1);
-  }, [sortedEntries, deferredRange]);
+    return [...entries]
+      .sort((a, b) => a.startTime - b.startTime)
+      .slice(startIndex, endIndex + 1)
+      .reverse();
+  }, [entries, deferredRange]);
 
   const overallTimeRange = useMemo(() => {
     if (entries.length === 0) return null;
@@ -699,7 +772,7 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
   const displayRange = selectedTimeRange ?? overallTimeRange;
 
   // Calculate bar position for each entry
-  const getBarStyle = (entry: SubscriptionEntry): CSSProperties => {
+  const getBarProps = (entry: SubscriptionEntry) => {
     const range = (displayRange?.max ?? 1) - (displayRange?.min ?? 0) || 1;
     const now = performance.now();
 
@@ -720,10 +793,10 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
           : "var(--j-success-color)";
 
     return {
-      "--bar-left": `${left}%`,
-      "--bar-width": `${width}%`,
-      "--bar-color": color,
-    } as CSSProperties;
+      barLeft: `${left}%`,
+      barWidth: `${width}%`,
+      barColor: color,
+    };
   };
 
   const handleNavigateToCoValue = (id: string) => {
@@ -746,6 +819,10 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
     );
   }
 
+  const selectedEntry = selectedRow
+    ? filteredEntries.find((e) => e.uuid === selectedRow)
+    : null;
+
   return (
     <Container style={style}>
       <TimeRangeSlider
@@ -756,22 +833,31 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
         totalCount={entries.length}
         filteredCount={filteredEntries.length}
       />
-      <Grid>
-        <HeaderCell>Source</HeaderCell>
-        <HeaderCell>CoValue</HeaderCell>
-        <HeaderCell>Caller</HeaderCell>
-        <HeaderCell>Duration</HeaderCell>
-        {filteredEntries.map((entry) => (
-          <SubscriptionRow
-            key={entry.uuid}
-            entry={entry}
-            isExpanded={expandedRows.has(entry.uuid)}
-            onToggle={() => toggleRow(entry.uuid)}
+      <MainLayout>
+        <ListPanel>
+          <Grid>
+            <HeaderCell>Source</HeaderCell>
+            <HeaderCell>CoValue</HeaderCell>
+            <HeaderCell>Caller</HeaderCell>
+            <HeaderCell>Duration</HeaderCell>
+            {filteredEntries.map((entry) => (
+              <SubscriptionRow
+                key={entry.uuid}
+                entry={entry}
+                isSelected={selectedRow === entry.uuid}
+                onSelect={() => selectRow(entry.uuid)}
+                {...getBarProps(entry)}
+              />
+            ))}
+          </Grid>
+        </ListPanel>
+        {selectedEntry ? (
+          <SubscriptionDetailPanel
+            entry={selectedEntry}
             onNavigate={handleNavigateToCoValue}
-            barStyle={getBarStyle(entry)}
           />
-        ))}
-      </Grid>
+        ) : null}
+      </MainLayout>
     </Container>
   );
 }
