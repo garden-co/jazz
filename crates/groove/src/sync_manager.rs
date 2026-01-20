@@ -1078,6 +1078,19 @@ impl SyncManager {
         branch_name: BranchName,
         tails: HashSet<CommitId>,
     ) {
+        // Skip objects marked as nosync (local-only, e.g., index nodes)
+        let Some(object) = self.object_manager.get(object_id) else {
+            return;
+        };
+        if object
+            .metadata
+            .get("nosync")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
 
         for server_id in server_ids {
@@ -1115,6 +1128,19 @@ impl SyncManager {
         tails: HashSet<CommitId>,
         except: ClientId,
     ) {
+        // Skip objects marked as nosync (local-only, e.g., index nodes)
+        let Some(object) = self.object_manager.get(object_id) else {
+            return;
+        };
+        if object
+            .metadata
+            .get("nosync")
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         let client_ids: Vec<ClientId> = self
             .clients
             .iter()
@@ -2103,5 +2129,199 @@ mod tests {
             }
             _ => panic!("Expected ObjectUpdated"),
         }
+    }
+
+    // ========================================================================
+    // nosync Filtering Tests
+    // ========================================================================
+
+    #[test]
+    fn nosync_object_not_synced_to_server() {
+        let mut sm = SyncManager::new();
+
+        // Create object with nosync: "true" metadata
+        let obj_id = sm.object_manager.create(Some(
+            [("nosync".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        sm.object_manager
+            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        // Add server - should NOT receive the nosync object
+        let server_id = ServerId::new();
+        sm.add_server(server_id);
+
+        let outbox = sm.take_outbox();
+        assert!(
+            outbox.is_empty(),
+            "nosync object should not be synced to server"
+        );
+    }
+
+    #[test]
+    fn nosync_object_not_synced_to_client() {
+        let mut sm = SyncManager::new();
+
+        // Create object with nosync: "true" metadata
+        let obj_id = sm.object_manager.create(Some(
+            [("nosync".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        sm.object_manager
+            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        // Add client with scope including the object
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        let mut scope = HashMap::new();
+        scope.insert((obj_id, "main".into()), Permission::Readable);
+        sm.add_or_update_query(client_id, QueryId(1), scope);
+
+        let outbox = sm.take_outbox();
+        assert!(
+            outbox.is_empty(),
+            "nosync object should not be synced to client"
+        );
+    }
+
+    #[test]
+    fn nosync_object_update_not_forwarded_to_server() {
+        let mut sm = SyncManager::new();
+
+        // Create nosync object
+        let obj_id = sm.object_manager.create(Some(
+            [("nosync".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        // Add server
+        let server_id = ServerId::new();
+        sm.add_server(server_id);
+        sm.take_outbox(); // Clear any initial sync messages
+
+        // Add another commit
+        sm.object_manager
+            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .unwrap();
+
+        // Forward update to servers
+        sm.forward_update_to_servers(obj_id, "main".into());
+
+        let outbox = sm.take_outbox();
+        assert!(
+            outbox.is_empty(),
+            "nosync object update should not be forwarded to server"
+        );
+    }
+
+    #[test]
+    fn nosync_object_truncation_not_forwarded_to_server() {
+        let mut sm = SyncManager::new();
+
+        // Create nosync object with some history
+        let obj_id = sm.object_manager.create(Some(
+            [("nosync".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .unwrap();
+        let c2 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .unwrap();
+
+        // Add server
+        let server_id = ServerId::new();
+        sm.add_server(server_id);
+        sm.take_outbox(); // Clear any initial sync messages
+
+        // Forward truncation to servers (simulating what would happen after truncation)
+        // The nosync check should prevent any message from being sent
+        sm.forward_truncation_to_servers(obj_id, "main".into(), [c2].into_iter().collect());
+
+        let outbox = sm.take_outbox();
+        assert!(
+            outbox.is_empty(),
+            "nosync object truncation should not be forwarded to server"
+        );
+    }
+
+    #[test]
+    fn nosync_object_truncation_not_forwarded_to_client() {
+        let mut sm = SyncManager::new();
+
+        // Create nosync object with some history
+        let obj_id = sm.object_manager.create(Some(
+            [("nosync".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .unwrap();
+        let c2 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .unwrap();
+
+        // Add client with scope including the object
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        let mut scope = HashMap::new();
+        scope.insert((obj_id, "main".into()), Permission::Readable);
+        sm.add_or_update_query(client_id, QueryId(1), scope);
+        sm.take_outbox(); // Clear any initial sync messages
+
+        // Forward truncation to clients (simulating what would happen after truncation)
+        // The nosync check should prevent any message from being sent
+        sm.forward_truncation_to_clients(obj_id, "main".into(), [c2].into_iter().collect());
+
+        let outbox = sm.take_outbox();
+        assert!(
+            outbox.is_empty(),
+            "nosync object truncation should not be forwarded to client"
+        );
+    }
+
+    #[test]
+    fn regular_object_still_syncs_to_server() {
+        // Ensure regular objects without nosync still sync properly
+        let mut sm = SyncManager::new();
+
+        // Create object WITHOUT nosync metadata
+        let obj_id = sm.object_manager.create(Some(
+            [("key".to_string(), "value".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        sm.object_manager
+            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .unwrap();
+
+        // Add server - should receive the object
+        let server_id = ServerId::new();
+        sm.add_server(server_id);
+
+        let outbox = sm.take_outbox();
+        assert_eq!(outbox.len(), 1, "regular object should sync to server");
     }
 }
