@@ -431,93 +431,42 @@ function usePerformanceEntries(): SubscriptionEntry[] {
   const [entries, setEntries] = useState<SubscriptionEntry[]>([]);
 
   useEffect(() => {
-    // Collect existing marks on mount
-    const existingMarks = performance
-      .getEntriesByType("mark")
-      .filter((m) => m.name.startsWith("jazz.subscription.start:"));
+    const entriesByUuid = new Map<string, SubscriptionEntry>();
 
-    const initialEntries: SubscriptionEntry[] = existingMarks.map((mark) => {
-      const detail = (mark as PerformanceMark)
-        .detail as SubscriptionPerformanceDetail;
-      const uuid = mark.name.replace("jazz.subscription.start:", "");
+    const handlePerformanceEntries = (entries: PerformanceEntry[]) => {
+      for (const mark of entries) {
+        if (!mark.name.startsWith("jazz.subscription")) continue;
 
-      const measure = performance.getEntriesByName(
-        `jazz.subscription:${uuid}`,
-      )[0] as PerformanceMeasure | undefined;
+        const detail = (mark as PerformanceMark)
+          .detail as SubscriptionPerformanceDetail;
 
-      if (measure) {
-        const measureDetail = measure.detail as SubscriptionPerformanceDetail;
-        return {
-          uuid,
+        if (mark.entryType === "mark" && entriesByUuid.has(detail.uuid))
+          continue;
+
+        entriesByUuid.set(detail.uuid, {
+          uuid: detail.uuid,
           id: detail.id,
           source: detail.source,
           resolve: JSON.stringify(detail.resolve),
-          status: measureDetail.status,
+          status: detail.status,
           startTime: mark.startTime,
-          endTime: mark.startTime + measure.duration,
-          duration: measure.duration,
-          errorType: measureDetail.errorType,
           callerStack: detail.callerStack,
-        };
+          duration: mark.entryType === "mark" ? undefined : mark.duration,
+          endTime: mark.startTime + mark.duration,
+          errorType: detail.errorType,
+        });
       }
+    };
 
-      return {
-        uuid,
-        id: detail.id,
-        source: detail.source,
-        resolve: JSON.stringify(detail.resolve),
-        status: "pending" as const,
-        startTime: mark.startTime,
-        callerStack: detail.callerStack,
-      };
-    });
+    handlePerformanceEntries(performance.getEntriesByType("mark"));
 
-    setEntries(initialEntries);
+    handlePerformanceEntries(performance.getEntriesByType("measure"));
 
-    if (typeof PerformanceObserver === "undefined") {
-      return;
-    }
+    setEntries(Array.from(entriesByUuid.values()));
 
     const observer = new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        if (entry.name.startsWith("jazz.subscription.start:")) {
-          const detail = (entry as PerformanceMark)
-            .detail as SubscriptionPerformanceDetail;
-          setEntries((prev) => [
-            ...prev,
-            {
-              uuid: detail.uuid,
-              id: detail.id,
-              source: detail.source,
-              resolve: JSON.stringify(detail.resolve),
-              status: "pending",
-              startTime: entry.startTime,
-              callerStack: detail.callerStack,
-            },
-          ]);
-        } else if (
-          entry.entryType === "measure" &&
-          entry.name.startsWith("jazz.subscription:")
-        ) {
-          const uuid = entry.name.replace("jazz.subscription:", "");
-          const detail = (entry as PerformanceMeasure)
-            .detail as SubscriptionPerformanceDetail;
-
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.uuid === uuid
-                ? {
-                    ...e,
-                    status: detail.status,
-                    endTime: entry.startTime + entry.duration,
-                    duration: entry.duration,
-                    errorType: detail.errorType,
-                  }
-                : e,
-            ),
-          );
-        }
-      }
+      handlePerformanceEntries(list.getEntries());
+      setEntries(Array.from(entriesByUuid.values()));
     });
 
     observer.observe({ entryTypes: ["mark", "measure"] });
