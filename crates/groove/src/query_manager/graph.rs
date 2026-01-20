@@ -187,6 +187,27 @@ impl QueryGraph {
         }
     }
 
+    /// Check if the MaterializeNode has a specific object ID pending.
+    pub fn has_pending_id(&self, object_id: ObjectId) -> bool {
+        for node in self.nodes.values() {
+            if let GraphNode::Materialize(mat_node) = node
+                && mat_node.pending_ids().contains(&object_id)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark the materialize node dirty (to re-check pending IDs).
+    pub fn mark_materialize_dirty(&mut self) {
+        for (node_id, node) in &self.nodes {
+            if matches!(node, GraphNode::Materialize(_)) {
+                self.dirty_nodes.insert(*node_id);
+            }
+        }
+    }
+
     /// Topological sort of dirty nodes (dependencies first).
     fn topo_sort_dirty(&self) -> Vec<NodeId> {
         let mut result = Vec::new();
@@ -288,8 +309,24 @@ impl QueryGraph {
 
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     if let GraphNode::Materialize(mat_node) = node {
-                        let delta = mat_node.materialize(input_delta, &mut row_loader);
-                        row_deltas.insert(node_id, delta);
+                        // First, check if any previously-pending rows are now available
+                        let pending_delta = mat_node.check_pending(&mut row_loader);
+
+                        // Then materialize the new IdDelta
+                        let new_delta = mat_node.materialize(input_delta, &mut row_loader);
+
+                        // Merge the pending and new deltas
+                        let mut merged = RowDelta::new();
+                        merged.added.extend(pending_delta.added);
+                        merged.added.extend(new_delta.added);
+                        merged.removed.extend(pending_delta.removed);
+                        merged.removed.extend(new_delta.removed);
+                        merged.updated.extend(pending_delta.updated);
+                        merged.updated.extend(new_delta.updated);
+                        // pending flag is set based on whether we still have pending IDs
+                        merged.pending = new_delta.pending;
+
+                        row_deltas.insert(node_id, merged);
                     }
                 }
                 Some("filter") => {

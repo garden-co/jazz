@@ -112,6 +112,9 @@ impl RowNode for SortNode {
         // Build result with rows in sorted order
         let mut result = RowDelta::new();
 
+        // Propagate pending flag from input
+        result.pending = input.pending;
+
         // Added rows in sorted order
         for row in &self.current_rows {
             if added_ids.remove(&row.id) {
@@ -212,6 +215,7 @@ mod tests {
         );
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row1, row2, row3],
             removed: vec![],
             updated: vec![],
@@ -264,6 +268,7 @@ mod tests {
         );
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row1, row2, row3],
             removed: vec![],
             updated: vec![],
@@ -341,6 +346,7 @@ mod tests {
         );
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row1, row2, row3, row4],
             removed: vec![],
             updated: vec![],
@@ -379,6 +385,7 @@ mod tests {
         );
 
         node.process(RowDelta {
+            pending: false,
             added: vec![row1],
             removed: vec![],
             updated: vec![],
@@ -394,6 +401,7 @@ mod tests {
             ],
         );
         node.process(RowDelta {
+            pending: false,
             added: vec![row2],
             removed: vec![],
             updated: vec![],

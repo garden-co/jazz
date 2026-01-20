@@ -38,8 +38,11 @@ impl LimitOffsetNode {
     }
 
     /// Compute the delta between old and new window.
-    fn compute_delta(&self, old_rows: &[Row], new_rows: &[Row]) -> RowDelta {
+    fn compute_delta(&self, old_rows: &[Row], new_rows: &[Row], pending: bool) -> RowDelta {
         let mut delta = RowDelta::new();
+
+        // Propagate pending flag
+        delta.pending = pending;
 
         // Find removed rows (in old but not in new)
         for old in old_rows {
@@ -75,6 +78,7 @@ impl RowNode for LimitOffsetNode {
 
     fn process(&mut self, input: RowDelta) -> RowDelta {
         let old_rows = self.current_rows.clone();
+        let pending = input.pending;
 
         // Apply changes to all_rows
         for row in input.removed {
@@ -97,8 +101,8 @@ impl RowNode for LimitOffsetNode {
         self.recompute_window();
         self.dirty = false;
 
-        // Return the delta for the window
-        self.compute_delta(&old_rows, &self.current_rows)
+        // Return the delta for the window (propagating pending flag)
+        self.compute_delta(&old_rows, &self.current_rows, pending)
     }
 
     fn current_result(&self) -> &[Row] {
@@ -148,6 +152,7 @@ mod tests {
             .collect();
 
         let delta = RowDelta {
+            pending: false,
             added: rows,
             removed: vec![],
             updated: vec![],
@@ -174,6 +179,7 @@ mod tests {
             .collect();
 
         let delta = RowDelta {
+            pending: false,
             added: rows,
             removed: vec![],
             updated: vec![],
@@ -201,6 +207,7 @@ mod tests {
             .collect();
 
         let delta = RowDelta {
+            pending: false,
             added: rows,
             removed: vec![],
             updated: vec![],
@@ -228,6 +235,7 @@ mod tests {
 
         // Initial: [0, 1, 2, 3] -> window [0, 1]
         node.process(RowDelta {
+            pending: false,
             added: rows.clone(),
             removed: vec![],
             updated: vec![],
@@ -237,6 +245,7 @@ mod tests {
 
         // Remove first row: [1, 2, 3] -> window [1, 2]
         let result = node.process(RowDelta {
+            pending: false,
             added: vec![],
             removed: vec![rows[0].clone()],
             updated: vec![],
@@ -261,6 +270,7 @@ mod tests {
         let row = make_row(id, 1, "Row1");
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row],
             removed: vec![],
             updated: vec![],
