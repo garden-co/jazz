@@ -585,7 +585,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     return getCoValueOwner(this.coMap);
   }
 
-  private getPropertySchema(key: string): z.core.$ZodTypes {
+  private getPropertySchema(key: string): z.ZodType {
     if (this.cachedSchema === undefined) {
       return z.any();
     }
@@ -596,18 +596,17 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
 
     // @ts-expect-error as union, it has options fields and 2nd is the plain shape
     const fieldSchema = this.cachedSchema.options[1]?.shape?.[key] as
-      | z.core.$ZodTypes
+      | z.ZodType
       | undefined;
 
     // ignore codecs/pipes
     // even if they are optional and nullable
     if (
+      fieldSchema?.def?.type === "pipe" ||
       // @ts-expect-error
-      fieldSchema?._def?.type === "pipe" ||
+      fieldSchema?.def?.innerType?.def?.type === "pipe" ||
       // @ts-expect-error
-      fieldSchema?._def?.innerType?._def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?._def?.innerType?._def?.innerType?._def?.type === "pipe"
+      fieldSchema?.def?.innerType?.def?.innerType?.def?.type === "pipe"
     ) {
       return z.any();
     }

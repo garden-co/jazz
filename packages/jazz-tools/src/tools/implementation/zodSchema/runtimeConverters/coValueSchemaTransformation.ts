@@ -127,6 +127,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       schemaFieldToCoFieldDef(schema.element as SchemaField),
     );
     const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
+    coValueClass.coValueSchema = coValueSchema;
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {
     const coValueClass = FileStream;

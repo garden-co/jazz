@@ -532,7 +532,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     super(coList);
   }
 
-  private getItemSchema(): z.core.$ZodTypes {
+  private getItemSchema(): z.ZodType {
     const listSchema = this.coListSchema?.getValidationSchema();
 
     if (!listSchema || ("type" in listSchema && listSchema.type !== "union")) {
@@ -540,19 +540,16 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     }
 
     // @ts-expect-error as union, it has options fields and 2nd is the plain shape
-    const fieldSchema = listSchema.options[1]?.element as
-      | z.core.$ZodTypes
-      | undefined;
+    const fieldSchema = listSchema.options[1]?.element as z.ZodType | undefined;
 
     // ignore codecs/pipes
     // even if they are optional and nullable
     if (
+      fieldSchema?.def?.type === "pipe" ||
       // @ts-expect-error
-      fieldSchema?._def?.type === "pipe" ||
+      fieldSchema?.def?.innerType?.def?.type === "pipe" ||
       // @ts-expect-error
-      fieldSchema?._def?.innerType?._def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?._def?.innerType?._def?.innerType?._def?.type === "pipe"
+      fieldSchema?.def?.innerType?.def?.innerType?.def?.type === "pipe"
     ) {
       return z.any();
     }

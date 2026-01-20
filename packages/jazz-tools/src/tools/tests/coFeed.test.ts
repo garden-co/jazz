@@ -17,7 +17,12 @@ import {
   z,
 } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  expectValidationError,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 import {
   CoFeed,
   CoFeedInstanceCoValuesMaybeLoaded,
@@ -84,6 +89,25 @@ describe("Simple CoFeed operations", async () => {
         const Schema = co.feed(co.plainText());
         const feed = Schema.create([""]);
         expect(feed.perAccount[me.$jazz.id]?.value?.toString()).toBe("");
+      });
+
+      test("creation input validation", () => {
+        const Text = z.string();
+        const TextStream = co.feed(Text);
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => TextStream.create([123], { owner: me }),
+        );
+      });
+
+      test("creation input with loose validation", () => {
+        const Text = z.string();
+        const TextStream = co.feed(Text);
+        TextStream.create(
+          // @ts-expect-error - number is not a string
+          [123],
+          { owner: me, validation: "loose" },
+        );
       });
     });
   });
@@ -152,6 +176,25 @@ describe("Simple CoFeed operations", async () => {
       );
       expect(stream.perSession[me.$jazz.sessionID]?.value?.toString()).toEqual(
         "bread",
+      );
+    });
+
+    test("push with validation errors", () => {
+      const Schema = co.feed(z.string());
+      const stream = Schema.create(["milk"]);
+      expectValidationError(
+        // @ts-expect-error - number is not a string
+        () => stream.$jazz.push(123),
+      );
+    });
+
+    test("push with validation errors with loose validation", () => {
+      const Schema = co.feed(z.string());
+      const stream = Schema.create(["milk"]);
+      stream.$jazz.pushLoose(
+        // @ts-expect-error - number is not a string
+        123,
+        { validation: "loose" },
       );
     });
   });
@@ -327,6 +370,31 @@ describe("CoFeed resolution", async () => {
       update2.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]?.value
         ?.perAccount[me.$jazz.id]?.value,
     ).toBe("bread");
+  });
+
+  test("Loaded CoFeed keeps validation", async () => {
+    const { me, stream } = await initNodeAndStream();
+    const loadedStream = await TestStream.load(stream.$jazz.id, {
+      loadAs: me,
+    });
+    assertLoaded(loadedStream);
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => loadedStream.$jazz.push(123),
+    );
+
+    const myTopLevelStream = loadedStream.perAccount[me.$jazz.id];
+    assert(myTopLevelStream);
+    assertLoaded(myTopLevelStream.value);
+    const myNestedStream = myTopLevelStream.value.perAccount[me.$jazz.id];
+    assert(myNestedStream);
+    assertLoaded(myNestedStream.value);
+    expect(myNestedStream.value.perAccount[me.$jazz.id]?.value).toEqual("milk");
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => myNestedStream.value.$jazz.push(123),
+    );
   });
 });
 
