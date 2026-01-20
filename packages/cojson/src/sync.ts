@@ -401,16 +401,18 @@ export class SyncManager {
     };
 
     for (const coValue of this.local.allCoValues()) {
-      if (!coValue.isAvailable()) {
-        // If the coValue is unavailable and we never tried this peer
-        // we try to load it from the peer
-        if (!peer.loadRequestSent.has(coValue.id)) {
-          peer.sendLoadRequest(coValue, "low-priority");
-        }
-      } else {
-        // Build the list of coValues ordered by dependency
-        // so we can send the load message in the correct order
+      if (coValue.isAvailable()) {
+        // In memory - build ordered list for dependency-aware sending
         buildOrderedCoValueList(coValue);
+      } else if (coValue.loadingState === "unknown") {
+        // Skip unknown CoValues - we never tried to load them, so don't
+        // restore a subscription we never had. This prevents loading
+        // content for CoValues we don't actually care about.
+        continue;
+      } else if (!peer.loadRequestSent.has(coValue.id)) {
+        // For garbageCollected/onlyKnownState: knownState() returns lastKnownState
+        // For unavailable/loading/errored: knownState() returns empty state
+        peer.sendLoadRequest(coValue, "low-priority");
       }
 
       // Fill the missing known states with empty known states
