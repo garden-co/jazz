@@ -50,7 +50,7 @@ If any index is lost, that's an error state. We do NOT rebuild indices from rows
 **On cold start:**
 1. Load `_id` index for each table → discover all row ObjectIds
 2. Load all column indices for each table
-3. Load row objects as needed (lazy, via query)
+3. Load row objects as needed (lazy, via query - NOT eagerly into a cache)
 
 ## Index Storage Model (Node-per-Object)
 
@@ -84,6 +84,18 @@ The sync layer filters out objects with `nosync: "true"` when syncing to remotes
 4. **Queue insert intents**: When index not ready, queue `(key, row_id)` for replay later
 5. **No global state machine**: QueryManager has no Setup/Ready states - operations work immediately
 6. **Lazy loading**: Index data is read from ObjectManager on demand
+
+### ObjectManager as Source of Truth
+
+ObjectManager is designed to be a fast in-memory store with lazy loading from persistence. This means:
+
+1. **No caches on top**: Components consuming ObjectManager should NOT create their own caches of object content. ObjectManager already handles in-memory storage efficiently.
+
+2. **Handle not-yet-loaded state**: Consumers must handle the case where an object isn't loaded yet (ObjectState::Loading or missing). This is normal operation, not an error.
+
+3. **Listen for load completion**: Use ObjectManager's subscription mechanisms (global subscription, object updates) to react when objects become available. Don't poll or eagerly load.
+
+The row_loader closure passed to MaterializeNode should access ObjectManager directly, returning None for rows not yet loaded. The query graph already handles this gracefully.
 
 ### SkipListNodeView (Zero-Copy)
 
@@ -191,8 +203,7 @@ impl QueryManager {
     pub fn process(&mut self) {
         // 1. Process object updates from SyncManager
         // 2. Flush pending index updates for indices that became ready
-        // 3. Discover any new rows from _id indices
-        // 4. Settle subscriptions
+        // 3. Settle subscriptions (row data loaded on-demand from ObjectManager)
     }
 
     /// Flush pending index updates for indices that became ready.
@@ -251,6 +262,12 @@ crates/groove/src/query_manager/
   - Mutation methods take `&mut ObjectManager` and persist immediately
   - `InsertHandle` with `is_complete()` and `is_indexed()` methods
   - Lazy sentinel creation and persistence on first insert
+- [x] ObjectManager as sole source of truth for row data:
+  - Removed `row_cache` - no redundant caching layer
+  - `row_loader` closures access ObjectManager directly
+  - Removed `discover_rows_from_indices()` - no eager loading on process()
+  - `get()` renamed to `test_get_row_if_loaded()` and gated with `#[cfg(test)]`
+  - Production code must use queries to read data
 
 **Zero-Copy Architecture Tests:**
 | Test | Status | Location |
@@ -263,137 +280,50 @@ crates/groove/src/query_manager/
 | Insert returns true when inserted | ✓ | `skip_list::tests::insert_returns_true_when_inserted` |
 | Pending updates queue and flush | ✓ | `skip_list::tests::pending_updates_queue_and_flush` |
 | Cold start loads indices | ✓ | `manager::tests::cold_start_loads_persisted_indices_and_rows` |
+| Cold start doesn't eagerly load rows | ✓ | `manager::tests::cold_start_only_loads_queried_rows` |
 | Row is indexed after insert | ✓ | `manager::tests::row_is_indexed_after_insert` |
 
 ### Pending Followups
 
 #### Followup 2: nosync Filtering in SyncManager (High Priority)
 
-**Gap:** Index objects have `nosync: "true"` metadata but SyncManager doesn't filter them.
+Index objects have `nosync: "true"` metadata but SyncManager doesn't filter them yet. Need to add filtering when preparing to sync objects to peers.
+
+#### Followup 3: Sync Integration for Row Updates (Medium Priority)
+
+**Current limitation:** When rows are updated via sync (not local `update()` call), column indices may become stale. The `_id` index remains correct, but column indices won't reflect the new values because we don't have the old data to compute the index delta.
+
+**Design decisions needed:**
+1. Auto-process on each API call vs require explicit `process()` calls
+2. For synced row updates: rebuild column index entries, or accept staleness until next local update
 
 **Implementation needed:**
-- When preparing to sync objects to a peer, filter out those with `nosync: "true"` metadata:
-```rust
-fn should_sync_object(&self, object: &Object) -> bool {
-    object.metadata.get("nosync") != Some(&"true".to_string())
-}
-```
-
-**Verification:**
-- Create QueryManager, insert rows
-- Verify index objects have nosync metadata
-- Verify sync doesn't include index objects
-
-#### Followup 3: Automatic Sync Integration (Medium Priority)
-
-**Gap:** Changes arriving via sync don't automatically update indices unless `process()` is manually called.
-
-**Current state:**
-- Global subscription was added to ObjectManager and works correctly
-- QueryManager only calls `take_all_object_updates()` in `process()` when explicitly invoked
-- External changes from SyncManager (e.g., received from network) are NOT automatically processed
-
-**Implementation needed:**
-1. Design decision: auto-process on each API call, or require explicit `process()` calls
-2. If auto-process: call `process()` at the end of `insert()`, `update()`, `execute()`, etc.
-3. If explicit: document that users must call `process()` to see synced changes
-4. Integration test: two QueryManagers sharing a SyncManager, verify changes from one appear in the other
+- Integration test: two QueryManagers sharing a SyncManager
+- Track old row data for index updates (minimal cache just for pending synced objects?)
+- Or: accept that synced updates may have stale column indices until compaction/rebuild
 
 #### Followup 4: Async Row Materialization (Medium Priority)
 
-**Gap:** MaterializeNode loads rows synchronously, which could block if rows need to be fetched from network.
+MaterializeNode loads rows synchronously. If loader returns `None` (not yet loaded), row is skipped. Need mechanism for rows to appear in results once they arrive from network.
 
-**Current state:**
-- `MaterializeNode::materialize()` takes a synchronous `FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>` loader
-- If the loader returns `None`, the row is simply skipped (not added to result)
-- No mechanism to "wait" for pending rows or retry later
-
-**Implementation options:**
-- Option A: Return a "pending" state in RowDelta for rows not yet available
-- Option B: MaterializeNode tracks pending IDs and re-emits them when data arrives
-- Option C: Async loader with `Future` return type
-
-**Verification:**
-- Subscribe to query, sync brings in new object ID before content, verify row appears after content arrives
+**Options:** Return "pending" state in RowDelta, track pending IDs for re-emit, or async loader.
 
 #### Followup 5: `project_row` Should Use Memcpy (Low Priority)
 
-**Gap:** The `project_row` function decodes to `Value` then re-encodes, rather than copying bytes directly.
-
-**Current state (encoding.rs):**
-```rust
-pub fn project_row(...) -> Result<Vec<u8>, EncodingError> {
-    let mut dst_values = vec![Value::Null; dst_descriptor.columns.len()];
-    for &(src_col, dst_col) in column_mapping {
-        let value = decode_column(src_descriptor, src_data, src_col)?;
-        dst_values[dst_col] = value;
-    }
-    encode_row(dst_descriptor, &dst_values)
-}
-```
-
-**Implementation needed:**
-1. For fixed-size columns: directly memcpy bytes from source to destination
-2. For variable-length columns: copy byte ranges using offset table
-3. Only use decode/encode as fallback for complex cases (e.g., nullable flag differences)
-4. Add benchmark comparing current vs memcpy approach
+Currently decodes to `Value` then re-encodes. Should memcpy bytes directly for fixed-size columns.
 
 #### Followup 6: Add `subscribe_full` API (Low Priority)
 
-**Gap:** Only delta-mode subscriptions are exposed in the API.
-
-**Current state:**
-- Only `subscribe()` exists (delta mode)
-- `OutputMode::Full` exists in OutputNode but isn't exposed
-- `OutputNode::decode_current()` exists for getting full result set
-
-**Implementation needed:**
-1. Add `subscribe_full()` method to QueryManager
-2. Store output mode in subscription metadata
-3. In `take_updates()`, return full decoded result for full-mode subscriptions
-4. Add test for full-mode subscription
+Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired up to API.
 
 #### Followup 7: Fix Range Scan Boundary Semantics (Low Priority)
 
-**Gap:** Range conditions Lt/Gt use inclusive bounds in the index scan, potentially returning extra rows.
-
-**Current state:** The skip list `range_scan` uses inclusive bounds (`<=` and `>=`), but:
-- `Lt` (less than) should exclude the boundary value
-- `Gt` (greater than) should exclude the boundary value
-- `Le` (less than or equal) should include - correct
-- `Ge` (greater than or equal) should include - correct
-
-**Impact:** The filter node catches and correctly filters these rows, so correctness is maintained. But the index may return extra rows that are then filtered out, which is slightly inefficient.
-
-**Implementation options:**
-1. Add `Range { min, max, min_inclusive, max_inclusive }` to ScanCondition
-2. Update skip list `range_scan` to accept inclusivity flags
-3. Or: accept current behavior as "good enough" since filter corrects it
+Lt/Gt use inclusive bounds in index scan. Filter node corrects this, so correctness maintained but slightly inefficient.
 
 #### Followup 8: End-to-End Sync Integration Tests (Medium Priority)
 
-**Gap:** No tests verify that synced updates from another peer flow through to query deltas.
-
-**Implementation needed:**
-1. Create test with two SyncManagers connected (simulating two peers)
-2. Peer A: QueryManager with subscription
-3. Peer B: Insert row
-4. Simulate sync: Peer B sends object/commits to Peer A
-5. Peer A: Call `process()`, verify subscription receives delta
-6. Test both new row insertion and row update scenarios
+No tests verify synced updates flow through to query deltas. Need two-peer test with subscription verification.
 
 #### Followup 9: IndexScanNode Process Method (Low Priority)
 
-**Gap:** The `IdNode::process()` trait method on IndexScanNode is essentially a no-op.
-
-**Current state:**
-- `IndexScanNode` stores `(table, column)` strings, not the actual index reference
-- `IdNode::process()` returns empty IdDelta
-- The graph settling code special-cases IndexScanNode and calls `scan()` with the index passed in
-
-**Impact:** The trait-based abstraction is partially broken. The code works but violates the trait contract.
-
-**Implementation options:**
-1. Accept current design: IndexScanNode is a "semi-source" that needs external index injection
-2. Refactor: Give IndexScanNode a reference/Arc to IndexState so `process()` works standalone
-3. Refactor: Change IdNode trait to accept context parameter: `process(&mut self, ctx: &QueryContext) -> IdDelta`
+`IdNode::process()` is a no-op on IndexScanNode. Graph settling special-cases it. Works but violates trait contract.
