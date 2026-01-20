@@ -177,12 +177,15 @@ describe("CoMap", async () => {
 
       const dog = Dog.create({ name: "Rex" });
 
-      const person = Person.create({
-        name: "John",
-        age: 20,
-        // @ts-expect-error - This is an hack to test the behavior
-        dog: { $jazz: { id: dog.$jazz.id } },
-      });
+      const person = Person.create(
+        {
+          name: "John",
+          age: 20,
+          // @ts-expect-error - This is an hack to test the behavior
+          dog: { $jazz: { id: dog.$jazz.id } },
+        },
+        { validation: "loose" },
+      );
 
       expect(person.dog?.name).toEqual("Rex");
     });

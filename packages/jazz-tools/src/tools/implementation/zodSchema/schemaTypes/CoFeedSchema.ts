@@ -27,6 +27,7 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
+import { generateValidationSchemaFromItem } from "./schemaValidators.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -53,11 +54,9 @@ export class CoFeedSchema<
   }
 
   getValidationSchema = () => {
-    return z.array(
-      this.element instanceof z.core.$ZodType
-        ? this.element
-        : this.element.getValidationSchema(),
-    );
+    return z
+      .instanceof(CoFeed)
+      .or(z.array(generateValidationSchemaFromItem(this.element)));
   };
 
   constructor(

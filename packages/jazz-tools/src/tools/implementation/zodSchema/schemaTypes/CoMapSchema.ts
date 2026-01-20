@@ -19,7 +19,7 @@ import {
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
-  TypeSym,
+  isCoValueSchema,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -34,7 +34,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
-import { isAnyCoValue, isCoValueSchema } from "./schemaValidators.js";
+import { generateValidationSchemaFromItem } from "./schemaValidators.js";
 
 type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
   CoMapInstanceCoValuesMaybeLoaded<Shape>
@@ -55,54 +55,29 @@ export class CoMapSchema<
   getDefinition: () => CoMapSchemaDefinition;
 
   getValidationSchema = () => {
-    const plainShape: Record<string, AnyZodSchema> = {};
+    const plainShape: Record<string, z.ZodTypeAny> = {};
 
     for (const key in this.shape) {
       const item = this.shape[key];
-      // item is Group class
-      // This is because users can define the schema
-      // using Group class instead of GroupSchema
-      // e.g. `co.map({ group: Group })` vs `co.map({ group: co.group() })`
-      if (item?.prototype?.[TypeSym] === "Group") {
-        plainShape[key] = z.instanceof(Group);
-      } else if (
-        item?.prototype?.[TypeSym] === "Account" ||
-        (isCoValueSchema(item) && item.builtin === "Account")
-      ) {
-        plainShape[key] = isAnyCoValue;
-      } else if (isCoValueSchema(item)) {
+      if (isCoValueSchema(item)) {
         // Inject as getter to avoid circularity issues
         Object.defineProperty(plainShape, key, {
-          get: () => isAnyCoValue.or(item.getValidationSchema()),
+          get: () => generateValidationSchemaFromItem(item),
           enumerable: true,
           configurable: true,
         });
-      } else if ((item as any) instanceof z.core.$ZodType) {
-        // the following zod types are not supported:
-        if (
-          // codecs are managed lower level
-          item._def.type === "pipe"
-        ) {
-          plainShape[key] = z.any();
-        } else {
-          plainShape[key] = item;
-        }
       } else {
-        throw new Error(`Unsupported schema type: ${item}`);
+        plainShape[key] = generateValidationSchemaFromItem(this.shape[key]);
       }
     }
 
     let validationSchema = z.strictObject(plainShape);
     if (this.catchAll) {
-      if (isCoValueSchema(this.catchAll)) {
-        validationSchema = validationSchema.catchall(
-          this.catchAll.getValidationSchema(),
-        );
-      } else if ((this.catchAll as any) instanceof z.core.$ZodType) {
-        validationSchema = validationSchema.catchall(
-          this.catchAll as unknown as z.core.$ZodType,
-        );
-      }
+      validationSchema = validationSchema.catchall(
+        generateValidationSchemaFromItem(
+          this.catchAll as unknown as AnyZodOrCoValueSchema,
+        ),
+      );
     }
 
     return z.instanceof(CoMap).or(validationSchema);
