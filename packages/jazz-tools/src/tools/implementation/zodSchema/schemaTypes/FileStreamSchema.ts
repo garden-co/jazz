@@ -25,9 +25,7 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
     collaborative: true as const,
     builtin: "FileStream" as const,
     resolveQuery: true as const,
-    getValidationSchema: () => {
-      return z.instanceof(FileStream);
-    },
+    getValidationSchema: () => z.any(),
   };
 }
 

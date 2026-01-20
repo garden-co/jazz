@@ -84,10 +84,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const coValueClass = class ZCoMap extends ClassToExtend {
       static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoMap } | undefined) {
-        super({
-          ...options,
-          schema: ZCoMap.coValueSchema,
-        });
+        super(options);
         for (const [fieldName, fieldType] of Object.entries(def.shape)) {
           (this as any)[fieldName] = schemaFieldToCoFieldDef(
             fieldType as SchemaField,
@@ -114,10 +111,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const coValueClass = class ZCoList extends CoList {
       static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoList } | undefined) {
-        super({
-          ...options,
-          schema: ZCoList.coValueSchema,
-        });
+        super(options);
         (this as any)[coField.items] = schemaFieldToCoFieldDef(
           element as SchemaField,
         );

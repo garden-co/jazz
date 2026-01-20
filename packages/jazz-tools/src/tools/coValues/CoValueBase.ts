@@ -15,7 +15,6 @@ import {
   unstable_mergeBranch,
 } from "../internal.js";
 import { Group, TypeSym } from "../internal.js";
-import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @internal */
 export abstract class CoValueBase implements CoValue {
@@ -31,12 +30,8 @@ export abstract class CoValueBase implements CoValue {
   }
 
   /** @category Internals */
-  static fromRaw<V extends CoValue>(
-    this: CoValueClass<V>,
-    raw: RawCoValue,
-    schema?: CoreCoValueSchema,
-  ): V {
-    return new this({ fromRaw: raw, schema });
+  static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
+    return new this({ fromRaw: raw });
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

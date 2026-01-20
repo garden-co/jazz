@@ -59,7 +59,10 @@ export class CoMapSchema<
 
     for (const key in this.shape) {
       const item = this.shape[key];
-      // item is a Group
+      // item is Group class
+      // This is because users can define the schema
+      // using Group class instead of GroupSchema
+      // e.g. `co.map({ group: Group })` vs `co.map({ group: co.group() })`
       if (item?.prototype?.[TypeSym] === "Group") {
         plainShape[key] = z.instanceof(Group);
       } else if (
@@ -509,7 +512,7 @@ export function createCoreCoMapSchema<
       },
     }),
     resolveQuery: true as const,
-    getValidationSchema: () => z.object(shape),
+    getValidationSchema: () => z.any(),
   };
 }
 

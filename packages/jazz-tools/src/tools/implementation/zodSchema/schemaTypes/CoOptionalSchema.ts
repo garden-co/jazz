@@ -31,16 +31,6 @@ export class CoOptionalSchema<
   constructor(public readonly innerType: Shape) {}
 
   getValidationSchema = () => {
-    if (this.innerType.builtin === "CoMap") {
-      return z.optional(
-        z.instanceof(CoMap).or(this.innerType.getValidationSchema()),
-      );
-    } else if (this.innerType.builtin === "CoList") {
-      return z.optional(
-        z.instanceof(CoList).or(this.innerType.getValidationSchema()),
-      );
-    }
-
     return z.optional(this.innerType.getValidationSchema());
   };
 

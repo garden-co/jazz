@@ -234,12 +234,7 @@ export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
     builtin: "CoFeed" as const,
     element,
     resolveQuery: true as const,
-    getValidationSchema: () =>
-      z.array(
-        element instanceof z.core.$ZodType
-          ? element
-          : element.getValidationSchema(),
-      ),
+    getValidationSchema: () => z.any(),
   };
 }
 

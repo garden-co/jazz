@@ -26,7 +26,7 @@ export function createCoreCoRichTextSchema(): CoreRichTextSchema {
     collaborative: true as const,
     builtin: "CoRichText" as const,
     resolveQuery: true as const,
-    getValidationSchema: () => z.string().or(z.instanceof(CoRichText)),
+    getValidationSchema: () => z.any(),
   };
 }
 

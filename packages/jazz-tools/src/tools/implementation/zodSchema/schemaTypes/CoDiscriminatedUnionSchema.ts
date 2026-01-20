@@ -229,9 +229,7 @@ export function createCoreCoDiscriminatedUnionSchema<
   return {
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
-    getValidationSchema: () => {
-      return z.any();
-    },
+    getValidationSchema: () => z.any(),
     getDefinition: () => ({
       discriminator,
       get discriminatorMap() {

@@ -129,9 +129,7 @@ export class CoMap extends CoValueBase implements CoValue {
   static _schema: CoMapFieldSchema;
 
   /** @internal */
-  constructor(
-    options: { fromRaw: RawCoMap; schema?: CoreCoMapSchema } | undefined,
-  ) {
+  constructor(options: { fromRaw: RawCoMap } | undefined) {
     super();
 
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
@@ -139,7 +137,12 @@ export class CoMap extends CoValueBase implements CoValue {
     if (options && "fromRaw" in options) {
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoMapJazzApi(proxy, () => options.fromRaw, options.schema),
+          value: new CoMapJazzApi(
+            proxy,
+            () => options.fromRaw,
+            // coValueSchema is defined in /implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.ts
+            (this.constructor as any).coValueSchema,
+          ),
           enumerable: false,
         },
       });

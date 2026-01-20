@@ -123,20 +123,18 @@ export class CoList<out Item = any>
     return Array;
   }
 
-  constructor(
-    options: { fromRaw?: RawCoList; schema?: CoreCoValueSchema } | undefined,
-  ) {
+  constructor(options: { fromRaw: RawCoList } | undefined) {
     super();
 
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
 
-    if (options && "fromRaw" in options && options.fromRaw) {
+    if (options && "fromRaw" in options) {
       Object.defineProperties(this, {
         $jazz: {
           value: new CoListJazzApi(
             proxy,
-            () => options.fromRaw!,
-            options.schema,
+            () => options.fromRaw,
+            (this.constructor as any).coValueSchema,
           ),
           enumerable: false,
         },

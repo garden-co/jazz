@@ -27,7 +27,7 @@ export function createCoreGroupSchema(): CoreGroupSchema {
     collaborative: true as const,
     builtin: "Group" as const,
     resolveQuery: true as const,
-    getValidationSchema: () => z.instanceof(Group),
+    getValidationSchema: () => z.any(),
   };
 }
 

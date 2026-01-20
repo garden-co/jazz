@@ -29,12 +29,7 @@ export function createCoreCoVectorSchema(
     builtin: "CoVector" as const,
     dimensions,
     resolveQuery: true as const,
-    getValidationSchema: () => {
-      return z
-        .instanceof(CoVector)
-        .or(z.instanceof(Float32Array))
-        .or(z.array(z.number()));
-    },
+    getValidationSchema: () => z.any(),
   };
 }
 

@@ -27,7 +27,7 @@ export function createCoreCoPlainTextSchema(): CorePlainTextSchema {
     collaborative: true as const,
     builtin: "CoPlainText" as const,
     resolveQuery: true as const,
-    getValidationSchema: () => z.string().or(z.instanceof(CoPlainText)),
+    getValidationSchema: () => z.any(),
   };
 }
 

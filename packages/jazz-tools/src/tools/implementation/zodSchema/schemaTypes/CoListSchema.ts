@@ -308,16 +308,7 @@ export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
     builtin: "CoList" as const,
     element,
     resolveQuery: true as const,
-    getValidationSchema: () =>
-      z
-        .instanceof(CoList)
-        .or(
-          z.array(
-            element instanceof z.core.$ZodType
-              ? element
-              : element.getValidationSchema(),
-          ),
-        ),
+    getValidationSchema: () => z.any(),
   };
 }
 
