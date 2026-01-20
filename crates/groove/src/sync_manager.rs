@@ -516,6 +516,11 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
+        // Skip objects marked as nosync (local-only, e.g., index nodes)
+        if metadata.get("nosync").map(|v| v == "true").unwrap_or(false) {
+            return;
+        }
+
         // Extract needed info without holding mutable borrow
         let (include_metadata, already_sent) = {
             let Some(server) = self.servers.get(&server_id) else {
@@ -593,6 +598,11 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
+        // Skip objects marked as nosync (local-only, e.g., index nodes)
+        if metadata.get("nosync").map(|v| v == "true").unwrap_or(false) {
+            return;
+        }
+
         // Extract needed info without holding mutable borrow
         let (in_scope, include_metadata, already_sent) = {
             let Some(client) = self.clients.get(&client_id) else {

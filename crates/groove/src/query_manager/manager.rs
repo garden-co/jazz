@@ -1,0 +1,949 @@
+use std::collections::HashMap;
+
+use crate::commit::{CommitId, StoredState};
+use crate::object::{BranchName, ObjectId, ObjectState};
+use crate::object_manager::AllObjectUpdate;
+use crate::sync_manager::SyncManager;
+
+use super::encoding::{decode_row, encode_row};
+use super::graph::QueryGraph;
+use super::graph_nodes::output::QuerySubscriptionId;
+use super::index::{IndexError, IndexState};
+use super::query::{Query, QueryBuilder};
+use super::types::{RowDelta, RowDescriptor, Schema, TableName, Value};
+
+/// Row branch name (all row data goes on "main" branch).
+const ROW_BRANCH: &str = "main";
+
+/// Error types for QueryManager operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryError {
+    TableNotFound(TableName),
+    ColumnCountMismatch { expected: usize, actual: usize },
+    EncodingError(String),
+    ObjectNotFound(ObjectId),
+    QueryCompilationError(String),
+    IndexError(String),
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryError::TableNotFound(t) => write!(f, "table not found: {}", t),
+            QueryError::ColumnCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "column count mismatch: expected {expected}, got {actual}"
+                )
+            }
+            QueryError::EncodingError(msg) => write!(f, "encoding error: {msg}"),
+            QueryError::ObjectNotFound(id) => write!(f, "object not found: {:?}", id),
+            QueryError::QueryCompilationError(msg) => write!(f, "query compilation error: {msg}"),
+            QueryError::IndexError(msg) => write!(f, "index error: {msg}"),
+        }
+    }
+}
+
+impl From<IndexError> for QueryError {
+    fn from(e: IndexError) -> Self {
+        QueryError::IndexError(format!("{:?}", e))
+    }
+}
+
+impl std::error::Error for QueryError {}
+
+/// Handle for tracking insert completion.
+///
+/// Poll via `is_complete()` to check if the row is persisted.
+/// Poll via `is_indexed()` to check if the row is indexed.
+#[derive(Debug, Clone)]
+pub struct InsertHandle {
+    /// The row's ObjectId.
+    pub row_id: ObjectId,
+    /// CommitId of the row data.
+    pub row_commit_id: CommitId,
+}
+
+impl InsertHandle {
+    /// Check if the row data is durable (persisted to storage).
+    ///
+    /// Must call `QueryManager::process()` between checks to drive storage operations.
+    pub fn is_complete(&self, qm: &QueryManager) -> bool {
+        qm.is_commit_stored(self.row_id, &self.row_commit_id)
+    }
+
+    /// Check if the row is indexed (appears in the _id index).
+    ///
+    /// After insert + process(), the row should be indexed.
+    pub fn is_indexed(&self, qm: &QueryManager, table: &str) -> bool {
+        qm.row_is_indexed(table, self.row_id)
+    }
+}
+
+/// Query subscription info.
+#[derive(Debug)]
+struct QuerySubscription {
+    graph: QueryGraph,
+    #[allow(dead_code)]
+    mode: SubscriptionMode,
+}
+
+/// Subscription mode.
+#[derive(Debug, Clone, Copy)]
+pub enum SubscriptionMode {
+    Delta,
+    Full,
+}
+
+/// Update for a query subscription.
+#[derive(Debug, Clone)]
+pub struct QueryUpdate {
+    pub subscription_id: QuerySubscriptionId,
+    pub delta: RowDelta,
+}
+
+/// Manages reactive SQL queries over object-based storage.
+///
+/// No global Setup/Ready state machine - indices and data are loaded lazily
+/// from ObjectManager. Operations work immediately; queries return empty/Pending
+/// results until data is available.
+pub struct QueryManager {
+    sync_manager: SyncManager,
+    schema: Schema,
+
+    /// Indices: (table, column) -> IndexState
+    indices: HashMap<(String, String), IndexState>,
+
+    /// Active query subscriptions
+    subscriptions: HashMap<QuerySubscriptionId, QuerySubscription>,
+    next_subscription_id: u64,
+
+    /// Row data cache: ObjectId -> (table, data, commit_id)
+    row_cache: HashMap<ObjectId, (TableName, Vec<u8>, CommitId)>,
+
+    /// Pending query updates
+    update_outbox: Vec<QueryUpdate>,
+}
+
+impl QueryManager {
+    /// Create a new QueryManager with the given schema.
+    ///
+    /// Indices are created lazily when data is inserted. Existing data in
+    /// ObjectManager is discovered via index scans (zero-copy reads).
+    pub fn new(sync_manager: SyncManager, schema: Schema) -> Self {
+        // Initialize indices for all tables
+        let mut indices = HashMap::new();
+        for (table_name, descriptor) in &schema {
+            // Primary "_id" index
+            indices.insert(
+                (table_name.0.clone(), "_id".to_string()),
+                IndexState::new(&table_name.0, "_id"),
+            );
+
+            // Index for each column
+            for col in &descriptor.columns {
+                indices.insert(
+                    (table_name.0.clone(), col.name.clone()),
+                    IndexState::new(&table_name.0, &col.name),
+                );
+            }
+        }
+
+        Self {
+            sync_manager,
+            schema,
+            indices,
+            subscriptions: HashMap::new(),
+            next_subscription_id: 0,
+            row_cache: HashMap::new(),
+            update_outbox: Vec::new(),
+        }
+    }
+
+    /// Get the underlying SyncManager.
+    pub fn sync_manager(&self) -> &SyncManager {
+        &self.sync_manager
+    }
+
+    /// Get mutable reference to the underlying SyncManager.
+    pub fn sync_manager_mut(&mut self) -> &mut SyncManager {
+        &mut self.sync_manager
+    }
+
+    /// Check if a row is indexed (appears in the _id index for its table).
+    pub fn row_is_indexed(&self, table: &str, row_id: ObjectId) -> bool {
+        let id_key = (table.to_string(), "_id".to_string());
+        if let Some(index) = self.indices.get(&id_key) {
+            index.contains_row(row_id, &self.sync_manager.object_manager)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a commit has been stored to disk.
+    ///
+    /// Used by `InsertHandle::is_complete()` to check durability.
+    pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
+        if let Some(state) = self.sync_manager.object_manager.get_state(object_id) {
+            match state {
+                ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                    // Check all branches for the commit
+                    for branch in obj.branches.values() {
+                        if let Some(commit) = branch.commits.get(commit_id) {
+                            return matches!(commit.stored_state, StoredState::Stored);
+                        }
+                    }
+                }
+                ObjectState::Loading => {}
+            }
+        }
+        false
+    }
+
+    /// Insert a new row into a table.
+    ///
+    /// Returns an `InsertHandle` that can be polled to check durability.
+    /// Index updates happen immediately (creating sentinels if needed).
+    pub fn insert(&mut self, table: &str, values: &[Value]) -> Result<InsertHandle, QueryError> {
+        let table_name = TableName::new(table);
+        let descriptor = self
+            .schema
+            .get(&table_name)
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
+            .clone();
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        // Encode to binary
+        let data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
+        // Create object with table metadata
+        let mut metadata = HashMap::new();
+        metadata.insert("table".to_string(), table.to_string());
+
+        let object_id = self.sync_manager.object_manager.create(Some(metadata));
+        let author = object_id; // Self-authored
+
+        // Add commit with row data
+        let row_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(object_id, ROW_BRANCH, vec![], data.clone(), author, None)
+            .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+
+        // Cache the row immediately
+        self.row_cache
+            .insert(object_id, (table_name, data.clone(), row_commit_id));
+
+        // Update indices immediately and persist
+        self.update_indices_for_insert(table, object_id, &data, &descriptor)?;
+
+        // Mark subscriptions dirty
+        self.mark_subscriptions_dirty(table);
+
+        Ok(InsertHandle {
+            row_id: object_id,
+            row_commit_id,
+        })
+    }
+
+    /// Update a row.
+    pub fn update(&mut self, id: ObjectId, values: &[Value]) -> Result<(), QueryError> {
+        // Get table from cache
+        let (table_name, old_data, _) = self
+            .row_cache
+            .get(&id)
+            .ok_or(QueryError::ObjectNotFound(id))?
+            .clone();
+
+        let descriptor = self
+            .schema
+            .get(&table_name)
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
+            .clone();
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        // Encode new data
+        let new_data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
+        // Get parent commit
+        let tips = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, ROW_BRANCH)
+            .map_err(|_| QueryError::ObjectNotFound(id))?
+            .clone();
+
+        let parents: Vec<_> = tips.into_iter().collect();
+        let author = id;
+
+        // Add commit with new data
+        let commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(id, ROW_BRANCH, parents, new_data.clone(), author, None)
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Update indices and persist modified nodes
+        self.update_indices_for_update(&table_name.0, id, &old_data, &new_data, &descriptor)?;
+
+        // Update cache
+        self.row_cache
+            .insert(id, (table_name.clone(), new_data, commit_id));
+
+        // Mark subscriptions dirty
+        self.mark_subscriptions_dirty(&table_name.0);
+
+        Ok(())
+    }
+
+    /// Get a row by ID (decoded to Values).
+    pub fn get(&self, id: ObjectId) -> Option<Vec<Value>> {
+        let (table_name, data, _) = self.row_cache.get(&id)?;
+        let descriptor = self.schema.get(table_name)?;
+        decode_row(descriptor, data).ok()
+    }
+
+    /// Create a query builder for a table.
+    pub fn query(&self, table: &str) -> QueryBuilder {
+        QueryBuilder::new(table)
+    }
+
+    /// Execute a query and return results (one-shot).
+    pub fn execute(&mut self, query: Query) -> Result<Vec<Vec<Value>>, QueryError> {
+        let descriptor = self
+            .schema
+            .get(&query.table)
+            .ok_or_else(|| QueryError::TableNotFound(query.table.clone()))?
+            .clone();
+
+        let mut graph = QueryGraph::compile(&query, &self.schema)
+            .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+
+        // Settle the graph
+        let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            self.row_cache
+                .get(&id)
+                .map(|(_, data, commit)| (data.clone(), *commit))
+        };
+
+        graph.settle(&self.indices, &self.sync_manager.object_manager, row_loader);
+
+        // Decode results
+        let rows = graph.current_result();
+        let results = rows
+            .iter()
+            .filter_map(|row| decode_row(&descriptor, &row.data).ok())
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Subscribe to query results (delta mode).
+    pub fn subscribe(&mut self, query: Query) -> Result<QuerySubscriptionId, QueryError> {
+        let graph = QueryGraph::compile(&query, &self.schema)
+            .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+
+        let id = QuerySubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+
+        self.subscriptions.insert(
+            id,
+            QuerySubscription {
+                graph,
+                mode: SubscriptionMode::Delta,
+            },
+        );
+
+        Ok(id)
+    }
+
+    /// Unsubscribe from a query.
+    pub fn unsubscribe(&mut self, id: QuerySubscriptionId) {
+        self.subscriptions.remove(&id);
+    }
+
+    /// Take pending query updates.
+    pub fn take_updates(&mut self) -> Vec<QueryUpdate> {
+        std::mem::take(&mut self.update_outbox)
+    }
+
+    /// Process pending changes and settle all subscription graphs.
+    ///
+    /// This method drives async progress:
+    /// - Processes object updates from SyncManager
+    /// - Discovers rows from indices and loads into cache
+    /// - Settles all subscription graphs
+    pub fn process(&mut self) {
+        // Discover rows from _id indices and load into cache (lazy discovery)
+        self.discover_rows_from_indices();
+
+        // Process object updates from SyncManager
+        let updates = self.sync_manager.object_manager.take_all_object_updates();
+        for update in updates {
+            self.handle_object_update(update);
+        }
+
+        // Settle all subscriptions
+        for (sub_id, subscription) in &mut self.subscriptions {
+            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+                self.row_cache
+                    .get(&id)
+                    .map(|(_, data, commit)| (data.clone(), *commit))
+            };
+
+            let delta = subscription.graph.settle(
+                &self.indices,
+                &self.sync_manager.object_manager,
+                row_loader,
+            );
+            if !delta.is_empty() {
+                self.update_outbox.push(QueryUpdate {
+                    subscription_id: *sub_id,
+                    delta,
+                });
+            }
+        }
+    }
+
+    /// Discover rows from _id indices and load into cache.
+    /// Called during process() to lazily load rows.
+    fn discover_rows_from_indices(&mut self) {
+        for (table_name, _descriptor) in self.schema.clone() {
+            let id_key = (table_name.0.clone(), "_id".to_string());
+            if let Some(id_index) = self.indices.get(&id_key) {
+                // Get all row IDs from the _id index (zero-copy read from ObjectManager)
+                let row_ids = id_index.scan_all(&self.sync_manager.object_manager);
+
+                for row_id in row_ids {
+                    // Skip if already cached
+                    if self.row_cache.contains_key(&row_id) {
+                        continue;
+                    }
+
+                    // Try to load row from ObjectManager
+                    if let Some((data, commit_id)) = self.load_row_from_object(row_id) {
+                        self.row_cache
+                            .insert(row_id, (table_name.clone(), data, commit_id));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Load a row's data from ObjectManager.
+    fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
+        let state = self.sync_manager.object_manager.get_state(row_id)?;
+        match state {
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
+                let tip_id = branch.tips.iter().next()?;
+                let commit = branch.commits.get(tip_id)?;
+                Some((commit.content.clone(), *tip_id))
+            }
+            ObjectState::Loading => None,
+        }
+    }
+
+    /// Handle an object update from the global subscription.
+    fn handle_object_update(&mut self, update: AllObjectUpdate) {
+        // Check if this is a row object
+        let table = match update.metadata.get("table") {
+            Some(t) => t.clone(),
+            None => return,
+        };
+
+        // Extract data we need from the object (before any mutable operations)
+        let extracted: Option<(Vec<u8>, CommitId)> = (|| {
+            let object = self.sync_manager.object_manager.get(update.object_id)?;
+            let branch = object.branches.get(&BranchName::new(ROW_BRANCH))?;
+            // Get the first tip commit's content
+            branch.tips.iter().find_map(|tip_id| {
+                branch
+                    .commits
+                    .get(tip_id)
+                    .map(|c| (c.content.clone(), *tip_id))
+            })
+        })();
+
+        let (data, tip_id) = match extracted {
+            Some(x) => x,
+            None => return,
+        };
+
+        let table_name = TableName::new(&table);
+        let old_data = self
+            .row_cache
+            .get(&update.object_id)
+            .map(|(_, d, _)| d.clone());
+        let descriptor = self.schema.get(&table_name).cloned();
+
+        if let Some(desc) = descriptor {
+            if update.is_new_object {
+                // New row - update indices (ignore persistence errors for synced objects)
+                let _ = self.update_indices_for_insert(&table, update.object_id, &data, &desc);
+            } else if let Some(old) = &old_data {
+                // Updated row - update indices (ignore persistence errors for synced objects)
+                let _ = self.update_indices_for_update(&table, update.object_id, old, &data, &desc);
+            }
+        }
+
+        self.row_cache
+            .insert(update.object_id, (table_name, data, tip_id));
+        self.mark_subscriptions_dirty(&table);
+    }
+
+    /// Update indices when a row is inserted.
+    fn update_indices_for_insert(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        // Update "_id" index
+        let id_key = (table.to_string(), "_id".to_string());
+        if let Some(index) = self.indices.get_mut(&id_key) {
+            let modified_nodes = index.insert(
+                object_id.0.as_bytes(),
+                object_id,
+                &self.sync_manager.object_manager,
+            );
+            // Persist modified nodes
+            for node_id in modified_nodes {
+                index.persist_node(node_id, &mut self.sync_manager.object_manager)?;
+            }
+        }
+
+        // Update column indices
+        for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            let col_key = (table.to_string(), col.name.clone());
+            if let Some(index) = self.indices.get_mut(&col_key)
+                && let Ok(Some(value_bytes)) =
+                    super::encoding::column_bytes(descriptor, data, col_idx)
+            {
+                let modified_nodes =
+                    index.insert(value_bytes, object_id, &self.sync_manager.object_manager);
+                // Persist modified nodes
+                for node_id in modified_nodes {
+                    index.persist_node(node_id, &mut self.sync_manager.object_manager)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update indices when a row is updated.
+    fn update_indices_for_update(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        new_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        use std::collections::HashSet;
+        let mut all_modified_nodes: HashMap<(String, String), HashSet<ObjectId>> = HashMap::new();
+
+        // "_id" index doesn't change on update
+
+        // Update column indices
+        for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            let col_key = (table.to_string(), col.name.clone());
+            if let Some(index) = self.indices.get_mut(&col_key) {
+                // Remove old value
+                if let Ok(Some(old_bytes)) =
+                    super::encoding::column_bytes(descriptor, old_data, col_idx)
+                {
+                    let modified =
+                        index.remove(old_bytes, object_id, &self.sync_manager.object_manager);
+                    all_modified_nodes
+                        .entry(col_key.clone())
+                        .or_default()
+                        .extend(modified);
+                }
+                // Add new value
+                if let Ok(Some(new_bytes)) =
+                    super::encoding::column_bytes(descriptor, new_data, col_idx)
+                {
+                    let modified =
+                        index.insert(new_bytes, object_id, &self.sync_manager.object_manager);
+                    all_modified_nodes
+                        .entry(col_key.clone())
+                        .or_default()
+                        .extend(modified);
+                }
+            }
+        }
+
+        // Persist all modified nodes
+        for (col_key, node_ids) in all_modified_nodes {
+            if let Some(index) = self.indices.get_mut(&col_key) {
+                for node_id in node_ids {
+                    index.persist_node(node_id, &mut self.sync_manager.object_manager)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Mark subscriptions dirty for a table.
+    fn mark_subscriptions_dirty(&mut self, table: &str) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription.graph.table.0 == table {
+                subscription.graph.mark_dirty_for_table(table);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query_manager::types::ColumnDescriptor;
+    use crate::query_manager::types::ColumnType;
+
+    fn test_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("score", ColumnType::Integer),
+            ]),
+        );
+        schema
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        let row = qm.get(handle.row_id).unwrap();
+        assert_eq!(row[0], Value::Text("Alice".into()));
+        assert_eq!(row[1], Value::Integer(100));
+    }
+
+    #[test]
+    fn insert_and_query() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+        qm.insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+        // Query all
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Query with filter
+        let query = qm
+            .query("users")
+            .filter_ge("score", Value::Integer(75))
+            .build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn query_with_sort_and_limit() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+        qm.insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+        let query = qm.query("users").order_by_desc("score").limit(2).build();
+        let results = qm.execute(query).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
+        assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
+    }
+
+    #[test]
+    fn update_row() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        qm.update(
+            handle.row_id,
+            &[Value::Text("Alice Updated".into()), Value::Integer(150)],
+        )
+        .unwrap();
+
+        let row = qm.get(handle.row_id).unwrap();
+        assert_eq!(row[0], Value::Text("Alice Updated".into()));
+        assert_eq!(row[1], Value::Integer(150));
+    }
+
+    #[test]
+    fn table_not_found_error() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        let result = qm.insert("nonexistent", &[Value::Text("test".into())]);
+        assert!(matches!(result, Err(QueryError::TableNotFound(_))));
+    }
+
+    #[test]
+    fn column_count_mismatch_error() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        let result = qm.insert("users", &[Value::Text("Alice".into())]);
+        assert!(matches!(
+            result,
+            Err(QueryError::ColumnCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn insert_returns_handle_with_commit_id() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Handle should have the row ID
+        assert!(qm.get(handle.row_id).is_some());
+
+        // Handle should have a valid row commit ID
+        assert!(handle.row_commit_id.0 != [0; 32]);
+    }
+
+    #[test]
+    fn row_is_indexed_after_insert() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Row should be indexed immediately after insert
+        assert!(handle.is_indexed(&qm, "users"));
+    }
+
+    #[test]
+    fn index_persistence_via_insert() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Test".into()), Value::Integer(42)])
+            .unwrap();
+
+        // Verify row is indexed
+        assert!(handle.is_indexed(&qm, "users"));
+    }
+
+    // ========================================================================
+    // Lazy loading and subscription tests
+    // ========================================================================
+
+    #[test]
+    fn can_register_query_immediately() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Can register a query subscription immediately
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query);
+        assert!(sub_id.is_ok());
+    }
+
+    #[test]
+    fn subscription_updates_after_insert_and_process() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Register subscription
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Insert a row
+        qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Process - should settle subscriptions
+        qm.process();
+
+        // Now we should have subscription updates
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(updates[0].delta.added.len(), 1);
+    }
+
+    #[test]
+    fn multiple_inserts_all_visible_in_query() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Multiple inserts
+        let h1 = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        let h2 = qm
+            .insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+        let h3 = qm
+            .insert(
+                "users",
+                &[Value::Text("Charlie".into()), Value::Integer(75)],
+            )
+            .unwrap();
+
+        // All rows visible via get() immediately
+        assert!(qm.get(h1.row_id).is_some());
+        assert!(qm.get(h2.row_id).is_some());
+        assert!(qm.get(h3.row_id).is_some());
+
+        // Query returns all rows
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Sorted query works
+        let query = qm.query("users").order_by_desc("score").limit(2).build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
+        assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
+    }
+
+    #[test]
+    fn cold_start_loads_persisted_indices_and_rows() {
+        // Phase 1: Create QM, insert rows, persist indices
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm1 = QueryManager::new(sync_manager, schema.clone());
+
+        // Insert some rows
+        let h1 = qm1
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        let h2 = qm1
+            .insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+
+        // Rows are indexed
+        assert!(h1.is_indexed(&qm1, "users"));
+        assert!(h2.is_indexed(&qm1, "users"));
+
+        // Phase 2: "Cold start" - create new QM with same underlying ObjectManager
+        // Extract the SyncManager to reuse its ObjectManager
+        let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
+
+        // Create new QueryManager - reads indices lazily from ObjectManager
+        let mut qm2 = QueryManager::new(sync_manager2, schema);
+
+        // Process to discover rows from indices
+        qm2.process();
+
+        // Verify rows are discoverable via get()
+        assert!(qm2.get(h1.row_id).is_some());
+        assert!(qm2.get(h2.row_id).is_some());
+
+        // Verify queries work
+        let query = qm2.query("users").build();
+        let results = qm2.execute(query).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Verify filtered query works (proves indices were loaded)
+        let query = qm2
+            .query("users")
+            .filter_ge("score", Value::Integer(75))
+            .build();
+        let results = qm2.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], Value::Text("Alice".into()));
+    }
+
+    #[test]
+    fn cold_start_with_sorted_query() {
+        // Phase 1: Insert rows
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm1 = QueryManager::new(sync_manager, schema.clone());
+
+        qm1.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm1.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+        qm1.insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+        // Phase 2: Cold start
+        let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
+        let mut qm2 = QueryManager::new(sync_manager2, schema);
+        qm2.process();
+
+        // Sorted query should work
+        let query = qm2.query("users").order_by_desc("score").build();
+        let results = qm2.execute(query).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
+        assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
+        assert_eq!(results[2][0], Value::Text("Bob".into())); // 50
+    }
+}

@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::commit::{Commit, CommitId};
 
 /// UUIDv7 identifying an object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectId(pub Uuid);
 
 /// How deeply a branch has been loaded from storage.

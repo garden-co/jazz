@@ -13,6 +13,10 @@ use crate::storage::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionId(pub u64);
 
+/// Unique identifier for a global (all-objects) subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AllObjectsSubscriptionId(pub u64);
+
 /// Internal tracking of a subscription.
 #[derive(Debug, Clone)]
 struct Subscription {
@@ -32,6 +36,20 @@ pub struct SubscriptionUpdate {
     pub branch_name: BranchName,
     /// Current frontier commit IDs, sorted by timestamp (oldest first).
     pub commit_ids: Vec<CommitId>,
+}
+
+/// Update sent to global (all-objects) subscribers when any object changes.
+///
+/// Fires on: create(), receive_object(), add_commit(), receive_commit()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllObjectUpdate {
+    pub object_id: ObjectId,
+    pub metadata: HashMap<String, String>,
+    pub branch_name: BranchName,
+    /// Current frontier commit IDs for this branch, sorted by timestamp.
+    pub commit_ids: Vec<CommitId>,
+    /// True if this is a newly created/received object, false if existing object.
+    pub is_new_object: bool,
 }
 
 /// Full blob identifier (for addressing within commit context).
@@ -110,6 +128,11 @@ pub struct ObjectManager {
     /// Index: (ObjectId, BranchName) → set of SubscriptionIds
     branch_subscribers: HashMap<(ObjectId, BranchName), HashSet<SubscriptionId>>,
     pub subscription_outbox: Vec<SubscriptionUpdate>,
+    /// Global (all-objects) subscriptions.
+    all_object_subscriptions: HashSet<AllObjectsSubscriptionId>,
+    next_all_objects_subscription_id: u64,
+    /// Outbox for global subscription updates.
+    pub all_objects_outbox: Vec<AllObjectUpdate>,
     /// Last timestamp used, for monotonic ordering.
     last_timestamp: u64,
     /// Blobs by content hash (deduplicated storage).
@@ -155,6 +178,31 @@ impl ObjectManager {
         id
     }
 
+    /// Create an object with a specific ObjectId (for deterministic IDs).
+    ///
+    /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
+    /// Used for index root nodes that have deterministic IDs based on table/column name.
+    /// Queues a CreateObject request to the outbox.
+    pub fn create_with_id(
+        &mut self,
+        id: ObjectId,
+        metadata: Option<HashMap<String, String>>,
+    ) -> ObjectId {
+        let object = Object {
+            id,
+            metadata: metadata.clone().unwrap_or_default(),
+            branches: HashMap::new(),
+        };
+
+        self.outbox.push(StorageRequest::CreateObject {
+            id,
+            metadata: metadata.unwrap_or_default(),
+        });
+
+        self.objects.insert(id, ObjectState::Creating(object));
+        id
+    }
+
     /// Get an object by id (only if Creating or Available).
     pub fn get(&self, id: ObjectId) -> Option<&Object> {
         match self.objects.get(&id)? {
@@ -174,6 +222,11 @@ impl ObjectManager {
     /// Check if an object is in Loading state.
     pub fn is_loading(&self, id: ObjectId) -> bool {
         matches!(self.objects.get(&id), Some(ObjectState::Loading))
+    }
+
+    /// Get the state of an object (Loading, Creating, or Available).
+    pub fn get_state(&self, id: ObjectId) -> Option<&ObjectState> {
+        self.objects.get(&id)
     }
 
     /// Add a commit to an object's branch.
@@ -274,6 +327,10 @@ impl ObjectManager {
 
         // Notify subscribers of updated frontier
         self.notify_subscribers_of_commit(object_id, &branch_name);
+
+        // Notify global subscribers
+        let is_new = matches!(self.objects.get(&object_id), Some(ObjectState::Creating(_)));
+        self.notify_all_object_subscribers(object_id, &branch_name, is_new);
 
         Ok(commit_id)
     }
@@ -740,6 +797,9 @@ impl ObjectManager {
         // Notify subscribers
         self.notify_subscribers_of_commit(object_id, &branch_name);
 
+        // Notify global subscribers (received objects are never "new" from our perspective)
+        self.notify_all_object_subscribers(object_id, &branch_name, false);
+
         Ok(commit_id)
     }
 
@@ -840,6 +900,57 @@ impl ObjectManager {
     /// Take all pending subscription updates.
     pub fn take_subscription_updates(&mut self) -> Vec<SubscriptionUpdate> {
         std::mem::take(&mut self.subscription_outbox)
+    }
+
+    /// Subscribe to all object changes globally.
+    ///
+    /// Returns updates for any create(), receive_object(), add_commit(), receive_commit().
+    pub fn subscribe_all(&mut self) -> AllObjectsSubscriptionId {
+        let id = AllObjectsSubscriptionId(self.next_all_objects_subscription_id);
+        self.next_all_objects_subscription_id += 1;
+        self.all_object_subscriptions.insert(id);
+        id
+    }
+
+    /// Unsubscribe from global object updates.
+    pub fn unsubscribe_all(&mut self, id: AllObjectsSubscriptionId) {
+        self.all_object_subscriptions.remove(&id);
+    }
+
+    /// Take all pending global object updates.
+    pub fn take_all_object_updates(&mut self) -> Vec<AllObjectUpdate> {
+        std::mem::take(&mut self.all_objects_outbox)
+    }
+
+    /// Emit an update to all global subscribers.
+    fn notify_all_object_subscribers(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        is_new_object: bool,
+    ) {
+        if self.all_object_subscriptions.is_empty() {
+            return;
+        }
+
+        let (metadata, commit_ids) = if let Some(object) = self.get(object_id) {
+            let commit_ids = if let Some(branch) = object.branches.get(branch_name) {
+                Self::tips_by_timestamp(&branch.commits, &branch.tips)
+            } else {
+                vec![]
+            };
+            (object.metadata.clone(), commit_ids)
+        } else {
+            (HashMap::new(), vec![])
+        };
+
+        self.all_objects_outbox.push(AllObjectUpdate {
+            object_id,
+            metadata,
+            branch_name: branch_name.clone(),
+            commit_ids,
+            is_new_object,
+        });
     }
 
     /// Check if loaded_state satisfies the required depth.
