@@ -80,9 +80,10 @@ The sync layer filters out objects with `nosync: "true"` when syncing to remotes
 
 1. **Single source of truth**: ObjectManager holds all index node data
 2. **Zero-copy reads**: `SkipListNodeView` reads directly from `commit.content` without allocating
-3. **Copy-on-write**: Only mutated nodes are copied to `pending_writes`
-4. **No global state machine**: QueryManager has no Setup/Ready states - operations work immediately
-5. **Lazy loading**: Index data is read from ObjectManager on demand
+3. **Immediate persistence**: Mutations persist immediately to ObjectManager (no buffered node state)
+4. **Queue insert intents**: When index not ready, queue `(key, row_id)` for replay later
+5. **No global state machine**: QueryManager has no Setup/Ready states - operations work immediately
+6. **Lazy loading**: Index data is read from ObjectManager on demand
 
 ### SkipListNodeView (Zero-Copy)
 
@@ -107,16 +108,9 @@ impl<'a> SkipListNodeView<'a> {
 
     /// Get forward pointer at level (no allocation).
     pub fn forward(&self, level: usize) -> Option<ObjectId>;
-}
-```
 
-### NodeRef (Unified Access)
-
-```rust
-/// Unified node access - either a view into ObjectManager or reference to pending write.
-pub enum NodeRef<'a> {
-    View(SkipListNodeView<'a>),
-    Pending(&'a SkipListNode),
+    /// Convert to owned SkipListNode (for mutations).
+    pub fn to_owned(&self) -> SkipListNode;
 }
 ```
 
@@ -127,25 +121,46 @@ pub struct IndexState {
     pub root_id: ObjectId,
     pub table: String,
     pub column: String,
-    pub pending_writes: HashMap<ObjectId, SkipListNode>,  // Mutations not yet persisted
+    pending_index_updates: Vec<(Vec<u8>, ObjectId)>,  // Queue of insert intents (key, row_id)
     current_level: usize,
 }
 
 impl IndexState {
-    /// Get node - checks pending_writes first, then ObjectManager.
-    fn get_node<'a>(&'a self, node_id: ObjectId, om: &'a ObjectManager) -> Option<NodeRef<'a>>;
+    /// Get node as zero-copy view. Returns None if not in ObjectManager.
+    fn get_node<'a>(&self, node_id: ObjectId, om: &'a ObjectManager) -> Option<SkipListNodeView<'a>>;
 
-    /// For mutations, copy to pending_writes if not already there.
-    fn get_node_mut(&mut self, node_id: ObjectId, om: &ObjectManager) -> Option<&mut SkipListNode>;
+    /// Check if the index root exists in ObjectManager.
+    pub fn root_exists(&self, om: &ObjectManager) -> bool;
 
-    /// Persist any pending_writes to ObjectManager.
-    fn persist_pending(&mut self, om: &mut ObjectManager) -> Vec<(ObjectId, CommitId)>;
+    /// Take pending index updates (for replay when index becomes ready).
+    pub fn take_pending_updates(&mut self) -> Vec<(Vec<u8>, ObjectId)>;
+
+    /// Check if there are pending updates.
+    pub fn has_pending_updates(&self) -> bool;
+
+    /// Flush pending updates - replay queued inserts when index becomes ready.
+    pub fn flush_pending(&mut self, om: &mut ObjectManager) -> Result<(), IndexError>;
 }
 ```
 
-All traversal methods take `&ObjectManager`:
-- `insert(key, row_id, om)` - Insert into index
-- `remove(key, row_id, om)` - Remove from index
+### Mutation Flow
+
+Mutations persist immediately to ObjectManager. If the index isn't ready (sentinel doesn't exist), the insert intent is queued for later replay:
+
+```rust
+impl IndexState {
+    /// Insert a row into the index.
+    /// Returns Ok(true) if inserted, Ok(false) if queued (index not ready).
+    pub fn insert(&mut self, key: &[u8], row_id: ObjectId, om: &mut ObjectManager)
+        -> Result<bool, IndexError>;
+
+    /// Remove a row from the index. Persists immediately.
+    pub fn remove(&mut self, key: &[u8], row_id: ObjectId, om: &mut ObjectManager)
+        -> Result<(), IndexError>;
+}
+```
+
+Read-only traversal methods take `&ObjectManager`:
 - `lookup_exact(key, om)` - Exact match lookup
 - `range_scan(min, max, om)` - Range scan
 - `scan_all(om)` - Full index scan
@@ -172,11 +187,19 @@ impl InsertHandle {
 
 ```rust
 impl QueryManager {
-    /// Drive all async progress: persistence, subscription updates.
+    /// Drive all async progress: object updates, pending index flushes, subscription settling.
     pub fn process(&mut self) {
-        // 1. Discover any new rows from _id indices
-        // 2. Persist any pending index writes
-        // 3. Settle subscriptions
+        // 1. Process object updates from SyncManager
+        // 2. Flush pending index updates for indices that became ready
+        // 3. Discover any new rows from _id indices
+        // 4. Settle subscriptions
+    }
+
+    /// Flush pending index updates for indices that became ready.
+    fn flush_pending_index_updates(&mut self) {
+        // For each index with pending updates where root now exists:
+        //   - Take pending updates
+        //   - Replay each (key, row_id) insert
     }
 }
 ```
@@ -215,17 +238,19 @@ crates/groove/src/query_manager/
 - [x] All graph nodes: index_scan, union, materialize, filter, sort, limit_offset, output
 - [x] graph.rs - settling algorithm
 - [x] manager.rs + query.rs - QueryManager with Value boundary
-- [x] Index persistence: `persist_node()`, `persist_pending()` in IndexState
 - [x] `create_with_id()` in ObjectManager for deterministic root IDs
 - [x] Zero-copy index architecture:
   - `SkipListNodeView` for zero-copy reads from ObjectManager
-  - `NodeRef` enum for unified access (View or Pending)
-  - `pending_writes` for copy-on-write mutations
+  - Mutations persist immediately to ObjectManager (no `pending_writes` buffer)
+  - `pending_index_updates` queues insert intents when index not ready
+  - `flush_pending()` replays queued inserts when index becomes ready
+  - Removed `NodeRef` enum - only use `SkipListNodeView` directly
   - Removed `nodes` cache - ObjectManager is single source of truth
   - Removed `QueryManagerState` - no Setup/Ready state machine
   - All traversal methods take `&ObjectManager` parameter
+  - Mutation methods take `&mut ObjectManager` and persist immediately
   - `InsertHandle` with `is_complete()` and `is_indexed()` methods
-  - Lazy sentinel creation on first insert
+  - Lazy sentinel creation and persistence on first insert
 
 **Zero-Copy Architecture Tests:**
 | Test | Status | Location |
@@ -234,11 +259,11 @@ crates/groove/src/query_manager/
 | Node view key is zero-copy | ✓ | `skip_list::tests::node_view_key_is_zero_copy` |
 | Node view iterates row IDs | ✓ | `skip_list::tests::node_view_iterates_row_ids` |
 | Node view reads forward pointers | ✓ | `skip_list::tests::node_view_reads_forward_pointers` |
-| Get node reads from ObjectManager | ✓ | `skip_list::tests::get_node_reads_from_object_manager` |
-| Pending write takes precedence | ✓ | `skip_list::tests::get_node_returns_pending_write_if_present` |
-| Persist pending clears writes | ✓ | `skip_list::tests::persist_pending_clears_pending_writes` |
+| Insert creates and persists sentinel | ✓ | `skip_list::tests::insert_creates_and_persists_sentinel` |
+| Insert returns true when inserted | ✓ | `skip_list::tests::insert_returns_true_when_inserted` |
+| Pending updates queue and flush | ✓ | `skip_list::tests::pending_updates_queue_and_flush` |
 | Cold start loads indices | ✓ | `manager::tests::cold_start_loads_persisted_indices_and_rows` |
-| Insert handle is_indexed works | ✓ | `manager::tests::insert_handle_is_indexed` |
+| Row is indexed after insert | ✓ | `manager::tests::row_is_indexed_after_insert` |
 
 ### Pending Followups
 

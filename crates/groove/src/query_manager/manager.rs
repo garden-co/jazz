@@ -385,17 +385,21 @@ impl QueryManager {
     ///
     /// This method drives async progress:
     /// - Processes object updates from SyncManager
+    /// - Flushes pending index updates when indices become ready
     /// - Discovers rows from indices and loads into cache
     /// - Settles all subscription graphs
     pub fn process(&mut self) {
-        // Discover rows from _id indices and load into cache (lazy discovery)
-        self.discover_rows_from_indices();
-
         // Process object updates from SyncManager
         let updates = self.sync_manager.object_manager.take_all_object_updates();
         for update in updates {
             self.handle_object_update(update);
         }
+
+        // Flush pending index updates for indices that became ready
+        self.flush_pending_index_updates();
+
+        // Discover rows from _id indices and load into cache (lazy discovery)
+        self.discover_rows_from_indices();
 
         // Settle all subscriptions
         for (sub_id, subscription) in &mut self.subscriptions {
@@ -415,6 +419,27 @@ impl QueryManager {
                     subscription_id: *sub_id,
                     delta,
                 });
+            }
+        }
+    }
+
+    /// Flush pending index updates for indices that became ready.
+    fn flush_pending_index_updates(&mut self) {
+        // Collect indices that have pending updates and are now ready
+        let ready_indices: Vec<(String, String)> = self
+            .indices
+            .iter()
+            .filter(|(_, index)| {
+                index.has_pending_updates() && index.root_exists(&self.sync_manager.object_manager)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        // Flush pending updates for each ready index
+        for key in ready_indices {
+            if let Some(index) = self.indices.get_mut(&key) {
+                // Ignore errors - pending updates will be retried next process()
+                let _ = index.flush_pending(&mut self.sync_manager.object_manager);
             }
         }
     }
@@ -514,33 +539,28 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Update "_id" index
+        // Update "_id" index (persists immediately or queues)
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            let modified_nodes = index.insert(
+            index.insert(
                 object_id.0.as_bytes(),
                 object_id,
-                &self.sync_manager.object_manager,
-            );
-            // Persist modified nodes
-            for node_id in modified_nodes {
-                index.persist_node(node_id, &mut self.sync_manager.object_manager)?;
-            }
+                &mut self.sync_manager.object_manager,
+            )?;
         }
 
-        // Update column indices
+        // Update column indices (persists immediately or queues)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             let col_key = (table.to_string(), col.name.clone());
             if let Some(index) = self.indices.get_mut(&col_key)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, data, col_idx)
             {
-                let modified_nodes =
-                    index.insert(value_bytes, object_id, &self.sync_manager.object_manager);
-                // Persist modified nodes
-                for node_id in modified_nodes {
-                    index.persist_node(node_id, &mut self.sync_manager.object_manager)?;
-                }
+                index.insert(
+                    value_bytes,
+                    object_id,
+                    &mut self.sync_manager.object_manager,
+                )?;
             }
         }
 
@@ -556,12 +576,9 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        use std::collections::HashSet;
-        let mut all_modified_nodes: HashMap<(String, String), HashSet<ObjectId>> = HashMap::new();
-
         // "_id" index doesn't change on update
 
-        // Update column indices
+        // Update column indices (remove old value, add new value - persists immediately)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             let col_key = (table.to_string(), col.name.clone());
             if let Some(index) = self.indices.get_mut(&col_key) {
@@ -569,32 +586,13 @@ impl QueryManager {
                 if let Ok(Some(old_bytes)) =
                     super::encoding::column_bytes(descriptor, old_data, col_idx)
                 {
-                    let modified =
-                        index.remove(old_bytes, object_id, &self.sync_manager.object_manager);
-                    all_modified_nodes
-                        .entry(col_key.clone())
-                        .or_default()
-                        .extend(modified);
+                    index.remove(old_bytes, object_id, &mut self.sync_manager.object_manager)?;
                 }
                 // Add new value
                 if let Ok(Some(new_bytes)) =
                     super::encoding::column_bytes(descriptor, new_data, col_idx)
                 {
-                    let modified =
-                        index.insert(new_bytes, object_id, &self.sync_manager.object_manager);
-                    all_modified_nodes
-                        .entry(col_key.clone())
-                        .or_default()
-                        .extend(modified);
-                }
-            }
-        }
-
-        // Persist all modified nodes
-        for (col_key, node_ids) in all_modified_nodes {
-            if let Some(index) = self.indices.get_mut(&col_key) {
-                for node_id in node_ids {
-                    index.persist_node(node_id, &mut self.sync_manager.object_manager)?;
+                    index.insert(new_bytes, object_id, &mut self.sync_manager.object_manager)?;
                 }
             }
         }
