@@ -50,6 +50,11 @@ pub struct AllObjectUpdate {
     pub commit_ids: Vec<CommitId>,
     /// True if this is a newly created/received object, false if existing object.
     pub is_new_object: bool,
+    /// Previous tip commit IDs before this update (empty for new objects).
+    pub previous_commit_ids: Vec<CommitId>,
+    /// Content of previous "winning" tip (newest by timestamp). None if new object.
+    /// Used by QueryManager to compute index deltas for synced updates.
+    pub old_content: Option<Vec<u8>>,
 }
 
 /// Full blob identifier (for addressing within commit context).
@@ -253,8 +258,9 @@ impl ObjectManager {
             return Err(Error::ObjectNotReady(object_id));
         }
 
-        // Validate object exists and check parents
-        {
+        // Capture previous state BEFORE mutation for AllObjectUpdate
+        // (previous_commit_ids, old_content)
+        let (previous_commit_ids, old_content) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
@@ -281,7 +287,21 @@ impl ObjectManager {
                     }
                 }
             }
-        }
+
+            // Capture previous tips and "winning" tip content before mutation
+            if let Some(branch) = object.branches.get(&branch_name) {
+                let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
+                // Last tip in sorted order is the "winner" (newest by timestamp)
+                let old_content = prev_tips
+                    .last()
+                    .and_then(|tip_id| branch.commits.get(tip_id))
+                    .map(|commit| commit.content.clone());
+                (prev_tips, old_content)
+            } else {
+                // New branch - no previous state
+                (vec![], None)
+            }
+        };
 
         let timestamp = self.next_timestamp();
 
@@ -330,7 +350,13 @@ impl ObjectManager {
 
         // Notify global subscribers
         let is_new = matches!(self.objects.get(&object_id), Some(ObjectState::Creating(_)));
-        self.notify_all_object_subscribers(object_id, &branch_name, is_new);
+        self.notify_all_object_subscribers(
+            object_id,
+            &branch_name,
+            is_new,
+            previous_commit_ids,
+            old_content,
+        );
 
         Ok(commit_id)
     }
@@ -757,9 +783,34 @@ impl ObjectManager {
             return Err(Error::ObjectNotReady(object_id));
         }
 
-        // Ensure object exists
-        if self.get(object_id).is_none() {
-            return Err(Error::ObjectNotFound(object_id));
+        // Capture previous state BEFORE mutation for AllObjectUpdate
+        let (previous_commit_ids, old_content, already_exists) = {
+            let object = self
+                .get(object_id)
+                .ok_or(Error::ObjectNotFound(object_id))?;
+
+            if let Some(branch) = object.branches.get(&branch_name) {
+                // Check if commit already exists (idempotent)
+                if branch.commits.contains_key(&commit_id) {
+                    (vec![], None, true)
+                } else {
+                    let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
+                    // Last tip in sorted order is the "winner" (newest by timestamp)
+                    let old_content = prev_tips
+                        .last()
+                        .and_then(|tip_id| branch.commits.get(tip_id))
+                        .map(|commit| commit.content.clone());
+                    (prev_tips, old_content, false)
+                }
+            } else {
+                // New branch - no previous state
+                (vec![], None, false)
+            }
+        };
+
+        // Skip notification and mutation for duplicate commits
+        if already_exists {
+            return Ok(commit_id);
         }
 
         // Queue storage request
@@ -781,11 +832,6 @@ impl ObjectManager {
                 ..Default::default()
             });
 
-        // Check if commit already exists (idempotent)
-        if branch.commits.contains_key(&commit_id) {
-            return Ok(commit_id);
-        }
-
         // Update tips: remove any parents that are tips, add this commit as tip
         for parent in &commit.parents {
             branch.tips.remove(parent);
@@ -798,7 +844,13 @@ impl ObjectManager {
         self.notify_subscribers_of_commit(object_id, &branch_name);
 
         // Notify global subscribers (received objects are never "new" from our perspective)
-        self.notify_all_object_subscribers(object_id, &branch_name, false);
+        self.notify_all_object_subscribers(
+            object_id,
+            &branch_name,
+            false,
+            previous_commit_ids,
+            old_content,
+        );
 
         Ok(commit_id)
     }
@@ -928,6 +980,8 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: &BranchName,
         is_new_object: bool,
+        previous_commit_ids: Vec<CommitId>,
+        old_content: Option<Vec<u8>>,
     ) {
         if self.all_object_subscriptions.is_empty() {
             return;
@@ -950,6 +1004,8 @@ impl ObjectManager {
             branch_name: branch_name.clone(),
             commit_ids,
             is_new_object,
+            previous_commit_ids,
+            old_content,
         });
     }
 
