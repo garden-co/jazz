@@ -819,9 +819,9 @@ describe("OutgoingLoadQueue", () => {
       expect(queue.lowPriorityPendingCount).toBe(0);
       expect(queue.highPriorityPendingCount).toBe(1);
 
-      // Complete blocker and verify original callback is used
+      // Complete blocker and verify upgraded callback is used
       queue.trackComplete(blockerMap.core);
-      expect(callbackCount).toBe(1); // Original callback should be called
+      expect(callbackCount).toBe(10); // Upgraded callback should be called
     });
 
     test("should not downgrade high-priority to low-priority", () => {
@@ -935,7 +935,7 @@ describe("OutgoingLoadQueue", () => {
 
       expect(queue.lowPriorityPendingCount).toBe(3);
 
-      // Upgrade the middle one
+      // Upgrade the middle one (uses new callback)
       queue.enqueue(low2.core, () => order.push("upgraded"));
 
       expect(queue.lowPriorityPendingCount).toBe(2);
@@ -946,11 +946,11 @@ describe("OutgoingLoadQueue", () => {
       queue.trackComplete(low2.core);
       queue.trackComplete(low1.core);
 
-      // low2 should be first (high priority), then low1 and low3
-      expect(order).toEqual(["low2", "low1", "low3"]);
+      // upgraded should be first (high priority with new callback), then low1 and low3
+      expect(order).toEqual(["upgraded", "low1", "low3"]);
     });
 
-    test("should execute immediately when upgrading with immediate mode", () => {
+    test("should execute immediately when upgrading low-priority with immediate mode", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -961,29 +961,143 @@ describe("OutgoingLoadQueue", () => {
       queue.enqueue(blockerMap.core, () => {});
 
       const targetMap = group.createMap();
-      let callbackCalled = false;
+      let originalCallbackCalled = false;
+      let immediateCallbackCalled = false;
 
       // Add low-priority item
       queue.enqueue(
         targetMap.core,
         () => {
-          callbackCalled = true;
+          originalCallbackCalled = true;
         },
         "low-priority",
       );
 
       expect(queue.lowPriorityPendingCount).toBe(1);
-      expect(callbackCalled).toBe(false);
+      expect(originalCallbackCalled).toBe(false);
 
-      // Upgrade with immediate mode - should execute immediately
-      queue.enqueue(targetMap.core, () => {}, "immediate");
+      // Upgrade with immediate mode - should execute immediately with new callback
+      queue.enqueue(
+        targetMap.core,
+        () => {
+          immediateCallbackCalled = true;
+        },
+        "immediate",
+      );
 
       // Should have been executed immediately, not moved to high-priority queue
       expect(queue.lowPriorityPendingCount).toBe(0);
       expect(queue.highPriorityPendingCount).toBe(0);
-      expect(callbackCalled).toBe(true);
+      expect(originalCallbackCalled).toBe(false); // Original callback not called
+      expect(immediateCallbackCalled).toBe(true); // New callback called
       // Should be in-flight now (2 because blocker is also in-flight)
       expect(queue.inFlightCount).toBe(2);
+    });
+
+    test("should execute immediately when upgrading high-priority with immediate mode", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const targetMap = group.createMap();
+      let originalCallbackCalled = false;
+      let immediateCallbackCalled = false;
+
+      // Add high-priority item (it will be queued since blocker is in-flight)
+      queue.enqueue(targetMap.core, () => {
+        originalCallbackCalled = true;
+      });
+
+      expect(queue.highPriorityPendingCount).toBe(1);
+      expect(originalCallbackCalled).toBe(false);
+
+      // Request with immediate mode - should execute immediately with new callback
+      queue.enqueue(
+        targetMap.core,
+        () => {
+          immediateCallbackCalled = true;
+        },
+        "immediate",
+      );
+
+      // Should have been executed immediately, removed from high-priority queue
+      expect(queue.highPriorityPendingCount).toBe(0);
+      expect(originalCallbackCalled).toBe(false); // Original callback not called
+      expect(immediateCallbackCalled).toBe(true); // New callback called
+      // Should be in-flight now (2 because blocker is also in-flight)
+      expect(queue.inFlightCount).toBe(2);
+    });
+
+    test("should skip immediate request on an in-flight value", () => {
+      setMaxInFlightLoadsPerPeer(10);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const targetMap = group.createMap();
+      let firstCallbackCount = 0;
+      let secondCallbackCount = 0;
+
+      // First enqueue - should go in-flight immediately
+      queue.enqueue(targetMap.core, () => {
+        firstCallbackCount++;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(firstCallbackCount).toBe(1);
+
+      // Immediate request on in-flight value - should be skipped
+      queue.enqueue(
+        targetMap.core,
+        () => {
+          secondCallbackCount++;
+        },
+        "immediate",
+      );
+
+      // Should not have sent again
+      expect(queue.inFlightCount).toBe(1);
+      expect(firstCallbackCount).toBe(1);
+      expect(secondCallbackCount).toBe(0);
+    });
+
+    test("should skip low-priority request on an in-flight value", () => {
+      setMaxInFlightLoadsPerPeer(10);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const targetMap = group.createMap();
+      let firstCallbackCount = 0;
+      let secondCallbackCount = 0;
+
+      // First enqueue - should go in-flight immediately
+      queue.enqueue(targetMap.core, () => {
+        firstCallbackCount++;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(firstCallbackCount).toBe(1);
+
+      // Low-priority request on in-flight value - should be skipped
+      queue.enqueue(
+        targetMap.core,
+        () => {
+          secondCallbackCount++;
+        },
+        "low-priority",
+      );
+
+      // Should not have sent again or queued
+      expect(queue.inFlightCount).toBe(1);
+      expect(queue.lowPriorityPendingCount).toBe(0);
+      expect(firstCallbackCount).toBe(1);
+      expect(secondCallbackCount).toBe(0);
     });
 
     test("should clear both priority queues on clear()", () => {

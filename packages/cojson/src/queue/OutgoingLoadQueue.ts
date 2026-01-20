@@ -16,7 +16,7 @@ interface PendingLoad {
  * - "low-priority": processed after all normal priority requests
  * - "immediate": bypasses the queue entirely, executes immediately
  */
-export type LoadMode = "low-priority" | "immediate";
+export type LoadMode = "low-priority" | "immediate" | "high-priority";
 
 /**
  * A queue that manages outgoing load requests with throttling.
@@ -42,7 +42,11 @@ export class OutgoingLoadQueue {
    */
   private lowPriorityNodes: Map<RawCoID, LinkedListNode<PendingLoad>> =
     new Map();
-  private requestedSet: Set<CoValueCore["id"]> = new Set();
+  /**
+   * Tracks nodes in the high-priority queue by CoValue ID for O(1) immediate mode lookup.
+   */
+  private highPriorityNodes: Map<RawCoID, LinkedListNode<PendingLoad>> =
+    new Map();
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private peerId: PeerID) {}
@@ -113,7 +117,6 @@ export class OutgoingLoadQueue {
         }
 
         this.inFlightLoads.delete(coValue);
-        this.requestedSet.delete(coValue.id);
         this.processQueue();
       } else {
         nextTimeout = Math.min(nextTimeout ?? Infinity, timeout - now);
@@ -150,7 +153,6 @@ export class OutgoingLoadQueue {
     }
 
     this.inFlightLoads.delete(coValue);
-    this.requestedSet.delete(coValue.id);
     this.processQueue();
   }
 
@@ -164,53 +166,61 @@ export class OutgoingLoadQueue {
    * @param mode - Optional mode: "low-priority" for background loads, "immediate" to bypass queue
    */
   enqueue(
-    coValue: CoValueCore,
+    value: CoValueCore,
     sendCallback: () => void,
-    mode?: LoadMode,
+    mode: LoadMode = "high-priority",
   ): void {
-    // Skip if already in-flight or pending
-    if (this.inFlightLoads.has(coValue) || this.requestedSet.has(coValue.id)) {
-      // Check if upgrade is needed: normal/immediate priority request for a low-priority pending item
-      if (mode !== "low-priority") {
-        const lowPriorityNode = this.lowPriorityNodes.get(coValue.id);
+    if (this.inFlightLoads.has(value)) {
+      return;
+    }
+
+    const lowPriorityNode = this.lowPriorityNodes.get(value.id);
+    const highPriorityNode = this.highPriorityNodes.get(value.id);
+
+    switch (mode) {
+      case "immediate":
+        // Upgrade any low-priority or high-priority requests to immediate priority
         if (lowPriorityNode) {
-          // Upgrade: remove from low-priority queue
           this.lowPriorityPending.remove(lowPriorityNode);
-          this.lowPriorityNodes.delete(coValue.id);
-
-          if (mode === "immediate") {
-            // Execute immediately
-            this.trackSent(lowPriorityNode.value.value);
-            lowPriorityNode.value.sendCallback();
-          } else {
-            // Move to high-priority queue
-            this.highPriorityPending.push(lowPriorityNode.value);
-            this.processQueue();
-          }
+          this.lowPriorityNodes.delete(value.id);
         }
-      }
-      return;
+        if (highPriorityNode) {
+          this.highPriorityPending.remove(highPriorityNode);
+          this.highPriorityNodes.delete(value.id);
+        }
+
+        this.trackSent(value);
+        sendCallback();
+        break;
+      case "high-priority":
+        if (highPriorityNode) {
+          return;
+        }
+
+        // Upgrade any low-priority requests to high-priority
+        if (lowPriorityNode) {
+          this.lowPriorityPending.remove(lowPriorityNode);
+          this.lowPriorityNodes.delete(value.id);
+        }
+
+        this.highPriorityNodes.set(
+          value.id,
+          this.highPriorityPending.push({ value, sendCallback }),
+        );
+        this.processQueue();
+        break;
+      case "low-priority":
+        if (lowPriorityNode || highPriorityNode) {
+          return;
+        }
+
+        this.lowPriorityNodes.set(
+          value.id,
+          this.lowPriorityPending.push({ value, sendCallback }),
+        );
+        this.processQueue();
+        break;
     }
-
-    this.requestedSet.add(coValue.id);
-
-    // Immediate mode bypasses the queue and sends immediately
-    if (mode === "immediate") {
-      this.trackSent(coValue);
-      sendCallback();
-      return;
-    }
-
-    const pendingLoad = { value: coValue, sendCallback };
-
-    if (mode === "low-priority") {
-      const node = this.lowPriorityPending.push(pendingLoad);
-      this.lowPriorityNodes.set(coValue.id, node);
-    } else {
-      this.highPriorityPending.push(pendingLoad);
-    }
-
-    this.processQueue();
   }
 
   private processing = false;
@@ -228,8 +238,11 @@ export class OutgoingLoadQueue {
       // Try high-priority first
       let next = this.highPriorityPending.shift();
 
-      // Fall back to low-priority if high-priority is empty
-      if (!next) {
+      if (next) {
+        // Remove from the tracking map since we're processing it
+        this.highPriorityNodes.delete(next.value.id);
+      } else {
+        // Fall back to low-priority if high-priority is empty
         next = this.lowPriorityPending.shift();
         if (next) {
           // Remove from the tracking map since we're processing it
@@ -258,9 +271,9 @@ export class OutgoingLoadQueue {
       this.timeoutHandle = null;
     }
     this.inFlightLoads.clear();
-    this.requestedSet.clear();
     this.highPriorityPending = new LinkedList();
     this.lowPriorityPending = new LinkedList();
+    this.highPriorityNodes.clear();
     this.lowPriorityNodes.clear();
   }
 
