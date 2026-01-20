@@ -155,49 +155,6 @@ impl<'a> SkipListNodeView<'a> {
     }
 }
 
-/// Unified access to a skip list node - either a view into ObjectManager or a pending write.
-pub enum NodeRef<'a> {
-    View(SkipListNodeView<'a>),
-    Pending(&'a SkipListNode),
-}
-
-impl<'a> NodeRef<'a> {
-    pub fn key(&self) -> &[u8] {
-        match self {
-            NodeRef::View(v) => v.key(),
-            NodeRef::Pending(n) => &n.key,
-        }
-    }
-
-    pub fn row_ids_vec(&self) -> Vec<ObjectId> {
-        match self {
-            NodeRef::View(v) => v.row_ids().collect(),
-            NodeRef::Pending(n) => n.row_ids.clone(),
-        }
-    }
-
-    pub fn forward(&self, level: usize) -> Option<ObjectId> {
-        match self {
-            NodeRef::View(v) => v.forward(level),
-            NodeRef::Pending(n) => n.forward.get(level).and_then(|x| *x),
-        }
-    }
-
-    pub fn level(&self) -> u8 {
-        match self {
-            NodeRef::View(v) => v.level(),
-            NodeRef::Pending(n) => n.level,
-        }
-    }
-
-    pub fn to_owned(&self) -> SkipListNode {
-        match self {
-            NodeRef::View(v) => v.to_owned(),
-            NodeRef::Pending(n) => (*n).clone(),
-        }
-    }
-}
-
 /// Index root discovery: deterministic UUID from table + column name.
 ///
 /// Uses UUID v5 (SHA-1 based) with a custom namespace for indices.
@@ -363,7 +320,7 @@ impl SkipListNode {
 /// In-memory state for a skip list index.
 ///
 /// Reads nodes directly from ObjectManager via zero-copy views.
-/// Only mutated nodes are copied to `pending_writes`.
+/// Queues insert intents when index not ready for replay later.
 #[derive(Debug, Clone)]
 pub struct IndexState {
     /// Root (sentinel) node ObjectId.
@@ -372,8 +329,8 @@ pub struct IndexState {
     pub table: String,
     /// Column name ("_id" for primary index).
     pub column: String,
-    /// Nodes modified but not yet persisted (copy-on-write).
-    pub pending_writes: HashMap<ObjectId, SkipListNode>,
+    /// Queue of insert intents when index not ready (key, row_id).
+    pending_index_updates: Vec<(Vec<u8>, ObjectId)>,
     /// Current maximum level in use (cached from root node).
     current_level: usize,
 }
@@ -392,30 +349,23 @@ impl IndexState {
             root_id,
             table,
             column,
-            pending_writes: HashMap::new(),
+            pending_index_updates: Vec::new(),
             current_level: 0,
         }
     }
 
     // ========================================================================
-    // Node access (zero-copy views with copy-on-write for mutations)
+    // Node access (zero-copy views)
     // ========================================================================
 
-    /// Get a node - checks pending_writes first, then ObjectManager.
+    /// Get a node as zero-copy view from ObjectManager.
     ///
-    /// Returns None if the node doesn't exist in either location.
-    pub fn get_node<'a>(&'a self, node_id: ObjectId, om: &'a ObjectManager) -> Option<NodeRef<'a>> {
-        // Pending writes take precedence (uncommitted mutations)
-        if let Some(node) = self.pending_writes.get(&node_id) {
-            return Some(NodeRef::Pending(node));
-        }
-
-        // Otherwise, read from ObjectManager (zero-copy)
-        Self::get_node_from_om(node_id, om)
-    }
-
-    /// Get a node directly from ObjectManager (static helper).
-    fn get_node_from_om(node_id: ObjectId, om: &ObjectManager) -> Option<NodeRef<'_>> {
+    /// Returns None if the node doesn't exist or is still loading.
+    pub fn get_node<'a>(
+        &self,
+        node_id: ObjectId,
+        om: &'a ObjectManager,
+    ) -> Option<SkipListNodeView<'a>> {
         let state = om.get_state(node_id)?;
         match state {
             ObjectState::Loading => None,
@@ -423,25 +373,24 @@ impl IndexState {
                 let branch = obj.branches.get(&BranchName::new(INDEX_BRANCH))?;
                 let tip_id = branch.tips.iter().next()?;
                 let commit = branch.commits.get(tip_id)?;
-                let view = SkipListNodeView::new(&commit.content)?;
-                Some(NodeRef::View(view))
+                SkipListNodeView::new(&commit.content)
             }
         }
     }
 
-    /// Get a mutable node - copies to pending_writes if not already there.
-    fn get_node_mut(&mut self, node_id: ObjectId, om: &ObjectManager) -> Option<&mut SkipListNode> {
-        if !self.pending_writes.contains_key(&node_id) {
-            // Convert view to owned (only when mutating)
-            let node = self.get_node(node_id, om)?.to_owned();
-            self.pending_writes.insert(node_id, node);
-        }
-        self.pending_writes.get_mut(&node_id)
-    }
-
-    /// Check if the index root exists (either in pending_writes or ObjectManager).
+    /// Check if the index root exists in ObjectManager.
     pub fn root_exists(&self, om: &ObjectManager) -> bool {
         self.get_node(self.root_id, om).is_some()
+    }
+
+    /// Take pending index updates (for replay when index becomes ready).
+    pub fn take_pending_updates(&mut self) -> Vec<(Vec<u8>, ObjectId)> {
+        std::mem::take(&mut self.pending_index_updates)
+    }
+
+    /// Check if there are pending updates.
+    pub fn has_pending_updates(&self) -> bool {
+        !self.pending_index_updates.is_empty()
     }
 
     /// Check if a row ID exists in the index (for InsertHandle.is_indexed).
@@ -464,37 +413,55 @@ impl IndexState {
         a.cmp(b)
     }
 
-    /// Ensure the sentinel node exists, creating it if necessary.
+    /// Ensure the sentinel node exists, creating and persisting it if necessary.
     ///
-    /// Returns true if the sentinel exists (or was created), false if ObjectManager
-    /// doesn't have the sentinel and we can't create (loading state).
-    fn ensure_sentinel(&mut self, om: &ObjectManager) -> bool {
-        // Check if sentinel already exists
+    /// Returns true if the sentinel exists (or was created), false if creation failed.
+    fn ensure_sentinel(&mut self, om: &mut ObjectManager) -> bool {
+        // Check if sentinel already exists in ObjectManager
         if self.get_node(self.root_id, om).is_some() {
             return true;
         }
 
-        // Create sentinel in pending_writes
-        self.pending_writes
-            .insert(self.root_id, SkipListNode::new_sentinel());
-        true
+        // Create and persist sentinel immediately
+        let sentinel = SkipListNode::new_sentinel();
+        self.persist_node_internal(self.root_id, &sentinel, om)
+            .is_ok()
     }
 
     /// Insert a row into the index.
     ///
-    /// Returns the ObjectIds of nodes that were modified (for persistence).
-    /// Returns empty Vec if index root doesn't exist (caller should queue update).
+    /// Returns true if inserted, false if queued (index not ready).
+    /// Persists modified nodes immediately to ObjectManager.
     #[allow(clippy::needless_range_loop)]
-    pub fn insert(&mut self, key: &[u8], row_id: ObjectId, om: &ObjectManager) -> Vec<ObjectId> {
-        // Ensure sentinel exists
+    pub fn insert(
+        &mut self,
+        key: &[u8],
+        row_id: ObjectId,
+        om: &mut ObjectManager,
+    ) -> Result<bool, IndexError> {
+        // Ensure sentinel exists (creates if needed)
         if !self.ensure_sentinel(om) {
-            return vec![];
+            // Index not ready - queue for later
+            self.pending_index_updates.push((key.to_vec(), row_id));
+            return Ok(false);
         }
 
+        // Index ready - do the actual insert
+        self.do_insert(key, row_id, om)?;
+        Ok(true)
+    }
+
+    /// Internal insert implementation - performs the actual skip list mutation.
+    #[allow(clippy::needless_range_loop)]
+    fn do_insert(
+        &mut self,
+        key: &[u8],
+        row_id: ObjectId,
+        om: &mut ObjectManager,
+    ) -> Result<(), IndexError> {
         // Recalculate current_level from root
         self.recalculate_level(om);
 
-        let mut modified = Vec::new();
         let mut update: Vec<ObjectId> = vec![self.root_id; MAX_LEVEL];
         let mut current = self.root_id;
 
@@ -521,13 +488,13 @@ impl IndexState {
             && next.key().cmp(key) == Ordering::Equal
         {
             // Key exists, add row_id if not already present
-            let row_ids = next.row_ids_vec();
+            let row_ids: Vec<ObjectId> = next.row_ids().collect();
             if !row_ids.contains(&row_id) {
-                let next_mut = self.get_node_mut(next_id, om).unwrap();
-                next_mut.row_ids.push(row_id);
-                modified.push(next_id);
+                let mut node = next.to_owned();
+                node.row_ids.push(row_id);
+                self.persist_node_internal(next_id, &node, om)?;
             }
-            return modified;
+            return Ok(());
         }
 
         // Key doesn't exist, create new node
@@ -544,43 +511,52 @@ impl IndexState {
             self.current_level = new_level as usize;
         }
 
-        // Insert node and update forward pointers
+        // Set forward pointers for new node
         for i in 0..=(new_level as usize) {
             let update_node = self.get_node(update[i], om).unwrap();
-            let next = update_node.forward(i);
-            new_node.forward[i] = next;
+            new_node.forward[i] = update_node.forward(i);
         }
 
-        self.pending_writes.insert(new_node_id, new_node);
-        modified.push(new_node_id);
+        // Persist new node first
+        self.persist_node_internal(new_node_id, &new_node, om)?;
 
-        // Update predecessors' forward pointers
+        // Update predecessors' forward pointers and persist
+        let mut updated_nodes: HashMap<ObjectId, SkipListNode> = HashMap::new();
         for i in 0..=(new_level as usize) {
-            let update_node = self.get_node_mut(update[i], om).unwrap();
-            if i < update_node.forward.len() {
-                update_node.forward[i] = Some(new_node_id);
+            let update_id = update[i];
+            let node = updated_nodes
+                .entry(update_id)
+                .or_insert_with(|| self.get_node(update_id, om).unwrap().to_owned());
+            if i < node.forward.len() {
+                node.forward[i] = Some(new_node_id);
             }
-            modified.push(update[i]);
         }
 
-        modified.sort();
-        modified.dedup();
-        modified
+        // Persist all updated predecessor nodes
+        for (node_id, node) in updated_nodes {
+            self.persist_node_internal(node_id, &node, om)?;
+        }
+
+        Ok(())
     }
 
     /// Remove a row from the index.
     ///
-    /// Returns the ObjectIds of nodes that were modified (for persistence).
+    /// Persists modified nodes immediately to ObjectManager.
     #[allow(clippy::needless_range_loop)]
-    pub fn remove(&mut self, key: &[u8], row_id: ObjectId, om: &ObjectManager) -> Vec<ObjectId> {
+    pub fn remove(
+        &mut self,
+        key: &[u8],
+        row_id: ObjectId,
+        om: &mut ObjectManager,
+    ) -> Result<(), IndexError> {
         // If root doesn't exist, nothing to remove
         if self.get_node(self.root_id, om).is_none() {
-            return vec![];
+            return Ok(());
         }
 
         self.recalculate_level(om);
 
-        let mut modified = Vec::new();
         let mut update: Vec<ObjectId> = vec![self.root_id; MAX_LEVEL];
         let mut current = self.root_id;
 
@@ -610,23 +586,26 @@ impl IndexState {
             let target_forward: Vec<Option<ObjectId>> =
                 (0..=target_level).map(|i| target.forward(i)).collect();
 
-            // Copy to pending_writes and remove row_id
-            let target_mut = self.get_node_mut(target_id, om).unwrap();
-            target_mut.row_ids.retain(|id| *id != row_id);
-            modified.push(target_id);
+            // Clone and remove row_id
+            let mut target_node = target.to_owned();
+            target_node.row_ids.retain(|id| *id != row_id);
 
-            // If no more rows, mark for removal and update predecessors
-            if target_mut.row_ids.is_empty() {
-                // Remove from pending_writes (mark as deleted)
-                self.pending_writes.remove(&target_id);
-
-                // Update forward pointers of predecessors
+            if target_node.row_ids.is_empty() {
+                // Node is now empty - update predecessors to skip it
+                let mut updated_nodes: HashMap<ObjectId, SkipListNode> = HashMap::new();
                 for i in 0..=target_level {
-                    let update_node = self.get_node_mut(update[i], om).unwrap();
-                    if i < update_node.forward.len() {
-                        update_node.forward[i] = target_forward.get(i).and_then(|x| *x);
-                        modified.push(update[i]);
+                    let update_id = update[i];
+                    let node = updated_nodes
+                        .entry(update_id)
+                        .or_insert_with(|| self.get_node(update_id, om).unwrap().to_owned());
+                    if i < node.forward.len() {
+                        node.forward[i] = target_forward.get(i).and_then(|x| *x);
                     }
+                }
+
+                // Persist updated predecessors
+                for (node_id, node) in updated_nodes {
+                    self.persist_node_internal(node_id, &node, om)?;
                 }
 
                 // Update current_level if needed
@@ -638,12 +617,23 @@ impl IndexState {
                         break;
                     }
                 }
+                // Note: We don't delete the empty node object, just unlink it
+            } else {
+                // Node still has rows - persist updated node
+                self.persist_node_internal(target_id, &target_node, om)?;
             }
         }
 
-        modified.sort();
-        modified.dedup();
-        modified
+        Ok(())
+    }
+
+    /// Flush pending index updates - replay queued inserts when index becomes ready.
+    pub fn flush_pending(&mut self, om: &mut ObjectManager) -> Result<(), IndexError> {
+        let pending = std::mem::take(&mut self.pending_index_updates);
+        for (key, row_id) in pending {
+            self.do_insert(&key, row_id, om)?;
+        }
+        Ok(())
     }
 
     /// Exact lookup - returns row IDs for the given key.
@@ -688,7 +678,7 @@ impl IndexState {
                 None => return vec![],
             };
             if self.compare_keys(next.key(), key) == Ordering::Equal {
-                return next.row_ids_vec();
+                return next.row_ids().collect();
             }
         }
 
@@ -763,7 +753,7 @@ impl IndexState {
                 break;
             }
 
-            results.extend(next.row_ids_vec());
+            results.extend(next.row_ids());
             next_opt = next.forward(0);
         }
 
@@ -833,54 +823,6 @@ impl IndexState {
         Ok(Some(commit_id))
     }
 
-    /// Persist all pending writes to ObjectManager.
-    ///
-    /// Clears pending_writes and returns list of (node_id, commit_id) for persisted nodes.
-    pub fn persist_pending(
-        &mut self,
-        object_manager: &mut ObjectManager,
-    ) -> Vec<(ObjectId, CommitId)> {
-        let pending = std::mem::take(&mut self.pending_writes);
-        pending
-            .into_iter()
-            .filter_map(|(id, node)| {
-                self.persist_node_internal(id, &node, object_manager)
-                    .ok()
-                    .flatten()
-                    .map(|c| (id, c))
-            })
-            .collect()
-    }
-
-    /// Persist a specific node (for immediate persistence after insert).
-    ///
-    /// If the node is in pending_writes, persists and removes it.
-    /// If the node is only in ObjectManager, just returns its current state.
-    pub fn persist_node(
-        &mut self,
-        node_id: ObjectId,
-        object_manager: &mut ObjectManager,
-    ) -> Result<Option<CommitId>, IndexError> {
-        // If node is in pending_writes, persist it
-        if let Some(node) = self.pending_writes.remove(&node_id) {
-            return self.persist_node_internal(node_id, &node, object_manager);
-        }
-
-        // Node not in pending_writes - check if it exists in ObjectManager
-        match object_manager.get_state(node_id) {
-            Some(ObjectState::Creating(_)) | Some(ObjectState::Available(_)) => {
-                // Already persisted, get current commit
-                let tips = object_manager
-                    .get_tip_ids(node_id, INDEX_BRANCH)
-                    .map_err(|e| IndexError::ObjectManagerError(format!("{:?}", e)))?;
-                let commit_id = tips.iter().next().copied();
-                Ok(commit_id)
-            }
-            Some(ObjectState::Loading) => Err(IndexError::ObjectNotReady(node_id)),
-            None => Ok(None), // Node doesn't exist anywhere
-        }
-    }
-
     /// Recalculate current_level based on root node.
     fn recalculate_level(&mut self, om: &ObjectManager) {
         let new_level = self.calculate_level_from_root(om);
@@ -907,7 +849,6 @@ impl IndexState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn index_root_id_is_deterministic() {
@@ -1044,14 +985,14 @@ mod tests {
 
     #[test]
     fn insert_and_lookup() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(b"alice@example.com", row1, &om);
-        index.insert(b"bob@example.com", row2, &om);
+        index.insert(b"alice@example.com", row1, &mut om).unwrap();
+        index.insert(b"bob@example.com", row2, &mut om).unwrap();
 
         let alice_rows = index.lookup_exact(b"alice@example.com", &om);
         assert_eq!(alice_rows.len(), 1);
@@ -1067,14 +1008,14 @@ mod tests {
 
     #[test]
     fn insert_duplicate_key() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(b"alice@example.com", row1, &om);
-        index.insert(b"alice@example.com", row2, &om);
+        index.insert(b"alice@example.com", row1, &mut om).unwrap();
+        index.insert(b"alice@example.com", row2, &mut om).unwrap();
 
         let rows = index.lookup_exact(b"alice@example.com", &om);
         assert_eq!(rows.len(), 2);
@@ -1084,12 +1025,12 @@ mod tests {
 
     #[test]
     fn insert_same_row_twice_is_idempotent() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
         let row = ObjectId::new();
 
-        index.insert(b"alice@example.com", row, &om);
-        index.insert(b"alice@example.com", row, &om);
+        index.insert(b"alice@example.com", row, &mut om).unwrap();
+        index.insert(b"alice@example.com", row, &mut om).unwrap();
 
         let rows = index.lookup_exact(b"alice@example.com", &om);
         assert_eq!(rows.len(), 1);
@@ -1097,16 +1038,16 @@ mod tests {
 
     #[test]
     fn remove_row() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(b"alice@example.com", row1, &om);
-        index.insert(b"alice@example.com", row2, &om);
+        index.insert(b"alice@example.com", row1, &mut om).unwrap();
+        index.insert(b"alice@example.com", row2, &mut om).unwrap();
 
-        index.remove(b"alice@example.com", row1, &om);
+        index.remove(b"alice@example.com", row1, &mut om).unwrap();
 
         let rows = index.lookup_exact(b"alice@example.com", &om);
         assert_eq!(rows.len(), 1);
@@ -1115,12 +1056,12 @@ mod tests {
 
     #[test]
     fn remove_last_row_removes_node() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
         let row = ObjectId::new();
 
-        index.insert(b"alice@example.com", row, &om);
-        index.remove(b"alice@example.com", row, &om);
+        index.insert(b"alice@example.com", row, &mut om).unwrap();
+        index.remove(b"alice@example.com", row, &mut om).unwrap();
 
         let rows = index.lookup_exact(b"alice@example.com", &om);
         assert!(rows.is_empty());
@@ -1128,7 +1069,7 @@ mod tests {
 
     #[test]
     fn range_scan_bounded() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "score");
 
         let row1 = ObjectId::new();
@@ -1137,10 +1078,10 @@ mod tests {
         let row4 = ObjectId::new();
 
         // Insert scores as bytes (simulating i32 encoding)
-        index.insert(&10i32.to_le_bytes(), row1, &om);
-        index.insert(&20i32.to_le_bytes(), row2, &om);
-        index.insert(&30i32.to_le_bytes(), row3, &om);
-        index.insert(&40i32.to_le_bytes(), row4, &om);
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
+        index.insert(&40i32.to_le_bytes(), row4, &mut om).unwrap();
 
         // Range [15, 35] should get 20 and 30
         let results = index.range_scan(Some(&15i32.to_le_bytes()), Some(&35i32.to_le_bytes()), &om);
@@ -1151,16 +1092,16 @@ mod tests {
 
     #[test]
     fn range_scan_unbounded_min() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "score");
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(&10i32.to_le_bytes(), row1, &om);
-        index.insert(&20i32.to_le_bytes(), row2, &om);
-        index.insert(&30i32.to_le_bytes(), row3, &om);
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
 
         // Range [_, 25] should get 10 and 20
         let results = index.range_scan(None, Some(&25i32.to_le_bytes()), &om);
@@ -1171,16 +1112,16 @@ mod tests {
 
     #[test]
     fn range_scan_unbounded_max() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "score");
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(&10i32.to_le_bytes(), row1, &om);
-        index.insert(&20i32.to_le_bytes(), row2, &om);
-        index.insert(&30i32.to_le_bytes(), row3, &om);
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
 
         // Range [15, _] should get 20 and 30
         let results = index.range_scan(Some(&15i32.to_le_bytes()), None, &om);
@@ -1191,16 +1132,16 @@ mod tests {
 
     #[test]
     fn scan_all() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "_id");
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1, &om);
-        index.insert(row2.0.as_bytes(), row2, &om);
-        index.insert(row3.0.as_bytes(), row3, &om);
+        index.insert(row1.0.as_bytes(), row1, &mut om).unwrap();
+        index.insert(row2.0.as_bytes(), row2, &mut om).unwrap();
+        index.insert(row3.0.as_bytes(), row3, &mut om).unwrap();
 
         let all = index.scan_all(&om);
         assert_eq!(all.len(), 3);
@@ -1210,20 +1151,19 @@ mod tests {
     }
 
     #[test]
-    fn insert_returns_modified_nodes() {
-        let om = ObjectManager::new();
+    fn insert_returns_true_when_inserted() {
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
         let row = ObjectId::new();
 
-        let modified = index.insert(b"alice@example.com", row, &om);
-
-        // Should include at least the new node and some predecessors
-        assert!(!modified.is_empty());
+        // Insert should return true (inserted, not queued)
+        let inserted = index.insert(b"alice@example.com", row, &mut om).unwrap();
+        assert!(inserted);
     }
 
     #[test]
     fn many_inserts_maintains_order() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "score");
 
         // Insert 100 items in random order
@@ -1231,7 +1171,9 @@ mod tests {
         for i in (0..100).rev() {
             let row = ObjectId::new();
             rows.push((i, row));
-            index.insert(&(i as i32).to_le_bytes(), row, &om);
+            index
+                .insert(&(i as i32).to_le_bytes(), row, &mut om)
+                .unwrap();
         }
 
         // Scan all should return them (each value is unique)
@@ -1243,25 +1185,15 @@ mod tests {
     fn persist_and_load_roundtrip() {
         let mut om = ObjectManager::new();
 
-        // Create an index and insert entries
+        // Create an index and insert entries (persists immediately)
         let mut index = IndexState::new("users", "email");
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        let mod1 = index.insert(b"alice@example.com", row1, &om);
-        let mod2 = index.insert(b"bob@example.com", row2, &om);
-        let mod3 = index.insert(b"charlie@example.com", row3, &om);
-
-        // Persist all modified nodes
-        let mut all_modified: HashSet<ObjectId> = HashSet::new();
-        all_modified.extend(mod1);
-        all_modified.extend(mod2);
-        all_modified.extend(mod3);
-
-        for node_id in all_modified {
-            index.persist_node(node_id, &mut om).unwrap();
-        }
+        index.insert(b"alice@example.com", row1, &mut om).unwrap();
+        index.insert(b"bob@example.com", row2, &mut om).unwrap();
+        index.insert(b"charlie@example.com", row3, &mut om).unwrap();
 
         // Create a new index state - reads from ObjectManager directly (no loading needed)
         let index2 = IndexState::new("users", "email");
@@ -1281,35 +1213,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_pending_clears_pending_writes() {
-        let mut om = ObjectManager::new();
-        let mut index = IndexState::new("users", "email");
-        let row = ObjectId::new();
-
-        // Insert creates pending writes
-        index.insert(b"test@example.com", row, &om);
-        assert!(!index.pending_writes.is_empty());
-
-        // Persist clears them
-        index.persist_pending(&mut om);
-        assert!(index.pending_writes.is_empty());
-    }
-
-    #[test]
-    fn get_node_returns_pending_write_if_present() {
-        let om = ObjectManager::new();
-        let mut index = IndexState::new("users", "email");
-        let row = ObjectId::new();
-
-        // Insert creates a pending write for sentinel and new node
-        index.insert(b"test@example.com", row, &om);
-
-        // get_node should return from pending_writes for root
-        let node = index.get_node(index.root_id, &om).unwrap();
-        assert!(matches!(node, NodeRef::Pending(_)));
-    }
-
-    #[test]
     fn fresh_index_root_doesnt_exist() {
         let om = ObjectManager::new();
         let index = IndexState::new("users", "email");
@@ -1319,41 +1222,46 @@ mod tests {
     }
 
     #[test]
-    fn insert_creates_sentinel_lazily() {
-        let om = ObjectManager::new();
+    fn insert_creates_and_persists_sentinel() {
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
 
         // Before insert, no sentinel
         assert!(!index.root_exists(&om));
 
-        // After insert, sentinel exists in pending_writes
+        // After insert, sentinel exists in ObjectManager (persisted immediately)
         let row = ObjectId::new();
-        index.insert(b"test@example.com", row, &om);
+        index.insert(b"test@example.com", row, &mut om).unwrap();
         assert!(index.root_exists(&om));
-        assert!(index.pending_writes.contains_key(&index.root_id));
-    }
-
-    #[test]
-    fn persist_node_returns_none_for_nonexistent_node() {
-        let mut om = ObjectManager::new();
-        let mut index = IndexState::new("users", "email");
-        let fake_id = ObjectId::new();
-
-        // Node doesn't exist anywhere
-        let result = index.persist_node(fake_id, &mut om).unwrap();
-        assert!(result.is_none());
     }
 
     #[test]
     fn contains_row_checks_id_index() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "_id");
         let row = ObjectId::new();
 
         assert!(!index.contains_row(row, &om));
 
-        index.insert(row.0.as_bytes(), row, &om);
+        index.insert(row.0.as_bytes(), row, &mut om).unwrap();
 
         assert!(index.contains_row(row, &om));
+    }
+
+    #[test]
+    fn pending_updates_queue_and_flush() {
+        let mut om = ObjectManager::new();
+        let mut index = IndexState::new("users", "email");
+        let row = ObjectId::new();
+
+        // First insert creates sentinel and inserts
+        index.insert(b"test@example.com", row, &mut om).unwrap();
+
+        // No pending updates (sentinel was created immediately)
+        assert!(!index.has_pending_updates());
+
+        // Take pending updates (should be empty)
+        let pending = index.take_pending_updates();
+        assert!(pending.is_empty());
     }
 }

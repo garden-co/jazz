@@ -103,15 +103,15 @@ mod tests {
 
     #[test]
     fn scan_all_returns_all_rows() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "_id");
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1, &om);
-        index.insert(row2.0.as_bytes(), row2, &om);
-        index.insert(row3.0.as_bytes(), row3, &om);
+        index.insert(row1.0.as_bytes(), row1, &mut om).unwrap();
+        index.insert(row2.0.as_bytes(), row2, &mut om).unwrap();
+        index.insert(row3.0.as_bytes(), row3, &mut om).unwrap();
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All);
         let delta = node.scan(&index, &om);
@@ -125,13 +125,13 @@ mod tests {
 
     #[test]
     fn scan_eq_returns_matching_rows() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "email");
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(b"alice@example.com", row1, &om);
-        index.insert(b"bob@example.com", row2, &om);
+        index.insert(b"alice@example.com", row1, &mut om).unwrap();
+        index.insert(b"bob@example.com", row2, &mut om).unwrap();
 
         let mut node = IndexScanNode::new(
             "users",
@@ -146,15 +146,15 @@ mod tests {
 
     #[test]
     fn scan_range_returns_rows_in_range() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "score");
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(&10i32.to_le_bytes(), row1, &om);
-        index.insert(&20i32.to_le_bytes(), row2, &om);
-        index.insert(&30i32.to_le_bytes(), row3, &om);
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
 
         let mut node = IndexScanNode::new(
             "users",
@@ -172,12 +172,12 @@ mod tests {
 
     #[test]
     fn rescan_detects_changes() {
-        let om = ObjectManager::new();
+        let mut om = ObjectManager::new();
         let mut index = IndexState::new("users", "_id");
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1, &om);
+        index.insert(row1.0.as_bytes(), row1, &mut om).unwrap();
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All);
         let delta1 = node.scan(&index, &om);
@@ -185,14 +185,14 @@ mod tests {
         assert!(delta1.added.contains(&row1));
 
         // Add another row
-        index.insert(row2.0.as_bytes(), row2, &om);
+        index.insert(row2.0.as_bytes(), row2, &mut om).unwrap();
         let delta2 = node.scan(&index, &om);
         assert_eq!(delta2.added.len(), 1);
         assert!(delta2.added.contains(&row2));
         assert!(delta2.removed.is_empty());
 
         // Remove first row
-        index.remove(row1.0.as_bytes(), row1, &om);
+        index.remove(row1.0.as_bytes(), row1, &mut om).unwrap();
         let delta3 = node.scan(&index, &om);
         assert!(delta3.added.is_empty());
         assert_eq!(delta3.removed.len(), 1);
