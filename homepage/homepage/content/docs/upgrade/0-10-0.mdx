@@ -12,9 +12,9 @@ There are also some other minor improvements that will make your Jazz experience
 Here is what's changed in this release:
 - [New authentication flow](#new-authentication-flow): Now with anonymous auth, redesigned to make Jazz easier to start with and be more flexible.
 - [Local-only mode](#local-only-mode): Users can now explore your app in local-only mode before signing up.
-- [Improvements on the loading APIs](#improved-loading-api); `ensureLoaded` now always returns a value and `useCoState` now returns `null` if the value is not found.
-- [Jazz Workers on native WebSockets](#native-websocket-for-jazz-workers): Improves compatibility with a wider set of Javascript runtimes.
-- [Group inheritance with role mapping](#group-inheritance): Groups can now inherit members from other groups with a fixed role.
+- [Improvements on the loading APIs](#improvements-on-the-loading-apis); `ensureLoaded` now always returns a value and `useCoState` now returns `null` if the value is not found.
+- [Jazz Workers on native WebSockets](#jazz-workers-on-native-websockets): Improves compatibility with a wider set of Javascript runtimes.
+- [Group inheritance with role mapping](#group-inheritance-with-role-mapping): Groups can now inherit members from other groups with a fixed role.
 - Support for Node 14 dropped on cojson.
 - Bugfix: `Group.removeMember` now returns a promise.
 - Now `cojson` and `jazz-tools` don't export directly the crypto providers anymore. Replace the import with `cojson/crypto/WasmCrypto` or `cojson/crypto/PureJSCrypto` depending on your use case.

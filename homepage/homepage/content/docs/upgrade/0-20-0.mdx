@@ -26,7 +26,7 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 - The `removeMember` method now throws an error if the caller is not authorized.
 - We have introduced a way to permanently [delete CoValues](/docs/react/core-concepts/deleting). This brings a [new `deleted` loading state](#new-deleted-loading-state).
 - The React context API in `jazz-tools/react-core` changed: `useJazzContextValue` replaces `useJazzContext` for value access, and nesting `JazzProvider` now throws. See [React context/provider changes](#react-contextprovider-changes).
-- The `load` method now returns a `CoValue` object instead of a `Promise<CoValue>`. See [Removed `load` method](#removed-load-method).
+- The `load` method now returns a `CoValue` object instead of a `Promise<CoValue>`.
 
 ## Breaking changes
 
@@ -221,11 +221,15 @@ The React context API in `jazz-tools/react-core` changed to prevent nested provi
 If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
 
 <CodeGroup>
-```diff
+```ts
+// [!code --:1]
 - import { useJazzContext } from "jazz-tools/react-core";
+// [!code ++:1]
 + import { useJazzContextValue } from "jazz-tools/react-core";
 
+// [!code --:1]
 - const context = useJazzContext();
+// [!code ++:1]
 + const context = useJazzContextValue();
 ```
 </CodeGroup>
