@@ -115,7 +115,7 @@ export class StorageApiAsync implements StorageAPI {
     await this.loadCoValue(id, callback, done);
   }
 
-  async loadCoValue(
+  private async loadCoValue(
     id: string,
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
@@ -274,7 +274,6 @@ export class StorageApiAsync implements StorageAPI {
     this.storeQueue.push(msg, correctionCallback);
 
     this.storeQueue.processQueue(async (data, correctionCallback) => {
-      this.interruptEraser("store");
       return this.storeSingle(data, correctionCallback);
     });
   }
@@ -351,12 +350,9 @@ export class StorageApiAsync implements StorageAPI {
     }
 
     const id = msg.id;
-    const storedCoValueRowID = await this.dbClient.upsertCoValue(
-      id,
-      msg.header,
-    );
+    const storedCoValueRow = await this.getCoValueRow(msg);
 
-    if (!storedCoValueRowID) {
+    if (!storedCoValueRow) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
 
@@ -370,11 +366,7 @@ export class StorageApiAsync implements StorageAPI {
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
       await this.dbClient.transaction(async (tx) => {
-        const sessionRow = await tx.getSingleCoValueSession(
-          storedCoValueRowID,
-          sessionID,
-        );
-
+        const sessionRow = storedCoValueRow.sessions[sessionID];
         if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
           await tx.markCoValueAsDeleted(id);
         }
@@ -398,7 +390,7 @@ export class StorageApiAsync implements StorageAPI {
             msg,
             sessionID,
             sessionRow,
-            storedCoValueRowID,
+            storedCoValueRow.id,
           );
           setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
@@ -416,13 +408,42 @@ export class StorageApiAsync implements StorageAPI {
     return true;
   }
 
+  private async getCoValueRow(
+    msg: NewContentMessage,
+  ): Promise<
+    { id: number; sessions: Record<SessionID, StoredSessionRow> } | undefined
+  > {
+    const id = msg.id;
+    const storedCoValueRowID = await this.dbClient.upsertCoValue(
+      id,
+      msg.header,
+    );
+    if (!storedCoValueRowID) {
+      return undefined;
+    }
+    const sessions: Record<SessionID, StoredSessionRow> = {};
+    await this.dbClient.transaction(async (tx) => {
+      const sessionRows = await Promise.all(
+        (Object.keys(msg.new) as SessionID[]).map((sessionID) =>
+          tx.getSingleCoValueSession(storedCoValueRowID, sessionID),
+        ),
+      );
+      for (const sessionRow of sessionRows) {
+        if (sessionRow) {
+          sessions[sessionRow.sessionID] = sessionRow;
+        }
+      }
+    });
+    return { id: storedCoValueRowID, sessions };
+  }
+
   private async putNewTxs(
     tx: DBTransactionInterfaceAsync,
     msg: NewContentMessage,
     sessionID: SessionID,
     sessionRow: StoredSessionRow | undefined,
     storedCoValueRowID: number,
-  ) {
+  ): Promise<number> {
     const newTransactions = msg.new[sessionID]?.newTransactions || [];
     const lastIdx = sessionRow?.lastIdx || 0;
 
