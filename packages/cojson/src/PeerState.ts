@@ -3,7 +3,7 @@ import { CoValueCore } from "./exports.js";
 import { RawCoID } from "./ids.js";
 import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
-import { OutgoingLoadQueue } from "./queue/OutgoingLoadQueue.js";
+import { type LoadMode, OutgoingLoadQueue } from "./queue/OutgoingLoadQueue.js";
 import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
@@ -59,7 +59,7 @@ export class PeerState {
   readonly loadRequestSent: Set<RawCoID> = new Set();
   private loadQueue: OutgoingLoadQueue;
 
-  sendLoadRequest(coValue: CoValueCore, allowOverflow?: boolean): void {
+  sendLoadRequest(coValue: CoValueCore, mode?: LoadMode): void {
     this.toldKnownState.add(coValue.id);
     this.loadRequestSent.add(coValue.id);
     this.loadQueue.enqueue(
@@ -70,7 +70,7 @@ export class PeerState {
           ...coValue.knownStateWithStreaming(),
         });
       },
-      allowOverflow,
+      mode,
     );
   }
 

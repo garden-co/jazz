@@ -532,4 +532,119 @@ describe("concurrent load", () => {
     const loadedSmallMap = await smallMapPromise;
     expect(loadedSmallMap.isAvailable()).toBe(true);
   });
+
+  test("should prioritize user-initiated loads over peer reconciliation loads", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    // Create CoValues on the server before the client connects
+    const group = jazzCloud.node.createGroup();
+
+    const [a, b, c] = [
+      group.createMap({ test: "a" }),
+      group.createMap({ test: "b" }),
+      group.createMap({ test: "c" }),
+    ];
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { peerState } = client.connectToSyncServer();
+
+    // Load a CoValue to make it available locally
+    await loadCoValueOrFail(client.node, a.id);
+    await loadCoValueOrFail(client.node, b.id);
+
+    // Close the peer connection
+    peerState.gracefulShutdown();
+
+    SyncMessagesLog.clear();
+
+    // Reconnect to the server to trigger the reconciliation load
+    client.connectToSyncServer();
+
+    // The reconciliation load should be in the low-priority queue
+    // Now make a user-initiated load for a different CoValue
+    await loadCoValueOrFail(client.node, c.id);
+
+    // Wait for the reconciliation loads to be sent
+    await waitFor(() => SyncMessagesLog.messages.length >= 8);
+
+    // Expect Group, C, A, B
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        A: a.core,
+        B: b.core,
+        C: c.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/3",
+        "client -> server | LOAD C sessions: empty",
+        "server -> client | CONTENT C header: true new: After: 0 New: 1",
+        "client -> server | KNOWN C sessions: header/1",
+        "client -> server | LOAD A sessions: header/1",
+        "server -> client | KNOWN A sessions: header/1",
+        "client -> server | LOAD B sessions: header/1",
+        "server -> client | KNOWN B sessions: header/1",
+      ]
+    `);
+  });
+
+  test("should upgrade low-priority reconciliation load to high-priority when user requests it", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    // Create CoValues on the server before the client connects
+    const group = jazzCloud.node.createGroup();
+
+    const [a, b, c] = [
+      group.createMap({ test: "a" }),
+      group.createMap({ test: "b" }),
+      group.createMap({ test: "c" }),
+    ];
+
+    const client = setupTestNode({
+      connected: false,
+    });
+
+    // Load both CoValues to make them marked as unavailable
+    await client.node.loadCoValueCore(a.id);
+    await client.node.loadCoValueCore(b.id);
+    await client.node.loadCoValueCore(c.id);
+
+    // Reconnect to the server to trigger the reconciliation load
+    client.connectToSyncServer();
+
+    // The reconciliation load should be in the low-priority queue
+    // Now try to bump-up the priority of the load for c
+    client.node.loadCoValueCore(c.id);
+
+    // Wait for the reconciliation loads to be sent
+    await waitFor(() => SyncMessagesLog.messages.length >= 6);
+
+    // Expect A, C, B
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        A: a.core,
+        B: b.core,
+        C: c.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD A sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT A header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN A sessions: header/1",
+        "client -> server | LOAD C sessions: empty",
+        "server -> client | CONTENT C header: true new: After: 0 New: 1",
+        "client -> server | KNOWN C sessions: header/1",
+        "client -> server | LOAD B sessions: empty",
+        "server -> client | CONTENT B header: true new: After: 0 New: 1",
+        "client -> server | KNOWN B sessions: header/1",
+      ]
+    `);
+  });
 });

@@ -10,8 +10,9 @@ type Tuple<T, N extends number, A extends unknown[] = []> = A extends {
   ? A
   : Tuple<T, N, [...A, T]>;
 export type QueueTuple = Tuple<LinkedList<SyncMessage>, 3>;
-type LinkedListNode<T> = {
+export type LinkedListNode<T> = {
   value: T;
+  prev: LinkedListNode<T> | undefined;
   next: LinkedListNode<T> | undefined;
 };
 /**
@@ -26,13 +27,14 @@ export class LinkedList<T> {
   tail: LinkedListNode<T> | undefined = undefined;
   length = 0;
 
-  push(value: T) {
-    const node = { value, next: undefined };
+  push(value: T): LinkedListNode<T> {
+    const node: LinkedListNode<T> = { value, prev: undefined, next: undefined };
 
     if (this.head === undefined) {
       this.head = node;
       this.tail = node;
     } else if (this.tail) {
+      node.prev = this.tail;
       this.tail.next = node;
       this.tail = node;
     } else {
@@ -41,6 +43,7 @@ export class LinkedList<T> {
 
     this.length++;
     this.meter?.push();
+    return node;
   }
 
   shift() {
@@ -55,12 +58,39 @@ export class LinkedList<T> {
 
     if (this.head === undefined) {
       this.tail = undefined;
+    } else {
+      this.head.prev = undefined;
     }
 
     this.length--;
 
     this.meter?.pull();
     return value;
+  }
+
+  /**
+   * Remove a specific node from the list in O(1) time.
+   * The node must be a valid node that was returned by push().
+   */
+  remove(node: LinkedListNode<T>): void {
+    if (node.prev) {
+      node.prev.next = node.next;
+    } else {
+      // Node is the head
+      this.head = node.next;
+    }
+
+    if (node.next) {
+      node.next.prev = node.prev;
+    } else {
+      // Node is the tail
+      this.tail = node.prev;
+    }
+
+    node.prev = undefined;
+    node.next = undefined;
+    this.length--;
+    this.meter?.pull();
   }
 
   isEmpty() {

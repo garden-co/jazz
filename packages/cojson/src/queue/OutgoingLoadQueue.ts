@@ -1,13 +1,22 @@
 import { CO_VALUE_LOADING_CONFIG } from "../config.js";
 import { CoValueCore } from "../exports.js";
+import type { RawCoID } from "../ids.js";
 import { logger } from "../logger.js";
 import type { PeerID } from "../sync.js";
-import { LinkedList, meteredList } from "./LinkedList.js";
+import { LinkedList, type LinkedListNode, meteredList } from "./LinkedList.js";
 
 interface PendingLoad {
   value: CoValueCore;
   sendCallback: () => void;
 }
+
+/**
+ * Mode for enqueuing load requests:
+ * - undefined (default): normal priority, processed in order
+ * - "low-priority": processed after all normal priority requests
+ * - "immediate": bypasses the queue entirely, executes immediately
+ */
+export type LoadMode = "low-priority" | "immediate";
 
 /**
  * A queue that manages outgoing load requests with throttling.
@@ -20,7 +29,19 @@ interface PendingLoad {
  */
 export class OutgoingLoadQueue {
   private inFlightLoads: Map<CoValueCore, number> = new Map();
-  private pending: LinkedList<PendingLoad> = meteredList("load-requests-queue");
+  private highPriorityPending: LinkedList<PendingLoad> = meteredList(
+    "load-requests-queue",
+    { priority: "high" },
+  );
+  private lowPriorityPending: LinkedList<PendingLoad> = meteredList(
+    "load-requests-queue",
+    { priority: "low" },
+  );
+  /**
+   * Tracks nodes in the low-priority queue by CoValue ID for O(1) upgrade lookup.
+   */
+  private lowPriorityNodes: Map<RawCoID, LinkedListNode<PendingLoad>> =
+    new Map();
   private requestedSet: Set<CoValueCore["id"]> = new Set();
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
@@ -140,34 +161,62 @@ export class OutgoingLoadQueue {
    *
    * @param coValue - The CoValue to load
    * @param sendCallback - Callback to send the request when ready
-   * @param allowOverflow - If true, send immediately bypassing the capacity limit (used for dependencies)
+   * @param mode - Optional mode: "low-priority" for background loads, "immediate" to bypass queue
    */
   enqueue(
     coValue: CoValueCore,
     sendCallback: () => void,
-    allowOverflow?: boolean,
+    mode?: LoadMode,
   ): void {
     // Skip if already in-flight or pending
     if (this.inFlightLoads.has(coValue) || this.requestedSet.has(coValue.id)) {
+      // Check if upgrade is needed: normal/immediate priority request for a low-priority pending item
+      if (mode !== "low-priority") {
+        const lowPriorityNode = this.lowPriorityNodes.get(coValue.id);
+        if (lowPriorityNode) {
+          // Upgrade: remove from low-priority queue
+          this.lowPriorityPending.remove(lowPriorityNode);
+          this.lowPriorityNodes.delete(coValue.id);
+
+          if (mode === "immediate") {
+            // Execute immediately
+            this.trackSent(lowPriorityNode.value.value);
+            lowPriorityNode.value.sendCallback();
+          } else {
+            // Move to high-priority queue
+            this.highPriorityPending.push(lowPriorityNode.value);
+            this.processQueue();
+          }
+        }
+      }
       return;
     }
 
     this.requestedSet.add(coValue.id);
 
-    // Dependencies bypass the queue and send immediately
-    if (allowOverflow) {
+    // Immediate mode bypasses the queue and sends immediately
+    if (mode === "immediate") {
       this.trackSent(coValue);
       sendCallback();
       return;
     }
 
-    this.pending.push({ value: coValue, sendCallback });
+    const pendingLoad = { value: coValue, sendCallback };
+
+    if (mode === "low-priority") {
+      const node = this.lowPriorityPending.push(pendingLoad);
+      this.lowPriorityNodes.set(coValue.id, node);
+    } else {
+      this.highPriorityPending.push(pendingLoad);
+    }
+
     this.processQueue();
   }
 
   private processing = false;
   /**
    * Process all pending load requests while capacity is available.
+   * High-priority requests are processed first, then low-priority.
    */
   private processQueue(): void {
     if (this.processing || !this.canSend()) {
@@ -176,7 +225,17 @@ export class OutgoingLoadQueue {
     this.processing = true;
 
     while (this.canSend()) {
-      const next = this.pending.shift();
+      // Try high-priority first
+      let next = this.highPriorityPending.shift();
+
+      // Fall back to low-priority if high-priority is empty
+      if (!next) {
+        next = this.lowPriorityPending.shift();
+        if (next) {
+          // Remove from the tracking map since we're processing it
+          this.lowPriorityNodes.delete(next.value.id);
+        }
+      }
 
       if (!next) {
         break;
@@ -200,7 +259,9 @@ export class OutgoingLoadQueue {
     }
     this.inFlightLoads.clear();
     this.requestedSet.clear();
-    this.pending = new LinkedList();
+    this.highPriorityPending = new LinkedList();
+    this.lowPriorityPending = new LinkedList();
+    this.lowPriorityNodes.clear();
   }
 
   /**
@@ -214,6 +275,20 @@ export class OutgoingLoadQueue {
    * Get the number of pending loads (for testing/debugging).
    */
   get pendingCount(): number {
-    return this.pending.length;
+    return this.highPriorityPending.length + this.lowPriorityPending.length;
+  }
+
+  /**
+   * Get the number of high-priority pending loads (for testing/debugging).
+   */
+  get highPriorityPendingCount(): number {
+    return this.highPriorityPending.length;
+  }
+
+  /**
+   * Get the number of low-priority pending loads (for testing/debugging).
+   */
+  get lowPriorityPendingCount(): number {
+    return this.lowPriorityPending.length;
   }
 }

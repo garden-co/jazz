@@ -405,7 +405,7 @@ export class SyncManager {
         // If the coValue is unavailable and we never tried this peer
         // we try to load it from the peer
         if (!peer.loadRequestSent.has(coValue.id)) {
-          peer.sendLoadRequest(coValue);
+          peer.sendLoadRequest(coValue, "low-priority");
         }
       } else {
         // Build the list of coValues ordered by dependency
@@ -425,8 +425,11 @@ export class SyncManager {
        * - Subscribe to the coValue updates
        * - Start the sync process in case we or the other peer
        *   lacks some transactions
+       *
+       * Use low priority for reconciliation loads so that user-initiated
+       * loads take precedence.
        */
-      peer.sendLoadRequest(coValue);
+      peer.sendLoadRequest(coValue, "low-priority");
     }
   }
 
@@ -780,12 +783,12 @@ export class SyncManager {
             peers.push(peer);
           }
 
-          // Allow overflow to bypass the concurrency limit for dependencies
+          // Use immediate mode to bypass the concurrency limit for dependencies
           // We do this to avoid that the dependency load is blocked
           // by the pending dependendant load
           // Also these should be done with the highest priority, because we need to
           // unblock the coValue wait
-          dependencyCoValue.load(peers, true);
+          dependencyCoValue.load(peers, "immediate");
         }
       }
 

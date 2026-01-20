@@ -1,6 +1,7 @@
 import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
+import type { LoadMode } from "../queue/OutgoingLoadQueue.js";
 import {
   RawAccount,
   type ControlledAccountOrAgent,
@@ -1847,11 +1848,11 @@ export class CoValueCore {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
 
-  load(peers: PeerState[], allowOverflow?: boolean) {
+  load(peers: PeerState[], mode?: LoadMode) {
     this.loadFromStorage((found) => {
       // When found the load is triggered by handleNewContent
       if (!found) {
-        this.loadFromPeers(peers, allowOverflow);
+        this.loadFromPeers(peers, mode);
       }
     });
   }
@@ -1937,7 +1938,7 @@ export class CoValueCore {
     this.node.storage.loadKnownState(this.id, done);
   }
 
-  loadFromPeers(peers: PeerState[], allowOverflow?: boolean) {
+  loadFromPeers(peers: PeerState[], mode?: LoadMode) {
     if (peers.length === 0) {
       return;
     }
@@ -1947,12 +1948,12 @@ export class CoValueCore {
 
       if (currentState === "unknown" || currentState === "unavailable") {
         this.markPending(peer.id);
-        this.internalLoadFromPeer(peer, allowOverflow);
+        this.internalLoadFromPeer(peer, mode);
       }
     }
   }
 
-  private internalLoadFromPeer(peer: PeerState, allowOverflow?: boolean) {
+  private internalLoadFromPeer(peer: PeerState, mode?: LoadMode) {
     if (peer.closed && !peer.persistent) {
       this.markNotFoundInPeer(peer.id);
       return;
@@ -1978,7 +1979,7 @@ export class CoValueCore {
      * as part of the reconnection process.
      */
     if (!peer.closed) {
-      peer.sendLoadRequest(this, allowOverflow);
+      peer.sendLoadRequest(this, mode);
     }
 
     this.subscribe((state, unsubscribe) => {

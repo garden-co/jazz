@@ -544,8 +544,8 @@ describe("OutgoingLoadQueue", () => {
     });
   });
 
-  describe("allowOverflow", () => {
-    test("should send immediately when allowOverflow is true even at capacity", () => {
+  describe("immediate mode", () => {
+    test("should send immediately when mode is immediate even at capacity", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -565,13 +565,13 @@ describe("OutgoingLoadQueue", () => {
       expect(callback1Called).toBe(true);
       expect(queue.inFlightCount).toBe(1);
 
-      // This should bypass the capacity limit with allowOverflow
+      // This should bypass the capacity limit with immediate mode
       queue.enqueue(
         map2.core,
         () => {
           callback2Called = true;
         },
-        true,
+        "immediate",
       );
 
       // Both should have been called even though capacity is 1
@@ -579,7 +579,7 @@ describe("OutgoingLoadQueue", () => {
       expect(queue.inFlightCount).toBe(2);
     });
 
-    test("should still track overflow requests for timeout handling", async () => {
+    test("should still track immediate requests for timeout handling", async () => {
       vi.useFakeTimers();
       CO_VALUE_LOADING_CONFIG.TIMEOUT = 1000;
       setMaxInFlightLoadsPerPeer(1);
@@ -589,7 +589,7 @@ describe("OutgoingLoadQueue", () => {
 
       const coValue = node.getCoValue("co_zTestOverflowTimeout01" as any);
 
-      queue.enqueue(coValue, () => {}, true);
+      queue.enqueue(coValue, () => {}, "immediate");
 
       expect(queue.inFlightCount).toBe(1);
 
@@ -601,7 +601,7 @@ describe("OutgoingLoadQueue", () => {
       expect(coValue.getLoadingStateForPeer(TEST_PEER_ID)).toBe("unavailable");
     });
 
-    test("should still deduplicate overflow requests", () => {
+    test("should still deduplicate immediate requests", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -616,14 +616,14 @@ describe("OutgoingLoadQueue", () => {
         () => {
           callbackCount++;
         },
-        true,
+        "immediate",
       );
       queue.enqueue(
         map.core,
         () => {
           callbackCount++;
         },
-        true,
+        "immediate",
       );
 
       // Should only be called once due to deduplication
@@ -631,14 +631,14 @@ describe("OutgoingLoadQueue", () => {
       expect(queue.inFlightCount).toBe(1);
     });
 
-    test("should process pending requests when overflow request completes", () => {
+    test("should process pending requests when immediate request completes", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
       const group = node.createGroup();
 
       const map1 = group.createMap();
-      const overflowMap = group.createMap();
+      const immediateMap = group.createMap();
       const map2 = group.createMap();
 
       let callback2Called = false;
@@ -654,13 +654,13 @@ describe("OutgoingLoadQueue", () => {
       expect(callback2Called).toBe(false);
       expect(queue.pendingCount).toBe(1);
 
-      // Add overflow request - this bypasses the queue but still counts as in-flight
-      queue.enqueue(overflowMap.core, () => {}, true);
+      // Add immediate request - this bypasses the queue but still counts as in-flight
+      queue.enqueue(immediateMap.core, () => {}, "immediate");
 
       expect(queue.inFlightCount).toBe(2);
 
-      // Complete the overflow request
-      queue.trackComplete(overflowMap.core);
+      // Complete the immediate request
+      queue.trackComplete(immediateMap.core);
 
       // Still at capacity because map1 is still in-flight
       expect(callback2Called).toBe(false);
@@ -723,6 +723,293 @@ describe("OutgoingLoadQueue", () => {
       expect(coValue.getLoadingStateForPeer(TEST_PEER_ID)).not.toBe(
         "unavailable",
       );
+    });
+  });
+
+  describe("priority queue", () => {
+    test("should process high-priority requests before low-priority", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue first
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      // Enqueue low-priority requests
+      const lowMap1 = group.createMap();
+      const lowMap2 = group.createMap();
+
+      // Enqueue high-priority request
+      const highMap = group.createMap();
+
+      const order: string[] = [];
+
+      // Add low-priority first
+      queue.enqueue(lowMap1.core, () => order.push("low1"), "low-priority");
+      queue.enqueue(lowMap2.core, () => order.push("low2"), "low-priority");
+      // Add high-priority after
+      queue.enqueue(highMap.core, () => order.push("high"));
+
+      expect(queue.pendingCount).toBe(3);
+      expect(queue.highPriorityPendingCount).toBe(1);
+      expect(queue.lowPriorityPendingCount).toBe(2);
+
+      // Complete the blocker and process requests one by one
+      queue.trackComplete(blockerMap.core);
+      expect(order).toEqual(["high"]);
+
+      queue.trackComplete(highMap.core);
+      expect(order).toEqual(["high", "low1"]);
+
+      queue.trackComplete(lowMap1.core);
+      expect(order).toEqual(["high", "low1", "low2"]);
+    });
+
+    test("should add low-priority request to low-priority queue", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const lowMap = group.createMap();
+      queue.enqueue(lowMap.core, () => {}, "low-priority");
+
+      expect(queue.pendingCount).toBe(1);
+      expect(queue.lowPriorityPendingCount).toBe(1);
+      expect(queue.highPriorityPendingCount).toBe(0);
+    });
+
+    test("should upgrade low-priority to high-priority when requested with normal priority", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const targetMap = group.createMap();
+      let callbackCount = 0;
+
+      // First enqueue as low-priority
+      queue.enqueue(
+        targetMap.core,
+        () => {
+          callbackCount++;
+        },
+        "low-priority",
+      );
+
+      expect(queue.lowPriorityPendingCount).toBe(1);
+      expect(queue.highPriorityPendingCount).toBe(0);
+
+      // Upgrade by requesting with normal priority
+      queue.enqueue(targetMap.core, () => {
+        callbackCount += 10;
+      });
+
+      // Should have moved to high-priority queue
+      expect(queue.lowPriorityPendingCount).toBe(0);
+      expect(queue.highPriorityPendingCount).toBe(1);
+
+      // Complete blocker and verify original callback is used
+      queue.trackComplete(blockerMap.core);
+      expect(callbackCount).toBe(1); // Original callback should be called
+    });
+
+    test("should not downgrade high-priority to low-priority", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const targetMap = group.createMap();
+
+      // First enqueue as high-priority
+      queue.enqueue(targetMap.core, () => {});
+
+      expect(queue.highPriorityPendingCount).toBe(1);
+      expect(queue.lowPriorityPendingCount).toBe(0);
+
+      // Try to enqueue as low-priority
+      queue.enqueue(targetMap.core, () => {}, "low-priority");
+
+      // Should still be in high-priority queue (no change)
+      expect(queue.highPriorityPendingCount).toBe(1);
+      expect(queue.lowPriorityPendingCount).toBe(0);
+    });
+
+    test("should process mixed priority requests in correct order", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue first
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const order: string[] = [];
+
+      // Interleave low and high priority
+      const low1 = group.createMap();
+      const high1 = group.createMap();
+      const low2 = group.createMap();
+      const high2 = group.createMap();
+      const low3 = group.createMap();
+
+      queue.enqueue(low1.core, () => order.push("low1"), "low-priority");
+      queue.enqueue(high1.core, () => order.push("high1"));
+      queue.enqueue(low2.core, () => order.push("low2"), "low-priority");
+      queue.enqueue(high2.core, () => order.push("high2"));
+      queue.enqueue(low3.core, () => order.push("low3"), "low-priority");
+
+      expect(queue.highPriorityPendingCount).toBe(2);
+      expect(queue.lowPriorityPendingCount).toBe(3);
+
+      // Process all
+      queue.trackComplete(blockerMap.core);
+      queue.trackComplete(high1.core);
+      queue.trackComplete(high2.core);
+      queue.trackComplete(low1.core);
+      queue.trackComplete(low2.core);
+
+      // High priority should come first, then low priority
+      expect(order).toEqual(["high1", "high2", "low1", "low2", "low3"]);
+    });
+
+    test("should handle upgrade when item is the only one in low-priority queue", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const targetMap = group.createMap();
+
+      // Add single low-priority item
+      queue.enqueue(targetMap.core, () => {}, "low-priority");
+
+      expect(queue.lowPriorityPendingCount).toBe(1);
+
+      // Upgrade it
+      queue.enqueue(targetMap.core, () => {});
+
+      expect(queue.lowPriorityPendingCount).toBe(0);
+      expect(queue.highPriorityPendingCount).toBe(1);
+    });
+
+    test("should handle upgrade when item is in the middle of low-priority queue", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const order: string[] = [];
+      const low1 = group.createMap();
+      const low2 = group.createMap();
+      const low3 = group.createMap();
+
+      // Add three low-priority items
+      queue.enqueue(low1.core, () => order.push("low1"), "low-priority");
+      queue.enqueue(low2.core, () => order.push("low2"), "low-priority");
+      queue.enqueue(low3.core, () => order.push("low3"), "low-priority");
+
+      expect(queue.lowPriorityPendingCount).toBe(3);
+
+      // Upgrade the middle one
+      queue.enqueue(low2.core, () => order.push("upgraded"));
+
+      expect(queue.lowPriorityPendingCount).toBe(2);
+      expect(queue.highPriorityPendingCount).toBe(1);
+
+      // Process all
+      queue.trackComplete(blockerMap.core);
+      queue.trackComplete(low2.core);
+      queue.trackComplete(low1.core);
+
+      // low2 should be first (high priority), then low1 and low3
+      expect(order).toEqual(["low2", "low1", "low3"]);
+    });
+
+    test("should execute immediately when upgrading with immediate mode", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const targetMap = group.createMap();
+      let callbackCalled = false;
+
+      // Add low-priority item
+      queue.enqueue(
+        targetMap.core,
+        () => {
+          callbackCalled = true;
+        },
+        "low-priority",
+      );
+
+      expect(queue.lowPriorityPendingCount).toBe(1);
+      expect(callbackCalled).toBe(false);
+
+      // Upgrade with immediate mode - should execute immediately
+      queue.enqueue(targetMap.core, () => {}, "immediate");
+
+      // Should have been executed immediately, not moved to high-priority queue
+      expect(queue.lowPriorityPendingCount).toBe(0);
+      expect(queue.highPriorityPendingCount).toBe(0);
+      expect(callbackCalled).toBe(true);
+      // Should be in-flight now (2 because blocker is also in-flight)
+      expect(queue.inFlightCount).toBe(2);
+    });
+
+    test("should clear both priority queues on clear()", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      // Block the queue
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      const highMap = group.createMap();
+      const lowMap = group.createMap();
+
+      queue.enqueue(highMap.core, () => {});
+      queue.enqueue(lowMap.core, () => {}, "low-priority");
+
+      expect(queue.highPriorityPendingCount).toBe(1);
+      expect(queue.lowPriorityPendingCount).toBe(1);
+
+      queue.clear();
+
+      expect(queue.highPriorityPendingCount).toBe(0);
+      expect(queue.lowPriorityPendingCount).toBe(0);
+      expect(queue.pendingCount).toBe(0);
     });
   });
 });
