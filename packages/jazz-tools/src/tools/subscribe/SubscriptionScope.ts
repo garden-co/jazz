@@ -4,7 +4,6 @@ import {
   CoList,
   CoMap,
   type CoValue,
-  type ID,
   MaybeLoaded,
   NotLoaded,
   type RefEncoded,
@@ -40,11 +39,14 @@ import {
 } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
+  static isProfilingEnabled = false;
+
+  static setProfilingEnabled(enabled: boolean) {
+    this.isProfilingEnabled = enabled;
+  }
+
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
-  childValues: Map<string, SubscriptionValue<any, any>> = new Map<
-    string,
-    SubscriptionValue<D, any>
-  >();
+  childValues: Map<string, SubscriptionValue<CoValue>> = new Map();
   /**
    * Explicitly-loaded child ids that are unloaded
    */
@@ -53,7 +55,7 @@ export class SubscriptionScope<D extends CoValue> {
    * Autoloaded child ids that are unloaded
    */
   private pendingAutoloadedChildren: Set<string> = new Set();
-  value: SubscriptionValue<D, any> | SubscriptionValueLoading;
+  value: SubscriptionValue<D> | SubscriptionValueLoading;
   private childErrors: Map<string, JazzError> = new Map();
   private validationErrors: Map<string, JazzError> = new Map();
   errorFromChildren: JazzError | undefined;
@@ -81,9 +83,9 @@ export class SubscriptionScope<D extends CoValue> {
 
   constructor(
     public node: LocalNode,
-    resolve: RefsToResolve<D>,
-    public id: ID<D>,
-    public schema: RefEncoded<D>,
+    resolve: RefsToResolve<any>,
+    public id: string,
+    public schema: RefEncoded<CoValue>,
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
@@ -141,7 +143,25 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  updateValue(value: SubscriptionValue<D, any>) {
+  trackLoadingPerformance(context: string) {
+    if (!SubscriptionScope.isProfilingEnabled) {
+      return;
+    }
+
+    const currentState = this.getCurrentRawValue();
+
+    if (currentState !== CoValueLoadingState.LOADING) {
+      return;
+    }
+
+    const uuid = crypto.randomUUID();
+
+    // TODO: Use performance.mark and performance.measure to track the loading performance
+    // provide context, schema and resolve in the details
+    // Check the storage peer loading state to see if the value has been loaded from storage
+  }
+
+  updateValue(value: SubscriptionValue<D>) {
     this.value = value;
 
     // Flags that the value has changed and we need to trigger an update
@@ -285,7 +305,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   handleChildUpdate(
     id: string,
-    value: SubscriptionValue<any, any> | SubscriptionValueLoading,
+    value: SubscriptionValue<CoValue> | SubscriptionValueLoading,
     key?: string,
   ) {
     if (value.type === CoValueLoadingState.LOADING) {
@@ -555,7 +575,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.dirty = false;
   }
 
-  subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
+  subscribers = new Set<(value: SubscriptionValue<D>) => void>();
   subscriberChangeCallbacks = new Set<(count: number) => void>();
 
   /**
@@ -578,7 +598,7 @@ export class SubscriptionScope<D extends CoValue> {
     });
   }
 
-  subscribe(listener: (value: SubscriptionValue<D, any>) => void) {
+  subscribe(listener: (value: SubscriptionValue<D>) => void) {
     this.subscribers.add(listener);
     this.notifySubscriberChange();
 
@@ -588,7 +608,7 @@ export class SubscriptionScope<D extends CoValue> {
     };
   }
 
-  setListener(listener: (value: SubscriptionValue<D, any>) => void) {
+  setListener(listener: (value: SubscriptionValue<D>) => void) {
     const hadListener = this.subscribers.has(listener);
     this.subscribers.add(listener);
     // Only notify if this is a new listener (count actually changed)
@@ -624,11 +644,11 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = true;
 
     if (value[TypeSym] === "CoMap" || value[TypeSym] === "Account") {
-      const map = value as CoMap;
+      const map = value as unknown as CoMap;
 
       this.loadCoMapKey(map, key, true);
     } else if (value[TypeSym] === "CoList") {
-      const list = value as CoList;
+      const list = value as unknown as CoList;
 
       this.loadCoListKey(list, key, true);
     }
@@ -650,7 +670,7 @@ export class SubscriptionScope<D extends CoValue> {
    *
    * Used to make the autoload work on closed subscription scopes
    */
-  pullValue(listener: (value: SubscriptionValue<D, any>) => void) {
+  pullValue(listener: (value: SubscriptionValue<D>) => void) {
     if (!this.closed) {
       throw new Error("Cannot pull a non-closed subscription scope");
     }
@@ -707,7 +727,7 @@ export class SubscriptionScope<D extends CoValue> {
     const child = new SubscriptionScope(
       this.node,
       true,
-      id as ID<any>,
+      id,
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
@@ -751,7 +771,7 @@ export class SubscriptionScope<D extends CoValue> {
         coValueType === "Account" ||
         coValueType === "Group"
       ) {
-        const map = value as CoMap;
+        const map = value as unknown as CoMap;
         const keys =
           "$each" in depth ? map.$jazz.raw.keys() : Object.keys(depth);
 
@@ -763,7 +783,7 @@ export class SubscriptionScope<D extends CoValue> {
           }
         }
       } else if (value[TypeSym] === "CoList") {
-        const list = value as CoList;
+        const list = value as unknown as CoList;
 
         const descriptor = list.$jazz.getItemsDescriptor();
 
@@ -782,7 +802,7 @@ export class SubscriptionScope<D extends CoValue> {
           }
         }
       } else if (value[TypeSym] === "CoStream") {
-        const stream = value as CoFeed;
+        const stream = value as unknown as CoFeed;
         const descriptor = stream.$jazz.getItemsDescriptor();
 
         if (descriptor && isRefEncoded(descriptor)) {
@@ -969,7 +989,7 @@ export class SubscriptionScope<D extends CoValue> {
     const child = new SubscriptionScope(
       this.node,
       resolve,
-      id as ID<any>,
+      id,
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,

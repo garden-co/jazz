@@ -4,6 +4,7 @@ import type {
   AnyAccountSchema,
   BranchDefinition,
   CoValue,
+  CoValueClass,
   CoValueClassOrSchema,
   CoValueFromRaw,
   SchemaResolveQuery,
@@ -16,9 +17,9 @@ import type {
 } from "jazz-tools";
 import {
   coValueClassFromCoValueClassOrSchema,
-  subscribeToCoValue,
   CoValueLoadingState,
   getUnloadedCoValueWithoutId,
+  SubscriptionScope,
 } from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
@@ -89,29 +90,31 @@ export class CoState<
             getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
           );
         }
-        const agent = "me" in ctx ? ctx.me : ctx.guest;
-        const resolve = getResolveQuery(Schema, options?.resolve);
 
-        const unsubscribe = subscribeToCoValue(
-          coValueClassFromCoValueClassOrSchema(Schema),
+        const agent = "me" in ctx ? ctx.me : ctx.guest;
+        const node = "node" in agent ? agent.node : agent.$jazz.localNode;
+        const resolve = getResolveQuery(Schema, options?.resolve);
+        const cls = coValueClassFromCoValueClassOrSchema(Schema) as CoValueClass<Loaded<V, R>>;
+
+        const subscriptionScope = new SubscriptionScope<Loaded<V, R>>(
+          node,
+          resolve,
           id,
-          {
-            // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
-            resolve,
-            loadAs: agent,
-            onError: (value) => {
-              this.update(value);
-            },
-            syncResolution: true,
-            unstable_branch: options?.unstable_branch,
-          },
-          (value) => {
-            this.update(value as Loaded<V, R>);
-          },
+          { ref: cls, optional: false },
+          false, // skipRetry
+          false, // bestEffortResolution
+          options?.unstable_branch,
         );
 
+        subscriptionScope.subscribe(() => {
+          const value = subscriptionScope.getCurrentValue();
+          this.update(value);
+        });
+
+        this.update(subscriptionScope.getCurrentValue());
+
         return () => {
-          unsubscribe();
+          subscriptionScope.destroy();
         };
       });
     });
@@ -170,27 +173,29 @@ export class AccountCoState<
         }
 
         const me = ctx.me;
+        const node = me.$jazz.localNode;
         const resolve = getResolveQuery(Schema, options?.resolve);
-
-        const unsubscribe = subscribeToCoValue(
-          coValueClassFromCoValueClassOrSchema(Schema),
+        const cls = coValueClassFromCoValueClassOrSchema(Schema) as CoValueClass<Loaded<A, R>>;
+ 
+        const subscriptionScope = new SubscriptionScope<Loaded<A, R>>(
+          node,
+          resolve,
           me.$jazz.id,
-          {
-            resolve,
-            loadAs: me,
-            onError: (value) => {
-              this.update(value);
-            },
-            syncResolution: true,
-            unstable_branch: options?.unstable_branch,
-          },
-          (value) => {
-            this.update(value as Loaded<A, R>);
-          },
+          { ref: cls, optional: false },
+          false, // skipRetry
+          false, // bestEffortResolution
+          options?.unstable_branch,
         );
 
+        subscriptionScope.subscribe(() => {
+          const value = subscriptionScope.getCurrentValue();
+          this.update(value);
+        });
+
+        this.update(subscriptionScope.getCurrentValue());
+
         return () => {
-          unsubscribe();
+          subscriptionScope.destroy();
         };
       });
     });

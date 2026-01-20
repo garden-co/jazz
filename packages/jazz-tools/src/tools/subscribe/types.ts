@@ -42,10 +42,10 @@ export type NotLoadedCoValueState =
   | typeof CoValueLoadingState.LOADING
   | CoValueErrorState;
 
-export type SubscriptionValue<D extends CoValue, R extends RefsToResolve<D>> =
+export type SubscriptionValue<D> =
   | {
       type: typeof CoValueLoadingState.LOADED;
-      value: Resolved<D, R>;
+      value: D;
       id: string;
     }
   | JazzError;
