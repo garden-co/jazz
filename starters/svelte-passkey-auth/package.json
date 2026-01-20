@@ -17,7 +17,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "devDependencies": {
-    "@playwright/test": "^1.50.1",
+    "@playwright/test": "catalog:default",
     "@sveltejs/adapter-auto": "^6.0.1",
     "@sveltejs/kit": "catalog:svelte",
     "@sveltejs/vite-plugin-svelte": "catalog:svelte",

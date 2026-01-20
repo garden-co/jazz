@@ -32,7 +32,7 @@
     "tailwind-merge": "^1.14.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.50.1",
+    "@playwright/test": "catalog:default",
     "@tailwindcss/postcss": "^4.1.10",
     "@types/react": "catalog:react",
     "@types/react-dom": "catalog:react",

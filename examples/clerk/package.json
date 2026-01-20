@@ -19,7 +19,7 @@
     "react-dom": "catalog:react"
   },
   "devDependencies": {
-    "@playwright/test": "^1.50.1",
+    "@playwright/test": "catalog:default",
     "@biomejs/biome": "catalog:default",
     "@types/react": "catalog:react",
     "@types/react-dom": "catalog:react",

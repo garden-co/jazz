@@ -32,7 +32,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:default",
-    "@playwright/test": "^1.50.1",
+    "@playwright/test": "catalog:default",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^20",

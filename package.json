@@ -16,7 +16,7 @@
   "devDependencies": {
     "@biomejs/biome": "catalog:default",
     "@changesets/cli": "^2.29.7",
-    "@playwright/test": "^1.50.1",
+    "@playwright/test": "catalog:default",
     "@vitejs/plugin-react": "^4.5.1",
     "@vitest/browser-playwright": "catalog:default",
     "@vitest/coverage-v8": "catalog:default",
@@ -26,7 +26,7 @@
     "jazz-tools": "workspace:*",
     "lefthook": "^1.8.2",
     "pkg-pr-new": "^0.0.60",
-    "playwright": "^1.50.1",
+    "playwright": "catalog:default",
     "turbo": "^2.3.1",
     "typedoc": "^0.25.13",
     "vitest": "catalog:default"
