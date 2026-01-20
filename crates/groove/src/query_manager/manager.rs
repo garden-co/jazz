@@ -397,6 +397,7 @@ impl QueryManager {
     /// This method drives async progress:
     /// - Processes object updates from SyncManager
     /// - Flushes pending index updates when indices become ready
+    /// - Marks subscriptions with pending IDs dirty when objects become available
     /// - Settles all subscription graphs (row data loaded on-demand from ObjectManager)
     pub fn process(&mut self) {
         // Process object updates from SyncManager
@@ -407,6 +408,10 @@ impl QueryManager {
 
         // Flush pending index updates for indices that became ready
         self.flush_pending_index_updates();
+
+        // Mark subscriptions dirty if they have pending IDs that might now be available
+        // This ensures settle() will be called to check pending rows
+        self.mark_subscriptions_with_pending_dirty();
 
         // Settle all subscriptions - row_loader reads directly from ObjectManager
         // Extract references to avoid borrowing self in the closure
@@ -433,6 +438,23 @@ impl QueryManager {
                     subscription_id: *sub_id,
                     delta,
                 });
+            }
+        }
+    }
+
+    /// Mark subscriptions dirty if they have pending IDs.
+    /// This ensures settle() will re-check pending rows on each process() call.
+    fn mark_subscriptions_with_pending_dirty(&mut self) {
+        for subscription in self.subscriptions.values_mut() {
+            // Check if the MaterializeNode has any pending IDs
+            for node in subscription.graph.nodes.values() {
+                if let super::graph::GraphNode::Materialize(mat_node) = node
+                    && mat_node.has_pending()
+                {
+                    // Mark the graph dirty so settle() will be called
+                    subscription.graph.mark_materialize_dirty();
+                    break;
+                }
             }
         }
     }

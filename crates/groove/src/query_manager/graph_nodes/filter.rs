@@ -123,6 +123,9 @@ impl RowNode for FilterNode {
     fn process(&mut self, input: RowDelta) -> RowDelta {
         let mut result = RowDelta::new();
 
+        // Propagate pending flag from input
+        result.pending = input.pending;
+
         // Filter removed rows
         for row in input.removed {
             if let Some(pos) = self.current_rows.iter().position(|r| r.id == row.id) {
@@ -238,6 +241,7 @@ mod tests {
         );
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row1.clone(), row2],
             removed: vec![],
             updated: vec![],
@@ -293,6 +297,7 @@ mod tests {
         );
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row1, row2.clone(), row3],
             removed: vec![],
             updated: vec![],
@@ -348,6 +353,7 @@ mod tests {
         );
 
         let delta = RowDelta {
+            pending: false,
             added: vec![row1.clone(), row2, row3.clone()],
             removed: vec![],
             updated: vec![],
@@ -390,6 +396,7 @@ mod tests {
 
         // First add the row
         let add_delta = RowDelta {
+            pending: false,
             added: vec![old_row.clone()],
             removed: vec![],
             updated: vec![],
@@ -398,6 +405,7 @@ mod tests {
 
         // Then update it to fail the filter
         let update_delta = RowDelta {
+            pending: false,
             added: vec![],
             removed: vec![],
             updated: vec![(old_row.clone(), new_row)],
@@ -440,6 +448,7 @@ mod tests {
 
         // Row doesn't pass filter initially, so not added
         let add_delta = RowDelta {
+            pending: false,
             added: vec![old_row.clone()],
             removed: vec![],
             updated: vec![],
@@ -449,6 +458,7 @@ mod tests {
 
         // Update makes it pass
         let update_delta = RowDelta {
+            pending: false,
             added: vec![],
             removed: vec![],
             updated: vec![(old_row, new_row.clone())],

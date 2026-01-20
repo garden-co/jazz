@@ -235,6 +235,8 @@ pub struct RowDelta {
     pub removed: Vec<Row>,
     /// Updated rows as (old, new) pairs.
     pub updated: Vec<(Row, Row)>,
+    /// True if some rows are still loading (hold back results until ready).
+    pub pending: bool,
 }
 
 impl RowDelta {

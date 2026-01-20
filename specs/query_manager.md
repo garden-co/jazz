@@ -304,13 +304,43 @@ Extended `AllObjectUpdate` with previous state to enable proper column index upd
 
 **TODO:** Currently uses last-writer-wins (newest tip by timestamp). Future work: merge strategies for concurrent updates.
 
+#### Followup 4: Async Row Materialization ✓
+
+When rows are still loading, the system now holds back ALL query results until everything is available:
+
+**Core changes:**
+- `RowDelta` gains `pending: bool` field - true when any rows are still loading
+- `MaterializeNode` tracks `pending_ids: HashSet<ObjectId>` for rows where loader returns `None`
+- `check_pending()` method re-tries pending IDs and emits newly-loaded rows
+- All downstream nodes (Filter, Sort, LimitOffset) propagate pending flag unchanged
+- `OutputNode` holds back deltas when `pending=true`, emitting full snapshot when pending clears
+
+**OutputNode state tracking:**
+- `held_pending: bool` - true when holding back results
+- `subscriber_initialized: bool` - true after first snapshot delivered
+- `held_changes: RowDelta` - accumulates changes during subsequent pending periods
+
+**Behavior:**
+- Initial pending → clears: Emit full `current_rows` as snapshot
+- Subsequent pending → clears: Emit only accumulated changes (not full state again)
+- Normal (non-pending): Deliver deltas incrementally
+
+**Integration:**
+- `graph.rs`: `settle()` calls `check_pending()` before processing new IdDelta, merges results
+- `manager.rs`: `mark_subscriptions_with_pending_dirty()` ensures subscriptions with pending IDs are re-settled on each `process()` call
+
+**Tests:**
+| Test | Location |
+|------|----------|
+| MaterializeNode tracks pending | `materialize::tests::materialize_tracks_pending_when_loader_returns_none` |
+| Not pending when all loaded | `materialize::tests::materialize_not_pending_when_all_loaded` |
+| check_pending emits newly loaded | `materialize::tests::check_pending_emits_newly_loaded_rows` |
+| Remove clears from pending | `materialize::tests::remove_clears_from_pending` |
+| OutputNode holds back when pending | `output::tests::output_holds_back_when_pending` |
+| OutputNode emits full state on clear | `output::tests::output_emits_full_state_when_pending_clears` |
+| Subsequent pending emits only changes | `output::tests::output_subsequent_pending_emits_only_new_changes` |
+
 ### Pending Followups
-
-#### Followup 4: Async Row Materialization (Medium Priority)
-
-MaterializeNode loads rows synchronously. If loader returns `None` (not yet loaded), row is skipped. Need mechanism for rows to appear in results once they arrive from network.
-
-**Options:** Return "pending" state in RowDelta, track pending IDs for re-emit, or async loader.
 
 #### Followup 5: `project_row` Should Use Memcpy (Low Priority)
 
