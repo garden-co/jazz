@@ -67,7 +67,7 @@
     "@biomejs/biome": "catalog:default",
     "@evilmartians/harmony": "^1.4.0",
     "@next/mdx": "^15.3.3",
-    "@playwright/test": "^1.52.0",
+    "@playwright/test": "catalog:default",
     "@tailwindcss/postcss": "^4.1.16",
     "@tailwindcss/typography": "^0.5.16",
     "@types/geojson": "^7946.0.14",

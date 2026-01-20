@@ -244,7 +244,7 @@
     "libsql": "^0.5.13",
     "msw": "^2.10.3",
     "oauth2-mock-server": "^8.1.0",
-    "playwright": "^1.50.1",
+    "playwright": "catalog:default",
     "queueueue": "^4.1.2",
     "react-error-boundary": "^6.0.0",
     "tsup": "8.5.0",

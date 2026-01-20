@@ -29,7 +29,7 @@
     "tailwindcss": "^4.1.11"
   },
   "devDependencies": {
-    "@playwright/test": "^1.50.1",
+    "@playwright/test": "catalog:default",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
