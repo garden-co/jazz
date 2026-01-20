@@ -954,6 +954,27 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       }
     } else if (key === "length") {
       return target.$jazz.raw.entries().length;
+    } else if (key === Symbol.iterator || key === "values") {
+      return function* () {
+        const length = target.$jazz.raw.entries().length;
+        for (let i = 0; i < length; i++) {
+          yield receiver[i];
+        }
+      };
+    } else if (key === "keys") {
+      return function* () {
+        const length = target.$jazz.raw.entries().length;
+        for (let i = 0; i < length; i++) {
+          yield i;
+        }
+      };
+    } else if (key === "entries") {
+      return function* () {
+        const length = target.$jazz.raw.entries().length;
+        for (let i = 0; i < length; i++) {
+          yield [i, receiver[i]] as [number, unknown];
+        }
+      };
     } else {
       return Reflect.get(target, key, receiver);
     }
