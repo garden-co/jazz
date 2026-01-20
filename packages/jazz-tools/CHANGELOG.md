@@ -1,5 +1,74 @@
 # jazz-tools
 
+## 0.20.0
+
+### Minor Changes
+
+- ee19292: Removed `JazzContextManagerContext` and added error when nesting `JazzProvider` components. This prevents bad patterns like nested providers and simplifies the alternative approach of using `JazzContext.Provider` directly with `useJazzContext()`.
+
+  ### Breaking changes
+
+  - Removed `JazzContextManagerContext` export from `jazz-tools/react-core`
+  - Renamed `useJazzContext` to `useJazzContextValue` (returns the context value)
+  - `useJazzContext` now returns the context manager instead of the context value
+  - Nesting `JazzProvider` components now throws an error
+
+  ### Migration
+
+  If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
+
+  ```diff
+  - import { useJazzContext } from "jazz-tools/react-core";
+  + import { useJazzContextValue } from "jazz-tools/react-core";
+
+  - const context = useJazzContext();
+  + const context = useJazzContextValue();
+  ```
+
+  If you need to provide context to children without creating a new context (e.g., for components that don't propagate React context), use:
+
+  ```tsx
+  <JazzContext.Provider value={useJazzContext()}>
+    {children}
+  </JazzContext.Provider>
+  ```
+
+- 8934d8a: ## Full native crypto (0.20.0)
+
+  With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+  ## 💥 Breaking changes
+
+  ### Crypto providers / fallback behavior
+
+  - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+  - **Removed `RNQuickCrypto`** from `jazz-tools`.
+  - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+  - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+
+  Full migration guide: `https://jazz.tools/docs/upgrade/0-20-0`
+
+### Patch Changes
+
+- 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
+
+  - CoValues are marked with a tombstone, making them inaccessible to all users
+  - Supports deleting nested CoValues via resolve queries
+  - Requires admin permissions on the CoValue's group
+  - Introduces new `deleted` loading state for deleted CoValues
+  - Groups and Accounts are skipped during deletion
+
+  See documentation: https://jazz.tools/docs/react/core-concepts/deleting
+
+- Updated dependencies [6b9368a]
+- Updated dependencies [89332d5]
+- Updated dependencies [f562a1f]
+- Updated dependencies [b5ada4d]
+- Updated dependencies [8934d8a]
+  - cojson@0.20.0
+  - cojson-storage-indexeddb@0.20.0
+  - cojson-transport-ws@0.20.0
+
 ## 0.19.22
 
 ### Patch Changes

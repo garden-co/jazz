@@ -1,6 +1,6 @@
 {
   "name": "cojson-core-napi-darwin-arm64",
-  "version": "0.19.22",
+  "version": "0.20.0",
   "cpu": [
     "arm64"
   ],
