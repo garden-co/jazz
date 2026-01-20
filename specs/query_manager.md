@@ -298,14 +298,16 @@ Index objects have `nosync: "true"` metadata. SyncManager now filters them befor
 
 **Current limitation:** When rows are updated via sync (not local `update()` call), column indices may become stale. The `_id` index remains correct, but column indices won't reflect the new values because we don't have the old data to compute the index delta.
 
-**Design decisions needed:**
-1. Auto-process on each API call vs require explicit `process()` calls
-2. For synced row updates: rebuild column index entries, or accept staleness until next local update
+**Design decision:** Require explicit `process()` calls (no auto-process).
 
-**Implementation needed:**
-- Integration test: two QueryManagers sharing a SyncManager
-- Track old row data for index updates (minimal cache just for pending synced objects?)
-- Or: accept that synced updates may have stale column indices until compaction/rebuild
+**Core need:** A way to get (old_data, new_data) on any object update, enabling:
+- Detection of which columns changed
+- Removal of old value from index before inserting new value
+
+**Implementation steps:**
+1. First: Add test verifying local insert+update updates ALL column indices (not just `_id`)
+2. Implement old_data/new_data tracking for object updates
+3. Integration test: QueryManager1 on SyncManager1/ObjectManager1 exchanging messages with QueryManager2 on SyncManager2/ObjectManager2
 
 #### Followup 4: Async Row Materialization (Medium Priority)
 
@@ -332,3 +334,7 @@ No tests verify synced updates flow through to query deltas. Need two-peer test 
 #### Followup 9: IndexScanNode Process Method (Low Priority)
 
 `IdNode::process()` is a no-op on IndexScanNode. Graph settling special-cases it. Works but violates trait contract.
+
+#### Followup 10: Row Deletion (Medium Priority)
+
+Implement `delete()` API for removing rows.
