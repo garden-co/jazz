@@ -219,9 +219,6 @@ importers:
       cojson-core-napi-darwin-x64:
         specifier: workspace:*
         version: link:npm/darwin-x64
-      cojson-core-napi-linux-arm-gnueabihf:
-        specifier: workspace:*
-        version: link:npm/linux-arm-gnueabihf
       cojson-core-napi-linux-arm64-gnu:
         specifier: workspace:*
         version: link:npm/linux-arm64-gnu
@@ -238,8 +235,6 @@ importers:
   crates/cojson-core-napi/npm/darwin-arm64: {}
 
   crates/cojson-core-napi/npm/darwin-x64: {}
-
-  crates/cojson-core-napi/npm/linux-arm-gnueabihf: {}
 
   crates/cojson-core-napi/npm/linux-arm64-gnu: {}
 
