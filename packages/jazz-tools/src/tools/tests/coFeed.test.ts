@@ -194,7 +194,6 @@ describe("Simple CoFeed operations", async () => {
       stream.$jazz.pushLoose(
         // @ts-expect-error - number is not a string
         123,
-        { validation: "loose" },
       );
     });
   });

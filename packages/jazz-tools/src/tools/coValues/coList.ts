@@ -174,7 +174,6 @@ export class CoList<out Item = any>
       | {
           owner: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
-          validation?: "strict" | "loose";
         }
       | Account
       | Group,
