@@ -283,11 +283,16 @@ crates/groove/src/query_manager/
 | Cold start doesn't eagerly load rows | ✓ | `manager::tests::cold_start_only_loads_queried_rows` |
 | Row is indexed after insert | ✓ | `manager::tests::row_is_indexed_after_insert` |
 
+### Completed Followups
+
+#### Followup 2: nosync Filtering in SyncManager ✓
+
+Index objects have `nosync: "true"` metadata. SyncManager now filters them before syncing to peers:
+- `queue_tips_to_server()` and `queue_tips_to_client()` check nosync before sending ObjectUpdated
+- `forward_truncation_to_servers()` and `forward_truncation_to_clients_except()` check nosync before sending ObjectTruncated
+- Tests in `sync_manager::tests::nosync_*` verify filtering behavior
+
 ### Pending Followups
-
-#### Followup 2: nosync Filtering in SyncManager (High Priority)
-
-Index objects have `nosync: "true"` metadata but SyncManager doesn't filter them yet. Need to add filtering when preparing to sync objects to peers.
 
 #### Followup 3: Sync Integration for Row Updates (Medium Priority)
 
