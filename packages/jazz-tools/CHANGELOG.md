@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.20.1
+
+### Patch Changes
+
+- ca306c0: Fixed `CoList` to return the correct length when calling `getOwnPropertyDescriptor` with `length`. Previously it was always returning 0.
+- d7f9cba: `setDefaultSchemaPermissions` now modifies existing CoValue schemas
+- Updated dependencies [03195eb]
+  - cojson@0.20.1
+  - cojson-storage-indexeddb@0.20.1
+  - cojson-transport-ws@0.20.1
+
 ## 0.20.0
 
 ### Minor Changes

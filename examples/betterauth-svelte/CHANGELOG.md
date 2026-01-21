@@ -1,5 +1,13 @@
 # betterauth-svelte
 
+## 0.0.38
+
+### Patch Changes
+
+- Updated dependencies [ca306c0]
+- Updated dependencies [d7f9cba]
+  - jazz-tools@0.20.1
+
 ## 0.0.37
 
 ### Patch Changes
