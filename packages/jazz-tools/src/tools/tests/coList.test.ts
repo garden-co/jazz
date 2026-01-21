@@ -1225,3 +1225,238 @@ describe("lastUpdatedAt", () => {
     expect(list.$jazz.lastUpdatedAt).not.toEqual(updatedAt);
   });
 });
+
+describe("CoList proxy traps", () => {
+  test(".values() returns the same values as Object.values()", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create([]);
+    list.$jazz.push("bread");
+    list.$jazz.push("butter");
+    list.$jazz.push("onion");
+
+    const valuesFromMethod = [...list.values()];
+    const valuesFromObject = Object.values(list);
+    expect(valuesFromMethod).toEqual(valuesFromObject);
+    expect(valuesFromMethod).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test(".values().map() returns the same values as .map()", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create([]);
+    list.$jazz.push("bread");
+    list.$jazz.push("butter");
+    list.$jazz.push("onion");
+
+    const valuesFromMethod = [...list.values().map((v) => v.toUpperCase())];
+    const valuesFromObject = list.map((v) => v.toUpperCase());
+
+    expect(valuesFromMethod).toEqual(valuesFromObject);
+    expect(valuesFromMethod).toEqual(["BREAD", "BUTTER", "ONION"]);
+  });
+
+  test(".keys() returns numeric indices", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const keys = [...list.keys()];
+
+    expect(keys).toEqual([0, 1, 2]);
+  });
+
+  test(".entries() returns index-value pairs", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const entries = [...list.entries()];
+
+    expect(entries).toEqual([
+      [0, "bread"],
+      [1, "butter"],
+      [2, "onion"],
+    ]);
+  });
+
+  test("for...of iteration works correctly", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const items: string[] = [];
+    for (const item of list) {
+      items.push(item);
+    }
+
+    expect(items).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test("spread operator works correctly", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const items = [...list];
+
+    expect(items).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test("Array.from works correctly", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["bread", "butter", "onion"]);
+
+    const items = Array.from(list);
+
+    expect(items).toEqual(["bread", "butter", "onion"]);
+  });
+
+  test(".values() works with CoValue references", () => {
+    const Dog = co.map({
+      name: z.string(),
+    });
+    const DogList = co.list(Dog);
+
+    const list = DogList.create([
+      { name: "Rex" },
+      { name: "Fido" },
+      { name: "Buddy" },
+    ]);
+
+    const valuesFromMethod = [...list.values()];
+    const valuesFromObject = Object.values(list);
+
+    expect(valuesFromMethod.length).toBe(3);
+    expect(valuesFromMethod.map((d) => d?.name)).toEqual([
+      "Rex",
+      "Fido",
+      "Buddy",
+    ]);
+    expect(valuesFromMethod).toEqual(valuesFromObject);
+  });
+
+  test(".values() works after ensureLoaded", async () => {
+    const Task = co.map({
+      title: z.string(),
+    });
+    const TaskList = co.list(Task);
+
+    const list = TaskList.create([
+      { title: "Task 1" },
+      { title: "Task 2" },
+      { title: "Task 3" },
+    ]);
+
+    const loadedList = await list.$jazz.ensureLoaded({
+      resolve: { $each: true },
+    });
+
+    const valuesFromMethod = [...loadedList.values()];
+    const valuesFromObject = Object.values(loadedList);
+
+    expect(valuesFromMethod.length).toBe(3);
+    expect(valuesFromMethod.map((t) => t.title)).toEqual([
+      "Task 1",
+      "Task 2",
+      "Task 3",
+    ]);
+    expect(valuesFromMethod.map((t) => t.$jazz.id)).toEqual(
+      valuesFromObject.map((t) => t.$jazz.id),
+    );
+  });
+
+  test(".values() works on remotely loaded list", async () => {
+    const Task = co.map({
+      title: z.string(),
+    });
+    const TaskList = co.list(Task);
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const list = TaskList.create(
+      [{ title: "Task 1" }, { title: "Task 2" }, { title: "Task 3" }],
+      group,
+    );
+
+    const userB = await createJazzTestAccount();
+
+    const loadedList = await TaskList.load(list.$jazz.id, {
+      resolve: { $each: true },
+      loadAs: userB,
+    });
+
+    assertLoaded(loadedList);
+
+    const valuesFromMethod = [...loadedList.values()];
+    const valuesFromObject = Object.values(loadedList);
+
+    expect(valuesFromMethod.length).toBe(3);
+    expect(valuesFromMethod.map((t) => t.title)).toEqual([
+      "Task 1",
+      "Task 2",
+      "Task 3",
+    ]);
+    expect(valuesFromMethod.map((t) => t.$jazz.id)).toEqual(
+      valuesFromObject.map((t) => t.$jazz.id),
+    );
+  });
+
+  test("iterator methods work on empty list", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create([]);
+
+    expect([...list.values()]).toEqual([]);
+    expect([...list.keys()]).toEqual([]);
+    expect([...list.entries()]).toEqual([]);
+    expect([...list]).toEqual([]);
+  });
+
+  test("Object.getOwnPropertyDescriptors returns correct descriptors", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["a", "b", "c"]);
+
+    const descriptors = Object.getOwnPropertyDescriptors(list);
+
+    // Check numeric index descriptors
+    expect(descriptors["0"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: "a",
+    });
+    expect(descriptors["1"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: "b",
+    });
+    expect(descriptors["2"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: "c",
+    });
+
+    // Check length descriptor
+    expect(descriptors["length"]).toEqual({
+      enumerable: false,
+      configurable: false,
+      writable: true,
+      value: 3,
+    });
+
+    // Verify only expected enumerable keys
+    const enumerableKeys = Object.keys(descriptors).filter(
+      (key) => descriptors[key]?.enumerable,
+    );
+    expect(enumerableKeys.sort()).toEqual(["0", "1", "2"]);
+  });
+
+  test("setting the lenght to 0 has no effect", () => {
+    const TestList = co.list(z.string());
+    const list = TestList.create(["a", "b", "c"]);
+
+    list.length = 0;
+
+    expect(list.length).toBe(3);
+    expect(list[0]).toBe("a");
+    expect(list[1]).toBe("b");
+    expect(list[2]).toBe("c");
+  });
+});
