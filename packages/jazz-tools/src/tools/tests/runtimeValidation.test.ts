@@ -1,5 +1,10 @@
-import { beforeEach, describe, test, expect } from "vitest";
-import { co, z } from "../exports.js";
+import { beforeEach, describe, test, expect, vi } from "vitest";
+import {
+  co,
+  z,
+  setDefaultValidationMode,
+  getDefaultValidationMode,
+} from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { expectValidationError } from "./utils.js";
 
@@ -280,5 +285,154 @@ describe("runtime validation", () => {
     ).not.toThrow();
 
     expect(john.age).toEqual(-5);
+  });
+});
+
+describe("global validation mode", () => {
+  beforeEach(async () => {
+    await setupJazzTestSync();
+
+    await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+      creationProps: { name: "Hermes Puggington" },
+    });
+
+    // Reset to strict mode before each test
+    setDefaultValidationMode("strict");
+  });
+
+  test("getter and setter work correctly", () => {
+    expect(getDefaultValidationMode()).toEqual("strict");
+
+    setDefaultValidationMode("loose");
+    expect(getDefaultValidationMode()).toEqual("loose");
+
+    setDefaultValidationMode("warn");
+    expect(getDefaultValidationMode()).toEqual("warn");
+
+    setDefaultValidationMode("strict");
+    expect(getDefaultValidationMode()).toEqual("strict");
+  });
+
+  test("global loose mode skips validation on create", () => {
+    setDefaultValidationMode("loose");
+
+    const Person = co.map({
+      age: z.number().int().min(0).max(120),
+    });
+
+    // Should not throw even with invalid values
+    expect(() => Person.create({ age: -10 })).not.toThrow();
+    const person = Person.create({ age: -10 });
+    expect(person.age).toEqual(-10);
+  });
+
+  test("global loose mode skips validation on set", () => {
+    const Person = co.map({
+      age: z.number().int().min(0).max(120),
+    });
+
+    const person = Person.create({ age: 30 });
+
+    setDefaultValidationMode("loose");
+
+    // Should not throw even with invalid values
+    expect(() => person.$jazz.set("age", -999)).not.toThrow();
+    expect(person.age).toEqual(-999);
+  });
+
+  test("global warn mode logs but does not throw", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    setDefaultValidationMode("warn");
+
+    const Person = co.map({
+      age: z.number().int().min(0).max(120),
+    });
+
+    // Should not throw, but should log a warning
+    expect(() => Person.create({ age: -10 })).not.toThrow();
+    expect(warnSpy).toHaveBeenCalled();
+
+    warnSpy.mockClear();
+
+    const person = Person.create({ age: 30 });
+
+    // set with invalid value should also warn but not throw
+    expect(() => person.$jazz.set("age", 999)).not.toThrow();
+    expect(warnSpy).toHaveBeenCalled();
+    expect(person.age).toEqual(999);
+
+    warnSpy.mockRestore();
+  });
+
+  test("local override takes precedence over global mode", () => {
+    setDefaultValidationMode("loose");
+
+    const Person = co.map({
+      age: z.number().int().min(0).max(120),
+    });
+
+    // Local strict override should still validate even when global is loose
+    expectValidationError(() =>
+      Person.create({ age: -10 }, { validation: "strict" }),
+    );
+  });
+
+  test("local loose override works when global is strict", () => {
+    setDefaultValidationMode("strict");
+
+    const Person = co.map({
+      age: z.number().int().min(0).max(120),
+    });
+
+    const person = Person.create({ age: 30 });
+
+    // Local loose override should skip validation
+    expect(() =>
+      person.$jazz.set("age", -999, { validation: "loose" }),
+    ).not.toThrow();
+    expect(person.age).toEqual(-999);
+  });
+
+  test("global mode affects CoList operations", () => {
+    const Numbers = co.list(z.number().int().min(0));
+
+    // Create with valid data first
+    const numbers = Numbers.create([1, 2, 3]);
+
+    setDefaultValidationMode("loose");
+
+    // push should respect global loose mode (through pushLoose path)
+    expect(() => numbers.$jazz.push(-5)).not.toThrow();
+  });
+
+  test("global mode affects CoFeed operations", () => {
+    const Messages = co.feed(z.string().min(5));
+
+    setDefaultValidationMode("loose");
+
+    // Create should respect global loose mode
+    expect(() => Messages.create(["hi"])).not.toThrow();
+  });
+
+  test("mode changes affect existing schemas (lazy evaluation)", () => {
+    const Person = co.map({
+      age: z.number().int().min(0).max(120),
+    });
+
+    // Create with strict mode
+    const person1 = Person.create({ age: 30 });
+    expectValidationError(() => person1.$jazz.set("age", -5));
+
+    // Change to loose mode
+    setDefaultValidationMode("loose");
+
+    // Same schema, same instance should now use loose mode
+    expect(() => person1.$jazz.set("age", -5)).not.toThrow();
+    expect(person1.age).toEqual(-5);
+
+    // Create new instance - also uses loose mode
+    expect(() => Person.create({ age: -999 })).not.toThrow();
   });
 });

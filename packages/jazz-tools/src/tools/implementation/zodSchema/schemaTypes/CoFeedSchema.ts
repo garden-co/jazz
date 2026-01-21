@@ -28,6 +28,11 @@ import {
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
 import { generateValidationSchemaFromItem } from "./schemaValidators.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../validationSettings.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -66,20 +71,20 @@ export class CoFeedSchema<
 
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner?: Group; validation?: "strict" | "loose" } | Group,
+    options?: { owner?: Group; validation?: LocalValidationMode } | Group,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
     options?:
-      | { owner?: Account | Group; validation?: "strict" | "loose" }
+      | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,
   ): CoFeedInstance<T>;
   create(
     init: CoFeedSchemaInit<T>,
     options?:
-      | { owner?: Account | Group; validation?: "strict" | "loose" }
+      | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,
   ): CoFeedInstance<T> {
@@ -87,10 +92,26 @@ export class CoFeedSchema<
       options,
       this.permissions,
     );
-    return this.coValueClass.create(
-      init as any,
-      optionsWithPermissions,
-    ) as CoFeedInstance<T>;
+
+    // Handle validation directly using the schema
+    const validation =
+      options && typeof options === "object" && "validation" in options
+        ? options.validation
+        : undefined;
+    const validationMode = resolveValidationMode(validation);
+    if (validationMode !== "loose") {
+      init = executeValidation(
+        this.getValidationSchema(),
+        init,
+        validationMode,
+      ) as CoFeedSchemaInit<T>;
+    }
+
+    // Pass validation: "loose" to avoid double validation in CoFeed.create
+    return this.coValueClass.create(init as any, {
+      ...optionsWithPermissions,
+      validation: "loose" as const,
+    }) as CoFeedInstance<T>;
   }
 
   load<

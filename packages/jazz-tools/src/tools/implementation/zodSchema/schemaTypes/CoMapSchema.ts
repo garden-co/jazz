@@ -35,6 +35,11 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { generateValidationSchemaFromItem } from "./schemaValidators.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../validationSettings.js";
 
 type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
   CoMapInstanceCoValuesMaybeLoaded<Shape>
@@ -114,7 +119,7 @@ export class CoMapSchema<
       | {
           owner?: Group;
           unique?: CoValueUniqueness["uniqueness"];
-          validation?: "strict" | "loose";
+          validation?: LocalValidationMode;
         }
       | Group,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
@@ -125,7 +130,7 @@ export class CoMapSchema<
       | {
           owner?: Owner;
           unique?: CoValueUniqueness["uniqueness"];
-          validation?: "strict" | "loose";
+          validation?: LocalValidationMode;
         }
       | Owner,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
@@ -135,8 +140,13 @@ export class CoMapSchema<
       this.permissions,
     );
 
-    if (options?.validation !== "loose") {
-      init = this.getValidationSchema().parse(init);
+    const validationMode = resolveValidationMode(options?.validation);
+    if (validationMode !== "loose") {
+      init = executeValidation(
+        this.getValidationSchema(),
+        init,
+        validationMode,
+      );
     }
 
     return this.coValueClass.create(init, optionsWithPermissions);

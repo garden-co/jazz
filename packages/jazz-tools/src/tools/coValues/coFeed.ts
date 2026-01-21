@@ -52,6 +52,11 @@ import {
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -230,7 +235,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
-          validation?: "strict" | "loose";
+          validation?: LocalValidationMode;
         }
       | Account
       | Group,
@@ -244,11 +249,20 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         options && typeof options === "object" && "validation" in options
           ? options.validation
           : undefined;
-      if (validation !== "loose") {
-        instance.$jazz.push(...init);
-      } else {
-        instance.$jazz.pushLoose(...init);
+      const validationMode = resolveValidationMode(validation);
+
+      // Validate using the full schema - init is an array, so it will match the array branch
+      // of the union (instanceof CoFeed | array of items)
+      const coValueSchema = (this as unknown as typeof CoFeed).coValueSchema;
+      if (validationMode !== "loose" && coValueSchema) {
+        const fullSchema = coValueSchema.getValidationSchema();
+        init = executeValidation(
+          fullSchema,
+          init,
+          validationMode,
+        ) as typeof init;
       }
+      instance.$jazz.pushLoose(...init);
     }
     return instance;
   }
@@ -410,10 +424,12 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * @category Content
    */
   push(...items: CoFieldInit<CoFeedItem<F>>[]): void {
-    if (this.coFeedSchema) {
+    const validationMode = resolveValidationMode();
+    if (validationMode !== "loose" && this.coFeedSchema) {
       const schema = z.array(this.getItemSchema());
-
-      items = z.parse(schema, items) as CoFieldInit<CoFeedItem<F>>[];
+      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+        CoFeedItem<F>
+      >[];
     }
     this.pushLoose(...items);
   }

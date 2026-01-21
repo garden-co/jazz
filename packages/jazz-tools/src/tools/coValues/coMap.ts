@@ -57,6 +57,11 @@ import {
   CoreCoMapSchema,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
 
 export type CoMapEdit<V> = {
   value?: V;
@@ -640,7 +645,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   set<K extends CoKeys<M>>(
     key: K,
     value: CoFieldInit<M[K]>,
-    options?: { validation?: "strict" | "loose" },
+    options?: { validation?: LocalValidationMode },
   ): void {
     const descriptor = this.getDescriptor(key as string);
 
@@ -648,11 +653,16 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       throw Error(`Cannot set unknown key ${key}`);
     }
 
-    // Validate the value if validation is not loose and we have a schema
-    if (options?.validation !== "loose" && this.coMapSchema) {
+    // Validate the value based on the resolved validation mode
+    const validationMode = resolveValidationMode(options?.validation);
+    if (validationMode !== "loose" && this.coMapSchema) {
       // Get the field schema for this specific key from the shape
       const fieldSchema = this.getPropertySchema(key);
-      value = z.parse(fieldSchema, value) as CoFieldInit<M[K]>;
+      value = executeValidation(
+        fieldSchema,
+        value,
+        validationMode,
+      ) as CoFieldInit<M[K]>;
     }
 
     let refId = (value as CoValue)?.$jazz?.id;
@@ -717,7 +727,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    */
   applyDiff(
     newValues: Partial<CoMapInit<M>>,
-    options?: { validation?: "strict" | "loose" },
+    options?: { validation?: LocalValidationMode },
   ): M {
     for (const key in newValues) {
       if (Object.prototype.hasOwnProperty.call(newValues, key)) {

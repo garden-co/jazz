@@ -54,6 +54,7 @@ export * from "./implementation/zodSchema/typeConverters/CoFieldSchemaInit.js";
 export * from "./implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 export * from "./implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 export * from "./implementation/zodSchema/schemaPermissions.js";
+export * from "./implementation/zodSchema/validationSettings.js";
 export * from "./coValues/extensions/imageDef.js";
 
 export * from "./implementation/ContextManager.js";

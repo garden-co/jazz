@@ -48,6 +48,11 @@ import {
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -564,11 +569,16 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   set(
     index: number,
     value: CoFieldInit<CoListItem<L>>,
-    options?: { validation?: "strict" | "loose" },
+    options?: { validation?: LocalValidationMode },
   ): void {
-    if (options?.validation !== "loose" && this.coListSchema) {
+    const validationMode = resolveValidationMode(options?.validation);
+    if (validationMode !== "loose" && this.coListSchema) {
       const fieldSchema = this.getItemSchema();
-      value = z.parse(fieldSchema, value) as CoFieldInit<CoListItem<L>>;
+      value = executeValidation(
+        fieldSchema,
+        value,
+        validationMode,
+      ) as CoFieldInit<CoListItem<L>>;
     }
 
     const itemDescriptor = this.schema[ItemsSym];
@@ -586,10 +596,12 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   push(...items: CoFieldInit<CoListItem<L>>[]): number {
-    if (this.coListSchema) {
+    const validationMode = resolveValidationMode();
+    if (validationMode !== "loose" && this.coListSchema) {
       const schema = z.array(this.getItemSchema());
-
-      items = z.parse(schema, items) as CoFieldInit<CoListItem<L>>[];
+      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+        CoListItem<L>
+      >[];
     }
     return this.pushLoose(...items);
   }
