@@ -405,13 +405,7 @@ export class SyncManager {
         // If the coValue is unavailable and we never tried this peer
         // we try to load it from the peer
         if (!peer.loadRequestSent.has(coValue.id)) {
-          peer.trackLoadRequestSent(coValue.id);
-          this.trySendToPeer(peer, {
-            action: "load",
-            header: false,
-            id: coValue.id,
-            sessions: {},
-          });
+          peer.sendLoadRequest(coValue, "low-priority");
         }
       } else {
         // Build the list of coValues ordered by dependency
@@ -431,12 +425,11 @@ export class SyncManager {
        * - Subscribe to the coValue updates
        * - Start the sync process in case we or the other peer
        *   lacks some transactions
+       *
+       * Use low priority for reconciliation loads so that user-initiated
+       * loads take precedence.
        */
-      peer.trackLoadRequestSent(coValue.id);
-      this.trySendToPeer(peer, {
-        action: "load",
-        ...coValue.knownState(),
-      });
+      peer.sendLoadRequest(coValue, "low-priority");
     }
   }
 
@@ -515,7 +508,7 @@ export class SyncManager {
         currentTimer - lastTimer >
         SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
       ) {
-        await new Promise<void>((resolve) => setTimeout(resolve));
+        await waitForNextTick();
         lastTimer = performance.now();
       }
     }
@@ -733,6 +726,8 @@ export class SyncManager {
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
     }
+
+    peer.trackLoadRequestComplete(coValue);
   }
 
   recordTransactionsSize(newTransactions: Transaction[], source: string) {
@@ -751,6 +746,7 @@ export class SyncManager {
   ) {
     const coValue = this.local.getCoValue(msg.id);
     const peer = from === "storage" || from === "import" ? undefined : from;
+
     const sourceRole =
       from === "storage"
         ? "storage"
@@ -767,6 +763,7 @@ export class SyncManager {
       };
     }
 
+    peer?.trackLoadRequestUpdate(coValue);
     coValue.addDependenciesFromContentMessage(msg);
 
     // If some of the dependencies are missing, we wait for them to be available
@@ -786,7 +783,12 @@ export class SyncManager {
             peers.push(peer);
           }
 
-          dependencyCoValue.load(peers);
+          // Use immediate mode to bypass the concurrency limit for dependencies
+          // We do this to avoid that the dependency load is blocked
+          // by the pending dependendant load
+          // Also these should be done with the highest priority, because we need to
+          // unblock the coValue wait
+          dependencyCoValue.load(peers, "immediate");
         }
       }
 
@@ -1014,8 +1016,6 @@ export class SyncManager {
       peer.trackToldKnownState(msg.id);
     }
 
-    const syncedPeers = [];
-
     /**
      * Store the content and propagate it to the server peers and the subscribed client peers
      */
@@ -1028,6 +1028,8 @@ export class SyncManager {
         this.trackSyncState(coValue.id);
       }
     }
+
+    peer?.trackLoadRequestComplete(coValue);
 
     for (const peer of this.getPeers(coValue.id)) {
       /**
@@ -1042,25 +1044,8 @@ export class SyncManager {
       // We directly forward the new content to peers that have an active subscription
       if (peer.isCoValueSubscribedToPeer(coValue.id)) {
         this.sendNewContent(coValue.id, peer);
-        syncedPeers.push(peer);
-      } else if (
-        peer.role === "server" &&
-        !peer.loadRequestSent.has(coValue.id)
-      ) {
-        const state = coValue.getLoadingStateForPeer(peer.id);
-
-        // Check if there is a inflight load operation and we
-        // are waiting for other peers to send the load request
-        if (state === "unknown") {
-          // Sending a load message to the peer to get to know how much content is missing
-          // before sending the new content
-          this.trySendToPeer(peer, {
-            action: "load",
-            ...coValue.knownStateWithStreaming(),
-          });
-          peer.trackLoadRequestSent(coValue.id);
-          syncedPeers.push(peer);
-        }
+      } else if (peer.role === "server") {
+        peer.sendLoadRequest(coValue);
       }
     }
   }
@@ -1343,4 +1328,11 @@ export function hwrServerPeerSelector(n: number): ServerPeerSelector {
       .slice(0, n)
       .map((wp) => wp.peer);
   };
+}
+
+let waitForNextTick = () =>
+  new Promise<void>((resolve) => queueMicrotask(resolve));
+
+if (typeof setImmediate === "function") {
+  waitForNextTick = () => new Promise<void>((resolve) => setImmediate(resolve));
 }

@@ -15,8 +15,9 @@ export function setMaxRecommendedTxSize(size: number) {
 
 export const CO_VALUE_LOADING_CONFIG = {
   MAX_RETRIES: 1,
-  TIMEOUT: 30_000,
+  TIMEOUT: 60_000,
   RETRY_DELAY: 3000,
+  MAX_IN_FLIGHT_LOADS_PER_PEER: 1000,
 };
 
 export function setCoValueLoadingMaxRetries(maxRetries: number) {
@@ -54,13 +55,12 @@ export function setGarbageCollectorInterval(interval: number) {
 
 export const WEBSOCKET_CONFIG = {
   MAX_OUTGOING_MESSAGES_CHUNK_BYTES: 25_000,
-  OUTGOING_MESSAGES_CHUNK_DELAY: 5,
 };
 
 export function setMaxOutgoingMessagesChunkBytes(bytes: number) {
   WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES = bytes;
 }
 
-export function setOutgoingMessagesChunkDelay(delay: number) {
-  WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY = delay;
+export function setMaxInFlightLoadsPerPeer(limit: number) {
+  CO_VALUE_LOADING_CONFIG.MAX_IN_FLIGHT_LOADS_PER_PEER = limit;
 }

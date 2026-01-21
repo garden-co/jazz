@@ -1,0 +1,7 @@
+---
+"cojson": patch
+---
+
+Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently.
+
+When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
