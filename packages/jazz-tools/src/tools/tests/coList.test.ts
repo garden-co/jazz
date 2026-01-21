@@ -1448,6 +1448,33 @@ describe("CoList proxy traps", () => {
     expect(enumerableKeys.sort()).toEqual(["0", "1", "2"]);
   });
 
+  test("Object.getOwnPropertyDescriptors returns the resolved references", () => {
+    const TestList = co.list(co.map({ name: z.string() }));
+    const list = TestList.create([{ name: "a" }, { name: "b" }, { name: "c" }]);
+
+    const descriptors = Object.getOwnPropertyDescriptors(list);
+
+    // Check numeric index descriptors
+    expect(descriptors["0"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: list[0],
+    });
+    expect(descriptors["1"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: list[1],
+    });
+    expect(descriptors["2"]).toEqual({
+      enumerable: true,
+      configurable: true,
+      writable: false,
+      value: list[2],
+    });
+  });
+
   test("setting the lenght to 0 has no effect", () => {
     const TestList = co.list(z.string());
     const list = TestList.create(["a", "b", "c"]);

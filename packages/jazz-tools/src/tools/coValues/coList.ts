@@ -936,6 +936,30 @@ function toRawItems<Item>(
   return rawItems;
 }
 
+function getCoListItemValue(target: CoList, key: string) {
+  const rawValue = target.$jazz.raw.get(Number(key));
+
+  if (rawValue === undefined) {
+    return undefined;
+  }
+
+  const itemDescriptor: Schema = target.$jazz.schema[ItemsSym];
+
+  if (itemDescriptor === "json") {
+    return rawValue;
+  } else if ("encoded" in itemDescriptor) {
+    return itemDescriptor.encoded.decode(rawValue);
+  } else if (isRefEncoded(itemDescriptor)) {
+    if (rawValue === null) {
+      return undefined;
+    }
+
+    return accessChildByKey(target, rawValue as string, key);
+  }
+
+  return undefined;
+}
+
 const CoListProxyHandler: ProxyHandler<CoList> = {
   get(target, key, receiver) {
     if (typeof key === "symbol") {
@@ -943,25 +967,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
     }
 
     if (!isNaN(+key)) {
-      const rawValue = target.$jazz.raw.get(Number(key));
-
-      if (rawValue === undefined) {
-        return undefined;
-      }
-
-      const itemDescriptor: Schema = target.$jazz.schema[ItemsSym];
-
-      if (itemDescriptor === "json") {
-        return rawValue;
-      } else if ("encoded" in itemDescriptor) {
-        return itemDescriptor.encoded.decode(rawValue);
-      } else if (isRefEncoded(itemDescriptor)) {
-        if (rawValue === null) {
-          return undefined;
-        }
-
-        return accessChildByKey(target, rawValue as string, key);
-      }
+      return getCoListItemValue(target, key);
     } else if (key === "length") {
       return target.$jazz.raw.length();
     }
@@ -1045,7 +1051,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
           enumerable: true,
           configurable: true,
           writable: false,
-          value: target.$jazz.raw.get(index),
+          value: getCoListItemValue(target, key),
         };
       }
     } else if (key === "length") {
