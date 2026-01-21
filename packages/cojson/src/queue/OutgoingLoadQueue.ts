@@ -12,8 +12,8 @@ interface PendingLoad {
 
 /**
  * Mode for enqueuing load requests:
- * - undefined (default): normal priority, processed in order
- * - "low-priority": processed after all normal priority requests
+ * - "high-priority" (default): high priority, processed in order
+ * - "low-priority": processed after all high priority requests
  * - "immediate": bypasses the queue entirely, executes immediately
  */
 export type LoadMode = "low-priority" | "immediate" | "high-priority";
