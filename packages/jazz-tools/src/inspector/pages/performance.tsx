@@ -440,8 +440,9 @@ function usePerformanceEntries(): SubscriptionEntry[] {
 
         if (detail?.type !== "jazz-subscription") continue;
 
-        if (mark.entryType === "mark" && entriesByUuid.has(detail.uuid))
-          continue;
+        const prevEntry = entriesByUuid.get(detail.uuid);
+
+        if (mark.entryType === "mark" && prevEntry) continue;
 
         entriesByUuid.set(detail.uuid, {
           uuid: detail.uuid,
@@ -450,7 +451,7 @@ function usePerformanceEntries(): SubscriptionEntry[] {
           resolve: JSON.stringify(detail.resolve),
           status: detail.status,
           startTime: mark.startTime,
-          callerStack: detail.callerStack,
+          callerStack: detail.callerStack ?? prevEntry?.callerStack,
           duration: mark.entryType === "mark" ? undefined : mark.duration,
           endTime: mark.startTime + mark.duration,
           errorType: detail.errorType,
