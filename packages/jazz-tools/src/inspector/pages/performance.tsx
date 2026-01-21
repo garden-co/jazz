@@ -147,7 +147,12 @@ const TimeLabel = styled("span")`
   pointer-events: none;
   left: 4px;
 
+  @media (prefers-color-scheme: dark) {
+    --time-label-overflow-color: black;
+  }
+
   @container (max-width: 50px) {
+    color: var(--time-label-overflow-color, inherit);
     left: 100%;
     margin-left: 4px;
   }
@@ -294,9 +299,13 @@ const TimeMarker = styled("div")`
   position: absolute;
   font-size: 0.5rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  color: var(--j-neutral-500);
+  color: var(--j-text-color);
   padding: 2px 4px;
   white-space: nowrap;
+
+  @media (prefers-color-scheme: dark) {
+    color: var(--j-neutral-500);
+  }
 
   &::after {
     content: "";
