@@ -378,6 +378,10 @@ export class RawCoList<
     return arr;
   }
 
+  length() {
+    return this.entries().length;
+  }
+
   /** @internal */
   entriesUncached(): {
     value: Item;
