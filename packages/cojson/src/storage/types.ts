@@ -163,11 +163,6 @@ export type CoValueUpdate = {
 };
 
 export interface DBTransactionInterfaceAsync {
-  getSingleCoValueSession(
-    coValueRowId: number,
-    sessionID: SessionID,
-  ): Promise<StoredSessionRow | undefined>;
-
   /**
    * Persist a "deleted coValue" marker in storage (work queue entry).
    * This is an enqueue signal: implementations should set status to `Pending`.
@@ -177,62 +172,28 @@ export interface DBTransactionInterfaceAsync {
 
   upsertCoValueRow(coValueRow: CoValueUpdate): Promise<StoredNewCoValueRow>;
 
-  addSessionUpdate({
-    sessionUpdate,
-    sessionRow,
-  }: {
-    sessionUpdate: SessionRow;
-    sessionRow?: StoredSessionRow;
-  }): Promise<number>;
-
   addTransaction(
     sessionRowID: number,
     idx: number,
     newTransaction: Transaction,
   ): Promise<number> | undefined | unknown;
-
-  addSignatureAfter({
-    sessionRowID,
-    idx,
-    signature,
-  }: {
-    sessionRowID: number;
-    idx: number;
-    signature: Signature;
-  }): Promise<unknown>;
 }
 
 export interface DBClientInterfaceAsync {
-  getCoValue(
-    coValueId: string,
-  ): Promise<StoredCoValueRow | undefined> | undefined;
-
   getCoValueRow(
     coValueId: string,
   ): Promise<StoredNewCoValueRow | undefined> | undefined;
-
-  upsertCoValue(
-    id: string,
-    header?: CoValueHeader,
-  ): Promise<number | undefined>;
 
   /**
    * Enumerate all coValue IDs currently pending in the "deleted coValues" work queue.
    */
   getAllCoValuesWaitingForDelete(): Promise<RawCoID[]>;
 
-  getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]>;
-
   getNewTransactionInSession(
     sessionRowId: number,
     fromIdx: number,
     toIdx: number,
   ): Promise<TransactionRow[]>;
-
-  getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]>;
 
   transaction(
     callback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
