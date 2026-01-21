@@ -152,6 +152,16 @@ export type SignatureAfterRow = {
   signature: Signature;
 };
 
+// TODO rename
+export type CoValueUpdate = {
+  updatedCoValueRow: NewCoValueRow;
+  newTransactions: Record<
+    SessionID,
+    { transactions: Transaction[]; afterIdx: number }
+  >;
+  hasInvalidAssumptions: boolean;
+};
+
 export interface DBTransactionInterfaceAsync {
   getSingleCoValueSession(
     coValueRowId: number,
@@ -164,6 +174,8 @@ export interface DBTransactionInterfaceAsync {
    * This is expected to be idempotent (safe to call repeatedly).
    */
   markCoValueAsDeleted(id: RawCoID): Promise<unknown>;
+
+  upsertCoValueRow(coValueRow: CoValueUpdate): Promise<StoredNewCoValueRow>;
 
   addSessionUpdate({
     sessionUpdate,

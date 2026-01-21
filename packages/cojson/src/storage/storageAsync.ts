@@ -25,13 +25,12 @@ import {
 } from "./syncUtils.js";
 import type {
   CorrectionCallback,
+  CoValueUpdate,
   DBClientInterfaceAsync,
-  DBTransactionInterfaceAsync,
   NewCoValueRow,
   NewSessionRow,
   StoredCoValueRow,
   StoredNewCoValueRow,
-  StoredSessionRow,
 } from "./types.js";
 import { isDeleteSessionID } from "../ids.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
@@ -349,10 +348,8 @@ export class StorageApiAsync implements StorageAPI {
     const knownState = this.knownStates.getKnownState(id);
     knownState.header = true;
 
-    let invalidAssumptions = false;
-
     await this.dbClient.transaction(async (tx) => {
-      const storedCoValueRow = await this.upsertCoValueRow(tx, coValueRow);
+      const storedCoValueRow = await tx.upsertCoValueRow(coValueRow);
 
       for (const sessionID of Object.keys(
         coValueRow.newTransactions,
@@ -380,56 +377,11 @@ export class StorageApiAsync implements StorageAPI {
 
     this.knownStates.handleUpdate(id, knownState);
 
-    if (invalidAssumptions) {
+    if (coValueRow.hasInvalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
     }
 
     return true;
-  }
-
-  private async upsertCoValueRow(
-    tx: DBTransactionInterfaceAsync,
-    coValueRow: CoValueUpdate,
-  ): Promise<StoredNewCoValueRow> {
-    const id = coValueRow.updatedCoValueRow.id;
-    const coValueRowID = await this.dbClient.upsertCoValue(
-      id,
-      coValueRow.updatedCoValueRow.header,
-    );
-    if (!coValueRowID) {
-      throw new Error("BOOM: Failed to upsert coValue row");
-    }
-    for (const session of Object.values(
-      coValueRow.updatedCoValueRow.sessions,
-    )) {
-      if (session.coValue === Infinity) {
-        session.coValue = coValueRowID;
-      }
-    }
-    for (const session of Object.values(
-      coValueRow.updatedCoValueRow.sessions,
-    )) {
-      const sessionRowID = await tx.addSessionUpdate({
-        sessionUpdate: session,
-        sessionRow:
-          "rowID" in session ? (session as StoredSessionRow) : undefined,
-      });
-      // @ts-expect-error - convert the session into a StoredNewSessionRow
-      session.rowID = sessionRowID;
-
-      for (const [idx, signature] of Object.entries(session.signatures)) {
-        await tx.addSignatureAfter({
-          sessionRowID,
-          idx: Number(idx),
-          signature,
-        });
-      }
-    }
-    // @ts-expect-error - convert the sessions into a StoredNewSessionRow
-    return {
-      ...coValueRow.updatedCoValueRow,
-      rowID: coValueRowID,
-    };
   }
 
   deletedValues = new Set<RawCoID>();
@@ -487,15 +439,6 @@ export class StorageApiAsync implements StorageAPI {
     return this.storeQueue.close();
   }
 }
-
-type CoValueUpdate = {
-  updatedCoValueRow: NewCoValueRow;
-  newTransactions: Record<
-    SessionID,
-    { transactions: Transaction[]; afterIdx: number }
-  >;
-  invalidAssumptions: boolean;
-};
 
 function getUpdatedCoValueRow(
   storedCoValueRow: StoredNewCoValueRow | undefined,
@@ -563,5 +506,9 @@ function getUpdatedCoValueRow(
     header,
     sessions,
   };
-  return { updatedCoValueRow, newTransactions, invalidAssumptions };
+  return {
+    updatedCoValueRow,
+    newTransactions,
+    hasInvalidAssumptions: invalidAssumptions,
+  };
 }

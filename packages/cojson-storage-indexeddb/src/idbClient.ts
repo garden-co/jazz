@@ -6,6 +6,7 @@ import type {
 } from "cojson";
 import type {
   CoValueRow,
+  CoValueUpdate,
   DBClientInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
@@ -52,6 +53,61 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
         .index("uniqueSessions")
         .get([coValueRowId, sessionID]),
     );
+  }
+
+  async upsertCoValueRow(
+    coValueRow: CoValueUpdate,
+  ): Promise<StoredNewCoValueRow> {
+    const id = coValueRow.updatedCoValueRow.id;
+    const coValueRowID = await this.upsertCoValue(
+      id,
+      coValueRow.updatedCoValueRow.header,
+    );
+    if (!coValueRowID) {
+      throw new Error("BOOM: Failed to upsert coValue row");
+    }
+    for (const session of Object.values(
+      coValueRow.updatedCoValueRow.sessions,
+    )) {
+      if (session.coValue === Infinity) {
+        session.coValue = coValueRowID;
+      }
+    }
+    for (const session of Object.values(
+      coValueRow.updatedCoValueRow.sessions,
+    )) {
+      const sessionRowID = await this.addSessionUpdate({
+        sessionUpdate: session,
+      });
+      // @ts-expect-error - convert the session into a StoredNewSessionRow
+      session.rowID = sessionRowID;
+
+      for (const [idx, signature] of Object.entries(session.signatures)) {
+        await this.addSignatureAfter({
+          sessionRowID,
+          idx: Number(idx),
+          signature,
+        });
+      }
+    }
+    // @ts-expect-error - convert the sessions into a StoredNewSessionRow
+    return {
+      ...coValueRow.updatedCoValueRow,
+      rowID: coValueRowID,
+    };
+  }
+
+  async upsertCoValue(
+    id: RawCoID,
+    header?: CojsonInternalTypes.CoValueHeader,
+  ): Promise<number | undefined> {
+    const idbKey = await this.run((tx) =>
+      tx.getObjectStore("coValues").put({
+        id,
+        header,
+      }),
+    );
+    return idbKey ? Number(idbKey) : undefined;
   }
 
   async markCoValueAsDeleted(id: RawCoID): Promise<void> {
