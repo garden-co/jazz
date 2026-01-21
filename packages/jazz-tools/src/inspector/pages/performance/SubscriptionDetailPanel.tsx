@@ -138,13 +138,20 @@ export function SubscriptionDetailPanel({
 
         <DetailLabel>CoValue</DetailLabel>
         <DetailValue>
-          <a
+          <button
             title="Click to navigate to CoValue"
             onClick={() => onNavigate(entry.id)}
-            style={{ color: "var(--j-link-color)", cursor: "pointer" }}
+            style={{
+              color: "var(--j-link-color)",
+              cursor: "pointer",
+              background: "none",
+              border: "none",
+              padding: 0,
+              font: "inherit",
+            }}
           >
             {entry.id}
-          </a>
+          </button>
         </DetailValue>
 
         <DetailLabel>Time</DetailLabel>

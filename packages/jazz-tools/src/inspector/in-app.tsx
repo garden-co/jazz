@@ -9,6 +9,7 @@ import { NodeProvider } from "./contexts/node.js";
 import { InMemoryRouterProvider } from "./router/in-memory-router.js";
 import { Header } from "./viewer/header.js";
 import { PerformancePage } from "./pages/performance/index.js";
+import { HomePage } from "./pages/home.js";
 import { SubscriptionScope } from "jazz-tools";
 
 export type InspectorTab = "inspector" | "performance";
@@ -59,7 +60,6 @@ export function InspectorInApp({
       <InMemoryRouterProvider>
         <InspectorContainer as={GlobalStyles} style={{ zIndex: 999 }}>
           <Header
-            showDeleteLocalData={true}
             showClose={true}
             onClose={() => setOpen(false)}
             activeTab={activeTab}
@@ -68,6 +68,7 @@ export function InspectorInApp({
           {/* Both components stay mounted, visibility controlled by CSS */}
           <PageStack
             style={{ display: activeTab === "inspector" ? "flex" : "none" }}
+            homePage={<HomePage showDeleteLocalData />}
           />
           <PerformancePage
             style={{ display: activeTab === "performance" ? "flex" : "none" }}

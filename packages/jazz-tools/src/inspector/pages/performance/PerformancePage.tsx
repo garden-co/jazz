@@ -193,13 +193,13 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
             ))}
           </Grid>
         </ListPanel>
-        {selectedEntry ? (
+        {selectedEntry && (
           <SubscriptionDetailPanel
             entry={selectedEntry}
             onNavigate={handleNavigateToCoValue}
             onClose={() => setSelectedRow(null)}
           />
-        ) : null}
+        )}
       </MainLayout>
     </Container>
   );
