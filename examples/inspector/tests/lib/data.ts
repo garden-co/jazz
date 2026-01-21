@@ -1,4 +1,10 @@
-import { FileStream, ImageDefinition, co, z } from "jazz-tools";
+import {
+  FileStream,
+  ImageDefinition,
+  co,
+  z,
+  setDefaultValidationMode,
+} from "jazz-tools";
 import {
   Issue,
   Organization,
@@ -6,6 +12,8 @@ import {
   type ReactionType,
   ReactionsList,
 } from "./schema";
+
+setDefaultValidationMode("strict");
 
 const projectsData: {
   name: string;

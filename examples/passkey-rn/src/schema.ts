@@ -1,4 +1,6 @@
-import { co } from "jazz-tools";
+import { co, setDefaultValidationMode } from "jazz-tools";
+
+setDefaultValidationMode("strict");
 
 /**
  * Simple note schema to demonstrate Jazz functionality with passkey auth.
