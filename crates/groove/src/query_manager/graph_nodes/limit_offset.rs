@@ -1,4 +1,6 @@
-use crate::query_manager::types::{Row, RowDelta, RowDescriptor};
+use std::collections::HashSet;
+
+use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
 
 use super::RowNode;
 
@@ -6,64 +8,102 @@ use super::RowNode;
 #[derive(Debug)]
 pub struct LimitOffsetNode {
     descriptor: RowDescriptor,
+    /// Output tuple descriptor (same as input - pass-through).
+    output_tuple_descriptor: TupleDescriptor,
     limit: Option<usize>,
     offset: usize,
-    /// All rows from input (before limit/offset applied).
-    all_rows: Vec<Row>,
-    /// Current rows after limit/offset.
-    current_rows: Vec<Row>,
+    /// All tuples from input (before limit/offset applied).
+    all_tuples: Vec<Tuple>,
+    /// Current tuples after limit/offset.
+    windowed_tuples: Vec<Tuple>,
+    /// HashSet view for trait requirement.
+    current_tuples: HashSet<Tuple>,
     dirty: bool,
 }
 
 impl LimitOffsetNode {
+    /// Create a LimitOffsetNode with RowDescriptor (backward compatible).
     pub fn new(descriptor: RowDescriptor, limit: Option<usize>, offset: usize) -> Self {
+        let output_tuple_descriptor =
+            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
         Self {
             descriptor,
+            output_tuple_descriptor,
             limit,
             offset,
-            all_rows: Vec::new(),
-            current_rows: Vec::new(),
+            all_tuples: Vec::new(),
+            windowed_tuples: Vec::new(),
+            current_tuples: HashSet::new(),
             dirty: true,
         }
     }
 
-    /// Recompute current_rows from all_rows based on limit/offset.
-    fn recompute_window(&mut self) {
-        let start = self.offset.min(self.all_rows.len());
-        let end = match self.limit {
-            Some(limit) => (start + limit).min(self.all_rows.len()),
-            None => self.all_rows.len(),
-        };
-        self.current_rows = self.all_rows[start..end].to_vec();
+    /// Create a LimitOffsetNode with TupleDescriptor.
+    pub fn with_tuple_descriptor(
+        tuple_descriptor: TupleDescriptor,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> Self {
+        let descriptor = tuple_descriptor.combined_descriptor();
+        Self {
+            descriptor,
+            output_tuple_descriptor: tuple_descriptor,
+            limit,
+            offset,
+            all_tuples: Vec::new(),
+            windowed_tuples: Vec::new(),
+            current_tuples: HashSet::new(),
+            dirty: true,
+        }
     }
 
-    /// Compute the delta between old and new window.
-    fn compute_delta(&self, old_rows: &[Row], new_rows: &[Row], pending: bool) -> RowDelta {
-        let mut delta = RowDelta::new();
+    /// Get the output tuple descriptor.
+    pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
+        &self.output_tuple_descriptor
+    }
 
-        // Propagate pending flag
+    /// Recompute windowed_tuples from all_tuples based on limit/offset.
+    fn recompute_tuple_window(&mut self) {
+        let start = self.offset.min(self.all_tuples.len());
+        let end = match self.limit {
+            Some(limit) => (start + limit).min(self.all_tuples.len()),
+            None => self.all_tuples.len(),
+        };
+        self.windowed_tuples = self.all_tuples[start..end].to_vec();
+        self.current_tuples = self.windowed_tuples.iter().cloned().collect();
+    }
+
+    /// Compute the delta between old and new tuple window.
+    fn compute_tuple_delta(
+        &self,
+        old_tuples: &[Tuple],
+        new_tuples: &[Tuple],
+        pending: bool,
+    ) -> TupleDelta {
+        let mut delta = TupleDelta::new();
         delta.pending = pending;
 
-        // Find removed rows (in old but not in new)
-        for old in old_rows {
-            if !new_rows.iter().any(|r| r.id == old.id) {
+        // Find removed tuples (in old but not in new)
+        for old in old_tuples {
+            if !new_tuples.iter().any(|t| t == old) {
                 delta.removed.push(old.clone());
             }
         }
 
-        // Find added rows (in new but not in old)
-        for new in new_rows {
-            if !old_rows.iter().any(|r| r.id == new.id) {
+        // Find added tuples (in new but not in old)
+        for new in new_tuples {
+            if !old_tuples.iter().any(|t| t == new) {
                 delta.added.push(new.clone());
             }
         }
 
-        // Find updated rows (in both, but potentially different data)
-        for new in new_rows {
-            if let Some(old) = old_rows.iter().find(|r| r.id == new.id)
-                && (old.data != new.data || old.commit_id != new.commit_id)
-            {
-                delta.updated.push((old.clone(), new.clone()));
+        // Find updated tuples (same IDs but different content)
+        for new in new_tuples {
+            if let Some(old) = old_tuples.iter().find(|t| *t == new) {
+                // Check if content changed (since == only compares IDs)
+                if has_tuple_content_changed(old, new) {
+                    delta.updated.push((old.clone(), new.clone()));
+                }
             }
         }
 
@@ -71,42 +111,52 @@ impl LimitOffsetNode {
     }
 }
 
+/// Check if tuple content changed (for tuples with same IDs).
+fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
+    old.iter()
+        .zip(new.iter())
+        .any(|(o, n)| match (o.content(), n.content()) {
+            (Some(oc), Some(nc)) => oc != nc,
+            _ => false,
+        })
+}
+
 impl RowNode for LimitOffsetNode {
     fn output_descriptor(&self) -> &RowDescriptor {
         &self.descriptor
     }
 
-    fn process(&mut self, input: RowDelta) -> RowDelta {
-        let old_rows = self.current_rows.clone();
+    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        let old_tuples = self.windowed_tuples.clone();
         let pending = input.pending;
 
-        // Apply changes to all_rows
-        for row in input.removed {
-            self.all_rows.retain(|r| r.id != row.id);
+        // Apply changes to all_tuples
+        for tuple in input.removed {
+            self.all_tuples.retain(|t| t != &tuple);
         }
 
-        // For added rows, we maintain the order from input (assumed sorted)
-        for row in input.added {
-            self.all_rows.push(row);
+        // For added tuples, maintain order from input (assumed sorted)
+        for tuple in input.added {
+            self.all_tuples.push(tuple);
         }
 
-        // For updated rows, update in place
-        for (old_row, new_row) in input.updated {
-            if let Some(pos) = self.all_rows.iter().position(|r| r.id == old_row.id) {
-                self.all_rows[pos] = new_row;
+        // For updated tuples, update in place
+        for (old_tuple, new_tuple) in input.updated {
+            if let Some(pos) = self.all_tuples.iter().position(|t| t == &old_tuple) {
+                self.all_tuples[pos] = new_tuple;
             }
         }
 
         // Recompute window
-        self.recompute_window();
+        self.recompute_tuple_window();
         self.dirty = false;
 
-        // Return the delta for the window (propagating pending flag)
-        self.compute_delta(&old_rows, &self.current_rows, pending)
+        // Return the delta for the window
+        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples, pending)
     }
 
-    fn current_result(&self) -> &[Row] {
-        &self.current_rows
+    fn current_tuples(&self) -> &HashSet<Tuple> {
+        &self.current_tuples
     }
 
     fn mark_dirty(&mut self) {
@@ -124,7 +174,7 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -133,10 +183,22 @@ mod tests {
         ])
     }
 
-    fn make_row(id: ObjectId, n: i32, name: &str) -> Row {
+    fn make_tuple(id: ObjectId, n: i32, name: &str) -> Tuple {
         let descriptor = test_descriptor();
         let data = encode_row(&descriptor, &[Value::Integer(n), Value::Text(name.into())]).unwrap();
-        Row::new(id, data, CommitId([0; 32]))
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn contains_id(tuples: &[Tuple], id: ObjectId) -> bool {
+        tuples.iter().any(|t| t.ids().contains(&id))
+    }
+
+    fn get_windowed_ids(node: &LimitOffsetNode) -> Vec<ObjectId> {
+        node.windowed_tuples.iter().map(|t| t.ids()[0]).collect()
     }
 
     #[test]
@@ -145,15 +207,15 @@ mod tests {
         let mut node = LimitOffsetNode::new(descriptor, Some(2), 0);
 
         let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
-        let rows: Vec<_> = ids
+        let tuples: Vec<_> = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| make_row(*id, i as i32, &format!("Row{}", i)))
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
             .collect();
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: rows,
+            added: tuples,
             removed: vec![],
             updated: vec![],
         };
@@ -161,9 +223,10 @@ mod tests {
         let result = node.process(delta);
 
         assert_eq!(result.added.len(), 2);
-        assert_eq!(node.current_result().len(), 2);
-        assert_eq!(node.current_result()[0].id, ids[0]);
-        assert_eq!(node.current_result()[1].id, ids[1]);
+        let windowed_ids = get_windowed_ids(&node);
+        assert_eq!(windowed_ids.len(), 2);
+        assert_eq!(windowed_ids[0], ids[0]);
+        assert_eq!(windowed_ids[1], ids[1]);
     }
 
     #[test]
@@ -172,15 +235,15 @@ mod tests {
         let mut node = LimitOffsetNode::new(descriptor, None, 2);
 
         let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
-        let rows: Vec<_> = ids
+        let tuples: Vec<_> = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| make_row(*id, i as i32, &format!("Row{}", i)))
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
             .collect();
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: rows,
+            added: tuples,
             removed: vec![],
             updated: vec![],
         };
@@ -188,10 +251,11 @@ mod tests {
         let result = node.process(delta);
 
         assert_eq!(result.added.len(), 3);
-        assert_eq!(node.current_result().len(), 3);
-        assert_eq!(node.current_result()[0].id, ids[2]);
-        assert_eq!(node.current_result()[1].id, ids[3]);
-        assert_eq!(node.current_result()[2].id, ids[4]);
+        let windowed_ids = get_windowed_ids(&node);
+        assert_eq!(windowed_ids.len(), 3);
+        assert_eq!(windowed_ids[0], ids[2]);
+        assert_eq!(windowed_ids[1], ids[3]);
+        assert_eq!(windowed_ids[2], ids[4]);
     }
 
     #[test]
@@ -200,15 +264,15 @@ mod tests {
         let mut node = LimitOffsetNode::new(descriptor, Some(2), 1);
 
         let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
-        let rows: Vec<_> = ids
+        let tuples: Vec<_> = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| make_row(*id, i as i32, &format!("Row{}", i)))
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
             .collect();
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: rows,
+            added: tuples,
             removed: vec![],
             updated: vec![],
         };
@@ -216,9 +280,10 @@ mod tests {
         let result = node.process(delta);
 
         assert_eq!(result.added.len(), 2);
-        assert_eq!(node.current_result().len(), 2);
-        assert_eq!(node.current_result()[0].id, ids[1]);
-        assert_eq!(node.current_result()[1].id, ids[2]);
+        let windowed_ids = get_windowed_ids(&node);
+        assert_eq!(windowed_ids.len(), 2);
+        assert_eq!(windowed_ids[0], ids[1]);
+        assert_eq!(windowed_ids[1], ids[2]);
     }
 
     #[test]
@@ -227,38 +292,40 @@ mod tests {
         let mut node = LimitOffsetNode::new(descriptor, Some(2), 0);
 
         let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
-        let rows: Vec<_> = ids
+        let tuples: Vec<_> = ids
             .iter()
             .enumerate()
-            .map(|(i, id)| make_row(*id, i as i32, &format!("Row{}", i)))
+            .map(|(i, id)| make_tuple(*id, i as i32, &format!("Row{}", i)))
             .collect();
 
         // Initial: [0, 1, 2, 3] -> window [0, 1]
-        node.process(RowDelta {
+        node.process(TupleDelta {
             pending: false,
-            added: rows.clone(),
+            added: tuples.clone(),
             removed: vec![],
             updated: vec![],
         });
-        assert_eq!(node.current_result()[0].id, ids[0]);
-        assert_eq!(node.current_result()[1].id, ids[1]);
+        let windowed_ids = get_windowed_ids(&node);
+        assert_eq!(windowed_ids[0], ids[0]);
+        assert_eq!(windowed_ids[1], ids[1]);
 
-        // Remove first row: [1, 2, 3] -> window [1, 2]
-        let result = node.process(RowDelta {
+        // Remove first tuple: [1, 2, 3] -> window [1, 2]
+        let result = node.process(TupleDelta {
             pending: false,
             added: vec![],
-            removed: vec![rows[0].clone()],
+            removed: vec![tuples[0].clone()],
             updated: vec![],
         });
 
         assert_eq!(result.removed.len(), 1);
-        assert_eq!(result.removed[0].id, ids[0]);
+        assert!(contains_id(&result.removed, ids[0]));
         assert_eq!(result.added.len(), 1);
-        assert_eq!(result.added[0].id, ids[2]); // New row slides in
+        assert!(contains_id(&result.added, ids[2])); // New tuple slides in
 
-        assert_eq!(node.current_result().len(), 2);
-        assert_eq!(node.current_result()[0].id, ids[1]);
-        assert_eq!(node.current_result()[1].id, ids[2]);
+        let windowed_ids = get_windowed_ids(&node);
+        assert_eq!(windowed_ids.len(), 2);
+        assert_eq!(windowed_ids[0], ids[1]);
+        assert_eq!(windowed_ids[1], ids[2]);
     }
 
     #[test]
@@ -267,17 +334,17 @@ mod tests {
         let mut node = LimitOffsetNode::new(descriptor, Some(10), 100);
 
         let id = ObjectId::new();
-        let row = make_row(id, 1, "Row1");
+        let tuple = make_tuple(id, 1, "Row1");
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: vec![row],
+            added: vec![tuple],
             removed: vec![],
             updated: vec![],
         };
 
         node.process(delta);
 
-        assert!(node.current_result().is_empty());
+        assert!(node.windowed_tuples.is_empty());
     }
 }

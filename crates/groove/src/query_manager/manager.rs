@@ -1216,9 +1216,10 @@ impl QueryManager {
     }
 
     /// Mark subscriptions dirty for a table.
+    /// Checks all tables involved in the subscription (including joined tables).
     fn mark_subscriptions_dirty(&mut self, table: &str) {
         for subscription in self.subscriptions.values_mut() {
-            if subscription.graph.table.0 == table {
+            if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_dirty_for_table(table);
             }
         }
@@ -1226,9 +1227,10 @@ impl QueryManager {
 
     /// Mark a row as updated in all subscriptions for a table.
     /// This triggers content change detection during settle().
+    /// Checks all tables involved in the subscription (including joined tables).
     fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
-            if subscription.graph.table.0 == table {
+            if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_updated(id);
             }
         }
@@ -1236,12 +1238,19 @@ impl QueryManager {
 
     /// Mark a row as deleted in all subscriptions for a table.
     /// This triggers removal delta emission during settle().
+    /// Checks all tables involved in the subscription (including joined tables).
     fn mark_row_deleted_in_subscriptions(&mut self, table: &str, id: ObjectId) {
         for subscription in self.subscriptions.values_mut() {
-            if subscription.graph.table.0 == table {
+            if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_deleted(id);
             }
         }
+    }
+
+    /// Check if a subscription involves a given table (base table or any joined table).
+    fn subscription_involves_table(graph: &super::graph::QueryGraph, table: &str) -> bool {
+        // Check all index scan nodes - each one tracks (node_id, table_name, column)
+        graph.index_scan_nodes.iter().any(|(_, t, _)| t == table)
     }
 }
 
@@ -3533,5 +3542,352 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].subscription_id, sub_id);
         assert_eq!(updates[0].delta.removed.len(), 1);
+    }
+
+    // ========================================================================
+    // Join integration tests
+    // ========================================================================
+
+    fn join_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+        );
+        schema
+    }
+
+    #[test]
+    fn join_compiles_but_not_executed_yet() {
+        // This test validates that join queries compile and don't panic,
+        // even though full join execution is not yet implemented.
+        // Once execute() supports joins, this test can be extended.
+        let sync_manager = SyncManager::new();
+        let schema = join_schema();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        // Build a join query
+        let query = qm
+            .query("users")
+            .join("posts")
+            .on("id", "author_id")
+            .build();
+
+        // The query should compile successfully
+        assert!(query.is_join());
+        assert_eq!(query.joins.len(), 1);
+    }
+
+    #[test]
+    fn join_query_with_projection_compiles() {
+        let sync_manager = SyncManager::new();
+        let schema = join_schema();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        let query = qm
+            .query("users")
+            .join("posts")
+            .on("id", "author_id")
+            .select(&["name", "title"])
+            .build();
+
+        assert!(query.is_join());
+        assert_eq!(
+            query.select_columns,
+            Some(vec!["name".to_string(), "title".to_string()])
+        );
+    }
+
+    #[test]
+    fn join_query_with_alias_compiles() {
+        let sync_manager = SyncManager::new();
+        let schema = join_schema();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        let query = qm
+            .query("users")
+            .alias("u")
+            .join("posts")
+            .alias("p")
+            .on("u.id", "p.author_id")
+            .build();
+
+        assert!(query.is_join());
+        assert_eq!(query.alias, Some("u".to_string()));
+        assert_eq!(query.joins[0].alias, Some("p".to_string()));
+    }
+
+    #[test]
+    fn self_join_query_compiles() {
+        // Self-join: employees with their managers
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("employees"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("manager_id", ColumnType::Integer).nullable(),
+            ]),
+        );
+
+        let sync_manager = SyncManager::new();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        let query = qm
+            .query("employees")
+            .alias("e")
+            .join("employees")
+            .alias("m")
+            .on("e.manager_id", "m.id")
+            .build();
+
+        assert!(query.is_join());
+        assert_eq!(query.alias, Some("e".to_string()));
+        assert_eq!(query.joins[0].table.0, "employees");
+        assert_eq!(query.joins[0].alias, Some("m".to_string()));
+    }
+
+    #[test]
+    fn multi_join_query_compiles() {
+        // Three-way join: orders -> customers, orders -> products
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("orders"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("customer_id", ColumnType::Integer),
+                ColumnDescriptor::new("product_id", ColumnType::Integer),
+            ]),
+        );
+        schema.insert(
+            TableName::new("customers"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("products"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+
+        let sync_manager = SyncManager::new();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        let query = qm
+            .query("orders")
+            .join("customers")
+            .on("customer_id", "id")
+            .join("products")
+            .on("product_id", "id")
+            .build();
+
+        assert!(query.is_join());
+        assert_eq!(query.joins.len(), 2);
+        assert_eq!(query.joins[0].table.0, "customers");
+        assert_eq!(query.joins[1].table.0, "products");
+    }
+
+    #[test]
+    fn join_subscription_marks_dirty_for_joined_table() {
+        // This test verifies that inserts into a JOINED table (not the base table)
+        // mark the join subscription as dirty. This is a regression test for a bug
+        // where only the base table would trigger reactivity.
+        //
+        // We test this by checking that the subscription's index scan nodes for the
+        // joined table get marked dirty when we insert into that table.
+        let sync_manager = SyncManager::new();
+        let schema = join_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Subscribe to a join query: users JOIN posts ON users.id = posts.author_id
+        let query = qm
+            .query("users")
+            .join("posts")
+            .on("id", "author_id")
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process once to settle initial state
+        qm.process();
+        let _ = qm.take_updates();
+
+        // Verify the subscription has index scan nodes for BOTH tables
+        let subscription = qm.subscriptions.get(&sub_id).unwrap();
+        let tables_in_subscription: Vec<&String> = subscription
+            .graph
+            .index_scan_nodes
+            .iter()
+            .map(|(_, table, _)| table)
+            .collect();
+        assert!(
+            tables_in_subscription.contains(&&"users".to_string()),
+            "Subscription should have index scan for users"
+        );
+        assert!(
+            tables_in_subscription.contains(&&"posts".to_string()),
+            "Subscription should have index scan for posts"
+        );
+
+        // Clear dirty nodes
+        qm.subscriptions
+            .get_mut(&sub_id)
+            .unwrap()
+            .graph
+            .dirty_nodes
+            .clear();
+
+        // Insert into the JOINED table (posts), not the base table (users)
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Test Post".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // BUG: mark_subscriptions_dirty() only checks subscription.graph.table.0 == "posts"
+        // but the base table is "users", so the subscription won't be marked dirty.
+        let subscription = qm.subscriptions.get(&sub_id).unwrap();
+        assert!(
+            !subscription.graph.dirty_nodes.is_empty(),
+            "Join subscription should be marked dirty when joined table is modified"
+        );
+    }
+
+    #[test]
+    fn join_produces_combined_tuples() {
+        // Test that a join produces tuples with elements from both tables.
+        // This verifies basic join functionality and tuple structure.
+        let sync_manager = SyncManager::new();
+        let schema = join_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a user
+        let user_id = qm
+            .insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert a post by that user
+        let post_id = qm
+            .insert(
+                "posts",
+                &[
+                    Value::Integer(100),
+                    Value::Text("Hello World".into()),
+                    Value::Integer(1), // author_id matches user id
+                ],
+            )
+            .unwrap();
+
+        // Subscribe to a join query
+        let query = qm
+            .query("users")
+            .join("posts")
+            .on("id", "author_id")
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get join results
+        qm.process();
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have updates for subscription");
+
+        // Should have one joined row
+        assert_eq!(delta.added.len(), 1, "Should have one joined result");
+
+        // The delta should contain columns from both tables
+        // For now we can verify the row exists; combined descriptor testing
+        // requires more infrastructure
+        let row = &delta.added[0];
+        assert!(!row.data.is_empty());
+
+        // Verify we got a result (the join produced data)
+        // Note: With joins, output currently uses base table descriptor,
+        // so row.id will be the base table object ID (user_id).
+        let _ = (user_id, post_id); // Both IDs were used in the join
+    }
+
+    #[test]
+    fn join_filter_on_joined_table_column() {
+        // Test filtering on a column from the JOINED table (not the base table).
+        // FilterNode now uses TupleDescriptor to resolve column indices to correct tuple elements.
+        let sync_manager = SyncManager::new();
+        let schema = join_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert users
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+        qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
+            .unwrap();
+
+        // Insert posts - one should match filter, one should not
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Hello World".into()), // Should NOT match "Rust"
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Learning Rust".into()), // SHOULD match filter
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+
+        // Join with filter on posts.title
+        // TODO: This filter won't work correctly - it will try to match "Rust"
+        // against users.id column because evaluate_tuple only looks at element[0]
+        let query = qm
+            .query("users")
+            .join("posts")
+            .on("id", "author_id")
+            // This filter SHOULD match posts.title containing "Rust"
+            // but currently it compares against users table
+            .filter_eq("title", Value::Text("Learning Rust".into()))
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have updates");
+
+        // Should only have one result (the "Learning Rust" post)
+        assert_eq!(
+            delta.added.len(),
+            1,
+            "Filter on joined table column should work"
+        );
     }
 }

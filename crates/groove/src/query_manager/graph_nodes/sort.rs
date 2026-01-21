@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use crate::query_manager::encoding::compare_column;
-use crate::query_manager::types::{Row, RowDelta, RowDescriptor};
+use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
 
 use super::RowNode;
 
@@ -23,51 +24,98 @@ pub struct SortKey {
 #[derive(Debug)]
 pub struct SortNode {
     descriptor: RowDescriptor,
+    /// Output tuple descriptor (same as input - pass-through).
+    output_tuple_descriptor: TupleDescriptor,
     sort_keys: Vec<SortKey>,
-    /// Current sorted rows.
-    current_rows: Vec<Row>,
+    /// Current sorted tuples.
+    sorted_tuples: Vec<Tuple>,
+    /// HashSet view of current tuples (for trait requirement).
+    current_tuples: HashSet<Tuple>,
     dirty: bool,
 }
 
 impl SortNode {
+    /// Create a SortNode with RowDescriptor (backward compatible).
     pub fn new(descriptor: RowDescriptor, sort_keys: Vec<SortKey>) -> Self {
+        let output_tuple_descriptor =
+            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
         Self {
             descriptor,
+            output_tuple_descriptor,
             sort_keys,
-            current_rows: Vec::new(),
+            sorted_tuples: Vec::new(),
+            current_tuples: HashSet::new(),
             dirty: true,
         }
     }
 
-    /// Compare two rows by sort keys.
-    fn compare_rows(&self, a: &Row, b: &Row) -> Ordering {
-        for key in &self.sort_keys {
-            let ord = compare_column(
-                &self.descriptor,
-                &a.data,
-                key.col_index,
-                &b.data,
-                key.col_index,
-            )
-            .unwrap_or(Ordering::Equal);
-
-            let ord = match key.direction {
-                SortDirection::Ascending => ord,
-                SortDirection::Descending => ord.reverse(),
-            };
-
-            if ord != Ordering::Equal {
-                return ord;
-            }
+    /// Create a SortNode with TupleDescriptor.
+    pub fn with_tuple_descriptor(
+        tuple_descriptor: TupleDescriptor,
+        sort_keys: Vec<SortKey>,
+    ) -> Self {
+        let descriptor = tuple_descriptor.combined_descriptor();
+        Self {
+            descriptor,
+            output_tuple_descriptor: tuple_descriptor,
+            sort_keys,
+            sorted_tuples: Vec::new(),
+            current_tuples: HashSet::new(),
+            dirty: true,
         }
-        Ordering::Equal
     }
 
-    /// Find the insertion position for a row (binary search).
-    fn find_position(&self, row: &Row) -> usize {
-        self.current_rows
-            .binary_search_by(|r| self.compare_rows(r, row))
+    /// Get the output tuple descriptor.
+    pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
+        &self.output_tuple_descriptor
+    }
+
+    /// Compare two tuples by sort keys (assumes single-element tuples).
+    fn compare_tuples(&self, a: &Tuple, b: &Tuple) -> Ordering {
+        // For single-table queries, compare first element's content
+        let a_content = a.get(0).and_then(|e| e.content());
+        let b_content = b.get(0).and_then(|e| e.content());
+
+        match (a_content, b_content) {
+            (Some(a_data), Some(b_data)) => {
+                for key in &self.sort_keys {
+                    let ord = compare_column(
+                        &self.descriptor,
+                        a_data,
+                        key.col_index,
+                        b_data,
+                        key.col_index,
+                    )
+                    .unwrap_or(Ordering::Equal);
+
+                    let ord = match key.direction {
+                        SortDirection::Ascending => ord,
+                        SortDirection::Descending => ord.reverse(),
+                    };
+
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                }
+                Ordering::Equal
+            }
+            // Unmaterialized tuples sort to the end
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+
+    /// Find the insertion position for a tuple (binary search).
+    fn find_tuple_position(&self, tuple: &Tuple) -> usize {
+        self.sorted_tuples
+            .binary_search_by(|t| self.compare_tuples(t, tuple))
             .unwrap_or_else(|pos| pos)
+    }
+
+    /// Sync current_tuples HashSet from sorted_tuples Vec.
+    fn sync_hashset(&mut self) {
+        self.current_tuples = self.sorted_tuples.iter().cloned().collect();
     }
 }
 
@@ -76,65 +124,64 @@ impl RowNode for SortNode {
         &self.descriptor
     }
 
-    fn process(&mut self, input: RowDelta) -> RowDelta {
-        // Track which IDs are added/removed for reconstructing a sorted delta
-        let mut added_ids: std::collections::HashSet<_> =
-            input.added.iter().map(|r| r.id).collect();
-        let mut removed_ids: std::collections::HashSet<_> =
-            input.removed.iter().map(|r| r.id).collect();
-        let updated_old_ids: std::collections::HashSet<_> =
-            input.updated.iter().map(|(old, _)| old.id).collect();
+    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        // Track which tuple IDs are added/removed
+        let mut added_ids: HashSet<_> = input.added.iter().map(|t| t.ids()).collect();
+        let mut removed_ids: HashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
+        let updated_old_ids: HashSet<_> = input.updated.iter().map(|(old, _)| old.ids()).collect();
 
         // Handle removals - find and remove
-        for row in &input.removed {
-            if let Some(pos) = self.current_rows.iter().position(|r| r.id == row.id) {
-                self.current_rows.remove(pos);
+        for tuple in &input.removed {
+            if let Some(pos) = self.sorted_tuples.iter().position(|t| t == tuple) {
+                self.sorted_tuples.remove(pos);
             }
         }
 
         // Handle additions - insert in sorted position
-        for row in &input.added {
-            let pos = self.find_position(row);
-            self.current_rows.insert(pos, row.clone());
+        for tuple in &input.added {
+            let pos = self.find_tuple_position(tuple);
+            self.sorted_tuples.insert(pos, tuple.clone());
         }
 
         // Handle updates - remove old position, insert at new position
-        for (old_row, new_row) in &input.updated {
-            // Remove from old position
-            if let Some(pos) = self.current_rows.iter().position(|r| r.id == old_row.id) {
-                self.current_rows.remove(pos);
+        for (old_tuple, new_tuple) in &input.updated {
+            if let Some(pos) = self.sorted_tuples.iter().position(|t| t == old_tuple) {
+                self.sorted_tuples.remove(pos);
             }
-            // Insert at new position
-            let pos = self.find_position(new_row);
-            self.current_rows.insert(pos, new_row.clone());
+            let pos = self.find_tuple_position(new_tuple);
+            self.sorted_tuples.insert(pos, new_tuple.clone());
         }
 
-        // Build result with rows in sorted order
-        let mut result = RowDelta::new();
+        // Sync the HashSet
+        self.sync_hashset();
 
-        // Propagate pending flag from input
+        // Build result with tuples in sorted order
+        let mut result = TupleDelta::new();
         result.pending = input.pending;
 
-        // Added rows in sorted order
-        for row in &self.current_rows {
-            if added_ids.remove(&row.id) {
-                result.added.push(row.clone());
+        // Added tuples in sorted order
+        for tuple in &self.sorted_tuples {
+            if added_ids.remove(&tuple.ids()) {
+                result.added.push(tuple.clone());
             }
         }
 
-        // Removed rows (order doesn't matter as much, but use input order)
-        for row in input.removed {
-            if removed_ids.remove(&row.id) {
-                result.removed.push(row);
+        // Removed tuples (order doesn't matter as much)
+        for tuple in input.removed {
+            if removed_ids.remove(&tuple.ids()) {
+                result.removed.push(tuple);
             }
         }
 
-        // Updated rows (find in sorted current_rows)
-        for (old_row, _) in &input.updated {
-            if updated_old_ids.contains(&old_row.id)
-                && let Some(new_row) = self.current_rows.iter().find(|r| r.id == old_row.id)
+        // Updated tuples (find in sorted)
+        for (old_tuple, _) in &input.updated {
+            if updated_old_ids.contains(&old_tuple.ids())
+                && let Some(new_tuple) = self
+                    .sorted_tuples
+                    .iter()
+                    .find(|t| t.ids() == old_tuple.ids())
             {
-                result.updated.push((old_row.clone(), new_row.clone()));
+                result.updated.push((old_tuple.clone(), new_tuple.clone()));
             }
         }
 
@@ -142,8 +189,8 @@ impl RowNode for SortNode {
         result
     }
 
-    fn current_result(&self) -> &[Row] {
-        &self.current_rows
+    fn current_tuples(&self) -> &HashSet<Tuple> {
+        &self.current_tuples
     }
 
     fn mark_dirty(&mut self) {
@@ -161,7 +208,7 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -171,10 +218,18 @@ mod tests {
         ])
     }
 
-    fn make_row(id: ObjectId, values: &[Value]) -> Row {
+    fn make_tuple(id: ObjectId, values: &[Value]) -> Tuple {
         let descriptor = test_descriptor();
         let data = encode_row(&descriptor, values).unwrap();
-        Row::new(id, data, CommitId([0; 32]))
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn get_sorted_ids(node: &SortNode) -> Vec<ObjectId> {
+        node.sorted_tuples.iter().map(|t| t.ids()[0]).collect()
     }
 
     #[test]
@@ -189,7 +244,7 @@ mod tests {
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
         let id3 = ObjectId::new();
-        let row1 = make_row(
+        let tuple1 = make_tuple(
             id1,
             &[
                 Value::Integer(1),
@@ -197,7 +252,7 @@ mod tests {
                 Value::Integer(100),
             ],
         );
-        let row2 = make_row(
+        let tuple2 = make_tuple(
             id2,
             &[
                 Value::Integer(2),
@@ -205,7 +260,7 @@ mod tests {
                 Value::Integer(50),
             ],
         );
-        let row3 = make_row(
+        let tuple3 = make_tuple(
             id3,
             &[
                 Value::Integer(3),
@@ -214,20 +269,20 @@ mod tests {
             ],
         );
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: vec![row1, row2, row3],
+            added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
             updated: vec![],
         };
 
         node.process(delta);
 
-        let result = node.current_result();
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].id, id2); // score 50
-        assert_eq!(result[1].id, id3); // score 75
-        assert_eq!(result[2].id, id1); // score 100
+        let sorted_ids = get_sorted_ids(&node);
+        assert_eq!(sorted_ids.len(), 3);
+        assert_eq!(sorted_ids[0], id2); // score 50
+        assert_eq!(sorted_ids[1], id3); // score 75
+        assert_eq!(sorted_ids[2], id1); // score 100
     }
 
     #[test]
@@ -242,7 +297,7 @@ mod tests {
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
         let id3 = ObjectId::new();
-        let row1 = make_row(
+        let tuple1 = make_tuple(
             id1,
             &[
                 Value::Integer(1),
@@ -250,7 +305,7 @@ mod tests {
                 Value::Integer(100),
             ],
         );
-        let row2 = make_row(
+        let tuple2 = make_tuple(
             id2,
             &[
                 Value::Integer(2),
@@ -258,7 +313,7 @@ mod tests {
                 Value::Integer(50),
             ],
         );
-        let row3 = make_row(
+        let tuple3 = make_tuple(
             id3,
             &[
                 Value::Integer(3),
@@ -267,20 +322,20 @@ mod tests {
             ],
         );
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: vec![row1, row2, row3],
+            added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
             updated: vec![],
         };
 
         node.process(delta);
 
-        let result = node.current_result();
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].id, id1); // score 100
-        assert_eq!(result[1].id, id3); // score 75
-        assert_eq!(result[2].id, id2); // score 50
+        let sorted_ids = get_sorted_ids(&node);
+        assert_eq!(sorted_ids.len(), 3);
+        assert_eq!(sorted_ids[0], id1); // score 100
+        assert_eq!(sorted_ids[1], id3); // score 75
+        assert_eq!(sorted_ids[2], id2); // score 50
     }
 
     #[test]
@@ -307,12 +362,16 @@ mod tests {
         let id3 = ObjectId::new();
         let id4 = ObjectId::new();
 
-        let make_row_local = |id: ObjectId, values: &[Value]| -> Row {
+        let make_tuple_local = |id: ObjectId, values: &[Value]| -> Tuple {
             let data = encode_row(&descriptor, values).unwrap();
-            Row::new(id, data, CommitId([0; 32]))
+            Tuple::new(vec![TupleElement::Row {
+                id,
+                content: data,
+                commit_id: CommitId([0; 32]),
+            }])
         };
 
-        let row1 = make_row_local(
+        let tuple1 = make_tuple_local(
             id1,
             &[
                 Value::Integer(1),
@@ -320,7 +379,7 @@ mod tests {
                 Value::Integer(100),
             ],
         );
-        let row2 = make_row_local(
+        let tuple2 = make_tuple_local(
             id2,
             &[
                 Value::Integer(1),
@@ -328,7 +387,7 @@ mod tests {
                 Value::Integer(50),
             ],
         );
-        let row3 = make_row_local(
+        let tuple3 = make_tuple_local(
             id3,
             &[
                 Value::Integer(2),
@@ -336,7 +395,7 @@ mod tests {
                 Value::Integer(75),
             ],
         );
-        let row4 = make_row_local(
+        let tuple4 = make_tuple_local(
             id4,
             &[
                 Value::Integer(2),
@@ -345,23 +404,23 @@ mod tests {
             ],
         );
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: vec![row1, row2, row3, row4],
+            added: vec![tuple1, tuple2, tuple3, tuple4],
             removed: vec![],
             updated: vec![],
         };
 
         node.process(delta);
 
-        let result = node.current_result();
-        assert_eq!(result.len(), 4);
+        let sorted_ids = get_sorted_ids(&node);
+        assert_eq!(sorted_ids.len(), 4);
         // Dept 1, score desc: 100, 50
-        assert_eq!(result[0].id, id1); // dept 1, score 100
-        assert_eq!(result[1].id, id2); // dept 1, score 50
+        assert_eq!(sorted_ids[0], id1); // dept 1, score 100
+        assert_eq!(sorted_ids[1], id2); // dept 1, score 50
         // Dept 2, score desc: 90, 75
-        assert_eq!(result[2].id, id4); // dept 2, score 90
-        assert_eq!(result[3].id, id3); // dept 2, score 75
+        assert_eq!(sorted_ids[2], id4); // dept 2, score 90
+        assert_eq!(sorted_ids[3], id3); // dept 2, score 75
     }
 
     #[test]
@@ -375,7 +434,7 @@ mod tests {
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
-        let row1 = make_row(
+        let tuple1 = make_tuple(
             id1,
             &[
                 Value::Integer(1),
@@ -384,15 +443,15 @@ mod tests {
             ],
         );
 
-        node.process(RowDelta {
+        node.process(TupleDelta {
             pending: false,
-            added: vec![row1],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         });
 
-        // Insert row with lower score
-        let row2 = make_row(
+        // Insert tuple with lower score
+        let tuple2 = make_tuple(
             id2,
             &[
                 Value::Integer(2),
@@ -400,15 +459,15 @@ mod tests {
                 Value::Integer(50),
             ],
         );
-        node.process(RowDelta {
+        node.process(TupleDelta {
             pending: false,
-            added: vec![row2],
+            added: vec![tuple2],
             removed: vec![],
             updated: vec![],
         });
 
-        let result = node.current_result();
-        assert_eq!(result[0].id, id2); // 50 first
-        assert_eq!(result[1].id, id1); // 100 second
+        let sorted_ids = get_sorted_ids(&node);
+        assert_eq!(sorted_ids[0], id2); // 50 first
+        assert_eq!(sorted_ids[1], id1); // 100 second
     }
 }

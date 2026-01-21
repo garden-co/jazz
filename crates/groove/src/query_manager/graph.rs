@@ -6,24 +6,32 @@ use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
 
 use super::encoding::encode_value;
+use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::{IndexScanNode, ScanCondition};
+use super::graph_nodes::join::JoinNode;
 use super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
+use super::graph_nodes::project::ProjectNode;
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::union::UnionNode;
-use super::graph_nodes::{IdNode, NodeId, RowNode, SourceContext, SourceNode};
+use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::IndexState;
 use super::query::{Condition, Query};
-use super::types::{IdDelta, Row, RowDelta, RowDescriptor, Schema, TableName};
+use super::types::{
+    Row, RowDelta, RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleDescriptor,
+};
 
 /// A node in the query graph (type-erased).
 #[derive(Debug)]
 pub enum GraphNode {
     IndexScan(IndexScanNode),
     Union(UnionNode),
+    Alias(AliasNode),
+    Join(JoinNode),
     Materialize(MaterializeNode),
+    Project(ProjectNode),
     Filter(FilterNode),
     Sort(SortNode),
     LimitOffset(LimitOffsetNode),
@@ -47,12 +55,16 @@ pub struct QueryGraph {
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
     pub index_scan_nodes: Vec<(NodeId, String, String)>, // (node_id, table, column)
+    /// Per-table descriptors in join order (for flattening multi-element tuples).
+    pub table_descriptors: Vec<RowDescriptor>,
+    /// Combined descriptor for output (all columns from all tables).
+    pub combined_descriptor: RowDescriptor,
     /// Next node ID.
     next_node_id: u64,
 }
 
 impl QueryGraph {
-    pub fn new(table: TableName) -> Self {
+    pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
             nodes: HashMap::new(),
             edges: HashMap::new(),
@@ -61,6 +73,8 @@ impl QueryGraph {
             output_node: NodeId(0),
             table,
             index_scan_nodes: Vec::new(),
+            table_descriptors: vec![descriptor.clone()],
+            combined_descriptor: descriptor,
             next_node_id: 0,
         }
     }
@@ -87,8 +101,12 @@ impl QueryGraph {
 
     /// Compile a query into a graph.
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
+        if query.is_join() {
+            return Self::compile_join(query, schema);
+        }
+
         let descriptor = schema.get(&query.table)?.clone();
-        let mut graph = QueryGraph::new(query.table.clone());
+        let mut graph = QueryGraph::new(query.table.clone(), descriptor.clone());
 
         // Phase 1: Build IndexScan nodes (one per disjunct)
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
@@ -108,7 +126,12 @@ impl QueryGraph {
 
             index_columns.push(scan_column.clone());
 
-            let scan_node = IndexScanNode::new(query.table.0.clone(), &scan_column, scan_condition);
+            let scan_node = IndexScanNode::new(
+                query.table.0.clone(),
+                &scan_column,
+                scan_condition,
+                descriptor.clone(),
+            );
             let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
             graph
                 .index_scan_nodes
@@ -118,8 +141,12 @@ impl QueryGraph {
 
         // If include_deleted is set, also scan _id_deleted index
         if query.include_deleted {
-            let deleted_scan_node =
-                IndexScanNode::new(query.table.0.clone(), "_id_deleted", ScanCondition::All);
+            let deleted_scan_node = IndexScanNode::new(
+                query.table.0.clone(),
+                "_id_deleted",
+                ScanCondition::All,
+                descriptor.clone(),
+            );
             let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
             graph.index_scan_nodes.push((
                 deleted_scan_id,
@@ -180,6 +207,164 @@ impl QueryGraph {
 
         // Output node
         let output_node = OutputNode::new(descriptor, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase2_input);
+        graph.output_node = output_id;
+
+        Some(graph)
+    }
+
+    /// Compile a join query into a graph.
+    ///
+    /// Note: Table aliases (query.alias, join_spec.alias) are parsed but not yet
+    /// used in graph construction. AliasNodes exist but aren't wired in.
+    /// Basic joins between different tables work; self-joins with aliases need
+    /// AliasNode integration to properly distinguish duplicate table columns.
+    /// TODO: Insert AliasNodes when aliases are present to enable self-joins.
+    fn compile_join(query: &Query, schema: &Schema) -> Option<Self> {
+        let base_descriptor = schema.get(&query.table)?.clone();
+        let mut graph = QueryGraph::new(query.table.clone(), base_descriptor.clone());
+
+        // Track all table names and descriptors for TupleDescriptor
+        let mut table_names = vec![query.table.0.clone()];
+        let mut table_descriptors = vec![base_descriptor.clone()];
+
+        // Build pipeline for base table: IndexScan → Materialize
+        let base_scan = IndexScanNode::new(
+            query.table.0.clone(),
+            "_id",
+            ScanCondition::All,
+            base_descriptor.clone(),
+        );
+        let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
+        graph
+            .index_scan_nodes
+            .push((base_scan_id, query.table.0.clone(), "_id".to_string()));
+
+        let base_mat = MaterializeNode::new(base_descriptor.clone());
+        let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
+        graph.add_edge(base_mat_id, base_scan_id);
+
+        // Track current left side descriptor (accumulates columns from joins)
+        let mut left_id = base_mat_id;
+        let mut left_descriptor = base_descriptor.clone();
+        let mut left_table_name = query.table.0.clone();
+
+        // Process each join
+        for join_spec in &query.joins {
+            let right_descriptor = schema.get(&join_spec.table)?.clone();
+
+            // Build pipeline for right table: IndexScan → Materialize
+            let right_scan = IndexScanNode::new(
+                join_spec.table.0.clone(),
+                "_id",
+                ScanCondition::All,
+                right_descriptor.clone(),
+            );
+            let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
+            graph.index_scan_nodes.push((
+                right_scan_id,
+                join_spec.table.0.clone(),
+                "_id".to_string(),
+            ));
+
+            let right_mat = MaterializeNode::new(right_descriptor.clone());
+            let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
+            graph.add_edge(right_mat_id, right_scan_id);
+
+            // Create JoinNode
+            if let Some((left_col, right_col)) = &join_spec.on {
+                // Parse column names - may be qualified (table.col) or unqualified
+                let left_col_name = left_col.split('.').next_back().unwrap_or(left_col);
+                let right_col_name = right_col.split('.').next_back().unwrap_or(right_col);
+
+                let join_node = JoinNode::from_row_descriptors(
+                    &left_table_name,
+                    left_descriptor.clone(),
+                    &join_spec.table.0,
+                    right_descriptor.clone(),
+                    left_col_name,
+                    right_col_name,
+                )?;
+                let join_id = graph.add_node(GraphNode::Join(join_node));
+
+                // JoinNode takes left and right as inputs
+                // Using convention: first edge is left, second is right
+                graph.add_edge(join_id, left_id);
+                graph.add_edge(join_id, right_mat_id);
+
+                // Update for next join in chain
+                left_id = join_id;
+
+                // Track table name and descriptor for TupleDescriptor
+                table_names.push(join_spec.table.0.clone());
+                table_descriptors.push(right_descriptor.clone());
+
+                // Combine descriptors for downstream nodes
+                left_descriptor = RowDescriptor::combine(&[left_descriptor, right_descriptor]);
+                // Use combined table name for multi-way joins
+                left_table_name = format!("{}_{}", left_table_name, join_spec.table.0);
+            }
+        }
+
+        // Build combined descriptor and TupleDescriptor from all tables
+        let combined_descriptor = RowDescriptor::combine(&table_descriptors);
+        // For FilterNode, all elements are materialized at this point (after Materialize nodes)
+        let tuple_descriptor = TupleDescriptor::from_tables(
+            &table_names
+                .iter()
+                .cloned()
+                .zip(table_descriptors.iter().cloned())
+                .collect::<Vec<_>>(),
+        )
+        .with_all_materialized();
+        graph.table_descriptors = table_descriptors;
+        graph.combined_descriptor = combined_descriptor.clone();
+
+        let mut phase2_input = left_id;
+
+        // Project node (if select_columns specified)
+        if let Some(columns) = &query.select_columns {
+            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+            let project_node = ProjectNode::new(combined_descriptor.clone(), &col_refs);
+            let project_id = graph.add_node(GraphNode::Project(project_node));
+            graph.add_edge(project_id, phase2_input);
+            phase2_input = project_id;
+        }
+
+        // Filter node (if conditions exist)
+        // Use TupleDescriptor to enable filtering on columns from any joined table
+        let predicate = query.to_predicate(&combined_descriptor);
+        if !matches!(predicate, Predicate::True) {
+            let filter_node =
+                FilterNode::with_tuple_descriptor(tuple_descriptor.clone(), predicate);
+            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
+            graph.add_edge(filter_id, phase2_input);
+            phase2_input = filter_id;
+        }
+
+        // Sort node (if order_by specified)
+        if !query.order_by.is_empty() {
+            let sort_keys = query.sort_keys(&combined_descriptor);
+            if !sort_keys.is_empty() {
+                let sort_node = SortNode::new(combined_descriptor.clone(), sort_keys);
+                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+                graph.add_edge(sort_id, phase2_input);
+                phase2_input = sort_id;
+            }
+        }
+
+        // LimitOffset node (if limit or offset specified)
+        if query.limit.is_some() || query.offset > 0 {
+            let limit_offset_node =
+                LimitOffsetNode::new(combined_descriptor.clone(), query.limit, query.offset);
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase2_input);
+            phase2_input = limit_offset_id;
+        }
+
+        // Output node
+        let output_node = OutputNode::new(combined_descriptor, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
@@ -320,7 +505,7 @@ impl QueryGraph {
     }
 
     /// Settle the graph - process all dirty nodes in topological order.
-    /// Returns the output delta.
+    /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(
         &mut self,
         indices: &HashMap<(String, String), IndexState>,
@@ -331,50 +516,89 @@ impl QueryGraph {
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
         let order = self.topo_sort_dirty();
-        let mut id_deltas: HashMap<NodeId, IdDelta> = HashMap::new();
-        let mut per_node_deltas: HashMap<NodeId, RowDelta> = HashMap::new();
+        let mut tuple_deltas: HashMap<NodeId, TupleDelta> = HashMap::new();
 
         let ctx = SourceContext { indices, om };
 
         for node_id in order {
             match self.nodes.get(&node_id) {
                 Some(GraphNode::IndexScan(_)) => {
-                    // Source node - call scan() with context
                     if let Some(GraphNode::IndexScan(scan_node)) = self.nodes.get_mut(&node_id) {
-                        let delta = scan_node.scan(&ctx);
-                        id_deltas.insert(node_id, delta);
+                        let delta = SourceNode::scan(scan_node, &ctx);
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Union(_)) => {
-                    // Id transform - collect inputs, call process()
-                    let inputs = self.collect_id_inputs(node_id);
+                    let inputs = self.collect_tuple_inputs(node_id);
                     if let Some(GraphNode::Union(union_node)) = self.nodes.get_mut(&node_id) {
                         let input_refs: Vec<_> = inputs.iter().collect();
-                        let delta = union_node.process(&input_refs);
-                        id_deltas.insert(node_id, delta);
+                        let delta = TransformNode::process(union_node, &input_refs);
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::Alias(_)) => {
+                    let input_delta = self.edges[&node_id]
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::Alias(alias_node)) = self.nodes.get_mut(&node_id) {
+                        let delta = RowNode::process(alias_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::Join(_)) => {
+                    // JoinNode has two inputs: left (index 0) and right (index 1)
+                    let edges = self.edges[&node_id].clone();
+                    let left_delta = edges
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+                    let right_delta = edges
+                        .get(1)
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::Join(join_node)) = self.nodes.get_mut(&node_id) {
+                        // Process left side first, then right side
+                        let left_result = join_node.process_left(left_delta);
+                        let right_result = join_node.process_right(right_delta);
+
+                        // Merge results
+                        let mut merged = TupleDelta::new();
+                        merged.added.extend(left_result.added);
+                        merged.added.extend(right_result.added);
+                        merged.removed.extend(left_result.removed);
+                        merged.removed.extend(right_result.removed);
+                        merged.pending = left_result.pending || right_result.pending;
+
+                        tuple_deltas.insert(node_id, merged);
+                    }
+                }
+                Some(GraphNode::Project(_)) => {
+                    let input_delta = self.edges[&node_id]
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::Project(project_node)) = self.nodes.get_mut(&node_id) {
+                        let delta = RowNode::process(project_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Materialize(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| id_deltas.get(dep).cloned())
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     if let Some(GraphNode::Materialize(mat_node)) = self.nodes.get_mut(&node_id) {
-                        // First, check deleted IDs and emit removal deltas
-                        let deleted_delta = mat_node.check_deleted_ids();
+                        let deleted_delta = mat_node.check_deleted_tuples();
+                        let pending_delta = mat_node.check_pending_tuples(&mut row_loader);
+                        let new_delta = mat_node.materialize_tuples(input_delta, &mut row_loader);
+                        let update_delta = mat_node.check_updated_tuples(&mut row_loader);
 
-                        // Check if any previously-pending rows are now available
-                        let pending_delta = mat_node.check_pending(&mut row_loader);
-
-                        // Then materialize the new IdDelta
-                        let new_delta = mat_node.materialize(input_delta, &mut row_loader);
-
-                        // Check updated IDs for content changes
-                        let update_delta = mat_node.check_updated_ids(&mut row_loader);
-
-                        // Merge all four deltas
-                        let mut merged = RowDelta::new();
+                        let mut merged = TupleDelta::new();
                         merged.added.extend(pending_delta.added);
                         merged.added.extend(new_delta.added);
                         merged.removed.extend(deleted_delta.removed);
@@ -383,54 +607,53 @@ impl QueryGraph {
                         merged.updated.extend(pending_delta.updated);
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
-                        // pending flag is set based on whether we still have pending IDs
                         merged.pending = new_delta.pending;
 
-                        per_node_deltas.insert(node_id, merged);
+                        tuple_deltas.insert(node_id, merged);
                     }
                 }
                 Some(GraphNode::Filter(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| per_node_deltas.get(dep).cloned())
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     if let Some(GraphNode::Filter(filter_node)) = self.nodes.get_mut(&node_id) {
-                        let delta = filter_node.process(input_delta);
-                        per_node_deltas.insert(node_id, delta);
+                        let delta = RowNode::process(filter_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Sort(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| per_node_deltas.get(dep).cloned())
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     if let Some(GraphNode::Sort(sort_node)) = self.nodes.get_mut(&node_id) {
-                        let delta = sort_node.process(input_delta);
-                        per_node_deltas.insert(node_id, delta);
+                        let delta = RowNode::process(sort_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::LimitOffset(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| per_node_deltas.get(dep).cloned())
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     if let Some(GraphNode::LimitOffset(lo_node)) = self.nodes.get_mut(&node_id) {
-                        let delta = lo_node.process(input_delta);
-                        per_node_deltas.insert(node_id, delta);
+                        let delta = RowNode::process(lo_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Output(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| per_node_deltas.get(dep).cloned())
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     if let Some(GraphNode::Output(output_node)) = self.nodes.get_mut(&node_id) {
-                        let delta = output_node.process(input_delta);
-                        per_node_deltas.insert(node_id, delta);
+                        let delta = RowNode::process(output_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
                     }
                 }
                 None => {}
@@ -438,28 +661,41 @@ impl QueryGraph {
         }
 
         self.dirty_nodes.clear();
-        per_node_deltas
+
+        // Convert TupleDelta to RowDelta for output
+        // For single-table queries: use simple conversion
+        // For join queries: flatten multi-element tuples using table descriptors
+        tuple_deltas
             .remove(&self.output_node)
+            .and_then(|td| {
+                if self.table_descriptors.len() == 1 {
+                    // Single-table query - direct conversion
+                    td.to_row_delta()
+                } else {
+                    // Join query - flatten multi-element tuples
+                    td.flatten_to_row_delta(&self.table_descriptors, &self.combined_descriptor)
+                }
+            })
             .unwrap_or_default()
     }
 
-    /// Collect id sets from input nodes for an id transform node.
-    fn collect_id_inputs(&self, node_id: NodeId) -> Vec<HashSet<ObjectId>> {
+    /// Collect tuple sets from input nodes for a transform node.
+    fn collect_tuple_inputs(&self, node_id: NodeId) -> Vec<HashSet<Tuple>> {
         self.edges[&node_id]
             .iter()
             .filter_map(|dep| match &self.nodes[dep] {
-                GraphNode::IndexScan(n) => Some(n.current_ids().clone()),
-                GraphNode::Union(n) => Some(n.current_ids().clone()),
+                GraphNode::IndexScan(n) => Some(n.current_tuples().clone()),
+                GraphNode::Union(n) => Some(n.current_tuples().clone()),
                 _ => None,
             })
             .collect()
     }
 
     /// Get current result from output node.
-    pub fn current_result(&self) -> &[Row] {
+    pub fn current_result(&self) -> Vec<Row> {
         match self.nodes.get(&self.output_node) {
-            Some(GraphNode::Output(node)) => node.current_result(),
-            _ => &[],
+            Some(GraphNode::Output(node)) => node.current_rows(),
+            _ => vec![],
         }
     }
 }
@@ -724,5 +960,98 @@ mod tests {
             "FilterNode should be elided when all disjuncts are fully covered"
         );
         assert_eq!(graph.nodes.len(), 5);
+    }
+
+    // ========================================================================
+    // Join compilation tests
+    // ========================================================================
+
+    fn join_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+        );
+        schema
+    }
+
+    fn has_join_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .values()
+            .any(|n| matches!(n, GraphNode::Join(_)))
+    }
+
+    fn has_project_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .values()
+            .any(|n| matches!(n, GraphNode::Project(_)))
+    }
+
+    #[test]
+    fn compile_simple_join() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users")
+            .join("posts")
+            .on("id", "author_id")
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Should have: 2x IndexScan -> 2x Materialize -> JoinNode -> Output
+        // 2 IndexScans + 2 Materializes + 1 Join + 1 Output = 6 nodes
+        assert!(has_join_node(&graph), "Should have a JoinNode");
+        assert_eq!(graph.index_scan_nodes.len(), 2);
+    }
+
+    #[test]
+    fn compile_join_with_projection() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users")
+            .join("posts")
+            .on("id", "author_id")
+            .select(&["name", "title"])
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        assert!(has_join_node(&graph), "Should have a JoinNode");
+        assert!(has_project_node(&graph), "Should have a ProjectNode");
+    }
+
+    #[test]
+    fn compile_join_returns_none_for_missing_table() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users")
+            .join("comments") // Table doesn't exist
+            .on("id", "user_id")
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema);
+        assert!(graph.is_none(), "Should return None for missing table");
+    }
+
+    #[test]
+    fn compile_join_returns_none_for_invalid_column() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users")
+            .join("posts")
+            .on("nonexistent", "author_id") // Column doesn't exist
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema);
+        assert!(graph.is_none(), "Should return None for invalid column");
     }
 }

@@ -35,7 +35,7 @@ The QueryManager layer provides reactive SQL queries over Jazz2's object-based s
 - **All indices persisted**: Every index (including column indices) is persisted as Jazz objects
 - **No index rebuild**: Indices are incrementally maintained; if missing on startup, that's an error state
 - **Indices**: Skip lists, node-per-object, `nosync: "true"` metadata, persisted locally only
-- **Query graph**: Two delta types - `IdDelta` before materialization, `RowDelta` after
+- **Query graph**: Unified `TupleDelta` type with progressive materialization throughout
 
 ## The "_id" Index IS the Row Manifest
 
@@ -220,7 +220,7 @@ impl QueryManager {
 ```
 crates/groove/src/query_manager/
 ├── mod.rs
-├── types.rs              # ColumnType, RowDescriptor, Row, IdDelta, RowDelta
+├── types.rs              # ColumnType, RowDescriptor, Row, TupleElement, Tuple, TupleDelta
 ├── encoding.rs           # encode/decode (boundary), binary ops (internal)
 ├── manager.rs            # QueryManager
 ├── query.rs              # Query, QueryBuilder, Value (boundary type)
@@ -229,66 +229,259 @@ crates/groove/src/query_manager/
 │   ├── mod.rs
 │   └── skip_list.rs
 └── graph_nodes/
-    ├── mod.rs            # SourceNode, IdNode, RowNode traits, SourceContext
+    ├── mod.rs            # SourceNode, TransformNode, RowNode traits, SourceContext
     ├── index_scan.rs     # Source node (impl SourceNode)
-    ├── union.rs          # OR conditions (impl IdNode)
-    ├── materialize.rs    # IdDelta → RowDelta boundary
-    ├── filter.rs         # In-memory filter (RowDelta)
-    ├── sort.rs           # (RowDelta)
-    ├── limit_offset.rs   # (RowDelta)
-    └── output.rs         # (RowDelta)
+    ├── union.rs          # OR conditions (impl TransformNode)
+    ├── materialize.rs    # Progressive materialization (TupleDelta → TupleDelta)
+    ├── filter.rs         # In-memory filter (TupleDelta)
+    ├── sort.rs           # Sorting (TupleDelta)
+    ├── limit_offset.rs   # Pagination (TupleDelta)
+    ├── output.rs         # Terminal node (TupleDelta)
+    ├── alias.rs          # Table aliasing for self-joins (TupleDelta)
+    ├── project.rs        # Column selection (TupleDelta)
+    └── join.rs           # Equi-join with hash indices (TupleDelta)
 ```
 
 ## Node Trait Architecture
 
-The query graph distinguishes between two kinds of ID-level nodes:
+The query graph uses a unified tuple model with progressive materialization. All nodes work with `TupleDelta` - the difference is whether tuples contain just IDs or fully materialized row data.
 
-**Source nodes** (`SourceNode` trait) read from external state:
-- `IndexScanNode` - scans indices for matching ObjectIds
-- Require external context (indices, ObjectManager) via `SourceContext`
-- Have no input nodes in the graph
-
-**Transform nodes** (`IdNode` trait) are pure dataflow:
-- `UnionNode` - merges ID sets from multiple inputs
-- `process()` takes input ID sets directly, no external state needed
-- Combine/filter outputs from other nodes
+### Tuple Model
 
 ```rust
-/// Context for source nodes that need external data.
+/// A single element in a tuple - either just an ID or a fully loaded row.
+pub enum TupleElement {
+    Id(ObjectId),
+    Row { id: ObjectId, content: Vec<u8>, commit_id: CommitId },
+}
+
+/// A tuple of elements. Identity based on IDs only (Hash/Eq ignore content).
+/// Length corresponds to number of tables (1 for single-table, 2+ for joins).
+pub struct Tuple(Vec<TupleElement>);
+
+/// Delta with progressive materialization support.
+pub struct TupleDelta {
+    pub added: Vec<Tuple>,
+    pub removed: Vec<Tuple>,
+    pub updated: Vec<(Tuple, Tuple)>,  // (old, new) - same IDs, different content
+    pub pending: bool,  // true if any elements still loading
+}
+```
+
+### Node Traits
+
+Three traits for different node roles:
+
+**Source nodes** (`SourceNode`) read from external state:
+- `IndexScanNode` - scans indices, returns length-1 tuples with `TupleElement::Id`
+- Require external context (indices, ObjectManager) via `SourceContext`
+
+**Transform nodes** (`TransformNode`) operate on tuple sets (before materialization):
+- `UnionNode` - merges tuple sets for OR conditions
+- Takes input tuple sets directly, no external state needed
+
+**Row nodes** (`RowNode`) operate on `TupleDelta` (can work with materialized content):
+- `MaterializeNode` - converts `TupleElement::Id` → `TupleElement::Row`
+- `FilterNode` - filters tuples by predicate (requires materialized content)
+- `SortNode` - orders tuples (requires materialized content)
+- `LimitOffsetNode` - pagination
+- `OutputNode` - terminal node, delivers results
+
+All nodes expose `output_tuple_descriptor()` for descriptor chaining.
+
+```rust
 pub struct SourceContext<'a> {
     pub indices: &'a HashMap<(String, String), IndexState>,
     pub om: &'a ObjectManager,
 }
 
-/// Source nodes produce data from external state (no input nodes).
 pub trait SourceNode {
-    fn scan(&mut self, ctx: &SourceContext) -> IdDelta;
-    fn current_ids(&self) -> &HashSet<ObjectId>;
+    fn scan(&mut self, ctx: &SourceContext) -> TupleDelta;
+    fn current_tuples(&self) -> &HashSet<Tuple>;
     fn mark_dirty(&mut self);
     fn is_dirty(&self) -> bool;
 }
 
-/// Transform nodes combine/filter id sets from their inputs.
-pub trait IdNode {
-    fn process(&mut self, inputs: &[&HashSet<ObjectId>]) -> IdDelta;
-    fn current_ids(&self) -> &HashSet<ObjectId>;
+pub trait TransformNode {
+    fn process(&mut self, inputs: &[&HashSet<Tuple>]) -> TupleDelta;
+    fn current_tuples(&self) -> &HashSet<Tuple>;
+    fn mark_dirty(&mut self);
+    fn is_dirty(&self) -> bool;
+}
+
+pub trait RowNode {
+    fn output_descriptor(&self) -> &RowDescriptor;
+    fn process(&mut self, input: TupleDelta) -> TupleDelta;
+    fn current_tuples(&self) -> &HashSet<Tuple>;
     fn mark_dirty(&mut self);
     fn is_dirty(&self) -> bool;
 }
 ```
 
-This separation enables `settle()` to use clean pattern matching rather than string-based dispatch.
+### Graph Pipeline
+
+**Single-table query:**
+```
+IndexScan(table) → [Union] → Materialize → [Filter] → [Sort] → [LimitOffset] → [Project] → Output
+     ↓                           ↓              ↓          ↓           ↓            ↓           ↓
+  TupleDelta               TupleDelta      TupleDelta  TupleDelta  TupleDelta   TupleDelta  TupleDelta
+  mat: [false]             mat: [false]    mat: [true] mat: [true] mat: [true]  mat: [true] mat: [true]
+```
+
+**Join query:**
+```
+IndexScan(users) → Materialize ──┐
+                                 ├──→ JoinNode → Materialize({1}) → [Filter] → Output
+         posts index (lookup) ───┘
+                                    mat: [true,false]  mat: [true,true]
+```
+
+Each node receives input descriptor(s), computes its output descriptor, and exposes it via `output_tuple_descriptor()`. Materialization requirements are validated at graph construction time.
+
+The final output converts `TupleDelta` to `RowDelta` via `to_row_delta()` for the subscription API.
+
+### Additional Nodes
+
+**MaterializeNode** - Converts `TupleElement::Id` → `TupleElement::Row` with selective control:
+```rust
+// Materialize all elements
+let mat = MaterializeNode::new_all(input_descriptor);
+
+// Selectively materialize only specified elements
+let mat = MaterializeNode::with_elements(input_descriptor, HashSet::from([1]));
+```
+Updates output descriptor's materialization state for specified elements.
+
+**FilterNode** - Filters tuples with compile-time validation:
+```rust
+// Returns Err if predicate references unmaterialized elements
+let filter = FilterNode::try_new(input_descriptor, predicate)?;
+```
+Uses `TupleDescriptor::resolve_column()` to find correct element for each predicate column.
+
+**AliasNode** - Transforms table namespace without modifying row data:
+```rust
+pub struct AliasNode {
+    original_table: String,
+    alias: String,
+    row_descriptor: RowDescriptor,
+    combined_descriptor: CombinedRowDescriptor,
+    // ...
+}
+```
+Used for self-joins where the same table appears multiple times with different aliases.
+
+**ProjectNode** - Selects a subset of columns:
+```rust
+pub struct ProjectNode {
+    input_descriptor: RowDescriptor,
+    output_descriptor: RowDescriptor,
+    column_mapping: Vec<(usize, usize)>,  // (src_col, dst_col)
+    // ...
+}
+```
+Requires materialized tuples. Re-encodes row data with only selected columns.
+
+**JoinNode** - Performs equi-joins with descriptor propagation:
+```rust
+pub struct JoinNode {
+    output_descriptor: TupleDescriptor,  // Concatenated from left + right
+    combined_descriptor: RowDescriptor,
+    // Hash index on left for efficient lookup
+    left_by_key: HashMap<Vec<u8>, HashSet<Tuple>>,
+    // Provenance tracking for reactivity
+    left_to_output: HashMap<Vec<ObjectId>, HashSet<Tuple>>,
+    right_to_output: HashMap<Vec<ObjectId>, HashSet<Tuple>>,
+    // ...
+}
+```
+
+Constructors:
+- `JoinNode::new(left_desc, right_desc, left_col, right_col)` - Takes `TupleDescriptor`s, validates left join column is materialized
+- `JoinNode::from_row_descriptors(...)` - Convenience for single-table inputs
+
+Output descriptor is `TupleDescriptor::concat(left, right)` - materialization state is concatenated from both sides. Maintains hash index on left for O(1) lookup. Tracks provenance so removals can efficiently find affected output tuples.
+
+## Query API
+
+### QueryBuilder
+
+```rust
+// Single-table query
+let query = qm.query("users")
+    .filter_eq("status", Value::Text("active".into()))
+    .order_by_desc("score")
+    .limit(10)
+    .build();
+
+// With projection
+let query = qm.query("users")
+    .select(&["name", "email"])
+    .build();
+
+// With alias (for self-joins)
+let query = qm.query("users")
+    .alias("u1")
+    .build();
+
+// Simple join
+let query = qm.query("users")
+    .join("posts")
+    .on("users.id", "posts.author_id")
+    .build();
+
+// Join with aliases
+let query = qm.query("users")
+    .alias("u")
+    .join("posts")
+    .alias("p")
+    .on("u.id", "p.author_id")
+    .select(&["u.name", "p.title"])
+    .build();
+
+// Self-join (same table twice)
+let query = qm.query("employees")
+    .alias("e")
+    .join("employees")
+    .alias("m")
+    .on("e.manager_id", "m.id")
+    .build();
+```
+
+### Query Struct
+
+```rust
+pub struct Query {
+    pub table: TableName,
+    pub alias: Option<String>,
+    pub joins: Vec<JoinSpec>,
+    pub disjuncts: Vec<Conjunction>,
+    pub order_by: Vec<(String, SortDirection)>,
+    pub limit: Option<usize>,
+    pub offset: usize,
+    pub include_deleted: bool,
+    pub select_columns: Option<Vec<String>>,
+}
+
+pub struct JoinSpec {
+    pub table: TableName,
+    pub alias: Option<String>,
+    pub on: Option<(String, String)>,
+}
+```
 
 ## Implementation Status
 
 ### Completed
-- [x] types.rs - ColumnType, RowDescriptor, Row, IdDelta, RowDelta
+- [x] types.rs - ColumnType, RowDescriptor, Row, TupleElement, Tuple, TupleDelta, CombinedRowDescriptor
 - [x] encoding.rs - binary format + operations
 - [x] Global subscription in object_manager.rs
 - [x] skip_list.rs - index with binary keys
-- [x] All graph nodes: index_scan, union, materialize, filter, sort, limit_offset, output
-- [x] graph.rs - settling algorithm
+- [x] All graph nodes: index_scan, union, materialize, filter, sort, limit_offset, output, alias, project, join
+- [x] graph.rs - settling algorithm (single-table and join queries)
 - [x] manager.rs + query.rs - QueryManager with Value boundary
+- [x] Query API: alias(), select(), join(), on() methods on QueryBuilder
+- [x] Join graph compilation (multi-table queries with JoinNode)
 - [x] `create_with_id()` in ObjectManager for deterministic root IDs
 - [x] Zero-copy index architecture:
   - `SkipListNodeView` for zero-copy reads from ObjectManager
@@ -481,51 +674,51 @@ pub enum ScanCondition {
 | Non-indexable condition keeps filter | `graph::tests::non_indexable_condition_keeps_filter` |
 | OR with single conditions elides filter | `graph::tests::or_with_single_conditions_elides_filter` |
 
-#### Followup 10: Separate Source Nodes from Transform Nodes ✓
+#### Followup 10: Unified Tuple Model ✓
 
-Refactored the ID-level node architecture to cleanly separate source nodes from transform nodes.
+Refactored the entire query graph to use a unified tuple model with progressive materialization.
 
 **Problem solved:**
-- `IdNode::process()` was a no-op on IndexScanNode
-- `settle()` used string-based dispatch to special-case each node type
-- Two different computation patterns conflated in one trait
+- Separate `IdDelta`/`RowDelta` types required awkward boundary at MaterializeNode
+- `IdNode` trait was confusing (didn't work with IDs after materialization)
+- Architecture didn't support joins (which need multi-element tuples)
 
 **Core changes:**
 
-1. **New `SourceNode` trait** for nodes that read from external state:
+1. **`TupleElement` and `Tuple` types** for progressive materialization:
 ```rust
-pub trait SourceNode {
-    fn scan(&mut self, ctx: &SourceContext) -> IdDelta;
-    fn current_ids(&self) -> &HashSet<ObjectId>;
-    fn mark_dirty(&mut self);
-    fn is_dirty(&self) -> bool;
+pub enum TupleElement {
+    Id(ObjectId),
+    Row { id: ObjectId, content: Vec<u8>, commit_id: CommitId },
+}
+
+pub struct Tuple(Vec<TupleElement>);  // Hash/Eq based on IDs only
+```
+
+2. **Unified `TupleDelta`** replaces both `IdDelta` and `RowDelta` internally:
+```rust
+pub struct TupleDelta {
+    pub added: Vec<Tuple>,
+    pub removed: Vec<Tuple>,
+    pub updated: Vec<(Tuple, Tuple)>,
+    pub pending: bool,
 }
 ```
 
-2. **`SourceContext` struct** bundles external dependencies:
-```rust
-pub struct SourceContext<'a> {
-    pub indices: &'a HashMap<(String, String), IndexState>,
-    pub om: &'a ObjectManager,
-}
-```
+3. **Three clean traits** for different node roles:
+   - `SourceNode` - reads from indices, returns unmaterialized tuples
+   - `TransformNode` - operates on tuple sets (UnionNode for OR)
+   - `RowNode` - processes `TupleDelta` (Filter, Sort, etc.)
 
-3. **Updated `IdNode::process()` signature** to take inputs directly:
-```rust
-fn process(&mut self, inputs: &[&HashSet<ObjectId>]) -> IdDelta;
-```
+4. **All nodes work with `TupleDelta`** throughout the pipeline:
+   - IndexScanNode returns length-1 tuples with `TupleElement::Id`
+   - MaterializeNode converts `Id` → `Row` elements
+   - Filter/Sort/etc. work with materialized tuples
+   - OutputNode maintains ordered results for deterministic output
 
-4. **`IndexScanNode`** now implements `SourceNode` (not `IdNode`)
-   - `scan()` looks up its index from `SourceContext` internally
-
-5. **`UnionNode`** simplified:
-   - Removed `pending_deltas` and `add_input()`
-   - `process()` takes input sets directly
-   - Removed redundant `process_inputs()` method
-
-6. **`settle()` uses pattern matching** instead of string dispatch:
-   - Creates `SourceContext` once at start
-   - `collect_id_inputs()` helper gathers inputs for transform nodes
+5. **Final output conversion**:
+   - `TupleDelta::to_row_delta()` converts to `RowDelta` at API boundary
+   - Only needed for subscription deltas visible to users
 
 #### Followup 9: End-to-End Sync Integration Tests ✓
 
@@ -619,6 +812,118 @@ let query = qm.query("users").include_deleted().build();
 | `include_deleted_query_returns_soft_deleted_rows` | Query returns both live and soft-deleted rows with full data |
 | `soft_delete_emits_removal_delta` | Subscription notified |
 | `hard_delete_emits_removal_delta` | Subscription notified |
+
+#### Followup 12: Self-Describing Tuples with Per-Element Materialization ✓
+
+Refactored the query graph so every node declares its output `TupleDescriptor` with per-element materialization state. This enables:
+- Arbitrary graph composition (nodes chain descriptors)
+- Lazy materialization (only load row content when needed)
+- Compile-time validation of materialization requirements
+
+**Problem solved:**
+- FilterNode only looked at `tuple.get(0)` - couldn't filter on joined table columns
+- No way to know at graph construction time if required elements were materialized
+- Materialization was all-or-nothing, not per-element
+
+**Core types added to `types.rs`:**
+
+```rust
+/// Per-element materialization tracking.
+/// materialized[i] == true means element i has row content loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaterializationState {
+    materialized: Vec<bool>,
+}
+
+impl MaterializationState {
+    pub fn all_ids(element_count: usize) -> Self;     // All false
+    pub fn all_materialized(element_count: usize) -> Self;  // All true
+    pub fn is_materialized(&self, element_index: usize) -> bool;
+    pub fn with_materialized(self, element_index: usize) -> Self;
+    pub fn concat(&self, other: &Self) -> Self;  // For joins
+}
+
+/// Describes structure and materialization state of tuples.
+pub struct TupleDescriptor {
+    elements: Vec<ElementDescriptor>,
+    total_columns: usize,
+    materialization: MaterializationState,  // Per-element state
+}
+
+impl TupleDescriptor {
+    pub fn single(table: &str, descriptor: RowDescriptor) -> Self;  // [false]
+    pub fn single_with_materialization(table: &str, desc: RowDescriptor, mat: bool) -> Self;
+    pub fn concat(left: &Self, right: &Self) -> Self;  // For joins
+    pub fn with_materialized(self, elements: &HashSet<usize>) -> Self;
+    pub fn assert_materialized(&self, elements: &HashSet<usize>) -> Result<(), String>;
+    pub fn resolve_column(global_index) -> Option<(element_index, local_index)>;
+    pub fn elements_for_columns(cols) -> HashSet<usize>;
+}
+```
+
+**Node changes - each node declares `output_tuple_descriptor()`:**
+
+| Node | Constructor | Materialization |
+|------|-------------|-----------------|
+| `IndexScanNode` | `new(..., row_descriptor)` | `[false]` (IDs only) |
+| `MaterializeNode` | `new_all(input_desc)` or `with_elements(desc, set)` | Marks specified elements true |
+| `JoinNode` | `new(left_desc, right_desc, ...)` | Concatenates states |
+| `FilterNode` | `try_new(desc, pred)` | Pass-through (validates required elements) |
+| `SortNode` | `with_tuple_descriptor(desc, keys)` | Pass-through |
+| `ProjectNode` | `with_tuple_descriptor(desc, cols)` | Pass-through |
+| `OutputNode` | `with_tuple_descriptor(desc, mode)` | Pass-through |
+
+**Compile-time validation:**
+- `FilterNode::try_new()` returns `Err` if predicate references unmaterialized elements
+- `JoinNode::new()` returns `None` if left join column isn't materialized
+- Catches errors at graph construction, not runtime
+
+**Graph compilation flow:**
+```rust
+// IndexScan outputs unmaterialized tuples
+let scan = IndexScanNode::new("users", "_id", cond, row_desc);
+// scan.output_tuple_descriptor().materialization = [false]
+
+// Materialize loads row content
+let mat = MaterializeNode::new_all(scan.output_tuple_descriptor().clone());
+// mat.output_tuple_descriptor().materialization = [true]
+
+// Filter validates and passes through
+let filter = FilterNode::try_new(mat.output_tuple_descriptor().clone(), pred)?;
+// Returns Err if predicate needs unmaterialized elements
+
+// Join concatenates descriptors
+let join = JoinNode::new(left_desc, right_desc, "users.id", "posts.author_id")?;
+// join.output_tuple_descriptor().materialization = [true, false]
+// Returns None if left join column not materialized
+```
+
+**Example: Join with filter on right table:**
+```
+Query: users JOIN posts ON users.id = posts.author_id WHERE posts.title = 'foo'
+
+IndexScan(users)                 → materialization: [false]
+MaterializeNode                  → materialization: [true]
+JoinNode(left=users, right=posts)→ materialization: [true, false]
+MaterializeNode(elements={1})    → materialization: [true, true]
+FilterNode(posts.title='foo')    → validates element 1 is materialized ✓
+OutputNode                       → flattens to RowDelta
+```
+
+**Tests:**
+| Test | Description |
+|------|-------------|
+| `join_filter_on_joined_table_column` | Filter on posts.title in users JOIN posts |
+| `filter_on_joined_table_column` | Unit test for multi-element tuple filtering |
+| `filter_on_left_table_column_in_join` | Filter on users.name in join |
+| `required_columns_*` | Predicate column extraction tests |
+| `tuple_descriptor_*` | TupleDescriptor resolution tests |
+| `materialization_state_*` | MaterializationState unit tests |
+
+**Selective materialization (implemented):**
+- `MaterializeNode::with_elements(desc, HashSet<usize>)` - only materialize specified elements
+- Graph analysis can determine which elements filter/sort actually need
+- Skip loading row data for elements not referenced by downstream nodes
 
 ### Pending Followups
 

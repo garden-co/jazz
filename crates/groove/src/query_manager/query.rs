@@ -3,6 +3,25 @@ use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
 
+/// A join specification.
+#[derive(Debug, Clone)]
+pub struct JoinSpec {
+    /// Table to join.
+    pub table: TableName,
+    /// Optional alias for the joined table.
+    pub alias: Option<String>,
+    /// Join condition: (left_column, right_column).
+    /// Left refers to the accumulated result, right refers to this join's table.
+    pub on: Option<(String, String)>,
+}
+
+impl JoinSpec {
+    /// Get the effective name (alias if set, otherwise table name).
+    pub fn effective_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.table.0)
+    }
+}
+
 /// A condition in a WHERE clause.
 #[derive(Debug, Clone)]
 pub enum Condition {
@@ -196,6 +215,10 @@ impl Conjunction {
 #[derive(Debug, Clone)]
 pub struct Query {
     pub table: TableName,
+    /// Optional table alias (for self-joins).
+    pub alias: Option<String>,
+    /// Joined tables.
+    pub joins: Vec<JoinSpec>,
     /// OR groups (disjunction of conjunctions).
     pub disjuncts: Vec<Conjunction>,
     /// Order by specification.
@@ -206,6 +229,8 @@ pub struct Query {
     pub offset: usize,
     /// If true, also scan _id_deleted to include soft-deleted rows.
     pub include_deleted: bool,
+    /// Columns to select (None = all columns).
+    pub select_columns: Option<Vec<String>>,
 }
 
 impl Query {
@@ -213,12 +238,25 @@ impl Query {
     pub fn new(table: impl Into<TableName>) -> Self {
         Self {
             table: table.into(),
+            alias: None,
+            joins: Vec::new(),
             disjuncts: vec![Conjunction::new()],
             order_by: Vec::new(),
             limit: None,
             offset: 0,
             include_deleted: false,
+            select_columns: None,
         }
+    }
+
+    /// Check if this is a join query.
+    pub fn is_join(&self) -> bool {
+        !self.joins.is_empty()
+    }
+
+    /// Get the effective table name (alias if set, otherwise table name).
+    pub fn effective_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.table.0)
     }
 
     /// Get the full predicate for this query.
@@ -407,6 +445,59 @@ impl QueryBuilder {
         self
     }
 
+    /// Set a table alias.
+    ///
+    /// If called before any join(), applies to the base table.
+    /// If called after join(), applies to the most recent joined table.
+    ///
+    /// Example: `query("users").alias("u1").join("posts").alias("p")`
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        let alias_str = alias.into();
+        if let Some(last_join) = self.query.joins.last_mut() {
+            // Apply to most recent join
+            last_join.alias = Some(alias_str);
+        } else {
+            // Apply to base table
+            self.query.alias = Some(alias_str);
+        }
+        self
+    }
+
+    /// Join another table.
+    ///
+    /// Example: `query("users").join("posts")` creates an inner join.
+    /// Use `.on()` to specify the join condition.
+    pub fn join(mut self, table: impl Into<TableName>) -> Self {
+        self.query.joins.push(JoinSpec {
+            table: table.into(),
+            alias: None,
+            on: None,
+        });
+        self
+    }
+
+    /// Specify the join condition for the most recent join.
+    ///
+    /// Format: `"left_table.column"` and `"right_table.column"`
+    /// Or unqualified column names if unambiguous.
+    ///
+    /// Example: `query("users").alias("u").join("posts").alias("p").on("u.id", "p.author_id")`
+    pub fn on(mut self, left_col: impl Into<String>, right_col: impl Into<String>) -> Self {
+        if let Some(last_join) = self.query.joins.last_mut() {
+            last_join.on = Some((left_col.into(), right_col.into()));
+        }
+        self
+    }
+
+    /// Select specific columns (projection).
+    ///
+    /// If not called, all columns are returned.
+    /// Example: `query("users").select(&["name", "email"])`
+    pub fn select(mut self, columns: &[&str]) -> Self {
+        self.query.select_columns = Some(columns.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
     /// Build the query.
     pub fn build(self) -> Query {
         self.query
@@ -540,5 +631,112 @@ mod tests {
         assert_eq!(keys[0].direction, SortDirection::Ascending);
         assert_eq!(keys[1].col_index, 2); // score
         assert_eq!(keys[1].direction, SortDirection::Descending);
+    }
+
+    #[test]
+    fn query_alias() {
+        let query = QueryBuilder::new("users").alias("u1").build();
+
+        assert_eq!(query.table.0, "users");
+        assert_eq!(query.alias, Some("u1".to_string()));
+        assert_eq!(query.effective_name(), "u1");
+    }
+
+    #[test]
+    fn query_effective_name_without_alias() {
+        let query = QueryBuilder::new("users").build();
+
+        assert_eq!(query.alias, None);
+        assert_eq!(query.effective_name(), "users");
+    }
+
+    #[test]
+    fn query_select_columns() {
+        let query = QueryBuilder::new("users")
+            .select(&["name", "score"])
+            .build();
+
+        assert_eq!(
+            query.select_columns,
+            Some(vec!["name".to_string(), "score".to_string()])
+        );
+    }
+
+    #[test]
+    fn query_select_all_by_default() {
+        let query = QueryBuilder::new("users").build();
+
+        assert_eq!(query.select_columns, None);
+    }
+
+    #[test]
+    fn query_simple_join() {
+        let query = QueryBuilder::new("users")
+            .join("posts")
+            .on("users.id", "posts.author_id")
+            .build();
+
+        assert!(query.is_join());
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].table.0, "posts");
+        assert_eq!(
+            query.joins[0].on,
+            Some(("users.id".to_string(), "posts.author_id".to_string()))
+        );
+    }
+
+    #[test]
+    fn query_join_with_aliases() {
+        let query = QueryBuilder::new("users")
+            .alias("u")
+            .join("posts")
+            .alias("p")
+            .on("u.id", "p.author_id")
+            .build();
+
+        assert_eq!(query.alias, Some("u".to_string()));
+        assert_eq!(query.effective_name(), "u");
+
+        assert_eq!(query.joins[0].alias, Some("p".to_string()));
+        assert_eq!(query.joins[0].effective_name(), "p");
+    }
+
+    #[test]
+    fn query_self_join() {
+        let query = QueryBuilder::new("employees")
+            .alias("e")
+            .join("employees")
+            .alias("m")
+            .on("e.manager_id", "m.id")
+            .build();
+
+        assert_eq!(query.table.0, "employees");
+        assert_eq!(query.alias, Some("e".to_string()));
+
+        assert_eq!(query.joins.len(), 1);
+        assert_eq!(query.joins[0].table.0, "employees");
+        assert_eq!(query.joins[0].alias, Some("m".to_string()));
+    }
+
+    #[test]
+    fn query_multiple_joins() {
+        let query = QueryBuilder::new("orders")
+            .join("customers")
+            .on("orders.customer_id", "customers.id")
+            .join("products")
+            .on("orders.product_id", "products.id")
+            .build();
+
+        assert_eq!(query.joins.len(), 2);
+        assert_eq!(query.joins[0].table.0, "customers");
+        assert_eq!(query.joins[1].table.0, "products");
+    }
+
+    #[test]
+    fn query_no_join_by_default() {
+        let query = QueryBuilder::new("users").build();
+
+        assert!(!query.is_join());
+        assert!(query.joins.is_empty());
     }
 }
