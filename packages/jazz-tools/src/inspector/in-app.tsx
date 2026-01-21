@@ -8,7 +8,7 @@ import { useOpenInspector } from "./viewer/use-open-inspector.js";
 import { NodeProvider } from "./contexts/node.js";
 import { InMemoryRouterProvider } from "./router/in-memory-router.js";
 import { Header } from "./viewer/header.js";
-import { PerformancePage } from "./pages/performance.js";
+import { PerformancePage } from "./pages/performance/index.js";
 import { SubscriptionScope } from "jazz-tools";
 
 export type InspectorTab = "inspector" | "performance";
