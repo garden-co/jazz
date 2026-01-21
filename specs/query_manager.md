@@ -229,15 +229,55 @@ crates/groove/src/query_manager/
 │   ├── mod.rs
 │   └── skip_list.rs
 └── graph_nodes/
-    ├── mod.rs            # IdNode, RowNode traits
-    ├── index_scan.rs     # Source node (IdDelta)
-    ├── union.rs          # OR conditions (IdDelta)
+    ├── mod.rs            # SourceNode, IdNode, RowNode traits, SourceContext
+    ├── index_scan.rs     # Source node (impl SourceNode)
+    ├── union.rs          # OR conditions (impl IdNode)
     ├── materialize.rs    # IdDelta → RowDelta boundary
     ├── filter.rs         # In-memory filter (RowDelta)
     ├── sort.rs           # (RowDelta)
     ├── limit_offset.rs   # (RowDelta)
     └── output.rs         # (RowDelta)
 ```
+
+## Node Trait Architecture
+
+The query graph distinguishes between two kinds of ID-level nodes:
+
+**Source nodes** (`SourceNode` trait) read from external state:
+- `IndexScanNode` - scans indices for matching ObjectIds
+- Require external context (indices, ObjectManager) via `SourceContext`
+- Have no input nodes in the graph
+
+**Transform nodes** (`IdNode` trait) are pure dataflow:
+- `UnionNode` - merges ID sets from multiple inputs
+- `process()` takes input ID sets directly, no external state needed
+- Combine/filter outputs from other nodes
+
+```rust
+/// Context for source nodes that need external data.
+pub struct SourceContext<'a> {
+    pub indices: &'a HashMap<(String, String), IndexState>,
+    pub om: &'a ObjectManager,
+}
+
+/// Source nodes produce data from external state (no input nodes).
+pub trait SourceNode {
+    fn scan(&mut self, ctx: &SourceContext) -> IdDelta;
+    fn current_ids(&self) -> &HashSet<ObjectId>;
+    fn mark_dirty(&mut self);
+    fn is_dirty(&self) -> bool;
+}
+
+/// Transform nodes combine/filter id sets from their inputs.
+pub trait IdNode {
+    fn process(&mut self, inputs: &[&HashSet<ObjectId>]) -> IdDelta;
+    fn current_ids(&self) -> &HashSet<ObjectId>;
+    fn mark_dirty(&mut self);
+    fn is_dirty(&self) -> bool;
+}
+```
+
+This separation enables `settle()` to use clean pattern matching rather than string-based dispatch.
 
 ## Implementation Status
 
@@ -441,6 +481,52 @@ pub enum ScanCondition {
 | Non-indexable condition keeps filter | `graph::tests::non_indexable_condition_keeps_filter` |
 | OR with single conditions elides filter | `graph::tests::or_with_single_conditions_elides_filter` |
 
+#### Followup 10: Separate Source Nodes from Transform Nodes ✓
+
+Refactored the ID-level node architecture to cleanly separate source nodes from transform nodes.
+
+**Problem solved:**
+- `IdNode::process()` was a no-op on IndexScanNode
+- `settle()` used string-based dispatch to special-case each node type
+- Two different computation patterns conflated in one trait
+
+**Core changes:**
+
+1. **New `SourceNode` trait** for nodes that read from external state:
+```rust
+pub trait SourceNode {
+    fn scan(&mut self, ctx: &SourceContext) -> IdDelta;
+    fn current_ids(&self) -> &HashSet<ObjectId>;
+    fn mark_dirty(&mut self);
+    fn is_dirty(&self) -> bool;
+}
+```
+
+2. **`SourceContext` struct** bundles external dependencies:
+```rust
+pub struct SourceContext<'a> {
+    pub indices: &'a HashMap<(String, String), IndexState>,
+    pub om: &'a ObjectManager,
+}
+```
+
+3. **Updated `IdNode::process()` signature** to take inputs directly:
+```rust
+fn process(&mut self, inputs: &[&HashSet<ObjectId>]) -> IdDelta;
+```
+
+4. **`IndexScanNode`** now implements `SourceNode` (not `IdNode`)
+   - `scan()` looks up its index from `SourceContext` internally
+
+5. **`UnionNode`** simplified:
+   - Removed `pending_deltas` and `add_input()`
+   - `process()` takes input sets directly
+   - Removed redundant `process_inputs()` method
+
+6. **`settle()` uses pattern matching** instead of string dispatch:
+   - Creates `SourceContext` once at start
+   - `collect_id_inputs()` helper gathers inputs for transform nodes
+
 ### Pending Followups
 
 #### Followup 6: `project_row` Should Use Memcpy (Low Priority)
@@ -454,10 +540,6 @@ Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired
 #### Followup 9: End-to-End Sync Integration Tests (Medium Priority)
 
 No tests verify synced updates flow through to query deltas. Need two-peer test with subscription verification.
-
-#### Followup 10: IndexScanNode Process Method (Low Priority)
-
-`IdNode::process()` is a no-op on IndexScanNode. Graph settling special-cases it. Works but violates trait contract.
 
 #### Followup 11: Row Deletion (Medium Priority)
 

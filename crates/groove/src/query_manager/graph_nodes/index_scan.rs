@@ -2,11 +2,9 @@ use std::collections::HashSet;
 use std::ops::Bound;
 
 use crate::object::ObjectId;
-use crate::object_manager::ObjectManager;
-use crate::query_manager::index::IndexState;
 use crate::query_manager::types::IdDelta;
 
-use super::IdNode;
+use super::{SourceContext, SourceNode};
 
 /// Condition for index scan.
 #[derive(Debug, Clone)]
@@ -52,16 +50,21 @@ impl IndexScanNode {
             dirty: true,
         }
     }
+}
 
-    /// Scan the index and update current_ids.
-    /// Returns the delta from previous state.
-    pub fn scan(&mut self, index: &IndexState, om: &ObjectManager) -> IdDelta {
-        let new_ids: HashSet<ObjectId> = match &self.condition {
-            ScanCondition::All => index.scan_all(om).into_iter().collect(),
-            ScanCondition::Eq(key) => index.lookup_exact(key, om).into_iter().collect(),
-            ScanCondition::Range { min, max } => {
-                index.range_scan(min, max, om).into_iter().collect()
+impl SourceNode for IndexScanNode {
+    fn scan(&mut self, ctx: &SourceContext) -> IdDelta {
+        let key = (self.table.clone(), self.column.clone());
+        let new_ids: HashSet<ObjectId> = if let Some(index) = ctx.indices.get(&key) {
+            match &self.condition {
+                ScanCondition::All => index.scan_all(ctx.om).into_iter().collect(),
+                ScanCondition::Eq(k) => index.lookup_exact(k, ctx.om).into_iter().collect(),
+                ScanCondition::Range { min, max } => {
+                    index.range_scan(min, max, ctx.om).into_iter().collect()
+                }
             }
+        } else {
+            HashSet::new()
         };
 
         let added: HashSet<ObjectId> = new_ids.difference(&self.current_ids).copied().collect();
@@ -71,16 +74,6 @@ impl IndexScanNode {
         self.dirty = false;
 
         IdDelta { added, removed }
-    }
-}
-
-impl IdNode for IndexScanNode {
-    fn process(&mut self) -> IdDelta {
-        // Note: This requires external index access.
-        // In practice, QueryManager will call scan() with the index.
-        // This method returns empty delta as a fallback.
-        self.dirty = false;
-        IdDelta::new()
     }
 
     fn current_ids(&self) -> &HashSet<ObjectId> {
@@ -99,7 +92,16 @@ impl IdNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object_manager::ObjectManager;
     use crate::query_manager::index::IndexState;
+    use std::collections::HashMap;
+
+    fn make_ctx<'a>(
+        indices: &'a HashMap<(String, String), IndexState>,
+        om: &'a ObjectManager,
+    ) -> SourceContext<'a> {
+        SourceContext { indices, om }
+    }
 
     #[test]
     fn scan_all_returns_all_rows() {
@@ -113,8 +115,12 @@ mod tests {
         index.insert(row2.0.as_bytes(), row2, &mut om).unwrap();
         index.insert(row3.0.as_bytes(), row3, &mut om).unwrap();
 
+        let mut indices = HashMap::new();
+        indices.insert(("users".to_string(), "_id".to_string()), index);
+
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All);
-        let delta = node.scan(&index, &om);
+        let ctx = make_ctx(&indices, &om);
+        let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 3);
         assert!(delta.added.contains(&row1));
@@ -133,12 +139,16 @@ mod tests {
         index.insert(b"alice@example.com", row1, &mut om).unwrap();
         index.insert(b"bob@example.com", row2, &mut om).unwrap();
 
+        let mut indices = HashMap::new();
+        indices.insert(("users".to_string(), "email".to_string()), index);
+
         let mut node = IndexScanNode::new(
             "users",
             "email",
             ScanCondition::Eq(b"alice@example.com".to_vec()),
         );
-        let delta = node.scan(&index, &om);
+        let ctx = make_ctx(&indices, &om);
+        let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
         assert!(delta.added.contains(&row1));
@@ -156,6 +166,9 @@ mod tests {
         index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
         index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
 
+        let mut indices = HashMap::new();
+        indices.insert(("users".to_string(), "score".to_string()), index);
+
         let mut node = IndexScanNode::new(
             "users",
             "score",
@@ -164,7 +177,8 @@ mod tests {
                 max: Bound::Included(25i32.to_le_bytes().to_vec()),
             },
         );
-        let delta = node.scan(&index, &om);
+        let ctx = make_ctx(&indices, &om);
+        let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
         assert!(delta.added.contains(&row2));
@@ -179,21 +193,35 @@ mod tests {
 
         index.insert(row1.0.as_bytes(), row1, &mut om).unwrap();
 
+        let mut indices = HashMap::new();
+        indices.insert(("users".to_string(), "_id".to_string()), index);
+
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All);
-        let delta1 = node.scan(&index, &om);
+        let ctx = make_ctx(&indices, &om);
+        let delta1 = node.scan(&ctx);
         assert_eq!(delta1.added.len(), 1);
         assert!(delta1.added.contains(&row1));
 
         // Add another row
-        index.insert(row2.0.as_bytes(), row2, &mut om).unwrap();
-        let delta2 = node.scan(&index, &om);
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .insert(row2.0.as_bytes(), row2, &mut om)
+            .unwrap();
+        let ctx = make_ctx(&indices, &om);
+        let delta2 = node.scan(&ctx);
         assert_eq!(delta2.added.len(), 1);
         assert!(delta2.added.contains(&row2));
         assert!(delta2.removed.is_empty());
 
         // Remove first row
-        index.remove(row1.0.as_bytes(), row1, &mut om).unwrap();
-        let delta3 = node.scan(&index, &om);
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .remove(row1.0.as_bytes(), row1, &mut om)
+            .unwrap();
+        let ctx = make_ctx(&indices, &om);
+        let delta3 = node.scan(&ctx);
         assert!(delta3.added.is_empty());
         assert_eq!(delta3.removed.len(), 1);
         assert!(delta3.removed.contains(&row1));

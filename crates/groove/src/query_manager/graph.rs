@@ -13,7 +13,7 @@ use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::union::UnionNode;
-use super::graph_nodes::{IdNode, NodeId, RowNode};
+use super::graph_nodes::{IdNode, NodeId, RowNode, SourceContext, SourceNode};
 use super::index::IndexState;
 use super::query::{Condition, Query};
 use super::types::{IdDelta, Row, RowDelta, RowDescriptor, Schema, TableName};
@@ -297,59 +297,33 @@ impl QueryGraph {
         let mut id_deltas: HashMap<NodeId, IdDelta> = HashMap::new();
         let mut per_node_deltas: HashMap<NodeId, RowDelta> = HashMap::new();
 
+        let ctx = SourceContext { indices, om };
+
         for node_id in order {
-            // First, gather any needed inputs before mutating
-            let node_type = self.nodes.get(&node_id).map(|n| match n {
-                GraphNode::IndexScan(_) => "index_scan",
-                GraphNode::Union(_) => "union",
-                GraphNode::Materialize(_) => "materialize",
-                GraphNode::Filter(_) => "filter",
-                GraphNode::Sort(_) => "sort",
-                GraphNode::LimitOffset(_) => "limit_offset",
-                GraphNode::Output(_) => "output",
-            });
-
-            match node_type {
-                Some("index_scan") => {
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::IndexScan(scan_node) = node {
-                        let key = (scan_node.table.clone(), scan_node.column.clone());
-                        if let Some(index) = indices.get(&key) {
-                            let delta = scan_node.scan(index, om);
-                            id_deltas.insert(node_id, delta);
-                        } else {
-                            id_deltas.insert(node_id, IdDelta::new());
-                        }
-                    }
-                }
-                Some("union") => {
-                    // Collect inputs first (immutable borrows)
-                    let deps = self.edges[&node_id].clone();
-                    let inputs: Vec<_> = deps
-                        .iter()
-                        .filter_map(|dep| match &self.nodes[dep] {
-                            GraphNode::IndexScan(n) => Some(n.current_ids().clone()),
-                            GraphNode::Union(n) => Some(n.current_ids().clone()),
-                            _ => None,
-                        })
-                        .collect();
-
-                    // Now mutate
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::Union(union_node) = node {
-                        let input_refs: Vec<_> = inputs.iter().collect();
-                        let delta = union_node.process_inputs(&input_refs);
+            match self.nodes.get(&node_id) {
+                Some(GraphNode::IndexScan(_)) => {
+                    // Source node - call scan() with context
+                    if let Some(GraphNode::IndexScan(scan_node)) = self.nodes.get_mut(&node_id) {
+                        let delta = scan_node.scan(&ctx);
                         id_deltas.insert(node_id, delta);
                     }
                 }
-                Some("materialize") => {
+                Some(GraphNode::Union(_)) => {
+                    // Id transform - collect inputs, call process()
+                    let inputs = self.collect_id_inputs(node_id);
+                    if let Some(GraphNode::Union(union_node)) = self.nodes.get_mut(&node_id) {
+                        let input_refs: Vec<_> = inputs.iter().collect();
+                        let delta = union_node.process(&input_refs);
+                        id_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::Materialize(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
                         .and_then(|dep| id_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::Materialize(mat_node) = node {
+                    if let Some(GraphNode::Materialize(mat_node)) = self.nodes.get_mut(&node_id) {
                         // First, check if any previously-pending rows are now available
                         let pending_delta = mat_node.check_pending(&mut row_loader);
 
@@ -374,55 +348,51 @@ impl QueryGraph {
                         per_node_deltas.insert(node_id, merged);
                     }
                 }
-                Some("filter") => {
+                Some(GraphNode::Filter(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
                         .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::Filter(filter_node) = node {
+                    if let Some(GraphNode::Filter(filter_node)) = self.nodes.get_mut(&node_id) {
                         let delta = filter_node.process(input_delta);
                         per_node_deltas.insert(node_id, delta);
                     }
                 }
-                Some("sort") => {
+                Some(GraphNode::Sort(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
                         .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::Sort(sort_node) = node {
+                    if let Some(GraphNode::Sort(sort_node)) = self.nodes.get_mut(&node_id) {
                         let delta = sort_node.process(input_delta);
                         per_node_deltas.insert(node_id, delta);
                     }
                 }
-                Some("limit_offset") => {
+                Some(GraphNode::LimitOffset(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
                         .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::LimitOffset(lo_node) = node {
+                    if let Some(GraphNode::LimitOffset(lo_node)) = self.nodes.get_mut(&node_id) {
                         let delta = lo_node.process(input_delta);
                         per_node_deltas.insert(node_id, delta);
                     }
                 }
-                Some("output") => {
+                Some(GraphNode::Output(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
                         .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    let node = self.nodes.get_mut(&node_id).unwrap();
-                    if let GraphNode::Output(output_node) = node {
+                    if let Some(GraphNode::Output(output_node)) = self.nodes.get_mut(&node_id) {
                         let delta = output_node.process(input_delta);
                         per_node_deltas.insert(node_id, delta);
                     }
                 }
-                _ => {}
+                None => {}
             }
         }
 
@@ -430,6 +400,18 @@ impl QueryGraph {
         per_node_deltas
             .remove(&self.output_node)
             .unwrap_or_default()
+    }
+
+    /// Collect id sets from input nodes for an id transform node.
+    fn collect_id_inputs(&self, node_id: NodeId) -> Vec<HashSet<ObjectId>> {
+        self.edges[&node_id]
+            .iter()
+            .filter_map(|dep| match &self.nodes[dep] {
+                GraphNode::IndexScan(n) => Some(n.current_ids().clone()),
+                GraphNode::Union(n) => Some(n.current_ids().clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Get current result from output node.
