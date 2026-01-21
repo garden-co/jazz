@@ -124,6 +124,22 @@ export type SessionRow = {
 
 export type StoredSessionRow = SessionRow & { rowID: number };
 
+export type NewSessionRow = SessionRow & {
+  signatures: Record<number, Signature>;
+};
+
+export type StoredNewSessionRow = StoredSessionRow & {
+  signatures: Record<number, Signature>;
+};
+
+export type NewCoValueRow = CoValueRow & {
+  sessions: Record<SessionID, NewSessionRow>;
+};
+
+export type StoredNewCoValueRow = StoredCoValueRow & {
+  sessions: Record<SessionID, StoredNewSessionRow>;
+};
+
 export type TransactionRow = {
   ses: number;
   idx: number;
@@ -178,6 +194,10 @@ export interface DBClientInterfaceAsync {
   getCoValue(
     coValueId: string,
   ): Promise<StoredCoValueRow | undefined> | undefined;
+
+  getCoValueRow(
+    coValueId: string,
+  ): Promise<StoredNewCoValueRow | undefined> | undefined;
 
   upsertCoValue(
     id: string,

@@ -27,32 +27,14 @@ import type {
   CorrectionCallback,
   DBClientInterfaceAsync,
   DBTransactionInterfaceAsync,
-  SignatureAfterRow,
-  CoValueRow,
+  NewCoValueRow,
+  NewSessionRow,
   StoredCoValueRow,
-  SessionRow,
+  StoredNewCoValueRow,
   StoredSessionRow,
 } from "./types.js";
 import { isDeleteSessionID } from "../ids.js";
-import { Signature } from "../crypto/crypto.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
-
-type NewSessionRow = SessionRow & {
-  signatures: Record<number, Signature>;
-};
-
-type NewCoValueRow = CoValueRow & {
-  sessions: Record<SessionID, NewSessionRow>;
-};
-
-type StoredNewCoValueRow = StoredCoValueRow & {
-  sessions: Record<
-    SessionID,
-    StoredSessionRow & {
-      signatures: Record<number, Signature>;
-    }
-  >;
-};
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
@@ -142,7 +124,7 @@ export class StorageApiAsync implements StorageAPI {
     done: (found: boolean) => void,
   ) {
     this.interruptEraser("load");
-    const coValueRow = await this.getCoValueRow(id);
+    const coValueRow = await this.dbClient.getCoValueRow(id);
 
     if (!coValueRow) {
       done?.(false);
@@ -354,7 +336,7 @@ export class StorageApiAsync implements StorageAPI {
     }
 
     const id = msg.id;
-    const storedCoValueRow = await this.getCoValueRow(id);
+    const storedCoValueRow = await this.dbClient.getCoValueRow(id);
     const coValueRow = getUpdatedCoValueRow(storedCoValueRow, msg);
 
     if (!coValueRow) {
@@ -403,40 +385,6 @@ export class StorageApiAsync implements StorageAPI {
     }
 
     return true;
-  }
-
-  private async getCoValueRow(
-    id: RawCoID,
-  ): Promise<StoredNewCoValueRow | undefined> {
-    const storedCoValueRow = await this.dbClient.getCoValue(id);
-    if (!storedCoValueRow) {
-      return undefined;
-    }
-    const { rowID, header } = storedCoValueRow;
-    const allCoValueSessions = (await this.dbClient.getCoValueSessions(
-      rowID,
-    )) as unknown as (StoredSessionRow & {
-      signatures: Record<number, Signature>;
-    })[];
-    const sessions = Object.fromEntries(
-      allCoValueSessions.map((sessionRow) => [
-        sessionRow.sessionID,
-        sessionRow,
-      ]),
-    );
-    await Promise.all(
-      allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.dbClient.getSignatures(
-          sessionRow.rowID,
-          0,
-        );
-        sessionRow.signatures = {};
-        for (const signature of signatures) {
-          sessionRow.signatures[signature.idx] = signature.signature;
-        }
-      }),
-    );
-    return { id, rowID, header, sessions };
   }
 
   private async upsertCoValueRow(

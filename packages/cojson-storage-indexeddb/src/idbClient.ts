@@ -10,7 +10,9 @@ import type {
   SessionRow,
   SignatureAfterRow,
   StoredCoValueRow,
+  StoredNewCoValueRow,
   StoredSessionRow,
+  StoredNewSessionRow,
   TransactionRow,
 } from "cojson";
 import {
@@ -226,6 +228,35 @@ export class IDBClient implements DBClientInterfaceAsync {
 
   constructor(db: IDBDatabase) {
     this.db = db;
+  }
+
+  async getCoValueRow(
+    coValueId: RawCoID,
+  ): Promise<StoredNewCoValueRow | undefined> {
+    const storedCoValueRow = await this.getCoValue(coValueId);
+    if (!storedCoValueRow) {
+      return undefined;
+    }
+    const { rowID, header } = storedCoValueRow;
+    const allCoValueSessions = (await this.getCoValueSessions(
+      rowID,
+    )) as StoredNewSessionRow[];
+    const sessions = Object.fromEntries(
+      allCoValueSessions.map((sessionRow) => [
+        sessionRow.sessionID,
+        sessionRow,
+      ]),
+    );
+    await Promise.all(
+      allCoValueSessions.map(async (sessionRow) => {
+        const signatures = await this.getSignatures(sessionRow.rowID, 0);
+        sessionRow.signatures = {};
+        for (const signature of signatures) {
+          sessionRow.signatures[signature.idx] = signature.signature;
+        }
+      }),
+    );
+    return { id: coValueId, rowID, header, sessions };
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
