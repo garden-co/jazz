@@ -30,6 +30,7 @@ import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import {
   captureError,
   isCustomErrorReportingEnabled,
+  isDev,
 } from "./errorReporting.js";
 import {
   createCoValue,
@@ -40,7 +41,7 @@ import {
 } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
-  static isProfilingEnabled = false;
+  static isProfilingEnabled = isDev;
 
   static setProfilingEnabled(enabled: boolean) {
     this.isProfilingEnabled = enabled;
