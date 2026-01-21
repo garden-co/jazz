@@ -209,7 +209,11 @@ export function SubscriptionRow({
       <Cell>{getCallerLocation(entry.callerStack) ?? "-"}</Cell>
       <Cell>
         {entry.duration !== undefined ? (
-          formatDuration(entry.duration)
+          entry.duration === 0 ? (
+            "⚡ cached"
+          ) : (
+            formatDuration(entry.duration)
+          )
         ) : (
           <PendingDot />
         )}
@@ -225,7 +229,11 @@ export function SubscriptionRow({
         }}
       >
         <TimeLabel className="time-label">
-          {formatDuration(entry.duration ?? 0)}
+          {entry.duration === 0
+            ? "⚡ cached"
+            : entry.duration
+              ? formatDuration(entry.duration)
+              : "-"}
         </TimeLabel>
       </TimeBar>
     </RowWrapper>

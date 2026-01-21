@@ -164,10 +164,6 @@ export class SubscriptionScope<D extends CoValue> {
 
     const currentState = this.getCurrentRawValue();
 
-    if (currentState !== CoValueLoadingState.LOADING) {
-      return;
-    }
-
     this.performanceUuid = crypto.randomUUID();
     this.performanceSource = source;
 
@@ -185,6 +181,11 @@ export class SubscriptionScope<D extends CoValue> {
     performance.mark(`jazz.subscription.start:${this.performanceUuid}`, {
       detail,
     });
+
+    if (currentState !== CoValueLoadingState.LOADING) {
+      this.emitLoadingComplete(currentState);
+      return;
+    }
 
     // Subscribe to get notified when loading completes
     const unsubscribe = this.subscribe(() => {
