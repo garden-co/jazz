@@ -340,28 +340,69 @@ When rows are still loading, the system now holds back ALL query results until e
 | OutputNode emits full state on clear | `output::tests::output_emits_full_state_when_pending_clears` |
 | Subsequent pending emits only changes | `output::tests::output_subsequent_pending_emits_only_new_changes` |
 
+#### Followup 5: Row Content Update Propagation ✓
+
+When a row's content changes (same ObjectId, new commit), subscriptions now receive update deltas:
+
+**Problem solved:**
+- `handle_object_update()` had the `object_id` but only marked table-level dirty
+- `settle()` only processed `IdDelta` (added/removed) from index scans
+- `MaterializeNode.check_update()` existed but was never called for content changes
+
+**Core changes:**
+- `MaterializeNode` gains `updated_ids: HashSet<ObjectId>` - IDs to check for content updates
+- `mark_updated(id)` method marks an ID for checking (only if already tracked in `rows`)
+- `check_updated_ids(loader)` method checks marked IDs and returns `RowDelta` with updates
+- `materialize()` clears `updated_ids` for removed IDs
+
+**QueryGraph changes:**
+- `mark_row_updated(id)` marks the ID in all MaterializeNodes and propagates dirty marks downstream
+- `mark_downstream_dirty(node_id)` helper recursively marks dependent nodes via `reverse_edges`
+- `settle()` calls `check_updated_ids()` after `materialize()` and merges update deltas
+
+**QueryManager integration:**
+- `mark_row_updated_in_subscriptions(table, id)` calls `graph.mark_row_updated(id)` for matching subscriptions
+- Wired into both `update()` (local updates) and `handle_object_update()` (synced updates)
+
+**Filter interaction:**
+- Row updated to fail filter → emits removal delta
+- Row updated to pass filter → emits addition delta
+- Row still passes filter → emits update delta with (old, new) pair
+
+**Tests:**
+| Test | Location |
+|------|----------|
+| Local update emits subscription delta | `manager::tests::local_update_emits_subscription_delta` |
+| Synced update emits subscription delta | `manager::tests::synced_update_emits_subscription_delta` |
+| Multiple updates same row single delta | `manager::tests::multiple_updates_same_row_single_delta` |
+| Update fails filter emits removal | `manager::tests::update_fails_filter_emits_removal` |
+| Update passes filter emits addition | `manager::tests::update_passes_filter_emits_addition` |
+| Update still passes filter emits update | `manager::tests::update_still_passes_filter_emits_update` |
+| Update to untracked row is silent | `manager::tests::update_to_untracked_row_is_silent` |
+| Insert then update same cycle | `manager::tests::insert_then_update_same_cycle` |
+
 ### Pending Followups
 
-#### Followup 5: `project_row` Should Use Memcpy (Low Priority)
+#### Followup 6: `project_row` Should Use Memcpy (Low Priority)
 
 Currently decodes to `Value` then re-encodes. Should memcpy bytes directly for fixed-size columns.
 
-#### Followup 6: Add `subscribe_full` API (Low Priority)
+#### Followup 7: Add `subscribe_full` API (Low Priority)
 
 Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired up to API.
 
-#### Followup 7: Fix Range Scan Boundary Semantics (Low Priority)
+#### Followup 8: Fix Range Scan Boundary Semantics (Low Priority)
 
 Lt/Gt use inclusive bounds in index scan. Filter node corrects this, so correctness maintained but slightly inefficient.
 
-#### Followup 8: End-to-End Sync Integration Tests (Medium Priority)
+#### Followup 9: End-to-End Sync Integration Tests (Medium Priority)
 
 No tests verify synced updates flow through to query deltas. Need two-peer test with subscription verification.
 
-#### Followup 9: IndexScanNode Process Method (Low Priority)
+#### Followup 10: IndexScanNode Process Method (Low Priority)
 
 `IdNode::process()` is a no-op on IndexScanNode. Graph settling special-cases it. Works but violates trait contract.
 
-#### Followup 10: Row Deletion (Medium Priority)
+#### Followup 11: Row Deletion (Medium Priority)
 
 Implement `delete()` API for removing rows.

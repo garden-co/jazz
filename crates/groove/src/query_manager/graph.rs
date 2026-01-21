@@ -208,6 +208,42 @@ impl QueryGraph {
         }
     }
 
+    /// Mark a row ID as updated for content checking.
+    /// This tells MaterializeNodes to check if the row's content has changed.
+    pub fn mark_row_updated(&mut self, id: ObjectId) {
+        // First pass: mark the ID as updated in each MaterializeNode and collect node IDs
+        let materialize_node_ids: Vec<NodeId> = self
+            .nodes
+            .iter_mut()
+            .filter_map(|(node_id, node)| {
+                if let GraphNode::Materialize(mat_node) = node {
+                    mat_node.mark_updated(id);
+                    Some(*node_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Second pass: mark dirty and propagate downstream
+        for node_id in materialize_node_ids {
+            self.dirty_nodes.insert(node_id);
+            self.mark_downstream_dirty(node_id);
+        }
+    }
+
+    /// Mark all nodes that depend on the given node as dirty (propagate forward).
+    fn mark_downstream_dirty(&mut self, node_id: NodeId) {
+        if let Some(parents) = self.reverse_edges.get(&node_id).cloned() {
+            for parent in parents {
+                if self.dirty_nodes.insert(parent) {
+                    // Recursively mark parents of parent
+                    self.mark_downstream_dirty(parent);
+                }
+            }
+        }
+    }
+
     /// Topological sort of dirty nodes (dependencies first).
     fn topo_sort_dirty(&self) -> Vec<NodeId> {
         let mut result = Vec::new();
@@ -254,7 +290,7 @@ impl QueryGraph {
     {
         let order = self.topo_sort_dirty();
         let mut id_deltas: HashMap<NodeId, IdDelta> = HashMap::new();
-        let mut row_deltas: HashMap<NodeId, RowDelta> = HashMap::new();
+        let mut per_node_deltas: HashMap<NodeId, RowDelta> = HashMap::new();
 
         for node_id in order {
             // First, gather any needed inputs before mutating
@@ -315,7 +351,10 @@ impl QueryGraph {
                         // Then materialize the new IdDelta
                         let new_delta = mat_node.materialize(input_delta, &mut row_loader);
 
-                        // Merge the pending and new deltas
+                        // Check updated IDs for content changes
+                        let update_delta = mat_node.check_updated_ids(&mut row_loader);
+
+                        // Merge all three deltas
                         let mut merged = RowDelta::new();
                         merged.added.extend(pending_delta.added);
                         merged.added.extend(new_delta.added);
@@ -323,58 +362,59 @@ impl QueryGraph {
                         merged.removed.extend(new_delta.removed);
                         merged.updated.extend(pending_delta.updated);
                         merged.updated.extend(new_delta.updated);
+                        merged.updated.extend(update_delta.updated);
                         // pending flag is set based on whether we still have pending IDs
                         merged.pending = new_delta.pending;
 
-                        row_deltas.insert(node_id, merged);
+                        per_node_deltas.insert(node_id, merged);
                     }
                 }
                 Some("filter") => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| row_deltas.get(dep).cloned())
+                        .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     if let GraphNode::Filter(filter_node) = node {
                         let delta = filter_node.process(input_delta);
-                        row_deltas.insert(node_id, delta);
+                        per_node_deltas.insert(node_id, delta);
                     }
                 }
                 Some("sort") => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| row_deltas.get(dep).cloned())
+                        .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     if let GraphNode::Sort(sort_node) = node {
                         let delta = sort_node.process(input_delta);
-                        row_deltas.insert(node_id, delta);
+                        per_node_deltas.insert(node_id, delta);
                     }
                 }
                 Some("limit_offset") => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| row_deltas.get(dep).cloned())
+                        .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     if let GraphNode::LimitOffset(lo_node) = node {
                         let delta = lo_node.process(input_delta);
-                        row_deltas.insert(node_id, delta);
+                        per_node_deltas.insert(node_id, delta);
                     }
                 }
                 Some("output") => {
                     let input_delta = self.edges[&node_id]
                         .first()
-                        .and_then(|dep| row_deltas.get(dep).cloned())
+                        .and_then(|dep| per_node_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     let node = self.nodes.get_mut(&node_id).unwrap();
                     if let GraphNode::Output(output_node) = node {
                         let delta = output_node.process(input_delta);
-                        row_deltas.insert(node_id, delta);
+                        per_node_deltas.insert(node_id, delta);
                     }
                 }
                 _ => {}
@@ -382,7 +422,9 @@ impl QueryGraph {
         }
 
         self.dirty_nodes.clear();
-        row_deltas.remove(&self.output_node).unwrap_or_default()
+        per_node_deltas
+            .remove(&self.output_node)
+            .unwrap_or_default()
     }
 
     /// Get current result from output node.

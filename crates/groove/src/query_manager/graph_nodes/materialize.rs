@@ -14,6 +14,8 @@ pub struct MaterializeNode {
     rows: HashMap<ObjectId, Row>,
     /// IDs that are pending (loader returned None, still loading).
     pending_ids: HashSet<ObjectId>,
+    /// IDs to check for content updates (row data may have changed).
+    updated_ids: HashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -27,6 +29,7 @@ impl MaterializeNode {
             descriptor,
             rows: HashMap::new(),
             pending_ids: HashSet::new(),
+            updated_ids: HashSet::new(),
             dirty: true,
         }
     }
@@ -42,8 +45,9 @@ impl MaterializeNode {
 
         // Handle removed IDs
         for id in delta.removed {
-            // Remove from pending if it was there
+            // Remove from pending and updated if it was there
             self.pending_ids.remove(&id);
+            self.updated_ids.remove(&id);
             if let Some(row) = self.rows.remove(&id) {
                 result.removed.push(row);
             }
@@ -102,6 +106,31 @@ impl MaterializeNode {
     /// Get the set of pending IDs.
     pub fn pending_ids(&self) -> &HashSet<ObjectId> {
         &self.pending_ids
+    }
+
+    /// Mark an ID for content update checking (only if we're tracking it).
+    pub fn mark_updated(&mut self, id: ObjectId) {
+        if self.rows.contains_key(&id) {
+            self.updated_ids.insert(id);
+        }
+    }
+
+    /// Check updated IDs for content changes, similar to check_pending.
+    /// Returns a RowDelta with updates for rows whose content changed.
+    pub fn check_updated_ids<F>(&mut self, mut loader: F) -> RowDelta
+    where
+        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
+    {
+        let mut result = RowDelta::new();
+        let ids_to_check: Vec<_> = self.updated_ids.drain().collect();
+
+        for id in ids_to_check {
+            if let Some(delta) = self.check_update(id, &mut loader) {
+                result.updated.extend(delta.updated);
+            }
+        }
+        result.pending = !self.pending_ids.is_empty();
+        result
     }
 
     /// Check if a row has been updated (data changed).
