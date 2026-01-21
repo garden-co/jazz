@@ -381,6 +381,66 @@ When a row's content changes (same ObjectId, new commit), subscriptions now rece
 | Update to untracked row is silent | `manager::tests::update_to_untracked_row_is_silent` |
 | Insert then update same cycle | `manager::tests::insert_then_update_same_cycle` |
 
+#### Followup 8: Range Scan Boundary Semantics + FilterNode Elision ✓
+
+Fixed range scan boundaries to use idiomatic Rust `std::ops::Bound` and added optimization to elide redundant FilterNodes.
+
+**Problem solved:**
+- `Lt`/`Gt` queries used inclusive bounds in index scan, returning extra rows that `FilterNode` had to remove
+- FilterNode was always present even when index scan fully covered the query condition
+
+**Core changes:**
+
+1. **`ScanCondition` uses `Bound<Vec<u8>>`:**
+```rust
+pub enum ScanCondition {
+    All,
+    Eq(Vec<u8>),
+    Range {
+        min: Bound<Vec<u8>>,  // Included/Excluded/Unbounded
+        max: Bound<Vec<u8>>,
+    },
+}
+```
+
+2. **`condition_to_scan()` maps correctly:**
+   - `Lt` → `max: Bound::Excluded`
+   - `Le` → `max: Bound::Included`
+   - `Gt` → `min: Bound::Excluded`
+   - `Ge` → `min: Bound::Included`
+   - `Between` → both `Bound::Included`
+
+3. **`range_scan()` respects exclusivity:**
+   - `Bound::Excluded(key)` skips exact matches
+   - `Bound::Included(key)` includes exact matches
+   - `Bound::Unbounded` has no constraint
+
+4. **FilterNode elision:**
+   - `Conjunction::is_fully_covered_by_index(column)` checks if all conditions are indexable and on the index column
+   - `build_remaining_predicate()` returns `Predicate::True` when all disjuncts are fully covered
+   - Query compilation skips FilterNode when predicate is `Predicate::True`
+
+**Behavior change:**
+
+| Query | Before | After |
+|-------|--------|-------|
+| `WHERE score = 100` | IndexScan → Mat → **Filter** → Output | IndexScan → Mat → Output |
+| `WHERE score < 50` | IndexScan(≤50) → Mat → **Filter** → Output | IndexScan(<50) → Mat → Output |
+| `WHERE score < 50 AND name = 'Alice'` | IndexScan → Mat → Filter → Output | IndexScan → Mat → Filter → Output |
+
+**Tests:**
+| Test | Location |
+|------|----------|
+| Range scan exclusive min | `skip_list::tests::range_scan_exclusive_min` |
+| Range scan exclusive max | `skip_list::tests::range_scan_exclusive_max` |
+| Range scan both exclusive | `skip_list::tests::range_scan_both_exclusive` |
+| Single Eq elides filter | `graph::tests::single_eq_condition_elides_filter` |
+| Single Lt elides filter | `graph::tests::single_lt_condition_elides_filter` |
+| Single Between elides filter | `graph::tests::single_between_condition_elides_filter` |
+| Multiple conditions keeps filter | `graph::tests::multiple_conditions_different_columns_keeps_filter` |
+| Non-indexable condition keeps filter | `graph::tests::non_indexable_condition_keeps_filter` |
+| OR with single conditions elides filter | `graph::tests::or_with_single_conditions_elides_filter` |
+
 ### Pending Followups
 
 #### Followup 6: `project_row` Should Use Memcpy (Low Priority)
@@ -390,10 +450,6 @@ Currently decodes to `Value` then re-encodes. Should memcpy bytes directly for f
 #### Followup 7: Add `subscribe_full` API (Low Priority)
 
 Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired up to API.
-
-#### Followup 8: Fix Range Scan Boundary Semantics (Low Priority)
-
-Lt/Gt use inclusive bounds in index scan. Filter node corrects this, so correctness maintained but slightly inefficient.
 
 #### Followup 9: End-to-End Sync Integration Tests (Medium Priority)
 
