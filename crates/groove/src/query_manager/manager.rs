@@ -19,11 +19,20 @@ const ROW_BRANCH: &str = "main";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryError {
     TableNotFound(TableName),
-    ColumnCountMismatch { expected: usize, actual: usize },
+    ColumnCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
     EncodingError(String),
     ObjectNotFound(ObjectId),
     QueryCompilationError(String),
     IndexError(String),
+    /// Cannot undelete or truncate a row that is not soft-deleted.
+    RowNotDeleted(ObjectId),
+    /// Cannot delete an already-deleted row.
+    RowAlreadyDeleted(ObjectId),
+    /// Cannot operate on a hard-deleted row (it no longer exists).
+    RowHardDeleted(ObjectId),
 }
 
 impl std::fmt::Display for QueryError {
@@ -40,6 +49,9 @@ impl std::fmt::Display for QueryError {
             QueryError::ObjectNotFound(id) => write!(f, "object not found: {:?}", id),
             QueryError::QueryCompilationError(msg) => write!(f, "query compilation error: {msg}"),
             QueryError::IndexError(msg) => write!(f, "index error: {msg}"),
+            QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {:?}", id),
+            QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {:?}", id),
+            QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
         }
     }
 }
@@ -62,6 +74,15 @@ pub struct InsertHandle {
     pub row_id: ObjectId,
     /// CommitId of the row data.
     pub row_commit_id: CommitId,
+}
+
+/// Handle for tracking delete completion.
+#[derive(Debug, Clone)]
+pub struct DeleteHandle {
+    /// The row's ObjectId.
+    pub row_id: ObjectId,
+    /// CommitId of the delete tombstone commit.
+    pub delete_commit_id: CommitId,
 }
 
 impl InsertHandle {
@@ -133,10 +154,16 @@ impl QueryManager {
         // Initialize indices for all tables
         let mut indices = HashMap::new();
         for (table_name, descriptor) in &schema {
-            // Primary "_id" index
+            // Primary "_id" index (for live rows)
             indices.insert(
                 (table_name.0.clone(), "_id".to_string()),
                 IndexState::new(&table_name.0, "_id"),
+            );
+
+            // Soft-deleted rows index
+            indices.insert(
+                (table_name.0.clone(), "_id_deleted".to_string()),
+                IndexState::new(&table_name.0, "_id_deleted"),
             );
 
             // Index for each column
@@ -176,6 +203,71 @@ impl QueryManager {
         } else {
             false
         }
+    }
+
+    /// Check if a row is soft-deleted (appears in _id_deleted but not _id).
+    pub fn row_is_deleted(&self, table: &str, row_id: ObjectId) -> bool {
+        let deleted_key = (table.to_string(), "_id_deleted".to_string());
+        if let Some(index) = self.indices.get(&deleted_key) {
+            index.contains_row(row_id, &self.sync_manager.object_manager)
+        } else {
+            false
+        }
+    }
+
+    /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
+    fn is_hard_deleted(&self, id: ObjectId) -> bool {
+        let Some(state) = self.sync_manager.object_manager.get_state(id) else {
+            return false;
+        };
+        let obj = match state {
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
+            ObjectState::Loading => return false,
+        };
+        let Some(branch) = obj.branches.get(&BranchName::new(ROW_BRANCH)) else {
+            return false;
+        };
+        let Some(tip_id) = branch.tips.iter().next() else {
+            return false;
+        };
+        let Some(commit) = branch.commits.get(tip_id) else {
+            return false;
+        };
+        // Hard delete: empty content + delete: hard metadata
+        commit.content.is_empty()
+            && commit
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("delete"))
+                .map(|v| v == "hard")
+                .unwrap_or(false)
+    }
+
+    /// Check if the current tip has `delete: soft` metadata.
+    fn is_soft_delete_commit(&self, id: ObjectId) -> bool {
+        let Some(state) = self.sync_manager.object_manager.get_state(id) else {
+            return false;
+        };
+        let obj = match state {
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
+            ObjectState::Loading => return false,
+        };
+        let Some(branch) = obj.branches.get(&BranchName::new(ROW_BRANCH)) else {
+            return false;
+        };
+        let Some(tip_id) = branch.tips.iter().next() else {
+            return false;
+        };
+        let Some(commit) = branch.commits.get(tip_id) else {
+            return false;
+        };
+        // Soft delete: has delete: soft metadata (content is preserved)
+        commit
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("delete"))
+            .map(|v| v == "soft")
+            .unwrap_or(false)
     }
 
     /// Check if a commit has been stored to disk.
@@ -309,6 +401,272 @@ impl QueryManager {
         Ok(())
     }
 
+    /// Soft delete a row.
+    ///
+    /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
+    /// This preserves the row data for queries with `include_deleted`.
+    /// Removes from `_id` and all column indices, adds to `_id_deleted` index.
+    pub fn delete(&mut self, id: ObjectId) -> Result<DeleteHandle, QueryError> {
+        // Check for hard delete first
+        if self.is_hard_deleted(id) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
+
+        // Get table name from object metadata
+        let table = self
+            .sync_manager
+            .object_manager
+            .get(id)
+            .and_then(|obj| obj.metadata.get("table").cloned())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let table_name = TableName::new(&table);
+
+        // Check if already soft-deleted
+        if self.row_is_deleted(&table, id) {
+            return Err(QueryError::RowAlreadyDeleted(id));
+        }
+
+        // Get old data from ObjectManager (for index removal and content preservation)
+        let (old_data, _) = self
+            .load_row_from_object(id)
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let descriptor = self
+            .schema
+            .get(&table_name)
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
+            .clone();
+
+        // Get parent commit
+        let tips = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, ROW_BRANCH)
+            .map_err(|_| QueryError::ObjectNotFound(id))?
+            .clone();
+
+        let parents: Vec<_> = tips.into_iter().collect();
+        let author = id;
+
+        // Create delete metadata
+        let mut delete_metadata = std::collections::BTreeMap::new();
+        delete_metadata.insert("delete".to_string(), "soft".to_string());
+
+        // Add commit with preserved content + delete: soft metadata
+        // Content is copied from previous tip so soft-deleted rows can still be read
+        let delete_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(
+                id,
+                ROW_BRANCH,
+                parents,
+                old_data.clone(), // Preserve content for soft deletes
+                author,
+                Some(delete_metadata),
+            )
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Update indices: remove from _id and column indices, add to _id_deleted
+        self.update_indices_for_soft_delete(&table, id, &old_data, &descriptor)?;
+
+        // Mark subscriptions dirty and mark row as deleted
+        self.mark_subscriptions_dirty(&table);
+        self.mark_row_deleted_in_subscriptions(&table, id);
+
+        Ok(DeleteHandle {
+            row_id: id,
+            delete_commit_id,
+        })
+    }
+
+    /// Undelete a soft-deleted row.
+    ///
+    /// Restores a row from the `_id_deleted` index back to the `_id` and column indices.
+    /// Creates a new commit with the provided values (no `delete` metadata).
+    pub fn undelete(&mut self, id: ObjectId, values: &[Value]) -> Result<InsertHandle, QueryError> {
+        // Check for hard delete first
+        if self.is_hard_deleted(id) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
+
+        // Get table name from object metadata
+        let table = self
+            .sync_manager
+            .object_manager
+            .get(id)
+            .and_then(|obj| obj.metadata.get("table").cloned())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let table_name = TableName::new(&table);
+
+        // Verify row is in _id_deleted index (soft-deleted)
+        if !self.row_is_deleted(&table, id) {
+            return Err(QueryError::RowNotDeleted(id));
+        }
+
+        let descriptor = self
+            .schema
+            .get(&table_name)
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
+            .clone();
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        // Encode new row data
+        let new_data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
+        // Get parent commit
+        let tips = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, ROW_BRANCH)
+            .map_err(|_| QueryError::ObjectNotFound(id))?
+            .clone();
+
+        let parents: Vec<_> = tips.into_iter().collect();
+        let author = id;
+
+        // Add commit with row data (no delete metadata = undelete)
+        let row_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(id, ROW_BRANCH, parents, new_data.clone(), author, None)
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Update indices: remove from _id_deleted, add to _id and column indices
+        self.update_indices_for_undelete(&table, id, &new_data, &descriptor)?;
+
+        // Mark subscriptions dirty
+        self.mark_subscriptions_dirty(&table);
+
+        Ok(InsertHandle {
+            row_id: id,
+            row_commit_id,
+        })
+    }
+
+    /// Hard delete a row.
+    ///
+    /// Creates a commit with empty content and `delete: hard` metadata.
+    /// Removes from ALL indices including `_id_deleted`.
+    /// Truncates history: only the hard delete tombstone remains.
+    /// Hard deletes are authoritative and override any concurrent or subsequent commits.
+    pub fn hard_delete(&mut self, id: ObjectId) -> Result<DeleteHandle, QueryError> {
+        // Check if already hard-deleted
+        if self.is_hard_deleted(id) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
+
+        // Get table name from object metadata
+        let table = self
+            .sync_manager
+            .object_manager
+            .get(id)
+            .and_then(|obj| obj.metadata.get("table").cloned())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let table_name = TableName::new(&table);
+
+        // Try to get old data (may be empty if already soft-deleted)
+        // Treat empty content as no data (tombstone)
+        let old_data = self
+            .load_row_from_object(id)
+            .map(|(data, _)| data)
+            .filter(|data| !data.is_empty());
+
+        let descriptor = self
+            .schema
+            .get(&table_name)
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
+            .clone();
+
+        // Get parent commit
+        let tips = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, ROW_BRANCH)
+            .map_err(|_| QueryError::ObjectNotFound(id))?
+            .clone();
+
+        let parents: Vec<_> = tips.into_iter().collect();
+        let author = id;
+
+        // Create hard delete metadata
+        let mut delete_metadata = std::collections::BTreeMap::new();
+        delete_metadata.insert("delete".to_string(), "hard".to_string());
+
+        // Add commit with empty content + delete: hard metadata
+        let delete_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(
+                id,
+                ROW_BRANCH,
+                parents,
+                vec![], // Empty content for tombstone
+                author,
+                Some(delete_metadata),
+            )
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Update indices: remove from ALL indices including _id_deleted
+        self.update_indices_for_hard_delete(&table, id, old_data.as_deref(), &descriptor)?;
+
+        // Truncate branch: set tails = [delete_commit_id], removing all history
+        // (In ObjectManager, this would be done via set_tails or similar)
+        // For now, we just record the hard delete tombstone
+        let mut tail_ids = std::collections::HashSet::new();
+        tail_ids.insert(delete_commit_id);
+        let _ = self
+            .sync_manager
+            .object_manager
+            .truncate_branch(id, ROW_BRANCH, tail_ids);
+
+        // Mark subscriptions dirty and mark row as deleted
+        self.mark_subscriptions_dirty(&table);
+        self.mark_row_deleted_in_subscriptions(&table, id);
+
+        Ok(DeleteHandle {
+            row_id: id,
+            delete_commit_id,
+        })
+    }
+
+    /// Truncate a soft-deleted row (upgrade to hard delete).
+    ///
+    /// Can only be called on rows that are already soft-deleted.
+    /// Removes the row from `_id_deleted` and truncates history.
+    pub fn truncate(&mut self, id: ObjectId) -> Result<DeleteHandle, QueryError> {
+        // Check for hard delete first
+        if self.is_hard_deleted(id) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
+
+        // Get table name from object metadata
+        let table = self
+            .sync_manager
+            .object_manager
+            .get(id)
+            .and_then(|obj| obj.metadata.get("table").cloned())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        // Verify row is in _id_deleted index (soft-deleted)
+        if !self.row_is_deleted(&table, id) {
+            return Err(QueryError::RowNotDeleted(id));
+        }
+
+        // Upgrade to hard delete
+        self.hard_delete(id)
+    }
+
     /// Test helper: get a row by ID if loaded in ObjectManager.
     ///
     /// Production code should use queries to read data, not this method.
@@ -349,8 +707,12 @@ impl QueryManager {
             .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         // Settle the graph - row_loader reads directly from ObjectManager
-        let row_loader =
-            |id: ObjectId| -> Option<(Vec<u8>, CommitId)> { self.load_row_from_object(id) };
+        // Returns None for empty content (hard delete tombstones) so they're not materialized
+        // Soft deletes have preserved content and can be materialized normally
+        let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+            self.load_row_from_object(id)
+                .filter(|(data, _)| !data.is_empty())
+        };
 
         graph.settle(&self.indices, &self.sync_manager.object_manager, row_loader);
 
@@ -420,6 +782,8 @@ impl QueryManager {
         let indices = &self.indices;
 
         for (sub_id, subscription) in &mut self.subscriptions {
+            // Row loader returns None for empty content (hard delete tombstones)
+            // Soft deletes have preserved content and can be materialized normally
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
                 let state = om.get_state(id)?;
                 match state {
@@ -427,6 +791,10 @@ impl QueryManager {
                         let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
                         let tip_id = branch.tips.iter().next()?;
                         let commit = branch.commits.get(tip_id)?;
+                        // Filter out empty content (hard delete tombstones only)
+                        if commit.content.is_empty() {
+                            return None;
+                        }
                         Some((commit.content.clone(), *tip_id))
                     }
                     ObjectState::Loading => None,
@@ -481,13 +849,17 @@ impl QueryManager {
         }
     }
 
-    /// Load a row's data from ObjectManager.
+    /// Load a row's data from ObjectManager using LWW (last-writer-wins by timestamp).
+    /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
     fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
         let state = self.sync_manager.object_manager.get_state(row_id)?;
         match state {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => {
                 let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
-                let tip_id = branch.tips.iter().next()?;
+                // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
+                let mut tips: Vec<_> = branch.tips.iter().copied().collect();
+                tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
+                let tip_id = tips.last()?;
                 let commit = branch.commits.get(tip_id)?;
                 Some((commit.content.clone(), *tip_id))
             }
@@ -503,18 +875,85 @@ impl QueryManager {
             None => return,
         };
 
-        // Extract current (new) data from the object
-        let new_data = match self.load_row_from_object(update.object_id) {
-            Some((data, _)) => data,
-            None => return,
-        };
-
         let table_name = TableName::new(&table);
         let descriptor = match self.schema.get(&table_name).cloned() {
             Some(desc) => desc,
             None => return,
         };
 
+        // Check if we have a local hard delete tombstone - if so, ignore incoming updates
+        if self.is_hard_deleted(update.object_id) {
+            // Hard delete is authoritative - ignore incoming updates
+            return;
+        }
+
+        // Check if incoming update is a hard delete
+        if self.is_incoming_hard_delete(update.object_id) {
+            // Apply hard delete unconditionally
+            let old_data = update.old_content.as_deref();
+            let _ = self.update_indices_for_hard_delete(
+                &table,
+                update.object_id,
+                old_data,
+                &descriptor,
+            );
+            self.mark_subscriptions_dirty(&table);
+            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            return;
+        }
+
+        // Check if incoming update is a soft delete
+        if self.is_soft_delete_commit(update.object_id) {
+            // Apply soft delete - remove from _id and column indices, add to _id_deleted
+            if let Some(old_data) = &update.old_content {
+                let _ = self.update_indices_for_soft_delete(
+                    &table,
+                    update.object_id,
+                    old_data,
+                    &descriptor,
+                );
+            } else {
+                // No old content - just remove from _id and add to _id_deleted
+                let id_key = (table.to_string(), "_id".to_string());
+                if let Some(index) = self.indices.get_mut(&id_key) {
+                    let _ = index.remove(
+                        update.object_id.0.as_bytes(),
+                        update.object_id,
+                        &mut self.sync_manager.object_manager,
+                    );
+                }
+                let deleted_key = (table.to_string(), "_id_deleted".to_string());
+                if let Some(index) = self.indices.get_mut(&deleted_key) {
+                    let _ = index.insert(
+                        update.object_id.0.as_bytes(),
+                        update.object_id,
+                        &mut self.sync_manager.object_manager,
+                    );
+                }
+            }
+            self.mark_subscriptions_dirty(&table);
+            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            return;
+        }
+
+        // Check if this is an undelete (non-empty content for previously soft-deleted row)
+        let was_soft_deleted = self.row_is_deleted(&table, update.object_id);
+
+        // Extract current (new) data from the object
+        let new_data = match self.load_row_from_object(update.object_id) {
+            Some((data, _)) => data,
+            None => return,
+        };
+
+        if was_soft_deleted {
+            // This is an undelete - remove from _id_deleted, add to _id and column indices
+            let _ =
+                self.update_indices_for_undelete(&table, update.object_id, &new_data, &descriptor);
+            self.mark_subscriptions_dirty(&table);
+            return;
+        }
+
+        // Normal update handling
         if update.is_new_object || update.previous_commit_ids.is_empty() {
             // First commit on branch (new object or synced first commit) - insert into all indices
             let _ =
@@ -534,6 +973,34 @@ impl QueryManager {
 
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
+    }
+
+    /// Check if an incoming update has hard delete metadata.
+    fn is_incoming_hard_delete(&self, id: ObjectId) -> bool {
+        let Some(state) = self.sync_manager.object_manager.get_state(id) else {
+            return false;
+        };
+        let obj = match state {
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
+            ObjectState::Loading => return false,
+        };
+        let Some(branch) = obj.branches.get(&BranchName::new(ROW_BRANCH)) else {
+            return false;
+        };
+        let Some(tip_id) = branch.tips.iter().next() else {
+            return false;
+        };
+        let Some(commit) = branch.commits.get(tip_id) else {
+            return false;
+        };
+        // Hard delete: empty content + delete: hard metadata
+        commit.content.is_empty()
+            && commit
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("delete"))
+                .map(|v| v == "hard")
+                .unwrap_or(false)
     }
 
     /// Update indices when a row is inserted.
@@ -605,6 +1072,149 @@ impl QueryManager {
         Ok(())
     }
 
+    /// Update indices for soft delete: remove from _id and column indices, add to _id_deleted.
+    fn update_indices_for_soft_delete(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        // Remove from "_id" index
+        let id_key = (table.to_string(), "_id".to_string());
+        if let Some(index) = self.indices.get_mut(&id_key) {
+            index.remove(
+                object_id.0.as_bytes(),
+                object_id,
+                &mut self.sync_manager.object_manager,
+            )?;
+        }
+
+        // Remove from all column indices
+        for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            let col_key = (table.to_string(), col.name.clone());
+            if let Some(index) = self.indices.get_mut(&col_key)
+                && let Ok(Some(value_bytes)) =
+                    super::encoding::column_bytes(descriptor, old_data, col_idx)
+            {
+                index.remove(
+                    value_bytes,
+                    object_id,
+                    &mut self.sync_manager.object_manager,
+                )?;
+            }
+        }
+
+        // Add to "_id_deleted" index
+        let deleted_key = (table.to_string(), "_id_deleted".to_string());
+        if let Some(index) = self.indices.get_mut(&deleted_key) {
+            index.insert(
+                object_id.0.as_bytes(),
+                object_id,
+                &mut self.sync_manager.object_manager,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Update indices for hard delete: remove from ALL indices including _id_deleted.
+    fn update_indices_for_hard_delete(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        old_data: Option<&[u8]>,
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        // Remove from "_id" index (may not be present if already soft-deleted)
+        let id_key = (table.to_string(), "_id".to_string());
+        if let Some(index) = self.indices.get_mut(&id_key) {
+            // Ignore errors - row may not be in _id if already soft-deleted
+            let _ = index.remove(
+                object_id.0.as_bytes(),
+                object_id,
+                &mut self.sync_manager.object_manager,
+            );
+        }
+
+        // Remove from all column indices (if we have old data)
+        if let Some(data) = old_data {
+            for (col_idx, col) in descriptor.columns.iter().enumerate() {
+                let col_key = (table.to_string(), col.name.clone());
+                if let Some(index) = self.indices.get_mut(&col_key)
+                    && let Ok(Some(value_bytes)) =
+                        super::encoding::column_bytes(descriptor, data, col_idx)
+                {
+                    // Ignore errors - row may not be in column index if already soft-deleted
+                    let _ = index.remove(
+                        value_bytes,
+                        object_id,
+                        &mut self.sync_manager.object_manager,
+                    );
+                }
+            }
+        }
+
+        // Remove from "_id_deleted" index (handles soft→hard upgrade)
+        let deleted_key = (table.to_string(), "_id_deleted".to_string());
+        if let Some(index) = self.indices.get_mut(&deleted_key) {
+            // Ignore errors - row may not be in _id_deleted if it was never soft-deleted
+            let _ = index.remove(
+                object_id.0.as_bytes(),
+                object_id,
+                &mut self.sync_manager.object_manager,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Update indices for undelete: remove from _id_deleted, add to _id and column indices.
+    fn update_indices_for_undelete(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        new_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        // Remove from "_id_deleted" index
+        let deleted_key = (table.to_string(), "_id_deleted".to_string());
+        if let Some(index) = self.indices.get_mut(&deleted_key) {
+            index.remove(
+                object_id.0.as_bytes(),
+                object_id,
+                &mut self.sync_manager.object_manager,
+            )?;
+        }
+
+        // Add to "_id" index
+        let id_key = (table.to_string(), "_id".to_string());
+        if let Some(index) = self.indices.get_mut(&id_key) {
+            index.insert(
+                object_id.0.as_bytes(),
+                object_id,
+                &mut self.sync_manager.object_manager,
+            )?;
+        }
+
+        // Add to all column indices
+        for (col_idx, col) in descriptor.columns.iter().enumerate() {
+            let col_key = (table.to_string(), col.name.clone());
+            if let Some(index) = self.indices.get_mut(&col_key)
+                && let Ok(Some(value_bytes)) =
+                    super::encoding::column_bytes(descriptor, new_data, col_idx)
+            {
+                index.insert(
+                    value_bytes,
+                    object_id,
+                    &mut self.sync_manager.object_manager,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Mark subscriptions dirty for a table.
     fn mark_subscriptions_dirty(&mut self, table: &str) {
         for subscription in self.subscriptions.values_mut() {
@@ -620,6 +1230,16 @@ impl QueryManager {
         for subscription in self.subscriptions.values_mut() {
             if subscription.graph.table.0 == table {
                 subscription.graph.mark_row_updated(id);
+            }
+        }
+    }
+
+    /// Mark a row as deleted in all subscriptions for a table.
+    /// This triggers removal delta emission during settle().
+    fn mark_row_deleted_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+        for subscription in self.subscriptions.values_mut() {
+            if subscription.graph.table.0 == table {
+                subscription.graph.mark_row_deleted(id);
             }
         }
     }
@@ -2251,5 +2871,667 @@ mod tests {
         let values = decode_row(&descriptor, &row.data).unwrap();
         assert_eq!(values[0], Value::Text("FromPeerA".into()));
         assert_eq!(values[1], Value::Integer(123));
+    }
+
+    // ========================================================================
+    // Soft Delete Tests
+    // ========================================================================
+
+    #[test]
+    fn soft_delete_removes_from_id_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Verify row is in _id index
+        assert!(qm.row_is_indexed("users", handle.row_id));
+
+        // Delete the row
+        let delete_handle = qm.delete(handle.row_id).unwrap();
+        assert_eq!(delete_handle.row_id, handle.row_id);
+
+        // Verify row is no longer in _id index
+        assert!(!qm.row_is_indexed("users", handle.row_id));
+    }
+
+    #[test]
+    fn soft_delete_adds_to_id_deleted_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Verify row is NOT in _id_deleted index
+        assert!(!qm.row_is_deleted("users", handle.row_id));
+
+        // Delete the row
+        qm.delete(handle.row_id).unwrap();
+
+        // Verify row IS in _id_deleted index
+        assert!(qm.row_is_deleted("users", handle.row_id));
+    }
+
+    #[test]
+    fn soft_deleted_row_not_in_query_results() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert rows
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+
+        // Verify both rows are visible
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Delete Alice
+        qm.delete(handle.row_id).unwrap();
+
+        // Verify only Bob is visible
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], Value::Text("Bob".into()));
+    }
+
+    #[test]
+    fn delete_already_deleted_row_fails() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Delete the row
+        qm.delete(handle.row_id).unwrap();
+
+        // Try to delete again - should fail
+        let result = qm.delete(handle.row_id);
+        assert!(matches!(result, Err(QueryError::RowAlreadyDeleted(_))));
+    }
+
+    #[test]
+    fn soft_delete_with_concurrent_tips_uses_lww() {
+        // Test that soft deleting an object with two concurrent tips results
+        // in a soft delete commit with content from the LWW winner (highest timestamp).
+        use crate::commit::{Commit, StoredState};
+        use crate::object::{BranchName, ObjectState};
+        use crate::query_manager::encoding::encode_row;
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert(
+                "users",
+                &[Value::Text("Original".into()), Value::Integer(0)],
+            )
+            .unwrap();
+        qm.process();
+
+        // Get the initial commit as the common parent
+        let branch_name = BranchName::new(ROW_BRANCH);
+        let initial_tips: Vec<_> = qm
+            .sync_manager
+            .object_manager
+            .get_tip_ids(handle.row_id, ROW_BRANCH)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(initial_tips.len(), 1);
+        let parent = initial_tips[0];
+
+        // Create two concurrent updates with different timestamps and content.
+        // Both have the same parent, creating diverging tips.
+        let descriptor = qm.schema.get(&TableName::new("users")).unwrap().clone();
+
+        // Commit A: lower timestamp, content "TipA"
+        let content_a = encode_row(
+            &descriptor,
+            &[Value::Text("TipA".into()), Value::Integer(100)],
+        )
+        .unwrap();
+        let commit_a = Commit {
+            author: handle.row_id,
+            parents: vec![parent],
+            content: content_a,
+            timestamp: 1000, // Lower timestamp
+            metadata: None,
+            stored_state: StoredState::Pending,
+        };
+
+        // Commit B: higher timestamp, content "TipB" - this should win
+        let content_b = encode_row(
+            &descriptor,
+            &[Value::Text("TipB".into()), Value::Integer(200)],
+        )
+        .unwrap();
+        let commit_b = Commit {
+            author: handle.row_id,
+            parents: vec![parent],
+            content: content_b.clone(),
+            timestamp: 2000, // Higher timestamp - LWW winner
+            metadata: None,
+            stored_state: StoredState::Pending,
+        };
+
+        // Add both commits to create concurrent tips
+        // We need to receive these as synced commits
+        let commit_a_id = qm
+            .sync_manager
+            .object_manager
+            .receive_commit(handle.row_id, ROW_BRANCH, commit_a)
+            .unwrap();
+        let commit_b_id = qm
+            .sync_manager
+            .object_manager
+            .receive_commit(handle.row_id, ROW_BRANCH, commit_b)
+            .unwrap();
+
+        // Verify we now have concurrent tips
+        let tips: Vec<_> = qm
+            .sync_manager
+            .object_manager
+            .get_tip_ids(handle.row_id, ROW_BRANCH)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(tips.len(), 2, "Should have 2 concurrent tips");
+        assert!(tips.contains(&commit_a_id));
+        assert!(tips.contains(&commit_b_id));
+
+        // Process updates
+        qm.process();
+
+        // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
+        let delete_handle = qm.delete(handle.row_id).unwrap();
+
+        // Get the delete commit and verify its content
+        let state = qm
+            .sync_manager
+            .object_manager
+            .get_state(handle.row_id)
+            .unwrap();
+        match state {
+            ObjectState::Available(obj) | ObjectState::Creating(obj) => {
+                let branch = obj.branches.get(&branch_name).unwrap();
+                let delete_commit = branch.commits.get(&delete_handle.delete_commit_id).unwrap();
+
+                // Verify the soft delete commit has content from the LWW winner (TipB)
+                assert_eq!(
+                    delete_commit.content, content_b,
+                    "Soft delete should preserve content from LWW winner"
+                );
+
+                // Also verify metadata
+                assert_eq!(
+                    delete_commit
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("delete")),
+                    Some(&"soft".to_string())
+                );
+            }
+            _ => panic!("Object should be available"),
+        }
+
+        // Additionally verify that querying with include_deleted shows the correct content
+        let query = qm.query("users").include_deleted().build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], Value::Text("TipB".into()));
+        assert_eq!(results[0][1], Value::Integer(200));
+    }
+
+    // ========================================================================
+    // Undelete Tests
+    // ========================================================================
+
+    #[test]
+    fn undelete_adds_to_id_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Delete the row
+        qm.delete(handle.row_id).unwrap();
+
+        // Verify row is not in _id index
+        assert!(!qm.row_is_indexed("users", handle.row_id));
+
+        // Undelete with new values
+        qm.undelete(
+            handle.row_id,
+            &[Value::Text("Alice Restored".into()), Value::Integer(150)],
+        )
+        .unwrap();
+
+        // Verify row is back in _id index
+        assert!(qm.row_is_indexed("users", handle.row_id));
+    }
+
+    #[test]
+    fn undelete_removes_from_id_deleted_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Delete the row
+        qm.delete(handle.row_id).unwrap();
+        assert!(qm.row_is_deleted("users", handle.row_id));
+
+        // Undelete
+        qm.undelete(
+            handle.row_id,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+        // Verify row is NOT in _id_deleted index
+        assert!(!qm.row_is_deleted("users", handle.row_id));
+    }
+
+    #[test]
+    fn undelete_row_appears_in_query_results() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Delete the row
+        qm.delete(handle.row_id).unwrap();
+
+        // Verify not visible
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 0);
+
+        // Undelete with new values
+        qm.undelete(
+            handle.row_id,
+            &[Value::Text("Alice Restored".into()), Value::Integer(200)],
+        )
+        .unwrap();
+
+        // Verify visible again with new values
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], Value::Text("Alice Restored".into()));
+        assert_eq!(results[0][1], Value::Integer(200));
+    }
+
+    #[test]
+    fn undelete_nondeleted_row_fails() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Try to undelete a non-deleted row - should fail
+        let result = qm.undelete(
+            handle.row_id,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        );
+        assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    }
+
+    // ========================================================================
+    // Hard Delete Tests
+    // ========================================================================
+
+    #[test]
+    fn hard_delete_removes_from_id_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Hard delete the row
+        qm.hard_delete(handle.row_id).unwrap();
+
+        // Verify row is not in _id index
+        assert!(!qm.row_is_indexed("users", handle.row_id));
+    }
+
+    #[test]
+    fn hard_delete_removes_from_id_deleted_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Soft delete first (puts it in _id_deleted)
+        qm.delete(handle.row_id).unwrap();
+        assert!(qm.row_is_deleted("users", handle.row_id));
+
+        // Then hard delete (removes from _id_deleted)
+        qm.hard_delete(handle.row_id).unwrap();
+
+        // Verify row is NOT in _id_deleted index
+        assert!(!qm.row_is_deleted("users", handle.row_id));
+    }
+
+    #[test]
+    fn hard_deleted_row_not_in_any_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Hard delete
+        qm.hard_delete(handle.row_id).unwrap();
+
+        // Verify row is not in _id index
+        assert!(!qm.row_is_indexed("users", handle.row_id));
+        // Verify row is not in _id_deleted index
+        assert!(!qm.row_is_deleted("users", handle.row_id));
+    }
+
+    #[test]
+    fn soft_then_hard_delete_removes_from_id_deleted() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Soft delete - row should be in _id_deleted
+        qm.delete(handle.row_id).unwrap();
+        assert!(qm.row_is_deleted("users", handle.row_id));
+
+        // Hard delete - row should be removed from _id_deleted
+        qm.hard_delete(handle.row_id).unwrap();
+        assert!(!qm.row_is_deleted("users", handle.row_id));
+    }
+
+    #[test]
+    fn undelete_hard_deleted_row_fails() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Hard delete
+        qm.hard_delete(handle.row_id).unwrap();
+
+        // Try to undelete - should fail
+        let result = qm.undelete(
+            handle.row_id,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        );
+        assert!(matches!(result, Err(QueryError::RowHardDeleted(_))));
+    }
+
+    // ========================================================================
+    // Truncate Tests
+    // ========================================================================
+
+    #[test]
+    fn truncate_soft_deleted_row() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Soft delete
+        qm.delete(handle.row_id).unwrap();
+        assert!(qm.row_is_deleted("users", handle.row_id));
+
+        // Truncate (upgrade to hard delete)
+        qm.truncate(handle.row_id).unwrap();
+
+        // Verify row is completely gone
+        assert!(!qm.row_is_indexed("users", handle.row_id));
+        assert!(!qm.row_is_deleted("users", handle.row_id));
+    }
+
+    #[test]
+    fn truncate_nondeleted_row_fails() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Try to truncate a non-deleted row - should fail
+        let result = qm.truncate(handle.row_id);
+        assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
+    }
+
+    // ========================================================================
+    // Include Deleted Query Tests
+    // ========================================================================
+
+    #[test]
+    fn include_deleted_query_returns_soft_deleted_rows() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert rows
+        let handle1 = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+
+        // Delete Alice
+        qm.delete(handle1.row_id).unwrap();
+
+        // Normal query - only Bob (Alice is in _id_deleted, not _id)
+        let query = qm.query("users").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], Value::Text("Bob".into()));
+
+        // Include deleted query - scans both _id and _id_deleted indices
+        // Soft-deleted rows have preserved content, so both Alice and Bob are returned
+        let query = qm.query("users").include_deleted().build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Verify Alice's data is preserved
+        let alice_result = results.iter().find(|r| r[0] == Value::Text("Alice".into()));
+        assert!(alice_result.is_some());
+        assert_eq!(alice_result.unwrap()[1], Value::Integer(100));
+
+        // Verify that Alice is in the _id_deleted index
+        assert!(qm.row_is_deleted("users", handle1.row_id));
+    }
+
+    #[test]
+    fn include_deleted_query_does_not_return_hard_deleted_rows() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert rows
+        let handle1 = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+
+        // Hard delete Alice
+        qm.hard_delete(handle1.row_id).unwrap();
+
+        // Include deleted query - only Bob (Alice is hard deleted)
+        let query = qm.query("users").include_deleted().build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0][0], Value::Text("Bob".into()));
+    }
+
+    // ========================================================================
+    // Delete Subscription Delta Tests
+    // ========================================================================
+
+    #[test]
+    fn soft_delete_emits_removal_delta() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Subscribe to all users
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get initial delta
+        qm.process();
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].delta.added.len(), 1); // Alice added
+
+        // Delete Alice
+        qm.delete(handle.row_id).unwrap();
+
+        // Process and check for removal delta
+        qm.process();
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(updates[0].delta.removed.len(), 1);
+        assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    }
+
+    #[test]
+    fn hard_delete_emits_removal_delta() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Subscribe to all users
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get initial delta
+        qm.process();
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].delta.added.len(), 1); // Alice added
+
+        // Hard delete Alice
+        qm.hard_delete(handle.row_id).unwrap();
+
+        // Process and check for removal delta
+        qm.process();
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(updates[0].delta.removed.len(), 1);
+        assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
+    }
+
+    #[test]
+    fn delete_row_not_in_subscription_no_delta() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert rows
+        let alice_handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+
+        // Subscribe to users with score >= 75 (only Alice)
+        let query = qm
+            .query("users")
+            .filter_ge("score", Value::Integer(75))
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get initial delta
+        qm.process();
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].delta.added.len(), 1); // Only Alice
+
+        // Delete Alice (who IS in subscription) - should emit removal delta
+        qm.delete(alice_handle.row_id).unwrap();
+
+        // Process and verify we got removal delta
+        qm.process();
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(updates[0].delta.removed.len(), 1);
     }
 }

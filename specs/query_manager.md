@@ -543,6 +543,83 @@ These tests validate the integration between SyncManager and QueryManager, ensur
 2. QueryManager's `process()` picks up the updates and settles subscriptions
 3. Subscription deltas are correctly emitted for both inserts and updates
 
+#### Followup 11: Soft Deletes and Hard Deletes ✓
+
+Implemented deletion semantics with two delete types:
+
+**Delete Types:**
+
+| Type | Content | Metadata | `_id_deleted` | Undeletable | Authoritative |
+|------|---------|----------|---------------|-------------|---------------|
+| Soft Delete | Preserved | `delete: soft` | Added | Yes | No |
+| Hard Delete | Empty | `delete: hard` | Removed | No | Yes (always wins) |
+
+**Key Design Decision:** Soft deletes preserve the row content (copied from previous tip). This allows:
+- `include_deleted()` queries to return full row data for soft-deleted rows
+- Soft-deleted rows to be materialized exactly like live rows
+- The `delete: soft` metadata serves as a filter flag, not a content marker
+
+**Index Infrastructure:**
+- `_id` index: Live rows only
+- `_id_deleted` index: Soft-deleted rows only (with preserved content)
+- Hard-deleted rows appear in neither index (empty content = true tombstone)
+
+**API:**
+
+```rust
+// Soft delete - preserves content, can be undone
+let handle = qm.delete(row_id)?;
+
+// Undelete - restore with new values
+let handle = qm.undelete(row_id, &[value1, value2])?;
+
+// Hard delete - permanent, authoritative, empties content
+let handle = qm.hard_delete(row_id)?;
+
+// Truncate - upgrade soft delete to hard delete
+let handle = qm.truncate(row_id)?;
+
+// Query including soft-deleted rows (returns full data)
+let query = qm.query("users").include_deleted().build();
+```
+
+**Error Types:**
+- `RowNotDeleted(id)` - Cannot undelete/truncate non-deleted row
+- `RowAlreadyDeleted(id)` - Cannot delete already-deleted row
+- `RowHardDeleted(id)` - Cannot operate on hard-deleted row
+
+**Sync Conflict Resolution:**
+- Hard delete is authoritative - always wins regardless of timestamp
+- Incoming update for hard-deleted row is ignored
+- Incoming hard delete discards any local updates
+
+**Query Behavior:**
+- Normal queries only scan `_id` index (live rows)
+- `include_deleted()` also scans `_id_deleted` - returns full row data for soft-deleted rows
+- Hard-deleted rows are invisible to all queries (empty content can't be materialized)
+
+**Subscription Deltas:**
+- Soft delete emits removal delta for subscribed rows
+- Hard delete emits removal delta for subscribed rows
+- Undelete emits addition delta
+
+**Tests:**
+| Test | Description |
+|------|-------------|
+| `soft_delete_removes_from_id_index` | Row removed from _id index |
+| `soft_delete_adds_to_id_deleted_index` | Row added to _id_deleted index |
+| `soft_deleted_row_not_in_query_results` | Deleted rows invisible to normal queries |
+| `delete_already_deleted_row_fails` | Idempotency error |
+| `undelete_adds_to_id_index` | Restored row back in _id |
+| `undelete_removes_from_id_deleted_index` | Row removed from _id_deleted |
+| `undelete_row_appears_in_query_results` | Restored row visible |
+| `hard_delete_removes_from_id_index` | Row removed from _id |
+| `hard_delete_removes_from_id_deleted_index` | Row removed from _id_deleted |
+| `soft_then_hard_delete_removes_from_id_deleted` | Upgrade removes from _id_deleted |
+| `include_deleted_query_returns_soft_deleted_rows` | Query returns both live and soft-deleted rows with full data |
+| `soft_delete_emits_removal_delta` | Subscription notified |
+| `hard_delete_emits_removal_delta` | Subscription notified |
+
 ### Pending Followups
 
 #### Followup 6: `project_row` Should Use Memcpy (Low Priority)
@@ -552,7 +629,3 @@ Currently decodes to `Value` then re-encodes. Should memcpy bytes directly for f
 #### Followup 7: Add `subscribe_full` API (Low Priority)
 
 Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired up to API.
-
-#### Followup 11: Row Deletion (Medium Priority)
-
-Implement `delete()` API for removing rows.

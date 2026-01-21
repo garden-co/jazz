@@ -116,7 +116,20 @@ impl QueryGraph {
             phase1_outputs.push(scan_id);
         }
 
-        // If multiple disjuncts, add Union node
+        // If include_deleted is set, also scan _id_deleted index
+        if query.include_deleted {
+            let deleted_scan_node =
+                IndexScanNode::new(query.table.0.clone(), "_id_deleted", ScanCondition::All);
+            let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
+            graph.index_scan_nodes.push((
+                deleted_scan_id,
+                query.table.0.clone(),
+                "_id_deleted".to_string(),
+            ));
+            phase1_outputs.push(deleted_scan_id);
+        }
+
+        // If multiple disjuncts (or include_deleted), add Union node
         let phase1_output = if phase1_outputs.len() > 1 {
             let union_node = UnionNode::new();
             let union_id = graph.add_node(GraphNode::Union(union_node));
@@ -237,6 +250,30 @@ impl QueryGraph {
         }
     }
 
+    /// Mark a row ID as deleted for removal delta emission.
+    /// This tells MaterializeNodes to emit a removal delta for this row.
+    pub fn mark_row_deleted(&mut self, id: ObjectId) {
+        // First pass: mark the ID as deleted in each MaterializeNode and collect node IDs
+        let materialize_node_ids: Vec<NodeId> = self
+            .nodes
+            .iter_mut()
+            .filter_map(|(node_id, node)| {
+                if let GraphNode::Materialize(mat_node) = node {
+                    mat_node.mark_deleted(id);
+                    Some(*node_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Second pass: mark dirty and propagate downstream
+        for node_id in materialize_node_ids {
+            self.dirty_nodes.insert(node_id);
+            self.mark_downstream_dirty(node_id);
+        }
+    }
+
     /// Mark all nodes that depend on the given node as dirty (propagate forward).
     fn mark_downstream_dirty(&mut self, node_id: NodeId) {
         if let Some(parents) = self.reverse_edges.get(&node_id).cloned() {
@@ -324,7 +361,10 @@ impl QueryGraph {
                         .unwrap_or_default();
 
                     if let Some(GraphNode::Materialize(mat_node)) = self.nodes.get_mut(&node_id) {
-                        // First, check if any previously-pending rows are now available
+                        // First, check deleted IDs and emit removal deltas
+                        let deleted_delta = mat_node.check_deleted_ids();
+
+                        // Check if any previously-pending rows are now available
                         let pending_delta = mat_node.check_pending(&mut row_loader);
 
                         // Then materialize the new IdDelta
@@ -333,10 +373,11 @@ impl QueryGraph {
                         // Check updated IDs for content changes
                         let update_delta = mat_node.check_updated_ids(&mut row_loader);
 
-                        // Merge all three deltas
+                        // Merge all four deltas
                         let mut merged = RowDelta::new();
                         merged.added.extend(pending_delta.added);
                         merged.added.extend(new_delta.added);
+                        merged.removed.extend(deleted_delta.removed);
                         merged.removed.extend(pending_delta.removed);
                         merged.removed.extend(new_delta.removed);
                         merged.updated.extend(pending_delta.updated);

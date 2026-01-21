@@ -204,6 +204,8 @@ pub struct Query {
     pub limit: Option<usize>,
     /// Offset.
     pub offset: usize,
+    /// If true, also scan _id_deleted to include soft-deleted rows.
+    pub include_deleted: bool,
 }
 
 impl Query {
@@ -215,6 +217,7 @@ impl Query {
             order_by: Vec::new(),
             limit: None,
             offset: 0,
+            include_deleted: false,
         }
     }
 
@@ -394,6 +397,13 @@ impl QueryBuilder {
     /// Set an offset.
     pub fn offset(mut self, n: usize) -> Self {
         self.query.offset = n;
+        self
+    }
+
+    /// Include soft-deleted rows in query results.
+    /// When true, the query will also scan the _id_deleted index.
+    pub fn include_deleted(mut self) -> Self {
+        self.query.include_deleted = true;
         self
     }
 
