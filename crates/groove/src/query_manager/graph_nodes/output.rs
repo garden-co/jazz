@@ -1,5 +1,9 @@
+use std::collections::HashSet;
+
 use crate::query_manager::encoding::decode_row;
-use crate::query_manager::types::{Row, RowDelta, RowDescriptor, Value};
+use crate::query_manager::types::{
+    Row, RowDelta, RowDescriptor, Tuple, TupleDelta, TupleDescriptor, Value,
+};
 
 use super::RowNode;
 
@@ -17,35 +21,72 @@ pub enum OutputMode {
 pub struct QuerySubscriptionId(pub u64);
 
 /// Output node - terminal node that delivers results to subscribers.
+///
+/// Materializes any remaining unmaterialized elements and flattens
+/// multi-element tuples to single Row outputs.
 #[derive(Debug)]
 pub struct OutputNode {
     descriptor: RowDescriptor,
+    /// Output tuple descriptor (always fully materialized).
+    output_tuple_descriptor: TupleDescriptor,
     mode: OutputMode,
-    /// Current result rows.
-    current_rows: Vec<Row>,
-    /// Pending deltas to deliver.
-    pending_deltas: Vec<RowDelta>,
+    /// Current result tuples (for RowNode trait).
+    current_tuples: HashSet<Tuple>,
+    /// Ordered tuples for deterministic output (preserves sort order).
+    ordered_tuples: Vec<Tuple>,
+    /// Pending tuple deltas to deliver.
+    pending_tuple_deltas: Vec<TupleDelta>,
     /// True if we're holding back results due to pending rows.
     held_pending: bool,
     /// True if subscriber has received initial snapshot.
     subscriber_initialized: bool,
-    /// Accumulated changes while pending (for subsequent pending periods).
-    held_changes: RowDelta,
+    /// Accumulated tuple changes while pending.
+    held_tuple_changes: TupleDelta,
     dirty: bool,
 }
 
 impl OutputNode {
+    /// Create an OutputNode with RowDescriptor (backward compatible).
     pub fn new(descriptor: RowDescriptor, mode: OutputMode) -> Self {
+        let output_tuple_descriptor =
+            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
         Self {
             descriptor,
+            output_tuple_descriptor,
             mode,
-            current_rows: Vec::new(),
-            pending_deltas: Vec::new(),
+            current_tuples: HashSet::new(),
+            ordered_tuples: Vec::new(),
+            pending_tuple_deltas: Vec::new(),
             held_pending: false,
             subscriber_initialized: false,
-            held_changes: RowDelta::new(),
+            held_tuple_changes: TupleDelta::new(),
             dirty: true,
         }
+    }
+
+    /// Create an OutputNode with TupleDescriptor.
+    /// The output descriptor is always fully materialized.
+    pub fn with_tuple_descriptor(tuple_descriptor: TupleDescriptor, mode: OutputMode) -> Self {
+        let descriptor = tuple_descriptor.combined_descriptor();
+        // Output is always fully materialized
+        let output_tuple_descriptor = tuple_descriptor.clone().with_all_materialized();
+        Self {
+            descriptor,
+            output_tuple_descriptor,
+            mode,
+            current_tuples: HashSet::new(),
+            ordered_tuples: Vec::new(),
+            pending_tuple_deltas: Vec::new(),
+            held_pending: false,
+            subscriber_initialized: false,
+            held_tuple_changes: TupleDelta::new(),
+            dirty: true,
+        }
+    }
+
+    /// Get the output tuple descriptor.
+    pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
+        &self.output_tuple_descriptor
     }
 
     /// Check if we're holding back results due to pending rows.
@@ -58,14 +99,24 @@ impl OutputNode {
         self.mode
     }
 
-    /// Take pending deltas (for delta mode).
-    pub fn take_deltas(&mut self) -> Vec<RowDelta> {
-        std::mem::take(&mut self.pending_deltas)
+    /// Take pending tuple deltas (for delta mode).
+    pub fn take_tuple_deltas(&mut self) -> Vec<TupleDelta> {
+        std::mem::take(&mut self.pending_tuple_deltas)
+    }
+
+    /// Get current result as rows (extracts from tuples).
+    /// For single-table queries, converts length-1 tuples to rows.
+    /// Returns rows in insertion order (preserves sort order from upstream nodes).
+    pub fn current_rows(&self) -> Vec<Row> {
+        self.ordered_tuples
+            .iter()
+            .filter_map(|t| t.to_single_row())
+            .collect()
     }
 
     /// Decode current rows to Values (for output to user).
     pub fn decode_current(&self) -> Vec<Vec<Value>> {
-        self.current_rows
+        self.current_rows()
             .iter()
             .filter_map(|row| decode_row(&self.descriptor, &row.data).ok())
             .collect()
@@ -118,19 +169,24 @@ impl RowNode for OutputNode {
         &self.descriptor
     }
 
-    fn process(&mut self, input: RowDelta) -> RowDelta {
-        // Apply changes to current_rows (always update internal state)
-        for row in &input.removed {
-            self.current_rows.retain(|r| r.id != row.id);
+    fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        // Apply changes to current_tuples and ordered_tuples (always update internal state)
+        for tuple in &input.removed {
+            self.current_tuples.remove(tuple);
+            self.ordered_tuples.retain(|t| t != tuple);
         }
 
-        for row in &input.added {
-            self.current_rows.push(row.clone());
+        for tuple in &input.added {
+            self.current_tuples.insert(tuple.clone());
+            self.ordered_tuples.push(tuple.clone());
         }
 
-        for (old_row, new_row) in &input.updated {
-            if let Some(pos) = self.current_rows.iter().position(|r| r.id == old_row.id) {
-                self.current_rows[pos] = new_row.clone();
+        for (old_tuple, new_tuple) in &input.updated {
+            self.current_tuples.remove(old_tuple);
+            self.current_tuples.insert(new_tuple.clone());
+            // Update in place in ordered_tuples to preserve position
+            if let Some(pos) = self.ordered_tuples.iter().position(|t| t == old_tuple) {
+                self.ordered_tuples[pos] = new_tuple.clone();
             }
         }
 
@@ -143,12 +199,16 @@ impl RowNode for OutputNode {
 
             // If subscriber is already initialized, accumulate changes
             if self.subscriber_initialized {
-                self.held_changes.added.extend(input.added.clone());
-                self.held_changes.removed.extend(input.removed.clone());
-                self.held_changes.updated.extend(input.updated.clone());
+                self.held_tuple_changes.added.extend(input.added.clone());
+                self.held_tuple_changes
+                    .removed
+                    .extend(input.removed.clone());
+                self.held_tuple_changes
+                    .updated
+                    .extend(input.updated.clone());
             }
 
-            // Return the input but don't add to pending_deltas
+            // Return the input but don't add to pending_tuple_deltas
             return input;
         }
 
@@ -157,30 +217,33 @@ impl RowNode for OutputNode {
             self.held_pending = false;
 
             if !self.subscriber_initialized {
-                // First time: emit full current_rows as the initial snapshot
+                // First time: emit full current_tuples as the initial snapshot
                 self.subscriber_initialized = true;
 
-                if !self.current_rows.is_empty() {
-                    let snapshot = RowDelta {
-                        added: self.current_rows.clone(),
+                if !self.current_tuples.is_empty() {
+                    let snapshot = TupleDelta {
+                        added: self.current_tuples.iter().cloned().collect(),
                         removed: vec![],
                         updated: vec![],
                         pending: false,
                     };
-                    self.pending_deltas.push(snapshot.clone());
+                    self.pending_tuple_deltas.push(snapshot.clone());
                     return snapshot;
                 }
                 return input;
             } else {
                 // Subsequent pending period: emit only accumulated changes
-                // Merge any final non-pending changes into held_changes
-                self.held_changes.added.extend(input.added.clone());
-                self.held_changes.removed.extend(input.removed.clone());
-                self.held_changes.updated.extend(input.updated.clone());
+                self.held_tuple_changes.added.extend(input.added.clone());
+                self.held_tuple_changes
+                    .removed
+                    .extend(input.removed.clone());
+                self.held_tuple_changes
+                    .updated
+                    .extend(input.updated.clone());
 
-                let result = std::mem::take(&mut self.held_changes);
+                let result = std::mem::take(&mut self.held_tuple_changes);
                 if !result.is_empty() {
-                    self.pending_deltas.push(result.clone());
+                    self.pending_tuple_deltas.push(result.clone());
                 }
                 return result;
             }
@@ -188,16 +251,15 @@ impl RowNode for OutputNode {
 
         // Normal case - not pending, weren't holding back
         self.subscriber_initialized = true;
-        // Store delta for delivery
         if !input.is_empty() {
-            self.pending_deltas.push(input.clone());
+            self.pending_tuple_deltas.push(input.clone());
         }
 
         input
     }
 
-    fn current_result(&self) -> &[Row] {
-        &self.current_rows
+    fn current_tuples(&self) -> &HashSet<Tuple> {
+        &self.current_tuples
     }
 
     fn mark_dirty(&mut self) {
@@ -215,7 +277,7 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement};
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -224,10 +286,18 @@ mod tests {
         ])
     }
 
-    fn make_row(id: ObjectId, n: i32, name: &str) -> Row {
+    fn make_tuple(id: ObjectId, n: i32, name: &str) -> Tuple {
         let descriptor = test_descriptor();
         let data = encode_row(&descriptor, &[Value::Integer(n), Value::Text(name.into())]).unwrap();
-        Row::new(id, data, CommitId([0; 32]))
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: data,
+            commit_id: CommitId([0; 32]),
+        }])
+    }
+
+    fn contains_id(tuples: &[Tuple], id: ObjectId) -> bool {
+        tuples.iter().any(|t| t.ids().contains(&id))
     }
 
     #[test]
@@ -236,18 +306,18 @@ mod tests {
         let mut node = OutputNode::new(descriptor, OutputMode::Delta);
 
         let id1 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
+        let tuple1 = make_tuple(id1, 1, "Alice");
 
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: false,
-            added: vec![row1],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         };
 
         node.process(delta);
 
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
     }
@@ -258,11 +328,11 @@ mod tests {
         let mut node = OutputNode::new(descriptor, OutputMode::Full);
 
         let id1 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
+        let tuple1 = make_tuple(id1, 1, "Alice");
 
-        node.process(RowDelta {
+        node.process(TupleDelta {
             pending: false,
-            added: vec![row1],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         });
@@ -279,7 +349,15 @@ mod tests {
         let node = OutputNode::new(descriptor, OutputMode::Delta);
 
         let id1 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
+        let row1 = Row::new(
+            id1,
+            encode_row(
+                &test_descriptor(),
+                &[Value::Integer(1), Value::Text("Alice".into())],
+            )
+            .unwrap(),
+            CommitId([0; 32]),
+        );
 
         let delta = RowDelta {
             pending: false,
@@ -300,10 +378,10 @@ mod tests {
         let descriptor = test_descriptor();
         let mut node = OutputNode::new(descriptor, OutputMode::Delta);
 
-        let delta = RowDelta::new();
+        let delta = TupleDelta::new();
         node.process(delta);
 
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert!(deltas.is_empty());
     }
 
@@ -313,12 +391,12 @@ mod tests {
         let mut node = OutputNode::new(descriptor, OutputMode::Delta);
 
         let id1 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
+        let tuple1 = make_tuple(id1, 1, "Alice");
 
         // Process delta with pending=true
-        let delta = RowDelta {
+        let delta = TupleDelta {
             pending: true,
-            added: vec![row1.clone()],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         };
@@ -326,11 +404,11 @@ mod tests {
         node.process(delta);
 
         // Internal state should be updated
-        assert_eq!(node.current_result().len(), 1);
+        assert_eq!(node.current_rows().len(), 1);
         assert!(node.is_held_pending());
 
         // But no deltas should be delivered
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert!(deltas.is_empty(), "Should hold back deltas when pending");
     }
 
@@ -341,33 +419,33 @@ mod tests {
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
-        let row2 = make_row(id2, 2, "Bob");
+        let tuple1 = make_tuple(id1, 1, "Alice");
+        let tuple2 = make_tuple(id2, 2, "Bob");
 
         // First delta with pending=true
-        let delta1 = RowDelta {
+        let delta1 = TupleDelta {
             pending: true,
-            added: vec![row1.clone()],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta1);
         assert!(node.is_held_pending());
-        assert!(node.take_deltas().is_empty());
+        assert!(node.take_tuple_deltas().is_empty());
 
-        // Second delta with pending=true (add another row)
-        let delta2 = RowDelta {
+        // Second delta with pending=true (add another tuple)
+        let delta2 = TupleDelta {
             pending: true,
-            added: vec![row2.clone()],
+            added: vec![tuple2],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta2);
         assert!(node.is_held_pending());
-        assert!(node.take_deltas().is_empty());
+        assert!(node.take_tuple_deltas().is_empty());
 
         // Now pending clears
-        let delta3 = RowDelta {
+        let delta3 = TupleDelta {
             pending: false,
             added: vec![],
             removed: vec![],
@@ -379,9 +457,13 @@ mod tests {
         assert!(!node.is_held_pending());
 
         // Should emit full current state as a single delta
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].added.len(), 2, "Should contain all current rows");
+        assert_eq!(
+            deltas[0].added.len(),
+            2,
+            "Should contain all current tuples"
+        );
     }
 
     #[test]
@@ -391,34 +473,34 @@ mod tests {
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
-        let row2 = make_row(id2, 2, "Bob");
+        let tuple1 = make_tuple(id1, 1, "Alice");
+        let tuple2 = make_tuple(id2, 2, "Bob");
 
         // Normal delta (not pending)
-        let delta1 = RowDelta {
+        let delta1 = TupleDelta {
             pending: false,
-            added: vec![row1.clone()],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta1);
 
         // Should deliver immediately
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
 
         // Second normal delta
-        let delta2 = RowDelta {
+        let delta2 = TupleDelta {
             pending: false,
-            added: vec![row2.clone()],
+            added: vec![tuple2],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta2);
 
         // Should also deliver immediately
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
     }
@@ -436,34 +518,34 @@ mod tests {
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
         let id3 = ObjectId::new();
-        let row1 = make_row(id1, 1, "Alice");
-        let row2 = make_row(id2, 2, "Bob");
-        let row3 = make_row(id3, 3, "Charlie");
+        let tuple1 = make_tuple(id1, 1, "Alice");
+        let tuple2 = make_tuple(id2, 2, "Bob");
+        let tuple3 = make_tuple(id3, 3, "Charlie");
 
         // Step 1: Initial pending period
-        let delta1 = RowDelta {
+        let delta1 = TupleDelta {
             pending: true,
-            added: vec![row1.clone()],
+            added: vec![tuple1],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta1);
         assert!(
-            node.take_deltas().is_empty(),
+            node.take_tuple_deltas().is_empty(),
             "Should hold back during initial pending"
         );
 
         // Step 2: Initial pending clears
-        let delta2 = RowDelta {
+        let delta2 = TupleDelta {
             pending: false,
-            added: vec![row2.clone()],
+            added: vec![tuple2],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta2);
 
-        // Should emit full snapshot (both rows)
-        let deltas = node.take_deltas();
+        // Should emit full snapshot (both tuples)
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(
             deltas[0].added.len(),
@@ -472,53 +554,53 @@ mod tests {
         );
 
         // Step 3: Normal update (non-pending)
-        let delta3 = RowDelta {
+        let delta3 = TupleDelta {
             pending: false,
-            added: vec![row3.clone()],
+            added: vec![tuple3],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta3);
 
         // Should deliver incrementally
-        let deltas = node.take_deltas();
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(
             deltas[0].added.len(),
             1,
             "Normal update should be incremental"
         );
-        assert_eq!(deltas[0].added[0].id, id3);
+        assert!(contains_id(&deltas[0].added, id3));
 
         // Step 4: New pending period starts
         let id4 = ObjectId::new();
-        let row4 = make_row(id4, 4, "Dave");
-        let delta4 = RowDelta {
+        let tuple4 = make_tuple(id4, 4, "Dave");
+        let delta4 = TupleDelta {
             pending: true,
-            added: vec![row4.clone()],
+            added: vec![tuple4],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta4);
         assert!(
-            node.take_deltas().is_empty(),
+            node.take_tuple_deltas().is_empty(),
             "Should hold back during second pending"
         );
 
         // Step 5: Second pending clears
         let id5 = ObjectId::new();
-        let row5 = make_row(id5, 5, "Eve");
-        let delta5 = RowDelta {
+        let tuple5 = make_tuple(id5, 5, "Eve");
+        let delta5 = TupleDelta {
             pending: false,
-            added: vec![row5.clone()],
+            added: vec![tuple5],
             removed: vec![],
             updated: vec![],
         };
         node.process(delta5);
 
-        // Should emit ONLY the changes during the pending period (row4, row5)
-        // NOT the full snapshot (which would be all 5 rows)
-        let deltas = node.take_deltas();
+        // Should emit ONLY the changes during the pending period (tuple4, tuple5)
+        // NOT the full snapshot (which would be all 5 tuples)
+        let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(
             deltas[0].added.len(),
@@ -526,13 +608,12 @@ mod tests {
             "Subsequent pending clear should emit only accumulated changes, not full snapshot"
         );
 
-        // Verify we got row4 and row5, not the old rows
-        let added_ids: Vec<_> = deltas[0].added.iter().map(|r| r.id).collect();
-        assert!(added_ids.contains(&id4), "Should contain row4");
-        assert!(added_ids.contains(&id5), "Should contain row5");
+        // Verify we got tuple4 and tuple5, not the old tuples
+        assert!(contains_id(&deltas[0].added, id4), "Should contain tuple4");
+        assert!(contains_id(&deltas[0].added, id5), "Should contain tuple5");
         assert!(
-            !added_ids.contains(&id1),
-            "Should NOT contain row1 (from initial snapshot)"
+            !contains_id(&deltas[0].added, id1),
+            "Should NOT contain tuple1 (from initial snapshot)"
         );
     }
 }
