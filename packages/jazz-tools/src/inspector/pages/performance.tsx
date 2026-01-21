@@ -435,10 +435,10 @@ function usePerformanceEntries(): SubscriptionEntry[] {
 
     const handlePerformanceEntries = (entries: PerformanceEntry[]) => {
       for (const mark of entries) {
-        if (!mark.name.startsWith("jazz.subscription")) continue;
-
         const detail = (mark as PerformanceMark)
           .detail as SubscriptionPerformanceDetail;
+
+        if (detail?.type !== "jazz-subscription") continue;
 
         if (mark.entryType === "mark" && entriesByUuid.has(detail.uuid))
           continue;
@@ -459,7 +459,6 @@ function usePerformanceEntries(): SubscriptionEntry[] {
     };
 
     handlePerformanceEntries(performance.getEntriesByType("mark"));
-
     handlePerformanceEntries(performance.getEntriesByType("measure"));
 
     setEntries(Array.from(entriesByUuid.values()));

@@ -39,10 +39,15 @@ export function createCoValueSubscriptionContext<
       loadingFallback?: React.ReactNode;
       unavailableFallback?: React.ReactNode;
     }>) => {
-      const subscription = useCoValueSubscription(schema, id, {
-        ...options,
-        resolve: resolve,
-      });
+      const subscription = useCoValueSubscription(
+        schema,
+        id,
+        {
+          ...options,
+          resolve: resolve,
+        },
+        "CoValueSubscriptionProvider",
+      );
 
       const loadState = useSubscriptionSelector(subscription, {
         select: (value) => value.$jazz.loadingState,
@@ -104,10 +109,14 @@ export function createAccountSubscriptionContext<
       loadingFallback?: React.ReactNode;
       unavailableFallback?: React.ReactNode;
     }>) => {
-      const subscription = useAccountSubscription(schema, {
-        ...options,
-        resolve: resolve,
-      });
+      const subscription = useAccountSubscription(
+        schema,
+        {
+          ...options,
+          resolve: resolve,
+        },
+        "AccountSubscriptionProvider",
+      );
 
       const loadState = useSubscriptionSelector(subscription, {
         select: (value) => value.$jazz.loadingState,

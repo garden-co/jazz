@@ -438,7 +438,8 @@ export function useCoState<
     Schema,
     id,
     options,
-    "useCoState",
+    // @ts-expect-error
+    `useCoState(${Schema.name}, ${id})`,
   );
   return useSubscriptionSelector(subscription, options);
 }

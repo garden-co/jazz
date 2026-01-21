@@ -171,6 +171,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.performanceSource = source;
 
     const detail: SubscriptionPerformanceDetail = {
+      type: "jazz-subscription",
       uuid: this.performanceUuid,
       id: this.id,
       source,
@@ -215,6 +216,7 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     const detail: SubscriptionPerformanceDetail = {
+      type: "jazz-subscription",
       uuid: this.performanceUuid,
       id: this.id,
       source: this.performanceSource ?? "unknown",
@@ -223,6 +225,14 @@ export class SubscriptionScope<D extends CoValue> {
       startTime: 0, // Will be calculated from measure
       endTime,
       errorType,
+      devtools: {
+        track: "Jazz 🎶",
+        properties: [
+          ["id", this.id],
+          ["source", this.performanceSource ?? "unknown"],
+        ],
+        tooltipText: this.getCreationStackLines(false),
+      },
     };
 
     performance.mark(`jazz.subscription.end:${this.performanceUuid}`, {
@@ -230,11 +240,14 @@ export class SubscriptionScope<D extends CoValue> {
     });
 
     try {
-      performance.measure(`jazz.subscription:${this.performanceUuid}`, {
-        start: `jazz.subscription.start:${this.performanceUuid}`,
-        end: `jazz.subscription.end:${this.performanceUuid}`,
-        detail,
-      });
+      performance.measure(
+        `${detail.source}(${this.id}, ${JSON.stringify(this.resolve)})`,
+        {
+          start: `jazz.subscription.start:${this.performanceUuid}`,
+          end: `jazz.subscription.end:${this.performanceUuid}`,
+          detail,
+        },
+      );
     } catch {
       // Marks may have been cleared
     }
@@ -568,7 +581,7 @@ export class SubscriptionScope<D extends CoValue> {
     return CoValueLoadingState.LOADING;
   }
 
-  private getCreationStackLines() {
+  private getCreationStackLines(fullFrame: boolean = true) {
     const stack = this.callerStack?.stack;
 
     if (!stack) {
@@ -589,6 +602,10 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (creationAppFrame) {
       (result += "Subscription created "), (result += creationAppFrame.trim());
+    }
+
+    if (!fullFrame) {
+      return result;
     }
 
     result += "\nFull subscription creation stack:";
