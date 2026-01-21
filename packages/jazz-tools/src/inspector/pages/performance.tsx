@@ -87,14 +87,20 @@ const RowWrapper = styled("div")`
   position: relative;
   cursor: pointer;
 
-  &:hover {
+  &:hover,
+  &:focus {
     background-color: var(--j-foreground);
+    outline: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--j-primary-color);
+    outline-offset: -2px;
   }
 
   &[data-expanded="true"] {
     background-color: var(--j-foreground);
   }
-
 `;
 
 const TimeBar = styled("div")`
@@ -205,19 +211,34 @@ const DetailPanel = styled("div")`
   border: 1px solid var(--j-border-color);
   border-radius: var(--j-radius-sm);
   overflow-y: auto;
+  position: relative;
 `;
 
-const DetailPanelEmpty = styled("div")`
-  width: 320px;
-  flex-shrink: 0;
+const CloseButton = styled("button")`
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--j-neutral-500);
-  font-size: 0.75rem;
-  background-color: var(--j-foreground);
-  border: 1px solid var(--j-border-color);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: none;
+  border: none;
   border-radius: var(--j-radius-sm);
+  cursor: pointer;
+  color: var(--j-neutral-500);
+
+  &:hover {
+    background-color: var(--j-background);
+    color: var(--j-text-color);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--j-primary-color);
+    outline-offset: -2px;
+  }
 `;
 
 const DetailsGrid = styled("div")`
@@ -567,11 +588,22 @@ function SubscriptionRow({
   barWidth,
   barColor,
 }: SubscriptionRowProps) {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSelect();
+    }
+  };
+
   return (
     <RowWrapper
       className="row-wrapper"
       data-expanded={isSelected}
       onClick={onSelect}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
+      role="button"
+      aria-label={`View details for ${entry.source} ${entry.id}`}
     >
       <Cell>
         <StatusBadge data-status={entry.status}>{entry.source}</StatusBadge>
@@ -617,14 +649,32 @@ function SubscriptionRow({
 interface SubscriptionDetailPanelProps {
   entry: SubscriptionEntry;
   onNavigate: (id: string) => void;
+  onClose: () => void;
 }
 
 function SubscriptionDetailPanel({
   entry,
   onNavigate,
+  onClose,
 }: SubscriptionDetailPanelProps) {
   return (
     <DetailPanel>
+      <CloseButton onClick={onClose} aria-label="Close detail panel">
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 14 14"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M1 1L13 13M1 13L13 1"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+          />
+        </svg>
+      </CloseButton>
       <DetailsGrid>
         <DetailLabel>Source</DetailLabel>
         <DetailValue>
@@ -803,6 +853,7 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
           <SubscriptionDetailPanel
             entry={selectedEntry}
             onNavigate={handleNavigateToCoValue}
+            onClose={() => setSelectedRow(null)}
           />
         ) : null}
       </MainLayout>
