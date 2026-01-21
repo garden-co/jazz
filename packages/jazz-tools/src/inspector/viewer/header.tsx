@@ -51,7 +51,7 @@ export function Header({
           </Tab>
         </TabBar>
       )}
-      {activeTab === "inspector" && (
+      {(activeTab === "inspector" || !activeTab) && (
         <>
           <Breadcrumbs />
           {path.length !== 0 && (
