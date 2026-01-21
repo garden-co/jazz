@@ -527,6 +527,22 @@ fn process(&mut self, inputs: &[&HashSet<ObjectId>]) -> IdDelta;
    - Creates `SourceContext` once at start
    - `collect_id_inputs()` helper gathers inputs for transform nodes
 
+#### Followup 9: End-to-End Sync Integration Tests ✓
+
+Added tests verifying synced updates flow through to query subscription deltas via the full `push_inbox()` → `process_inbox()` → `process()` path.
+
+**Tests:**
+| Test | Description |
+|------|-------------|
+| `sync_inbox_insert_flows_to_subscription_delta` | New row via sync inbox → subscription delta |
+| `sync_inbox_update_flows_to_subscription_delta` | Row update via sync inbox → update delta |
+| `two_peer_sync_insert_reaches_subscription` | Full two-peer flow: Peer A inserts → sync payload → Peer B subscription |
+
+These tests validate the integration between SyncManager and QueryManager, ensuring that:
+1. `push_inbox()` + `process_inbox()` properly triggers `AllObjectUpdate` callbacks
+2. QueryManager's `process()` picks up the updates and settles subscriptions
+3. Subscription deltas are correctly emitted for both inserts and updates
+
 ### Pending Followups
 
 #### Followup 6: `project_row` Should Use Memcpy (Low Priority)
@@ -536,10 +552,6 @@ Currently decodes to `Value` then re-encodes. Should memcpy bytes directly for f
 #### Followup 7: Add `subscribe_full` API (Low Priority)
 
 Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired up to API.
-
-#### Followup 9: End-to-End Sync Integration Tests (Medium Priority)
-
-No tests verify synced updates flow through to query deltas. Need two-peer test with subscription verification.
 
 #### Followup 11: Row Deletion (Medium Priority)
 
