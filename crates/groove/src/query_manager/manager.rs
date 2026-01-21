@@ -1962,4 +1962,294 @@ mod tests {
         assert_eq!(values[0], Value::Text("Alice Updated".into()));
         assert_eq!(values[1], Value::Integer(200));
     }
+
+    // ========================================================================
+    // End-to-End Sync Integration Tests (Followup 9)
+    // ========================================================================
+
+    #[test]
+    fn sync_inbox_insert_flows_to_subscription_delta() {
+        // End-to-end test: sync message → SyncManager inbox → QueryManager subscription
+        // This tests the full path through push_inbox() → process_inbox() → process()
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::{decode_row, encode_row};
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Add a "server" that we'll receive updates from
+        let server_id = ServerId::new();
+        qm.sync_manager_mut().add_server(server_id);
+
+        // Subscribe to all objects for sync updates
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Subscribe to users table
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to initialize (no updates yet)
+        qm.process();
+        let updates = qm.take_updates();
+        assert!(updates.is_empty(), "No updates before sync message");
+
+        // Construct the sync message payload
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let row_data = encode_row(
+            &descriptor,
+            &[Value::Text("SyncedUser".into()), Value::Integer(42)],
+        )
+        .unwrap();
+
+        let commit = Commit {
+            parents: vec![],
+            content: row_data,
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+
+        // Object metadata marking it as a "users" table row
+        let mut obj_metadata = std::collections::HashMap::new();
+        obj_metadata.insert("table".to_string(), "users".to_string());
+
+        // Push the sync message through SyncManager's inbox
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: row_id,
+                metadata: Some(crate::sync_manager::ObjectMetadata {
+                    id: row_id,
+                    metadata: obj_metadata,
+                }),
+                branch_name: ROW_BRANCH.into(),
+                commits: vec![commit],
+            },
+        });
+
+        // Process the inbox (SyncManager level)
+        qm.sync_manager_mut().process_inbox();
+
+        // Process (QueryManager level) - this should pick up the object update
+        qm.process();
+
+        // Verify subscription received the delta
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have one subscription update");
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.added.len(),
+            1,
+            "Delta should contain one added row"
+        );
+
+        // Verify the row contents
+        let row = &updates[0].delta.added[0];
+        let values = decode_row(&descriptor, &row.data).unwrap();
+        assert_eq!(values[0], Value::Text("SyncedUser".into()));
+        assert_eq!(values[1], Value::Integer(42));
+    }
+
+    #[test]
+    fn sync_inbox_update_flows_to_subscription_delta() {
+        // End-to-end test: sync update message → subscription emits update delta
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::{decode_row, encode_row};
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Add a "server"
+        let server_id = ServerId::new();
+        qm.sync_manager_mut().add_server(server_id);
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Insert a row locally first
+        let handle = qm
+            .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        let row_id = handle.row_id;
+        let first_commit_id = handle.row_commit_id;
+
+        // Subscribe to users
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get initial state
+        qm.process();
+        let _ = qm.take_updates(); // Clear initial delta
+
+        // Now simulate receiving an update from sync (as if another peer modified the row)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let updated_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice Updated".into()), Value::Integer(999)],
+        )
+        .unwrap();
+
+        let update_commit = Commit {
+            parents: vec![first_commit_id],
+            content: updated_data,
+            timestamp: 2000,
+            author: row_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+
+        // Push the update through SyncManager inbox
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: row_id,
+                metadata: None, // No metadata needed for existing object
+                branch_name: ROW_BRANCH.into(),
+                commits: vec![update_commit],
+            },
+        });
+
+        // Process both layers
+        qm.sync_manager_mut().process_inbox();
+        qm.process();
+
+        // Verify subscription received update delta
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have one subscription update");
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.updated.len(),
+            1,
+            "Delta should contain one updated row"
+        );
+
+        // Verify the new values
+        let (_old_row, new_row) = &updates[0].delta.updated[0];
+        let values = decode_row(&descriptor, &new_row.data).unwrap();
+        assert_eq!(values[0], Value::Text("Alice Updated".into()));
+        assert_eq!(values[1], Value::Integer(999));
+    }
+
+    #[test]
+    fn two_peer_sync_insert_reaches_subscription() {
+        // Full two-peer test: Peer A inserts → (simulated sync) → Peer B subscription delta
+        // This demonstrates the conceptual flow even though we construct the payload manually
+        use crate::commit::{Commit, StoredState};
+        use crate::object::{BranchName, ObjectState};
+        use crate::query_manager::encoding::decode_row;
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
+        // Create two peers
+        let sync_manager_a = SyncManager::new();
+        let sync_manager_b = SyncManager::new();
+        let schema = test_schema();
+        let mut peer_a = QueryManager::new(sync_manager_a, schema.clone());
+        let mut peer_b = QueryManager::new(sync_manager_b, schema);
+
+        // Peer B subscribes to all objects and sets up query subscription
+        peer_b.sync_manager_mut().object_manager.subscribe_all();
+        let query = peer_b.query("users").build();
+        let sub_id = peer_b.subscribe(query).unwrap();
+
+        // Peer B adds a "server" (representing Peer A)
+        let peer_a_as_server = ServerId::new();
+        peer_b.sync_manager_mut().add_server(peer_a_as_server);
+
+        // Process both to initialize
+        peer_a.process();
+        peer_b.process();
+        let _ = peer_b.take_updates();
+
+        // Peer A inserts a row
+        let handle = peer_a
+            .insert(
+                "users",
+                &[Value::Text("FromPeerA".into()), Value::Integer(123)],
+            )
+            .unwrap();
+        let row_id = handle.row_id;
+
+        // Get the actual commit data from Peer A's ObjectManager
+        // This simulates "what would be sent over the wire"
+        let (row_data, metadata) = {
+            let state = peer_a
+                .sync_manager()
+                .object_manager
+                .get_state(row_id)
+                .unwrap();
+            match state {
+                ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                    let branch = obj.branches.get(&BranchName::new(ROW_BRANCH)).unwrap();
+                    let tip_id = branch.tips.iter().next().unwrap();
+                    let commit = branch.commits.get(tip_id).unwrap();
+                    (commit.content.clone(), obj.metadata.clone())
+                }
+                _ => panic!("Object should be available"),
+            }
+        };
+
+        // Construct the sync payload as it would appear on the wire
+        let commit = Commit {
+            parents: vec![],
+            content: row_data,
+            timestamp: 1000,
+            author: row_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+
+        // Send to Peer B via SyncManager inbox
+        peer_b.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(peer_a_as_server),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: row_id,
+                metadata: Some(crate::sync_manager::ObjectMetadata {
+                    id: row_id,
+                    metadata,
+                }),
+                branch_name: ROW_BRANCH.into(),
+                commits: vec![commit],
+            },
+        });
+
+        // Peer B processes the sync message
+        peer_b.sync_manager_mut().process_inbox();
+        peer_b.process();
+
+        // Verify Peer B's subscription received the row
+        let updates = peer_b.take_updates();
+        assert_eq!(
+            updates.len(),
+            1,
+            "Peer B should have one subscription update"
+        );
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.added.len(),
+            1,
+            "Delta should contain one added row"
+        );
+
+        // Verify the row came from Peer A
+        let row = &updates[0].delta.added[0];
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let values = decode_row(&descriptor, &row.data).unwrap();
+        assert_eq!(values[0], Value::Text("FromPeerA".into()));
+        assert_eq!(values[1], Value::Integer(123));
+    }
 }
