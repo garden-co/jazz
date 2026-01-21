@@ -16,6 +16,8 @@ pub struct MaterializeNode {
     pending_ids: HashSet<ObjectId>,
     /// IDs to check for content updates (row data may have changed).
     updated_ids: HashSet<ObjectId>,
+    /// IDs that were deleted (emit removal delta during settle).
+    deleted_ids: HashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -30,6 +32,7 @@ impl MaterializeNode {
             rows: HashMap::new(),
             pending_ids: HashSet::new(),
             updated_ids: HashSet::new(),
+            deleted_ids: HashSet::new(),
             dirty: true,
         }
     }
@@ -113,6 +116,39 @@ impl MaterializeNode {
         if self.rows.contains_key(&id) {
             self.updated_ids.insert(id);
         }
+    }
+
+    /// Mark an ID as deleted - emit removal delta during next settle.
+    pub fn mark_deleted(&mut self, id: ObjectId) {
+        if self.rows.contains_key(&id) {
+            self.deleted_ids.insert(id);
+        }
+    }
+
+    /// Check deleted IDs and emit removal deltas.
+    /// Returns a RowDelta with rows removed for deleted IDs.
+    pub fn check_deleted_ids(&mut self) -> RowDelta {
+        let mut result = RowDelta::new();
+        let ids_to_remove: Vec<_> = self.deleted_ids.drain().collect();
+
+        for id in ids_to_remove {
+            // Remove from pending and updated
+            self.pending_ids.remove(&id);
+            self.updated_ids.remove(&id);
+
+            // Remove from rows and add to removed delta
+            if let Some(row) = self.rows.remove(&id) {
+                result.removed.push(row);
+            }
+        }
+
+        result.pending = !self.pending_ids.is_empty();
+        result
+    }
+
+    /// Check if there are any deleted IDs pending emission.
+    pub fn has_deleted(&self) -> bool {
+        !self.deleted_ids.is_empty()
     }
 
     /// Check updated IDs for content changes, similar to check_pending.
