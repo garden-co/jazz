@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { CoID, RawCoMap, logger } from "../exports.js";
+import { CoID, RawCoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
 import {
@@ -89,7 +89,7 @@ describe("StorageApiAsync", () => {
         ourName: "test",
         storageName: "test-storage",
       });
-      const id = "non-existent-id";
+      const id = "non-existent-id" as RawCoID;
       const callback = vi.fn();
       const done = vi.fn();
 
@@ -981,7 +981,7 @@ describe("StorageApiAsync", () => {
       // Trigger interruption. We don't await the load immediately to avoid doing
       // DB reads while the transaction is being held open by the barrier.
       const loadDone = new Promise<boolean>((resolve) => {
-        void storage.load("non-existent-id", () => {}, resolve);
+        void storage.load("non-existent-id" as RawCoID, () => {}, resolve);
       });
 
       releaseBarrier();

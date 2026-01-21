@@ -10,7 +10,7 @@ import {
   logger,
 } from "../exports.js";
 import { StoreQueue } from "../queue/StoreQueue.js";
-import { NewContentMessage, type PeerID } from "../sync.js";
+import { NewContentMessage, SessionNewContent, type PeerID } from "../sync.js";
 import {
   CoValueKnownState,
   emptyKnownState,
@@ -28,10 +28,31 @@ import type {
   DBClientInterfaceAsync,
   DBTransactionInterfaceAsync,
   SignatureAfterRow,
+  CoValueRow,
   StoredCoValueRow,
+  SessionRow,
   StoredSessionRow,
 } from "./types.js";
 import { isDeleteSessionID } from "../ids.js";
+import { Signature } from "../crypto/crypto.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
+
+type NewSessionRow = SessionRow & {
+  signatures: Record<number, Signature>;
+};
+
+type NewCoValueRow = CoValueRow & {
+  sessions: Record<SessionID, NewSessionRow>;
+};
+
+type StoredNewCoValueRow = StoredCoValueRow & {
+  sessions: Record<
+    SessionID,
+    StoredSessionRow & {
+      signatures: Record<number, Signature>;
+    }
+  >;
+};
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
@@ -108,7 +129,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   async load(
-    id: string,
+    id: RawCoID,
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
@@ -116,47 +137,26 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   private async loadCoValue(
-    id: string,
+    id: RawCoID,
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
     this.interruptEraser("load");
-    const coValueRow = await this.dbClient.getCoValue(id);
+    const coValueRow = await this.getCoValueRow(id);
 
     if (!coValueRow) {
       done?.(false);
       return;
     }
 
-    const allCoValueSessions = await this.dbClient.getCoValueSessions(
-      coValueRow.rowID,
-    );
-
-    const signaturesBySession = new Map<
-      SessionID,
-      Pick<SignatureAfterRow, "idx" | "signature">[]
-    >();
-
-    let contentStreaming = false;
-
-    await Promise.all(
-      allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.dbClient.getSignatures(
-          sessionRow.rowID,
-          0,
-        );
-
-        if (signatures.length > 0) {
-          contentStreaming = true;
-          signaturesBySession.set(sessionRow.sessionID, signatures);
-        }
-      }),
+    const contentStreaming = Object.values(coValueRow.sessions).some(
+      (sessionRow) => Object.keys(sessionRow.signatures).length > 0,
     );
 
     const knownState = this.knownStates.getKnownState(coValueRow.id);
     knownState.header = true;
 
-    for (const sessionRow of allCoValueSessions) {
+    for (const sessionRow of Object.values(coValueRow.sessions)) {
       setSessionCounter(
         knownState.sessions,
         sessionRow.sessionID,
@@ -172,8 +172,12 @@ export class StorageApiAsync implements StorageAPI {
       contentMessage.expectContentUntil = knownState.sessions;
     }
 
-    for (const sessionRow of allCoValueSessions) {
-      const signatures = signaturesBySession.get(sessionRow.sessionID) || [];
+    for (const sessionRow of Object.values(coValueRow.sessions)) {
+      const signatures = Object.entries(sessionRow.signatures).map(
+        ([idx, signature]) => {
+          return { idx: Number(idx), signature };
+        },
+      );
 
       let idx = 0;
 
@@ -350,9 +354,10 @@ export class StorageApiAsync implements StorageAPI {
     }
 
     const id = msg.id;
-    const storedCoValueRow = await this.getCoValueRow(msg);
+    const storedCoValueRow = await this.getCoValueRow(id);
+    const coValueRow = getUpdatedCoValueRow(storedCoValueRow, msg);
 
-    if (!storedCoValueRow) {
+    if (!coValueRow) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
 
@@ -364,38 +369,30 @@ export class StorageApiAsync implements StorageAPI {
 
     let invalidAssumptions = false;
 
-    for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      await this.dbClient.transaction(async (tx) => {
-        const sessionRow = storedCoValueRow.sessions[sessionID];
+    await this.dbClient.transaction(async (tx) => {
+      const storedCoValueRow = await this.upsertCoValueRow(tx, coValueRow);
+
+      for (const sessionID of Object.keys(
+        coValueRow.newTransactions,
+      ) as SessionID[]) {
+        const { transactions, afterIdx } =
+          coValueRow.newTransactions[sessionID]!;
+        const sessionRow = storedCoValueRow.sessions[sessionID]!;
+
         if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
           await tx.markCoValueAsDeleted(id);
         }
 
-        if (sessionRow) {
-          setSessionCounter(
-            knownState.sessions,
-            sessionRow.sessionID,
-            sessionRow.lastIdx,
-          );
-        }
+        setSessionCounter(knownState.sessions, sessionID, sessionRow.lastIdx);
 
-        const lastIdx = sessionRow?.lastIdx || 0;
-        const after = msg.new[sessionID]?.after || 0;
-
-        if (lastIdx < after) {
-          invalidAssumptions = true;
-        } else {
-          const newLastIdx = await this.putNewTxs(
-            tx,
-            msg,
-            sessionID,
-            sessionRow,
-            storedCoValueRow.id,
-          );
-          setSessionCounter(knownState.sessions, sessionID, newLastIdx);
-        }
-      });
-    }
+        const nextIdx = afterIdx;
+        await Promise.all(
+          transactions.map((newTransaction, i) =>
+            tx.addTransaction(sessionRow.rowID, nextIdx + i, newTransaction),
+          ),
+        );
+      }
+    });
 
     this.inMemoryCoValues.add(id);
 
@@ -409,98 +406,82 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   private async getCoValueRow(
-    msg: NewContentMessage,
-  ): Promise<
-    { id: number; sessions: Record<SessionID, StoredSessionRow> } | undefined
-  > {
-    const id = msg.id;
-    const storedCoValueRowID = await this.dbClient.upsertCoValue(
-      id,
-      msg.header,
-    );
-    if (!storedCoValueRowID) {
+    id: RawCoID,
+  ): Promise<StoredNewCoValueRow | undefined> {
+    const storedCoValueRow = await this.dbClient.getCoValue(id);
+    if (!storedCoValueRow) {
       return undefined;
     }
-    const sessions: Record<SessionID, StoredSessionRow> = {};
-    await this.dbClient.transaction(async (tx) => {
-      const sessionRows = await Promise.all(
-        (Object.keys(msg.new) as SessionID[]).map((sessionID) =>
-          tx.getSingleCoValueSession(storedCoValueRowID, sessionID),
-        ),
-      );
-      for (const sessionRow of sessionRows) {
-        if (sessionRow) {
-          sessions[sessionRow.sessionID] = sessionRow;
+    const { rowID, header } = storedCoValueRow;
+    const allCoValueSessions = (await this.dbClient.getCoValueSessions(
+      rowID,
+    )) as unknown as (StoredSessionRow & {
+      signatures: Record<number, Signature>;
+    })[];
+    const sessions = Object.fromEntries(
+      allCoValueSessions.map((sessionRow) => [
+        sessionRow.sessionID,
+        sessionRow,
+      ]),
+    );
+    await Promise.all(
+      allCoValueSessions.map(async (sessionRow) => {
+        const signatures = await this.dbClient.getSignatures(
+          sessionRow.rowID,
+          0,
+        );
+        sessionRow.signatures = {};
+        for (const signature of signatures) {
+          sessionRow.signatures[signature.idx] = signature.signature;
         }
-      }
-    });
-    return { id: storedCoValueRowID, sessions };
+      }),
+    );
+    return { id, rowID, header, sessions };
   }
 
-  private async putNewTxs(
+  private async upsertCoValueRow(
     tx: DBTransactionInterfaceAsync,
-    msg: NewContentMessage,
-    sessionID: SessionID,
-    sessionRow: StoredSessionRow | undefined,
-    storedCoValueRowID: number,
-  ): Promise<number> {
-    const newTransactions = msg.new[sessionID]?.newTransactions || [];
-    const lastIdx = sessionRow?.lastIdx || 0;
-
-    const actuallyNewOffset = lastIdx - (msg.new[sessionID]?.after || 0);
-
-    const actuallyNewTransactions = newTransactions.slice(actuallyNewOffset);
-
-    if (actuallyNewTransactions.length === 0) {
-      return lastIdx;
-    }
-
-    let bytesSinceLastSignature = sessionRow?.bytesSinceLastSignature || 0;
-    const newTransactionsSize = getNewTransactionsSize(actuallyNewTransactions);
-
-    const newLastIdx = lastIdx + actuallyNewTransactions.length;
-
-    let shouldWriteSignature = false;
-
-    if (exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)) {
-      shouldWriteSignature = true;
-      bytesSinceLastSignature = 0;
-    } else {
-      bytesSinceLastSignature += newTransactionsSize;
-    }
-
-    const nextIdx = lastIdx;
-
-    if (!msg.new[sessionID]) throw new Error("Session ID not found");
-
-    const sessionUpdate = {
-      coValue: storedCoValueRowID,
-      sessionID,
-      lastIdx: newLastIdx,
-      lastSignature: msg.new[sessionID].lastSignature,
-      bytesSinceLastSignature,
-    };
-
-    const sessionRowID: number = await tx.addSessionUpdate({
-      sessionUpdate,
-      sessionRow,
-    });
-
-    if (shouldWriteSignature) {
-      await tx.addSignatureAfter({
-        sessionRowID,
-        idx: newLastIdx - 1,
-        signature: msg.new[sessionID].lastSignature,
-      });
-    }
-
-    await Promise.all(
-      actuallyNewTransactions.map((newTransaction, i) =>
-        tx.addTransaction(sessionRowID, nextIdx + i, newTransaction),
-      ),
+    coValueRow: CoValueUpdate,
+  ): Promise<StoredNewCoValueRow> {
+    const id = coValueRow.updatedCoValueRow.id;
+    const coValueRowID = await this.dbClient.upsertCoValue(
+      id,
+      coValueRow.updatedCoValueRow.header,
     );
+    if (!coValueRowID) {
+      throw new Error("BOOM: Failed to upsert coValue row");
+    }
+    for (const session of Object.values(
+      coValueRow.updatedCoValueRow.sessions,
+    )) {
+      if (session.coValue === Infinity) {
+        session.coValue = coValueRowID;
+      }
+    }
+    for (const session of Object.values(
+      coValueRow.updatedCoValueRow.sessions,
+    )) {
+      const sessionRowID = await tx.addSessionUpdate({
+        sessionUpdate: session,
+        sessionRow:
+          "rowID" in session ? (session as StoredSessionRow) : undefined,
+      });
+      // @ts-expect-error - convert the session into a StoredNewSessionRow
+      session.rowID = sessionRowID;
 
-    return newLastIdx;
+      for (const [idx, signature] of Object.entries(session.signatures)) {
+        await tx.addSignatureAfter({
+          sessionRowID,
+          idx: Number(idx),
+          signature,
+        });
+      }
+    }
+    // @ts-expect-error - convert the sessions into a StoredNewSessionRow
+    return {
+      ...coValueRow.updatedCoValueRow,
+      rowID: coValueRowID,
+    };
   }
 
   deletedValues = new Set<RawCoID>();
@@ -557,4 +538,82 @@ export class StorageApiAsync implements StorageAPI {
     this.inMemoryCoValues.clear();
     return this.storeQueue.close();
   }
+}
+
+type CoValueUpdate = {
+  updatedCoValueRow: NewCoValueRow;
+  newTransactions: Record<
+    SessionID,
+    { transactions: Transaction[]; afterIdx: number }
+  >;
+  invalidAssumptions: boolean;
+};
+
+function getUpdatedCoValueRow(
+  storedCoValueRow: StoredNewCoValueRow | undefined,
+  msg: NewContentMessage,
+): CoValueUpdate | undefined {
+  const header = msg.header ?? storedCoValueRow?.header;
+  if (!header) {
+    return undefined;
+  }
+
+  let invalidAssumptions = false;
+  const sessions: Record<SessionID, NewSessionRow> =
+    storedCoValueRow?.sessions ?? {};
+  const newTransactions: Record<
+    SessionID,
+    { transactions: Transaction[]; afterIdx: number }
+  > = {};
+  for (const [_sessionID, sessionNewContent] of Object.entries(msg.new)) {
+    const sessionID = _sessionID as SessionID;
+    const sessionRow = sessions[sessionID];
+    const lastIdx = sessionRow?.lastIdx || 0;
+    const after = sessionNewContent.after;
+
+    if (lastIdx < after) {
+      invalidAssumptions = true;
+    } else {
+      const actuallyNewOffset = lastIdx - after;
+      const actuallyNewTransactions =
+        sessionNewContent.newTransactions.slice(actuallyNewOffset);
+      const newLastIdx = lastIdx + actuallyNewTransactions.length;
+
+      newTransactions[sessionID] = {
+        transactions: actuallyNewTransactions,
+        afterIdx: lastIdx,
+      };
+
+      const signatures = sessionRow?.signatures ?? {};
+      let bytesSinceLastSignature = sessionRow?.bytesSinceLastSignature || 0;
+      const newTransactionsSize = getNewTransactionsSize(
+        actuallyNewTransactions,
+      );
+      if (
+        exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)
+      ) {
+        signatures[newLastIdx - 1] = sessionNewContent.lastSignature;
+        bytesSinceLastSignature = 0;
+      } else {
+        bytesSinceLastSignature += newTransactionsSize;
+      }
+
+      const updatedSessionRow = {
+        sessionID,
+        lastIdx: newLastIdx,
+        lastSignature: sessionNewContent.lastSignature,
+        bytesSinceLastSignature,
+        signatures,
+        // TODO remove the `coValue` field from the type
+        coValue: storedCoValueRow?.rowID ?? Infinity,
+      };
+      sessions[sessionID] = updatedSessionRow;
+    }
+  }
+  const updatedCoValueRow = {
+    id: msg.id,
+    header,
+    sessions,
+  };
+  return { updatedCoValueRow, newTransactions, invalidAssumptions };
 }
