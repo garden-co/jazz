@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Bound;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -15,7 +16,7 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{IdNode, NodeId, RowNode};
 use super::index::IndexState;
 use super::query::{Condition, Query};
-use super::types::{IdDelta, Row, RowDelta, Schema, TableName};
+use super::types::{IdDelta, Row, RowDelta, RowDescriptor, Schema, TableName};
 
 /// A node in the query graph (type-erased).
 #[derive(Debug)]
@@ -91,6 +92,7 @@ impl QueryGraph {
 
         // Phase 1: Build IndexScan nodes (one per disjunct)
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
+        let mut index_columns: Vec<String> = Vec::new();
 
         for disjunct in &query.disjuncts {
             // Find best index condition for this disjunct
@@ -103,6 +105,8 @@ impl QueryGraph {
                 // No index condition, use "_id" for full scan
                 ("_id".to_string(), ScanCondition::All)
             };
+
+            index_columns.push(scan_column.clone());
 
             let scan_node = IndexScanNode::new(query.table.0.clone(), &scan_column, scan_condition);
             let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
@@ -131,8 +135,9 @@ impl QueryGraph {
 
         let mut phase2_input = materialize_id;
 
-        // Phase 2: Filter node (full predicate)
-        let predicate = query.to_predicate(&descriptor);
+        // Phase 2: Filter node (only if there are remaining conditions not covered by index)
+        // Build remaining predicate - only include conditions not fully handled by index scans
+        let predicate = build_remaining_predicate(query, &index_columns, &descriptor);
         if !matches!(predicate, Predicate::True) {
             let filter_node = FilterNode::new(descriptor.clone(), predicate);
             let filter_id = graph.add_node(GraphNode::Filter(filter_node));
@@ -436,29 +441,66 @@ impl QueryGraph {
     }
 }
 
+/// Build remaining predicate from conditions not covered by index scans.
+/// Returns Predicate::True if all conditions are fully covered.
+fn build_remaining_predicate(
+    query: &Query,
+    index_columns: &[String],
+    descriptor: &RowDescriptor,
+) -> Predicate {
+    // Check if all disjuncts are fully covered by their respective index scans
+    let all_fully_covered = query
+        .disjuncts
+        .iter()
+        .zip(index_columns.iter())
+        .all(|(disjunct, index_col)| disjunct.is_fully_covered_by_index(index_col));
+
+    if all_fully_covered {
+        return Predicate::True;
+    }
+
+    // Build remaining predicates for each disjunct
+    let remaining_predicates: Vec<Predicate> = query
+        .disjuncts
+        .iter()
+        .zip(index_columns.iter())
+        .map(|(disjunct, index_col)| disjunct.remaining_predicate(index_col, descriptor))
+        .filter(|p| !matches!(p, Predicate::True))
+        .collect();
+
+    // If any disjunct needs filtering, we must use the full predicate for correctness
+    // (because we can't tell which disjunct a row came from after union)
+    if remaining_predicates.is_empty() {
+        Predicate::True
+    } else {
+        // Fall back to full predicate for partial coverage cases
+        query.to_predicate(descriptor)
+    }
+}
+
 /// Convert a condition to a scan condition.
 fn condition_to_scan(cond: &Condition) -> ScanCondition {
     match cond {
         Condition::Eq { value, .. } => ScanCondition::Eq(encode_value(value)),
         Condition::Lt { value, .. } => ScanCondition::Range {
-            min: None,
-            max: Some(encode_value(value)),
+            min: Bound::Unbounded,
+            max: Bound::Excluded(encode_value(value)),
         },
         Condition::Le { value, .. } => ScanCondition::Range {
-            min: None,
-            max: Some(encode_value(value)),
+            min: Bound::Unbounded,
+            max: Bound::Included(encode_value(value)),
         },
         Condition::Gt { value, .. } => ScanCondition::Range {
-            min: Some(encode_value(value)),
-            max: None,
+            min: Bound::Excluded(encode_value(value)),
+            max: Bound::Unbounded,
         },
         Condition::Ge { value, .. } => ScanCondition::Range {
-            min: Some(encode_value(value)),
-            max: None,
+            min: Bound::Included(encode_value(value)),
+            max: Bound::Unbounded,
         },
         Condition::Between { min, max, .. } => ScanCondition::Range {
-            min: Some(encode_value(min)),
-            max: Some(encode_value(max)),
+            min: Bound::Included(encode_value(min)),
+            max: Bound::Included(encode_value(max)),
         },
         _ => ScanCondition::All,
     }
@@ -492,8 +534,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: IndexScan -> Materialize -> Filter -> Output
-        assert_eq!(graph.nodes.len(), 4);
+        // Should have: IndexScan -> Materialize -> Output (Filter elided - Eq fully covered)
+        assert_eq!(graph.nodes.len(), 3);
         assert_eq!(graph.index_scan_nodes.len(), 1);
     }
 
@@ -508,8 +550,8 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema).unwrap();
 
-        // Should have: 2x IndexScan -> Union -> Materialize -> Filter -> Output
-        assert_eq!(graph.nodes.len(), 6);
+        // Should have: 2x IndexScan -> Union -> Materialize -> Output (Filter elided)
+        assert_eq!(graph.nodes.len(), 5);
         assert_eq!(graph.index_scan_nodes.len(), 2);
     }
 
@@ -538,5 +580,126 @@ mod tests {
 
         // Should have: IndexScan -> Materialize -> Output
         assert_eq!(graph.nodes.len(), 3);
+    }
+
+    // ========================================================================
+    // FilterNode elision tests
+    // ========================================================================
+
+    fn has_filter_node(graph: &QueryGraph) -> bool {
+        graph
+            .nodes
+            .values()
+            .any(|n| matches!(n, GraphNode::Filter(_)))
+    }
+
+    #[test]
+    fn single_eq_condition_elides_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Eq is fully covered by index scan, no FilterNode needed
+        // Should have: IndexScan -> Materialize -> Output (3 nodes)
+        assert!(
+            !has_filter_node(&graph),
+            "FilterNode should be elided for single Eq condition"
+        );
+        assert_eq!(graph.nodes.len(), 3);
+    }
+
+    #[test]
+    fn single_lt_condition_elides_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_lt("score", Value::Integer(50))
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Lt is fully covered by index scan with Bound::Excluded
+        assert!(
+            !has_filter_node(&graph),
+            "FilterNode should be elided for single Lt condition"
+        );
+        assert_eq!(graph.nodes.len(), 3);
+    }
+
+    #[test]
+    fn single_between_condition_elides_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_between("score", Value::Integer(10), Value::Integer(50))
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Between is fully covered by index scan with inclusive bounds
+        assert!(
+            !has_filter_node(&graph),
+            "FilterNode should be elided for single Between condition"
+        );
+        assert_eq!(graph.nodes.len(), 3);
+    }
+
+    #[test]
+    fn multiple_conditions_different_columns_keeps_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_lt("score", Value::Integer(50))
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Index scan covers score < 50, but name = 'Alice' still needs filtering
+        // Should have: IndexScan -> Materialize -> Filter -> Output (4 nodes)
+        assert!(
+            has_filter_node(&graph),
+            "FilterNode needed for non-indexed condition"
+        );
+        assert_eq!(graph.nodes.len(), 4);
+    }
+
+    #[test]
+    fn non_indexable_condition_keeps_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_ne("score", Value::Integer(50))
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Ne is not index-scannable, uses full scan + filter
+        // Should have: IndexScan -> Materialize -> Filter -> Output (4 nodes)
+        assert!(
+            has_filter_node(&graph),
+            "FilterNode needed for non-indexable condition"
+        );
+        assert_eq!(graph.nodes.len(), 4);
+    }
+
+    #[test]
+    fn or_with_single_conditions_elides_filter() {
+        let schema = test_schema();
+        let query = QueryBuilder::new("users")
+            .filter_eq("score", Value::Integer(50))
+            .or()
+            .filter_eq("score", Value::Integer(100))
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema).unwrap();
+
+        // Each disjunct has one Eq condition fully covered by its index scan
+        // Union combines them, no additional filtering needed
+        // Should have: 2x IndexScan -> Union -> Materialize -> Output (5 nodes)
+        assert!(
+            !has_filter_node(&graph),
+            "FilterNode should be elided when all disjuncts are fully covered"
+        );
+        assert_eq!(graph.nodes.len(), 5);
     }
 }

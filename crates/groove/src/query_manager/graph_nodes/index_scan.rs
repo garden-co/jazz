@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ops::Bound;
 
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
@@ -14,10 +15,10 @@ pub enum ScanCondition {
     All,
     /// Exact match on key.
     Eq(Vec<u8>),
-    /// Range scan with optional bounds (inclusive).
+    /// Range scan with bounds (inclusive, exclusive, or unbounded).
     Range {
-        min: Option<Vec<u8>>,
-        max: Option<Vec<u8>>,
+        min: Bound<Vec<u8>>,
+        max: Bound<Vec<u8>>,
     },
 }
 
@@ -58,10 +59,9 @@ impl IndexScanNode {
         let new_ids: HashSet<ObjectId> = match &self.condition {
             ScanCondition::All => index.scan_all(om).into_iter().collect(),
             ScanCondition::Eq(key) => index.lookup_exact(key, om).into_iter().collect(),
-            ScanCondition::Range { min, max } => index
-                .range_scan(min.as_deref(), max.as_deref(), om)
-                .into_iter()
-                .collect(),
+            ScanCondition::Range { min, max } => {
+                index.range_scan(min, max, om).into_iter().collect()
+            }
         };
 
         let added: HashSet<ObjectId> = new_ids.difference(&self.current_ids).copied().collect();
@@ -160,8 +160,8 @@ mod tests {
             "users",
             "score",
             ScanCondition::Range {
-                min: Some(15i32.to_le_bytes().to_vec()),
-                max: Some(25i32.to_le_bytes().to_vec()),
+                min: Bound::Included(15i32.to_le_bytes().to_vec()),
+                max: Bound::Included(25i32.to_le_bytes().to_vec()),
             },
         );
         let delta = node.scan(&index, &om);

@@ -142,6 +142,36 @@ impl Conjunction {
             .collect()
     }
 
+    /// Check if all conditions are fully covered by index scan on the given column.
+    /// Returns true if the only condition(s) are on the index column and are index-scannable.
+    pub fn is_fully_covered_by_index(&self, index_column: &str) -> bool {
+        if self.conditions.is_empty() {
+            return true;
+        }
+        // All conditions must be on the index column and index-scannable
+        self.conditions
+            .iter()
+            .all(|c| c.column() == index_column && c.is_index_scannable())
+    }
+
+    /// Convert remaining (non-indexed) conditions to a Predicate.
+    /// Returns Predicate::True if all conditions are covered by the index.
+    pub fn remaining_predicate(&self, index_column: &str, descriptor: &RowDescriptor) -> Predicate {
+        let remaining: Vec<_> = self
+            .remaining_conditions(index_column)
+            .into_iter()
+            .filter_map(|c| c.to_predicate(descriptor))
+            .collect();
+
+        if remaining.is_empty() {
+            Predicate::True
+        } else if remaining.len() == 1 {
+            remaining.into_iter().next().unwrap()
+        } else {
+            Predicate::And(remaining)
+        }
+    }
+
     /// Convert to a Predicate.
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Predicate {
         if self.conditions.is_empty() {

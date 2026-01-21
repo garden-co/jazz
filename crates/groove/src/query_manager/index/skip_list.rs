@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ops::Bound;
 
 use uuid::Uuid;
 
@@ -685,13 +686,13 @@ impl IndexState {
         vec![]
     }
 
-    /// Range scan - returns row IDs for keys in [min, max] range.
-    /// Pass None for unbounded.
+    /// Range scan - returns row IDs for keys in the specified range.
+    /// Uses `std::ops::Bound` for inclusive/exclusive/unbounded bounds.
     #[allow(clippy::while_let_loop)]
     pub fn range_scan(
         &self,
-        min: Option<&[u8]>,
-        max: Option<&[u8]>,
+        min: &Bound<Vec<u8>>,
+        max: &Bound<Vec<u8>>,
         om: &ObjectManager,
     ) -> Vec<ObjectId> {
         // If root doesn't exist, return empty
@@ -702,8 +703,13 @@ impl IndexState {
         let mut results = Vec::new();
         let mut current = self.root_id;
 
-        // If min is specified, find start position
-        if let Some(min_key) = min {
+        // If min is bounded, find start position
+        let min_key = match min {
+            Bound::Included(k) | Bound::Excluded(k) => Some(k.as_slice()),
+            Bound::Unbounded => None,
+        };
+
+        if let Some(min_key) = min_key {
             for i in (0..=self.current_level).rev() {
                 loop {
                     let node = match self.get_node(current, om) {
@@ -739,17 +745,31 @@ impl IndexState {
             };
 
             // Check min bound
-            if let Some(min_key) = min
-                && self.compare_keys(next.key(), min_key) == Ordering::Less
-            {
+            let skip = match min {
+                Bound::Included(min_key) => {
+                    self.compare_keys(next.key(), min_key) == Ordering::Less
+                }
+                Bound::Excluded(min_key) => {
+                    self.compare_keys(next.key(), min_key) != Ordering::Greater
+                }
+                Bound::Unbounded => false,
+            };
+            if skip {
                 next_opt = next.forward(0);
                 continue;
             }
 
             // Check max bound
-            if let Some(max_key) = max
-                && self.compare_keys(next.key(), max_key) == Ordering::Greater
-            {
+            let stop = match max {
+                Bound::Included(max_key) => {
+                    self.compare_keys(next.key(), max_key) == Ordering::Greater
+                }
+                Bound::Excluded(max_key) => {
+                    self.compare_keys(next.key(), max_key) != Ordering::Less
+                }
+                Bound::Unbounded => false,
+            };
+            if stop {
                 break;
             }
 
@@ -762,7 +782,7 @@ impl IndexState {
 
     /// Full scan - returns all row IDs in order.
     pub fn scan_all(&self, om: &ObjectManager) -> Vec<ObjectId> {
-        self.range_scan(None, None, om)
+        self.range_scan(&Bound::Unbounded, &Bound::Unbounded, om)
     }
 
     // ========================================================================
@@ -1084,7 +1104,11 @@ mod tests {
         index.insert(&40i32.to_le_bytes(), row4, &mut om).unwrap();
 
         // Range [15, 35] should get 20 and 30
-        let results = index.range_scan(Some(&15i32.to_le_bytes()), Some(&35i32.to_le_bytes()), &om);
+        let results = index.range_scan(
+            &Bound::Included(15i32.to_le_bytes().to_vec()),
+            &Bound::Included(35i32.to_le_bytes().to_vec()),
+            &om,
+        );
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row2));
         assert!(results.contains(&row3));
@@ -1104,7 +1128,11 @@ mod tests {
         index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
 
         // Range [_, 25] should get 10 and 20
-        let results = index.range_scan(None, Some(&25i32.to_le_bytes()), &om);
+        let results = index.range_scan(
+            &Bound::Unbounded,
+            &Bound::Included(25i32.to_le_bytes().to_vec()),
+            &om,
+        );
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row1));
         assert!(results.contains(&row2));
@@ -1124,10 +1152,95 @@ mod tests {
         index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
 
         // Range [15, _] should get 20 and 30
-        let results = index.range_scan(Some(&15i32.to_le_bytes()), None, &om);
+        let results = index.range_scan(
+            &Bound::Included(15i32.to_le_bytes().to_vec()),
+            &Bound::Unbounded,
+            &om,
+        );
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row2));
         assert!(results.contains(&row3));
+    }
+
+    #[test]
+    fn range_scan_exclusive_min() {
+        let mut om = ObjectManager::new();
+        let mut index = IndexState::new("users", "score");
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        let row3 = ObjectId::new();
+
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
+
+        // Range (10, _] - excludes 10, should get 20 and 30
+        let results = index.range_scan(
+            &Bound::Excluded(10i32.to_le_bytes().to_vec()),
+            &Bound::Unbounded,
+            &om,
+        );
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row2));
+        assert!(results.contains(&row3));
+        // Verify 10 is excluded
+        assert!(!results.contains(&row1));
+    }
+
+    #[test]
+    fn range_scan_exclusive_max() {
+        let mut om = ObjectManager::new();
+        let mut index = IndexState::new("users", "score");
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        let row3 = ObjectId::new();
+
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
+
+        // Range [_, 30) - excludes 30, should get 10 and 20
+        let results = index.range_scan(
+            &Bound::Unbounded,
+            &Bound::Excluded(30i32.to_le_bytes().to_vec()),
+            &om,
+        );
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row1));
+        assert!(results.contains(&row2));
+        // Verify 30 is excluded
+        assert!(!results.contains(&row3));
+    }
+
+    #[test]
+    fn range_scan_both_exclusive() {
+        let mut om = ObjectManager::new();
+        let mut index = IndexState::new("users", "score");
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        let row3 = ObjectId::new();
+        let row4 = ObjectId::new();
+
+        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
+        index.insert(&40i32.to_le_bytes(), row4, &mut om).unwrap();
+
+        // Range (10, 40) - excludes both endpoints, should get 20 and 30
+        let results = index.range_scan(
+            &Bound::Excluded(10i32.to_le_bytes().to_vec()),
+            &Bound::Excluded(40i32.to_le_bytes().to_vec()),
+            &om,
+        );
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row2));
+        assert!(results.contains(&row3));
+        // Verify endpoints are excluded
+        assert!(!results.contains(&row1));
+        assert!(!results.contains(&row4));
     }
 
     #[test]
