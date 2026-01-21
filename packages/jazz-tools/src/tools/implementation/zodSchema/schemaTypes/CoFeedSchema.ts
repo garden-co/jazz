@@ -66,16 +66,22 @@ export class CoFeedSchema<
 
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Group } | Group,
+    options?: { owner?: Group; validation?: "strict" | "loose" } | Group,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner?: Account | Group; validation?: "strict" | "loose" }
+      | Account
+      | Group,
   ): CoFeedInstance<T>;
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner?: Account | Group; validation?: "strict" | "loose" }
+      | Account
+      | Group,
   ): CoFeedInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
