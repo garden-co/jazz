@@ -72,13 +72,14 @@ const TimeLabel = styled("span")`
   transition: opacity 0.15s ease;
   pointer-events: none;
   left: 4px;
+  --time-label-overflow-color: black;
 
   @media (prefers-color-scheme: dark) {
-    --time-label-overflow-color: black;
+    --time-label-overflow-color: white;
   }
 
   @container (max-width: 50px) {
-    color: var(--time-label-overflow-color, inherit);
+    color: var(--time-label-overflow-color);
     left: 100%;
     margin-left: 4px;
   }
