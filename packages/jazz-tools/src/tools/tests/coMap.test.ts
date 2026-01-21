@@ -533,8 +533,13 @@ describe("CoMap", async () => {
         age: z.number(),
       });
 
-      // @ts-expect-error - age should be a number
-      expect(() => Person.create({ name: "John", age: "20" })).toThrow();
+      expectValidationError(() =>
+        Person.create({
+          name: "John",
+          // @ts-expect-error - age should be a number
+          age: "20",
+        }),
+      );
     });
 
     it("should not throw when creating with invalid properties with loose validation", () => {
@@ -553,6 +558,22 @@ describe("CoMap", async () => {
           { validation: "loose" },
         ),
       ).not.toThrow();
+    });
+
+    it("should throw when creating with extra properties", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      expectValidationError(() =>
+        Person.create({
+          name: "John",
+          age: 20,
+          // @ts-expect-error - extra is not a valid property
+          extra: "extra",
+        }),
+      );
     });
 
     it("should validate Group schemas", async () => {
@@ -610,8 +631,13 @@ describe("CoMap", async () => {
 
       const john = Person.create({ name: "John", age: 20 });
 
-      // @ts-expect-error - age should be a number
-      expect(() => john.$jazz.set("age", "21")).toThrow();
+      expectValidationError(() =>
+        john.$jazz.set(
+          "age",
+          // @ts-expect-error - age should be a number
+          "21",
+        ),
+      );
 
       expect(john.age).toEqual(20);
     });
@@ -625,8 +651,12 @@ describe("CoMap", async () => {
       const john = Person.create({ name: "John", age: 20 });
 
       expect(() =>
-        // @ts-expect-error - age should be a number
-        john.$jazz.set("age", "21", { validation: "loose" }),
+        john.$jazz.set(
+          "age",
+          // @ts-expect-error - age should be a number
+          "21",
+          { validation: "loose" },
+        ),
       ).not.toThrow();
 
       expect(john.age).toEqual("21");
