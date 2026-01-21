@@ -1,5 +1,36 @@
 # jazz-run
 
+## 0.20.0
+
+### Patch Changes
+
+- Updated dependencies [6b9368a]
+- Updated dependencies [89332d5]
+- Updated dependencies [ee19292]
+- Updated dependencies [f562a1f]
+- Updated dependencies [b5ada4d]
+- Updated dependencies [8934d8a]
+  - cojson@0.20.0
+  - jazz-tools@0.20.0
+  - cojson-storage-sqlite@0.20.0
+  - cojson-transport-ws@0.20.0
+  - jazz-webhook@0.20.0
+
+## 0.19.22
+
+### Patch Changes
+
+- 3b70482: Wait for CoValues' dependencies to be garbage-collected before collecting them. This makes accounts and groups safe to be collected.
+- Updated dependencies [89d8798]
+- Updated dependencies [3b70482]
+- Updated dependencies [30b5339]
+- Updated dependencies [6078ea5]
+  - jazz-tools@0.19.22
+  - cojson@0.19.22
+  - jazz-webhook@0.19.22
+  - cojson-storage-sqlite@0.19.22
+  - cojson-transport-ws@0.19.22
+
 ## 0.19.19
 
 ### Patch Changes

@@ -224,6 +224,43 @@ describe("useCoState", () => {
     });
   });
 
+  it("should return a 'deleted' value when the coValue is deleted", async () => {
+    const TestMap = co.map({
+      value: z.string(),
+    });
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map = TestMap.create(
+      {
+        value: "123",
+      },
+      Group.create(account).makePublic("reader"),
+    );
+
+    const { result } = renderHook(() => useCoState(TestMap, map.$jazz.id), {
+      account,
+    });
+
+    await waitFor(() => {
+      assertLoaded(result.current);
+      expect(result.current.value).toBe("123");
+    });
+
+    console.log("deleting");
+    act(() => {
+      map.$jazz.raw.core.deleteCoValue();
+    });
+
+    await waitFor(() => {
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.DELETED,
+      );
+    });
+  });
+
   it("should return a 'loaded' value if the coValue is shared with everyone", async () => {
     const TestMap = co.map({
       value: z.string(),

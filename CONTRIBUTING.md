@@ -21,7 +21,7 @@ We welcome all ideas! If you have suggestions, feel free to open an issue marked
 
 1. **Fork the repository** and create your feature branch (see [GitHub's guide on forking a repository](https://docs.github.com/en/get-started/quickstart/fork-a-repo) if you're unfamiliar with the process):
 
-2. **Make your changes**, ensuring that you follow our coding standards (`pnpm format` (prettier) and `pnpm lint` (eslint) will automatically let you know there are issues).
+2. **Make your changes**, ensuring that you follow our coding standards (`pnpm format` (Biome) and `pnpm lint` (eslint) will automatically let you know there are issues).
 
 3. **Commit your changes** with a descriptive commit message.
 
@@ -31,7 +31,7 @@ We welcome all ideas! If you have suggestions, feel free to open an issue marked
 
 ### 4. Code Style Guidelines
 
-- We use [Prettier](https://prettier.io/) for formatting. Please ensure your code is formatted before submitting.
+- We use [Biome](https://biomejs.dev/) for formatting. Please ensure your code is formatted before submitting.
 - Write descriptive comments where necessary.
 
 ### 5. Local Setup
@@ -48,30 +48,46 @@ You'll need Node.js 22.x installed (we're working on support for 23.x), and pnpm
    pnpm install
    ```
 
-3. **Install homepage dependencies**:
-
-   ```bash
-   cd homepage && pnpm install
-   ```
-
-4. **Go back to the project root**:
-
-   ```bash
-   cd ..
-   ```
-
-4. **Build the packages**:
+3. **Build the packages**:
 
    ```bash
    pnpm build:packages
    ```
 
-5. **Run tests** to verify everything is working:
+4. **Run tests** to verify everything is working:
    ```bash
    pnpm test
    ```
 
-### 6. Testing
+5. cojson-core Setup (Optional)
+
+If you need to work on the native cojson-core modules (NAPI, WASM, or React Native), you'll need additional dependencies.
+
+**Prerequisites:**
+- Rust (install from https://rustup.rs/). We assume a rustup-managed toolchain for cross-compilation. Other Rust installations are not supported).
+- cmake and ninja (macOS: `brew install cmake ninja`, Linux: `apt-get install cmake ninja-build`)
+- For Android: Android SDK/NDK with `ANDROID_HOME` or `ANDROID_SDK_ROOT` set
+- For iOS: Xcode Command Line Tools (macOS only)
+
+**Run the setup script:**
+```bash
+./scripts/setup-cojson-core.sh
+```
+
+This script will:
+- Verify all prerequisites are installed
+- Add required Rust targets for Android and iOS
+- Install cargo-ndk for Android builds
+
+**Build commands:**
+```bash
+pnpm build:napi     # Build Node.js NAPI bindings
+pnpm build:wasm     # Build WebAssembly module
+pnpm build:rn       # Build React Native native modules
+pnpm build:all-packages  # Build everything including native modules
+```
+
+6. Testing
 
 Please write tests for any new features or bug fixes. We use Vitest for unit tests, and Playwright for e2e tests. Make sure all tests pass before submitting a pull request.
 
@@ -81,7 +97,30 @@ pnpm test
 
 NB: You'll need to run `pnpm exec playwright install` to install the Playwright browsers before first run.
 
-### 7. Communication
+7. Homepage Development
+
+The homepage is built using [Next.js](https://nextjs.org/) and [Tailwind CSS](https://tailwindcss.com/).
+
+1. **Install homepage dependencies**:
+
+   ```bash
+   cd homepage
+   pnpm install
+   ```
+
+2. **Build the homepage packages**:
+
+   ```bash
+   turbo build
+   ```
+
+3. **Run the development server**:
+
+   ```bash
+   pnpm dev
+   ```
+
+8. Communication
 
 - If you're unsure about anything, feel free to ask questions by opening a discussion, reaching out via issues, or on our [Discord](https://discord.gg/utDMjHYg42).
 - Be respectful and constructive, this is a welcoming community for everyone.

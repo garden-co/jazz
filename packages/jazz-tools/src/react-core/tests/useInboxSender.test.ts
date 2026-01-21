@@ -3,10 +3,7 @@
 import { CoMap, Group, Inbox, Loaded, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
-import {
-  experimental_useInboxSender,
-  useJazzContextManager,
-} from "../index.js";
+import { experimental_useInboxSender, useJazzContext } from "../index.js";
 import {
   createJazzTestAccount,
   linkAccounts,
@@ -75,7 +72,7 @@ describe("useInboxSender", () => {
 
     const { result } = renderHook(
       () => {
-        const ctx = useJazzContextManager();
+        const ctx = useJazzContext();
         const send = experimental_useInboxSender(inboxReceiver.$jazz.id);
         return { ctx, send };
       },

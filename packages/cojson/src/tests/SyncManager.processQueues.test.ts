@@ -70,7 +70,7 @@ describe("SyncManager.processQueues", () => {
       await loadCoValueOrFail(client.node, map.id);
 
       // Restart and load from storage
-      client.restart();
+      await client.restart();
       client.connectToSyncServer();
       client.addStorage({ storage });
 

@@ -16,6 +16,7 @@ import {
   emptyKnownState,
   setSessionCounter,
 } from "../knownState.js";
+import { isDeleteSessionID } from "../ids.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -29,15 +30,26 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
 import {
   ContentCallback,
   StorageStreamingQueue,
 } from "../queue/StorageStreamingQueue.js";
 import { getPriorityFromHeader } from "../priority.js";
 
+const MAX_DELETE_SCHEDULE_DURATION_MS = 100;
+
 export class StorageApiSync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceSync;
-  private loadedCoValues = new Set<RawCoID>();
+
+  private deletedCoValuesEraserScheduler:
+    | DeletedCoValuesEraserScheduler
+    | undefined;
+  /**
+   * Keeps track of CoValues that are in memory, to avoid reloading them from storage
+   * when it isn't necessary
+   */
+  private inMemoryCoValues = new Set<RawCoID>();
 
   /**
    * Queue for streaming content that will be pulled by SyncManager.
@@ -138,7 +150,7 @@ export class StorageApiSync implements StorageAPI {
       );
     }
 
-    this.loadedCoValues.add(coValueRow.id);
+    this.inMemoryCoValues.add(coValueRow.id);
 
     const priority = getPriorityFromHeader(coValueRow.header);
     const contentMessage = createContentMessage(
@@ -244,7 +256,7 @@ export class StorageApiSync implements StorageAPI {
     });
   }
 
-  async pushContentWithDependencies(
+  private async pushContentWithDependencies(
     coValueRow: StoredCoValueRow,
     contentMessage: NewContentMessage,
     pushCallback: (data: NewContentMessage) => void,
@@ -255,7 +267,7 @@ export class StorageApiSync implements StorageAPI {
     );
 
     for (const dependedOnCoValue of dependedOnCoValuesList) {
-      if (this.loadedCoValues.has(dependedOnCoValue)) {
+      if (this.inMemoryCoValues.has(dependedOnCoValue)) {
         continue;
       }
 
@@ -325,6 +337,10 @@ export class StorageApiSync implements StorageAPI {
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
       this.dbClient.transaction((tx) => {
+        if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
+          tx.markCoValueAsDeleted(id);
+        }
+
         const sessionRow = tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
@@ -352,6 +368,8 @@ export class StorageApiSync implements StorageAPI {
         }
       });
     }
+
+    this.inMemoryCoValues.add(id);
 
     this.knownStates.handleUpdate(id, knownState);
 
@@ -427,6 +445,51 @@ export class StorageApiSync implements StorageAPI {
     return newLastIdx;
   }
 
+  deletedValues = new Set<RawCoID>();
+
+  markDeleteAsValid(id: RawCoID) {
+    this.deletedValues.add(id);
+
+    if (this.deletedCoValuesEraserScheduler) {
+      this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
+    }
+  }
+
+  async eraseAllDeletedCoValues(): Promise<void> {
+    const ids = this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      this.dbClient.eraseCoValueButKeepTombstone(id);
+    }
+  }
+
+  enableDeletedCoValuesErasure() {
+    if (this.deletedCoValuesEraserScheduler) return;
+    this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
+      run: async () =>
+        this.eraseDeletedCoValuesOnceBudgeted(MAX_DELETE_SCHEDULE_DURATION_MS),
+    });
+    this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
+  }
+
+  private eraseDeletedCoValuesOnceBudgeted(budgetMs?: number) {
+    const startedAt = Date.now();
+    const ids = this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      // Strict time budget for sync storage to avoid blocking.
+      if (budgetMs && Date.now() - startedAt >= budgetMs) {
+        break;
+      }
+
+      this.dbClient.eraseCoValueButKeepTombstone(id);
+    }
+
+    return {
+      hasMore: this.dbClient.getAllCoValuesWaitingForDelete().length > 0,
+    };
+  }
+
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knownStates.waitForSync(id, coValue);
   }
@@ -450,7 +513,13 @@ export class StorageApiSync implements StorageAPI {
     this.dbClient.stopTrackingSyncState(id);
   }
 
+  onCoValueUnmounted(id: RawCoID): void {
+    this.inMemoryCoValues.delete(id);
+  }
+
   close() {
+    this.deletedCoValuesEraserScheduler?.dispose();
+    this.inMemoryCoValues.clear();
     return undefined;
   }
 }

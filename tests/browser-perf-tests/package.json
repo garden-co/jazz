@@ -1,0 +1,37 @@
+{
+  "name": "jazz-stress-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:web sync",
+    "dev:web": "vite",
+    "build": "tsc && vite build",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "preview": "vite preview",
+    "sync": "NODE_OPTIONS='--inspect' jazz-run sync",
+    "bench": "node --experimental-strip-types src/cli/cli.ts"
+  },
+  "dependencies": {
+    "@faker-js/faker": "^9.7.0",
+    "jazz-tools": "workspace:*",
+    "npm-run-all": "^4.1.5",
+    "jazz-run": "workspace:*",
+    "react-router": "^6.16.0",
+    "react-router-dom": "^6.16.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.1",
+    "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.1",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "@vitejs/plugin-react-swc": "^3.10.1",
+    "is-ci": "^3.0.1",
+    "jstat": "^1.9.6",
+    "typescript": "5.6.2",
+    "vite": "^6.3.5"
+  }
+}

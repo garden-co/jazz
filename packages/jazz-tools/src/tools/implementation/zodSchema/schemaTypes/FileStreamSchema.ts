@@ -32,10 +32,14 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   readonly builtin = "FileStream" as const;
   readonly resolveQuery = true as const;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
+   * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(private coValueClass: typeof FileStream) {}
 
@@ -159,7 +163,7 @@ export class FileStreamSchema implements CoreFileStreamSchema {
     permissions: Omit<SchemaPermissions, "onInlineCreate">,
   ): FileStreamSchema {
     const copy = new FileStreamSchema(this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }

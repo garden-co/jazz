@@ -14,7 +14,7 @@ import {
 import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
-import { RawCoID, SessionID, isRawCoID } from "./ids.js";
+import { isDeleteSessionID, RawCoID, SessionID, isRawCoID } from "./ids.js";
 import { LocalNode } from "./localNode.js";
 import { logger } from "./logger.js";
 import { CoValuePriority } from "./priority.js";
@@ -100,6 +100,10 @@ export interface Peer {
   role: "server" | "client";
   priority?: number;
   persistent?: boolean;
+}
+
+function isPersistentServerPeer(peer: Peer | PeerState): boolean {
+  return peer.role === "server" && (peer.persistent ?? false);
 }
 
 export type ServerPeerSelector = (
@@ -209,7 +213,6 @@ export class SyncManager {
       return;
     }
 
-    // TODO: validate
     switch (msg.action) {
       case "load":
         return this.handleLoad(msg, peer);
@@ -261,10 +264,18 @@ export class SyncManager {
 
       peer.combineOptimisticWith(id, coValue.knownState());
     } else if (!peer.toldKnownState.has(id)) {
-      this.trySendToPeer(peer, {
-        action: "known",
-        ...coValue.knownStateWithStreaming(),
-      });
+      if (coValue.isDeleted) {
+        // This way we make the peer believe that we've always ingested all the content they sent, even though we skipped it because the coValue is deleted
+        this.trySendToPeer(
+          peer,
+          coValue.stopSyncingKnownStateMessage(peer.getKnownState(id)),
+        );
+      } else {
+        this.trySendToPeer(peer, {
+          action: "known",
+          ...coValue.knownStateWithStreaming(),
+        });
+      }
     }
 
     peer.trackToldKnownState(id);
@@ -354,7 +365,7 @@ export class SyncManager {
   }
 
   startPeerReconciliation(peer: PeerState) {
-    if (peer.role === "server" && peer.persistent) {
+    if (isPersistentServerPeer(peer)) {
       // Resume syncing unsynced CoValues asynchronously
       this.resumeUnsyncedCoValues().catch((error) => {
         logger.warn("Failed to resume unsynced CoValues:", error);
@@ -525,7 +536,7 @@ export class SyncManager {
 
     const unsubscribeFromKnownStatesUpdates =
       peerState.subscribeToKnownStatesUpdates((id, knownState) => {
-        this.syncState.triggerUpdate(peer.id, id, knownState.value());
+        this.syncState.triggerUpdate(peer, id, knownState.value());
       });
 
     if (!skipReconciliation && peerState.role === "server") {
@@ -711,8 +722,8 @@ export class SyncManager {
 
     peer.combineWith(msg.id, knownStateFrom(msg));
 
-    // The header is a boolean value that tells us if the other peer do have information about the header.
-    // If it's false in this point it means that the coValue is unavailable on the other peer.
+    // The header is a boolean value that tells us if the other peer has information about the header.
+    // If it's false at this point it means that the coValue is unavailable on the other peer.
     const availableOnPeer = peer.getOptimisticKnownState(msg.id)?.header;
 
     if (!availableOnPeer) {
@@ -871,6 +882,8 @@ export class SyncManager {
       new: {},
     };
 
+    let wasAlreadyDeleted = coValue.isDeleted;
+
     /**
      * The coValue is in memory, load the transactions from the content message
      */
@@ -878,6 +891,10 @@ export class SyncManager {
       sessionID,
       newContentForSession,
     ] of getSessionEntriesFromContentMessage(msg)) {
+      if (wasAlreadyDeleted && !isDeleteSessionID(sessionID)) {
+        continue;
+      }
+
       const newTransactions = getNewTransactionsFromContentMessage(
         newContentForSession,
         coValue.knownState(),
@@ -932,12 +949,25 @@ export class SyncManager {
         this.recordTransactionsSize(newTransactions, sourceRole);
       }
 
+      // We reset the new content for the deleted coValue
+      // because we want to store only the delete session/transaction
+      if (!wasAlreadyDeleted && coValue.isDeleted) {
+        wasAlreadyDeleted = true;
+        validNewContent.new = {};
+      }
+
       // The new content for this session has been verified, so we can store it
       validNewContent.new[sessionID] = newContentForSession;
     }
 
     if (peer) {
-      peer.combineWith(msg.id, knownStateFromContent(validNewContent));
+      if (coValue.isDeleted) {
+        // In case of deleted coValues, we combine the known state with the content message
+        // to avoid that clients that don't support deleted coValues try to sync their own content indefinitely
+        peer.combineWith(msg.id, knownStateFromContent(msg));
+      } else {
+        peer.combineWith(msg.id, knownStateFromContent(validNewContent));
+      }
     }
 
     /**
@@ -969,10 +999,18 @@ export class SyncManager {
        * This way the sender knows that the content has been received and applied
        * and can update their peer's knownState accordingly.
        */
-      this.trySendToPeer(peer, {
-        action: "known",
-        ...coValue.knownState(),
-      });
+      if (coValue.isDeleted) {
+        // This way we make the peer believe that we've ingested all the content, even though we skipped it because the coValue is deleted
+        this.trySendToPeer(
+          peer,
+          coValue.stopSyncingKnownStateMessage(peer.getKnownState(msg.id)),
+        );
+      } else {
+        this.trySendToPeer(peer, {
+          action: "known",
+          ...coValue.knownState(),
+        });
+      }
       peer.trackToldKnownState(msg.id);
     }
 
@@ -1076,6 +1114,18 @@ export class SyncManager {
     const isSyncRequired = this.local.syncWhen !== "never";
     if (isSyncRequired && peers.length === 0) {
       this.unsyncedTracker.add(coValueId);
+
+      // Mark CoValue as synced once a persistent server peer is added and
+      // the CoValue is synced
+      const unsubscribe = this.syncState.subscribeToCoValueUpdates(
+        coValueId,
+        (peer, _knownState, syncState) => {
+          if (isPersistentServerPeer(peer) && syncState.uploaded) {
+            this.unsyncedTracker.remove(coValueId);
+            unsubscribe();
+          }
+        },
+      );
       return;
     }
 
@@ -1108,6 +1158,12 @@ export class SyncManager {
 
     const value = this.local.getCoValue(content.id);
 
+    if (value.isDeleted) {
+      // This doesn't persist the delete flag, it only signals the storage
+      // API that the delete transaction is valid
+      storage.markDeleteAsValid(value.id);
+    }
+
     // Try to store the content as-is for performance
     // In case that some transactions are missing, a correction will be requested, but it's an edge case
     storage.store(content, (correction) => {
@@ -1126,6 +1182,19 @@ export class SyncManager {
 
       return value.newContentSince(correction);
     });
+  }
+
+  /**
+   * Returns true if the local CoValue changes have been synced to all persistent server peers.
+   *
+   * Used during garbage collection to determine if the coValue is pending sync.
+   */
+  isSyncedToServerPeers(id: RawCoID): boolean {
+    // If there are currently no server peers, go ahead with GC.
+    // The CoValue will be reloaded into memory and synced when a peer is added.
+    return this.getPersistentServerPeers(id).every((peer) =>
+      this.syncState.isSynced(peer, id),
+    );
   }
 
   waitForSyncWithPeer(peerId: PeerID, id: RawCoID, timeout: number) {

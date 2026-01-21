@@ -35,13 +35,6 @@ export function ChatScreen(props: { chatID: string }) {
 
   const messages = useCoStates(Message, messageIds);
 
-  // The initial messages should be loaded all at once, so we can avoid flickering
-  if (
-    messages.slice(0, INITIAL_MESSAGES_TO_SHOW).some((msg) => !msg.$isLoaded)
-  ) {
-    return null;
-  }
-
   const sendImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
 

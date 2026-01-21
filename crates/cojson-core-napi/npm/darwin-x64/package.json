@@ -1,6 +1,6 @@
 {
   "name": "cojson-core-napi-darwin-x64",
-  "version": "0.19.20",
+  "version": "0.20.0",
   "cpu": [
     "x64"
   ],

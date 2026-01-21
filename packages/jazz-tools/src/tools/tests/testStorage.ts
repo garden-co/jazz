@@ -50,8 +50,8 @@ export async function createAsyncStorage({ filename }: { filename?: string }) {
     new LibSQLSqliteAsyncDriver(getDbPath(filename)),
   );
 
-  onTestFinished(() => {
-    storage.close();
+  onTestFinished(async () => {
+    await storage.close();
   });
 
   return storage;

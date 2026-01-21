@@ -77,6 +77,7 @@ import { emptyKnownState } from "./knownState.js";
 import {
   getContentMessageSize,
   getTransactionSize,
+  knownStateFromContent,
 } from "./coValueContentMessage.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
@@ -102,6 +103,7 @@ type Value = JsonValue | AnyRawCoValue;
 export { PriorityBasedMessageQueue } from "./queue/PriorityBasedMessageQueue.js";
 /** @hidden */
 export const cojsonInternals = {
+  knownStateFromContent,
   connectedPeers,
   rawCoIDtoBytes,
   rawCoIDfromBytes,
@@ -206,6 +208,7 @@ export type {
 };
 
 export * from "./storage/index.js";
+export * from "./CojsonMessageChannel/index.js";
 
 // biome-ignore format: off
 // eslint-disable-next-line @typescript-eslint/no-namespace

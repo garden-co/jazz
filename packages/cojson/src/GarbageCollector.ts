@@ -2,13 +2,13 @@ import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { GARBAGE_COLLECTOR_CONFIG } from "./config.js";
 import { RawCoID } from "./ids.js";
 
+/**
+ * TTL-based garbage collector for removing unused CoValues from memory.
+ */
 export class GarbageCollector {
   private readonly interval: ReturnType<typeof setInterval>;
 
-  constructor(
-    private readonly coValues: Map<RawCoID, CoValueCore>,
-    private readonly garbageCollectGroups: boolean,
-  ) {
+  constructor(private readonly coValues: Map<RawCoID, CoValueCore>) {
     this.interval = setInterval(() => {
       this.collect();
     }, GARBAGE_COLLECTOR_CONFIG.INTERVAL);
@@ -36,7 +36,7 @@ export class GarbageCollector {
       const timeSinceLastAccessed = currentTime - verified.lastAccessed;
 
       if (timeSinceLastAccessed > GARBAGE_COLLECTOR_CONFIG.MAX_AGE) {
-        coValue.unmount(this.garbageCollectGroups);
+        coValue.unmount();
       }
     }
   }

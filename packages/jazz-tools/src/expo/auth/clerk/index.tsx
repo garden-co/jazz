@@ -6,7 +6,10 @@ import {
   CoValueFromRaw,
   KvStoreContext,
 } from "jazz-tools";
-import { useAuthSecretStorage, useJazzContext } from "jazz-tools/react-core";
+import {
+  useAuthSecretStorage,
+  useJazzContextValue,
+} from "jazz-tools/react-core";
 import { JazzProviderProps } from "jazz-tools/react-native-core";
 import React from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -14,7 +17,7 @@ import { JazzExpoProvider } from "../../provider.js";
 import { ExpoSecureStoreAdapter } from "../../storage/expo-secure-store-adapter.js";
 
 function useJazzClerkAuth(clerk: MinimalClerkClient) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
   const authSecretStorage = useAuthSecretStorage();
 
   if ("guest" in context) {

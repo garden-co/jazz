@@ -11,7 +11,8 @@ import {
   setupTestNode,
   waitFor,
 } from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { Stringified } from "../jsonStringify";
+import { JsonValue } from "../jsonValue";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -325,7 +326,9 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
 
     msg.new[mesh.edgeFrance.node.currentSessionID]!.newTransactions.push({
       privacy: "trusting",
-      changes: stableStringify([{ op: "set", key: "hello", value: "updated" }]),
+      changes: JSON.stringify([
+        { op: "set", key: "hello", value: "updated" },
+      ]) as Stringified<JsonValue[]>,
       madeAt: Date.now(),
     });
 
@@ -506,7 +509,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       ]
     `);
 
-    edge.restart();
+    await edge.restart();
 
     edge.connectToSyncServer({
       syncServerName: "core",
