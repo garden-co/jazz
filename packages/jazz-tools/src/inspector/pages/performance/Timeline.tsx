@@ -65,7 +65,6 @@ const TimelineBars = styled("div")`
 
 const TimelineBar = styled("div")`
   position: absolute;
-  height: 6px;
   border-radius: 1px;
   min-width: 2px;
 `;
@@ -162,16 +161,21 @@ export function Timeline({
     const markers: { time: number; label: string; position: number }[] = [];
     if (duration <= 0) return markers;
 
-    // Determine appropriate interval based on duration
-    let interval: number;
-    if (duration <= 100) interval = 10;
-    else if (duration <= 500) interval = 50;
-    else if (duration <= 1000) interval = 100;
-    else if (duration <= 5000) interval = 500;
-    else if (duration <= 10000) interval = 1000;
-    else if (duration <= 50000) interval = 5000;
-    else if (duration <= 100000) interval = 10000;
-    else interval = 30000;
+    const maxMarkers = 5;
+
+    // Calculate minimum interval to have at most maxMarkers
+    const minInterval = duration / maxMarkers;
+
+    // Round up to a "nice" number (1, 2, 5, 10, 20, 50, 100, ...)
+    const magnitude = Math.pow(10, Math.floor(Math.log10(minInterval)));
+    const normalized = minInterval / magnitude;
+    let niceMultiplier: number;
+    if (normalized <= 1) niceMultiplier = 1;
+    else if (normalized <= 2) niceMultiplier = 2;
+    else if (normalized <= 5) niceMultiplier = 5;
+    else niceMultiplier = 10;
+
+    const interval = niceMultiplier * magnitude;
 
     const startMarker = Math.ceil(timeRange.min / interval) * interval;
     for (let time = startMarker; time <= timeRange.max; time += interval) {
@@ -320,6 +324,46 @@ export function Timeline({
     onSelectionChange,
   ]);
 
+  // Pre-calculate lane assignments to avoid overlaps
+  const laneAssignments = useMemo(() => {
+    const now = performance.now();
+    const barHeight = 3;
+    const barGap = 1;
+    const maxLanes = 8;
+
+    // Sort entries by start time for lane assignment
+    const sortedEntries = [...entries].sort(
+      (a, b) => a.startTime - b.startTime,
+    );
+
+    // Track end times for each lane (up to maxLanes)
+    const laneEndTimes: number[] = Array(maxLanes).fill(0);
+    const assignments = new Map<string, number>();
+
+    for (const entry of sortedEntries) {
+      const entryEnd = entry.endTime ?? now;
+
+      // Find the first lane where this entry fits (no overlap)
+      let assignedLane = laneEndTimes.findIndex(
+        (endTime) => entry.startTime >= endTime,
+      );
+
+      if (assignedLane === -1) {
+        // All lanes are occupied, find the one that ends earliest
+        const earliestEnd = Math.min(...laneEndTimes);
+        assignedLane = laneEndTimes.indexOf(earliestEnd);
+      }
+
+      // Update the lane's end time
+      laneEndTimes[assignedLane] = entryEnd;
+
+      // Calculate top position
+      assignments.set(entry.uuid, assignedLane * (barHeight + barGap));
+    }
+
+    return assignments;
+  }, [entries]);
+
   const getBarStyle = (entry: SubscriptionEntry): CSSProperties => {
     const now = performance.now();
     const start = entry.startTime;
@@ -334,11 +378,14 @@ export function Timeline({
           ? "var(--j-error-color)"
           : "var(--j-success-color)";
 
+    const top = laneAssignments.get(entry.uuid) ?? 0;
+
     return {
       left: `${left}%`,
       width: `${width}%`,
       backgroundColor: color,
-      top: `${4 + (entries.indexOf(entry) % 4) * 7}px`,
+      top: `${top}px`,
+      height: "3px",
     };
   };
 
