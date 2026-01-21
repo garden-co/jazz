@@ -1,5 +1,17 @@
 # cojson
 
+## 0.20.1
+
+### Patch Changes
+
+- 03195eb: Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently.
+
+  When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
+
+  - cojson-core-wasm@0.20.1
+  - cojson-core-rn@0.20.1
+  - cojson-core-napi@0.20.1
+
 ## 0.20.0
 
 ### Minor Changes
