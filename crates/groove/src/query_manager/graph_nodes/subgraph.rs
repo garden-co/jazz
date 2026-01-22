@@ -249,7 +249,8 @@ impl SubgraphBuilder {
     /// Build the SubgraphTemplate.
     pub fn build(self, schema: &Schema) -> Option<SubgraphTemplate> {
         let table_name = crate::query_manager::types::TableName::new(&self.table);
-        let descriptor = schema.get(&table_name)?.clone();
+        let table_schema = schema.get(&table_name)?;
+        let descriptor = table_schema.descriptor.clone();
 
         // Build base query
         let mut query_builder = QueryBuilder::new(&self.table);
@@ -313,14 +314,16 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("users"),
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema
     }

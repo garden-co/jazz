@@ -1134,3 +1134,98 @@ Currently decodes to `Value` then re-encodes. Should memcpy bytes directly for f
 #### Followup 7: Add `subscribe_full` API (Low Priority)
 
 Only delta-mode subscriptions exposed. `OutputMode::Full` exists but isn't wired up to API.
+
+#### Followup 13: ReBAC Policy Evaluation Gaps
+
+The async permission evaluation system (ReBAC via Policy Graphs) is implemented but has several gaps:
+
+**High Priority (Security Gaps):**
+
+1. ~~**EXISTS clause evaluation not implemented** (`manager.rs:1398`)~~ ✅ DONE
+   - EXISTS clauses now properly create and settle policy graphs
+   - Test: `rebac_tests::rebac_exists_clause_denies_non_matching_insert`
+   - Test: `rebac_tests::rebac_update_denied_by_using_exists_policy`
+
+2. ~~**UPDATE USING check not implemented**~~ ✅ DONE
+   - UPDATE now evaluates both USING (against old row) and WITH CHECK (against new row)
+   - Implemented via `evaluate_update_permission()` in `manager.rs`
+   - Complex clauses (INHERITS/EXISTS) in USING are properly evaluated
+   - Test: `rebac_tests::rebac_update_denied_by_using_policy`
+
+**Medium Priority:**
+
+3. ~~**INHERITS in PolicyFilterNode stubbed**~~ ✅ DONE
+   - PolicyFilterNode now properly evaluates INHERITS using PolicyGraph
+   - Added `process_with_context()` method for INHERITS evaluation in settlement
+   - Self-referential INHERITS disallowed (returns false, cycle detection at schema load)
+   - Dirty tracking: PolicyFilter nodes marked dirty when INHERITS-referenced tables change
+   - Cycle detection: `validate_no_inherits_cycles()` added to types.rs
+   - Test: `rebac_tests::rebac_inherits_filters_select_query_results` (passing)
+   - Test: `rebac_tests::rebac_inherits_cycle_detection` (passing)
+   - Test: `rebac_tests::rebac_inherits_self_reference_detection` (passing)
+   - Test: `rebac_tests::rebac_inherits_no_cycle_passes` (passing)
+
+4. **UUID format mismatch in session claims** (`policy.rs:534-536`)
+   - Uses `format!("{:?}", id)` (Debug format) for UUID comparison
+   - Session claims are JSON strings which may use different format
+   - May cause false negatives in `IN` checks with UUID arrays
+
+5. **NOT(complex_clause) semantics unclear** (`policy.rs:734-746`)
+   - When policy contains `NOT(INHERITS(...))`, the inversion logic is unclear
+   - Returns complex clauses with `passed: true` but meaning of NOT inversion is ambiguous
+   - Needs documentation or semantic fix
+
+**Low Priority (Code Quality):**
+
+6. ~~**Unused `table_name` field**~~ ✅ FIXED
+   - `PolicyFilterNode.table_name` now used for self-INHERITS detection
+
+#### Followup 14: Self-Referential INHERITS Support
+
+Self-referential INHERITS (e.g., folders with `parent_id` referencing the same `folders` table) is currently disallowed for safety. This is a common pattern for hierarchical data with inherited permissions.
+
+**Current Behavior:**
+- `policy_filter.rs:270`: Returns `false` when INHERITS references same table
+- `types.rs:validate_no_inherits_cycles()`: Detects self-reference as a cycle
+
+**Implementation Approach:**
+
+1. **Iterative Settlement with Depth Limit**
+   - Walk up the parent chain iteratively (not recursively via PolicyGraph)
+   - Check each parent row against the policy directly
+   - Stop at depth limit (e.g., 32) or NULL parent_id
+   - Track visited ObjectIds to detect runtime cycles
+
+2. **Example Policy:**
+   ```
+   -- Folders: user can see folder if they own it OR can see parent folder
+   SELECT policy: owner_id = @user_id OR INHERITS SELECT VIA parent_id
+   ```
+
+3. **Algorithm:**
+   ```rust
+   fn evaluate_self_inherits(row, depth) -> bool {
+       if depth >= 32 { return false; }
+
+       let parent_id = row.get("parent_id");
+       if parent_id.is_null() { return true; }  // Root folder, chain ends
+
+       let parent_row = load_row(parent_id)?;
+
+       // Evaluate non-INHERITS parts of policy against parent
+       if evaluate_simple_policy(parent_row) { return true; }
+
+       // Recurse up the chain
+       evaluate_self_inherits(parent_row, depth + 1)
+   }
+   ```
+
+4. **Considerations:**
+   - Runtime cycle detection via visited set (handles data cycles, not schema cycles)
+   - Caching: Parent policy results could be memoized across sibling evaluations
+   - Performance: Deep hierarchies may be slow; consider materialized path optimization
+
+**Tests to Add:**
+- `rebac_inherits_self_reference_allowed` - Basic self-referential INHERITS
+- `rebac_inherits_deep_hierarchy` - Deep folder hierarchy (depth limit)
+- `rebac_inherits_runtime_cycle` - Data cycle (A→B→A in parent_id)

@@ -165,8 +165,265 @@ impl RowDescriptor {
     }
 }
 
-/// Schema mapping table names to their row descriptors.
-pub type Schema = HashMap<TableName, RowDescriptor>;
+use super::policy::PolicyExpr;
+
+/// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
+#[derive(Debug, Clone, Default)]
+pub struct OperationPolicy {
+    /// USING clause - filters rows for SELECT/UPDATE/DELETE.
+    /// For SELECT: rows not matching are silently filtered out.
+    /// For UPDATE/DELETE: rows not matching cannot be modified.
+    pub using: Option<PolicyExpr>,
+    /// WITH CHECK clause - validates new row data for INSERT/UPDATE.
+    /// For INSERT: new row must satisfy this expression.
+    /// For UPDATE: updated row must satisfy this expression.
+    pub with_check: Option<PolicyExpr>,
+}
+
+impl OperationPolicy {
+    /// Create a policy with just a USING clause.
+    pub fn using(expr: PolicyExpr) -> Self {
+        Self {
+            using: Some(expr),
+            with_check: None,
+        }
+    }
+
+    /// Create a policy with just a WITH CHECK clause.
+    pub fn with_check(expr: PolicyExpr) -> Self {
+        Self {
+            using: None,
+            with_check: Some(expr),
+        }
+    }
+
+    /// Create a policy with both USING and WITH CHECK clauses.
+    pub fn using_and_check(using: PolicyExpr, check: PolicyExpr) -> Self {
+        Self {
+            using: Some(using),
+            with_check: Some(check),
+        }
+    }
+}
+
+/// Policies for all operations on a table.
+#[derive(Debug, Clone, Default)]
+pub struct TablePolicies {
+    pub select: OperationPolicy,
+    pub insert: OperationPolicy,
+    pub update: OperationPolicy,
+    pub delete: OperationPolicy,
+}
+
+impl TablePolicies {
+    /// Create empty policies (allow all by default).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the SELECT policy (USING only).
+    pub fn with_select(mut self, using: PolicyExpr) -> Self {
+        self.select = OperationPolicy::using(using);
+        self
+    }
+
+    /// Set the INSERT policy (WITH CHECK only).
+    pub fn with_insert(mut self, with_check: PolicyExpr) -> Self {
+        self.insert = OperationPolicy::with_check(with_check);
+        self
+    }
+
+    /// Set the UPDATE policy (USING and/or WITH CHECK).
+    pub fn with_update(mut self, using: Option<PolicyExpr>, with_check: PolicyExpr) -> Self {
+        self.update = OperationPolicy {
+            using,
+            with_check: Some(with_check),
+        };
+        self
+    }
+
+    /// Set the DELETE policy (USING only).
+    /// If not set, defaults to UPDATE's USING policy.
+    pub fn with_delete(mut self, using: PolicyExpr) -> Self {
+        self.delete = OperationPolicy::using(using);
+        self
+    }
+
+    /// Get the effective DELETE USING policy.
+    /// Falls back to UPDATE's USING if DELETE has none.
+    pub fn effective_delete_using(&self) -> Option<&PolicyExpr> {
+        self.delete.using.as_ref().or(self.update.using.as_ref())
+    }
+}
+
+/// Schema for a single table, including row structure and policies.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    /// Row structure definition.
+    pub descriptor: RowDescriptor,
+    /// Access control policies.
+    pub policies: TablePolicies,
+}
+
+impl TableSchema {
+    /// Create a new table schema with no policies (allow all).
+    pub fn new(descriptor: RowDescriptor) -> Self {
+        Self {
+            descriptor,
+            policies: TablePolicies::default(),
+        }
+    }
+
+    /// Create a table schema with policies.
+    pub fn with_policies(descriptor: RowDescriptor, policies: TablePolicies) -> Self {
+        Self {
+            descriptor,
+            policies,
+        }
+    }
+}
+
+impl From<RowDescriptor> for TableSchema {
+    fn from(descriptor: RowDescriptor) -> Self {
+        Self::new(descriptor)
+    }
+}
+
+/// Schema mapping table names to their table schemas.
+pub type Schema = HashMap<TableName, TableSchema>;
+
+/// Validate that no INHERITS cycles exist in the schema.
+///
+/// Cycles include: A→A (self-reference), A→B→A (direct cycle), A→B→C→A (indirect cycle).
+/// Cycles in INHERITS can cause infinite loops during policy evaluation.
+///
+/// Returns Ok(()) if no cycles found, Err with a description of the cycle otherwise.
+pub fn validate_no_inherits_cycles(schema: &Schema) -> Result<(), String> {
+    use super::policy::Operation;
+
+    for (table_name, table_schema) in schema {
+        // Check all policies that might have INHERITS
+        let policies_to_check = [
+            (&table_schema.policies.select.using, Operation::Select),
+            (&table_schema.policies.update.using, Operation::Update),
+        ];
+
+        for (policy_opt, _operation) in policies_to_check.iter() {
+            if let Some(policy) = policy_opt {
+                let mut visited = HashSet::new();
+                visited.insert(table_name.clone());
+                validate_policy_no_cycles(
+                    table_name,
+                    policy,
+                    &table_schema.descriptor,
+                    schema,
+                    &mut visited,
+                )?;
+            }
+        }
+
+        // Also check DELETE's effective policy (falls back to UPDATE)
+        if let Some(policy) = table_schema.policies.effective_delete_using() {
+            let mut visited = HashSet::new();
+            visited.insert(table_name.clone());
+            validate_policy_no_cycles(
+                table_name,
+                policy,
+                &table_schema.descriptor,
+                schema,
+                &mut visited,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively validate that a policy expression has no INHERITS cycles.
+fn validate_policy_no_cycles(
+    current_table: &TableName,
+    policy: &PolicyExpr,
+    descriptor: &RowDescriptor,
+    schema: &Schema,
+    visited: &mut HashSet<TableName>,
+) -> Result<(), String> {
+    use super::policy::PolicyExpr;
+
+    match policy {
+        PolicyExpr::Inherits {
+            via_column,
+            operation,
+        } => {
+            // Get target table from FK column
+            let col_idx = descriptor.column_index(via_column).ok_or_else(|| {
+                format!(
+                    "INHERITS via_column '{}' not found in table '{}'",
+                    via_column, current_table.0
+                )
+            })?;
+
+            let target_table =
+                descriptor.columns[col_idx]
+                    .references
+                    .as_ref()
+                    .ok_or_else(|| {
+                        format!(
+                            "INHERITS via_column '{}' in table '{}' has no FK reference",
+                            via_column, current_table.0
+                        )
+                    })?;
+
+            // Cycle check
+            if visited.contains(target_table) {
+                let path: Vec<_> = visited.iter().map(|t| t.0.as_str()).collect();
+                return Err(format!(
+                    "INHERITS cycle detected: {} → {} (path: {})",
+                    current_table.0,
+                    target_table.0,
+                    path.join(" → ")
+                ));
+            }
+
+            // Recurse into target table's policy
+            if let Some(target_schema) = schema.get(target_table) {
+                let target_policy = match operation {
+                    super::policy::Operation::Select => {
+                        target_schema.policies.select.using.as_ref()
+                    }
+                    super::policy::Operation::Update => {
+                        target_schema.policies.update.using.as_ref()
+                    }
+                    super::policy::Operation::Delete => {
+                        target_schema.policies.effective_delete_using()
+                    }
+                    super::policy::Operation::Insert => {
+                        target_schema.policies.insert.with_check.as_ref()
+                    }
+                };
+                if let Some(p) = target_policy {
+                    visited.insert(target_table.clone());
+                    validate_policy_no_cycles(
+                        target_table,
+                        p,
+                        &target_schema.descriptor,
+                        schema,
+                        visited,
+                    )?;
+                    visited.remove(target_table);
+                }
+            }
+        }
+        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+            for e in exprs {
+                validate_policy_no_cycles(current_table, e, descriptor, schema, visited)?;
+            }
+        }
+        PolicyExpr::Not(inner) => {
+            validate_policy_no_cycles(current_table, inner, descriptor, schema, visited)?;
+        }
+        _ => {} // Simple expressions don't have cycles
+    }
+    Ok(())
+}
 
 /// Value type for API boundary (insert input, query output).
 /// Internally, rows are stored as binary.

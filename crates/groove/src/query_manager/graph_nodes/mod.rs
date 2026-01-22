@@ -1,11 +1,13 @@
 pub mod alias;
 pub mod array_subquery;
+pub mod exists_output;
 pub mod filter;
 pub mod index_scan;
 pub mod join;
 pub mod limit_offset;
 pub mod materialize;
 pub mod output;
+pub mod policy_filter;
 pub mod project;
 pub mod sort;
 pub mod subgraph;
@@ -86,12 +88,14 @@ pub trait RowNode {
 
 pub use alias::AliasNode;
 pub use array_subquery::ArraySubqueryNode;
+pub use exists_output::ExistsOutputNode;
 pub use filter::FilterNode;
 pub use index_scan::IndexScanNode;
 pub use join::JoinNode;
 pub use limit_offset::LimitOffsetNode;
 pub use materialize::MaterializeNode;
 pub use output::OutputNode;
+pub use policy_filter::PolicyFilterNode;
 pub use project::ProjectNode;
 pub use sort::SortNode;
 pub use subgraph::{SubgraphBuilder, SubgraphInstance, SubgraphTemplate};
