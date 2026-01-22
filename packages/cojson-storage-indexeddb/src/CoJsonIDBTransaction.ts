@@ -1,4 +1,5 @@
 export type StoreName =
+  | "coValues2"
   | "coValues"
   | "sessions"
   | "transactions"
@@ -7,6 +8,7 @@ export type StoreName =
   | "unsyncedCoValues";
 
 const DEFAULT_TX_STORES: StoreName[] = [
+  "coValues2",
   "coValues",
   "sessions",
   "transactions",

@@ -7,9 +7,9 @@ import type { RawCoID, SessionID } from "../../exports.js";
 import type { CoValueKnownState } from "../../knownState.js";
 import { logger } from "../../logger.js";
 import type {
-  CoValueUpdate,
   DBClientInterfaceAsync,
   DBTransactionInterfaceAsync,
+  NewCoValueRow,
   SessionRow,
   SignatureAfterRow,
   StoredCoValueRow,
@@ -69,7 +69,7 @@ export class SQLiteClientAsync
     );
     await Promise.all(
       allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.getSignatures(sessionRow.rowID, 0);
+        const signatures = await this.getSignatures(sessionRow.rowID!, 0);
         sessionRow.signatures = {};
         for (const signature of signatures) {
           sessionRow.signatures[signature.idx] = signature.signature;
@@ -80,31 +80,23 @@ export class SQLiteClientAsync
   }
 
   async upsertCoValueRow(
-    coValueRow: CoValueUpdate,
+    coValueRow: NewCoValueRow,
   ): Promise<StoredNewCoValueRow> {
-    const id = coValueRow.updatedCoValueRow.id;
-    const coValueRowID = await this.upsertCoValue(
-      id,
-      coValueRow.updatedCoValueRow.header,
-    );
+    const id = coValueRow.id;
+    const coValueRowID = await this.upsertCoValue(id, coValueRow.header);
     if (!coValueRowID) {
       throw new Error("BOOM: Failed to upsert coValue row");
     }
-    for (const session of Object.values(
-      coValueRow.updatedCoValueRow.sessions,
-    )) {
+    for (const session of Object.values(coValueRow.sessions)) {
       if (session.coValue === Infinity) {
         session.coValue = coValueRowID;
       }
     }
-    for (const session of Object.values(
-      coValueRow.updatedCoValueRow.sessions,
-    )) {
+    for (const session of Object.values(coValueRow.sessions)) {
       const sessionRowID = await this.addSessionUpdate({
         sessionUpdate: session,
       });
-      // @ts-expect-error - convert the session into a StoredNewSessionRow
-      session.rowID = sessionRowID;
+      (session as StoredNewSessionRow).rowID = sessionRowID;
 
       for (const [idx, signature] of Object.entries(session.signatures)) {
         await this.addSignatureAfter({
@@ -114,9 +106,8 @@ export class SQLiteClientAsync
         });
       }
     }
-    // @ts-expect-error - convert the sessions into a StoredNewSessionRow
     return {
-      ...coValueRow.updatedCoValueRow,
+      ...coValueRow,
       rowID: coValueRowID,
     };
   }

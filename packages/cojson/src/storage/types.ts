@@ -122,7 +122,7 @@ export type SessionRow = {
   bytesSinceLastSignature?: number;
 };
 
-export type StoredSessionRow = SessionRow & { rowID: number };
+export type StoredSessionRow = SessionRow & { rowID?: number };
 
 export type NewSessionRow = SessionRow & {
   signatures: Record<number, Signature>;
@@ -141,7 +141,7 @@ export type StoredNewCoValueRow = StoredCoValueRow & {
 };
 
 export type TransactionRow = {
-  ses: number;
+  ses: number | string;
   idx: number;
   tx: Transaction;
 };
@@ -170,10 +170,10 @@ export interface DBTransactionInterfaceAsync {
    */
   markCoValueAsDeleted(id: RawCoID): Promise<unknown>;
 
-  upsertCoValueRow(coValueRow: CoValueUpdate): Promise<StoredNewCoValueRow>;
+  upsertCoValueRow(coValueRow: NewCoValueRow): Promise<StoredNewCoValueRow>;
 
   addTransaction(
-    sessionRowID: number,
+    sessionRowID: number | string,
     idx: number,
     newTransaction: Transaction,
   ): Promise<number> | undefined | unknown;
@@ -190,7 +190,7 @@ export interface DBClientInterfaceAsync {
   getAllCoValuesWaitingForDelete(): Promise<RawCoID[]>;
 
   getNewTransactionInSession(
-    sessionRowId: number,
+    sessionRowId: number | string,
     fromIdx: number,
     toIdx: number,
   ): Promise<TransactionRow[]>;

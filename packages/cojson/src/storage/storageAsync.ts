@@ -173,7 +173,9 @@ export class StorageApiAsync implements StorageAPI {
 
       for (const signature of signatures) {
         const newTxsInSession = await this.dbClient.getNewTransactionInSession(
-          sessionRow.rowID,
+          sessionRow.rowID
+            ? sessionRow.rowID
+            : coValueRow.id + sessionRow.sessionID,
           idx,
           signature.idx,
         );
@@ -349,7 +351,9 @@ export class StorageApiAsync implements StorageAPI {
     knownState.header = true;
 
     await this.dbClient.transaction(async (tx) => {
-      const storedCoValueRow = await tx.upsertCoValueRow(coValueRow);
+      const storedCoValueRow = await tx.upsertCoValueRow(
+        coValueRow.updatedCoValueRow,
+      );
 
       for (const sessionID of Object.keys(
         coValueRow.newTransactions,
@@ -367,7 +371,13 @@ export class StorageApiAsync implements StorageAPI {
         const nextIdx = afterIdx;
         await Promise.all(
           transactions.map((newTransaction, i) =>
-            tx.addTransaction(sessionRow.rowID, nextIdx + i, newTransaction),
+            tx.addTransaction(
+              sessionRow.rowID
+                ? sessionRow.rowID
+                : storedCoValueRow.id + sessionID,
+              nextIdx + i,
+              newTransaction,
+            ),
           ),
         );
       }
@@ -503,6 +513,7 @@ function getUpdatedCoValueRow(
   }
   const updatedCoValueRow = {
     id: msg.id,
+    ...(storedCoValueRow?.rowID ? { rowID: storedCoValueRow.rowID } : {}),
     header,
     sessions,
   };

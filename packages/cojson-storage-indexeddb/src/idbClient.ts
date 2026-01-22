@@ -1,19 +1,18 @@
 import type {
   CojsonInternalTypes,
+  NewCoValueRow,
   RawCoID,
   SessionID,
   DBTransactionInterfaceAsync,
 } from "cojson";
 import type {
   CoValueRow,
-  CoValueUpdate,
   DBClientInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
   StoredCoValueRow,
   StoredNewCoValueRow,
   StoredSessionRow,
-  StoredNewSessionRow,
   TransactionRow,
 } from "cojson";
 import {
@@ -56,44 +55,14 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
   }
 
   async upsertCoValueRow(
-    coValueRow: CoValueUpdate,
+    coValueRow: NewCoValueRow,
   ): Promise<StoredNewCoValueRow> {
-    const id = coValueRow.updatedCoValueRow.id;
-    const coValueRowID = await this.upsertCoValue(
-      id,
-      coValueRow.updatedCoValueRow.header,
+    const rowID = await this.run((tx) =>
+      tx.getObjectStore("coValues2").put(coValueRow),
     );
-    if (!coValueRowID) {
-      throw new Error("BOOM: Failed to upsert coValue row");
-    }
-    for (const session of Object.values(
-      coValueRow.updatedCoValueRow.sessions,
-    )) {
-      if (session.coValue === Infinity) {
-        session.coValue = coValueRowID;
-      }
-    }
-    for (const session of Object.values(
-      coValueRow.updatedCoValueRow.sessions,
-    )) {
-      const sessionRowID = await this.addSessionUpdate({
-        sessionUpdate: session,
-      });
-      // @ts-expect-error - convert the session into a StoredNewSessionRow
-      session.rowID = sessionRowID;
-
-      for (const [idx, signature] of Object.entries(session.signatures)) {
-        await this.addSignatureAfter({
-          sessionRowID,
-          idx: Number(idx),
-          signature,
-        });
-      }
-    }
-    // @ts-expect-error - convert the sessions into a StoredNewSessionRow
     return {
-      ...coValueRow.updatedCoValueRow,
-      rowID: coValueRowID,
+      ...coValueRow,
+      rowID: Number(rowID),
     };
   }
 
@@ -195,7 +164,7 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
   }
 
   async addTransaction(
-    sessionRowID: number,
+    sessionRowID: number | string,
     idx: number,
     newTransaction: CojsonInternalTypes.Transaction,
   ) {
@@ -289,30 +258,9 @@ export class IDBClient implements DBClientInterfaceAsync {
   async getCoValueRow(
     coValueId: RawCoID,
   ): Promise<StoredNewCoValueRow | undefined> {
-    const storedCoValueRow = await this.getCoValue(coValueId);
-    if (!storedCoValueRow) {
-      return undefined;
-    }
-    const { rowID, header } = storedCoValueRow;
-    const allCoValueSessions = (await this.getCoValueSessions(
-      rowID,
-    )) as StoredNewSessionRow[];
-    const sessions = Object.fromEntries(
-      allCoValueSessions.map((sessionRow) => [
-        sessionRow.sessionID,
-        sessionRow,
-      ]),
+    return queryIndexedDbStore(this.db, "coValues2", (store) =>
+      store.index("coValuesById").get(coValueId),
     );
-    await Promise.all(
-      allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.getSignatures(sessionRow.rowID, 0);
-        sessionRow.signatures = {};
-        for (const signature of signatures) {
-          sessionRow.signatures[signature.idx] = signature.signature;
-        }
-      }),
-    );
-    return { id: coValueId, rowID, header, sessions };
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
@@ -332,7 +280,7 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async getNewTransactionInSession(
-    sessionRowId: number,
+    sessionRowId: number | string,
     fromIdx: number,
     toIdx: number,
   ): Promise<TransactionRow[]> {

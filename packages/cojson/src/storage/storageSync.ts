@@ -121,7 +121,7 @@ export class StorageApiSync implements StorageAPI {
 
     let contentStreaming = false;
     for (const sessionRow of allCoValueSessions) {
-      const signatures = this.dbClient.getSignatures(sessionRow.rowID, 0);
+      const signatures = this.dbClient.getSignatures(sessionRow.rowID!, 0);
 
       if (signatures.length > 0) {
         contentStreaming = true;
@@ -242,7 +242,7 @@ export class StorageApiSync implements StorageAPI {
     signature: Pick<SignatureAfterRow, "idx" | "signature">,
   ) {
     const newTxsInSession = this.dbClient.getNewTransactionInSession(
-      sessionRow.rowID,
+      sessionRow.rowID!,
       idx,
       signature.idx,
     );
