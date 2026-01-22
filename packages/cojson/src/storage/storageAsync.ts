@@ -480,6 +480,10 @@ function getUpdatedCoValueRow(
         sessionNewContent.newTransactions.slice(actuallyNewOffset);
       const newLastIdx = lastIdx + actuallyNewTransactions.length;
 
+      if (actuallyNewTransactions.length === 0) {
+        continue;
+      }
+
       newTransactions[sessionID] = {
         transactions: actuallyNewTransactions,
         afterIdx: lastIdx,
