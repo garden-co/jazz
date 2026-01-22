@@ -17,7 +17,7 @@ const USER_ID: &str = "benchmark_user";
 fn insert_own_folder(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert/own_folder");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup: create data at scale
@@ -58,7 +58,7 @@ fn insert_own_folder(c: &mut Criterion) {
 fn insert_team_folder(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert/team_folder");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup: create data at scale
@@ -102,7 +102,7 @@ fn insert_team_folder(c: &mut Criterion) {
 fn insert_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert/batch");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         let batch_size = 100;
         group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
