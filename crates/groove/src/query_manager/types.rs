@@ -29,7 +29,7 @@ impl std::fmt::Display for TableName {
 }
 
 /// Column data type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
     /// 4-byte signed integer (i32), like PostgreSQL INTEGER.
     Integer,
@@ -43,6 +43,11 @@ pub enum ColumnType {
     Timestamp,
     /// 16-byte UUID (ObjectId).
     Uuid,
+    /// Homogeneous array of values.
+    Array(Box<ColumnType>),
+    /// Heterogeneous row/tuple of values with a known schema.
+    /// Used for nested rows (e.g., array of rows from subquery).
+    Row(Box<RowDescriptor>),
 }
 
 impl ColumnType {
@@ -55,12 +60,30 @@ impl ColumnType {
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
             ColumnType::Text => None,
+            ColumnType::Array(_) => None, // Arrays are variable-length
+            ColumnType::Row(_) => None,   // Rows are variable-length
         }
     }
 
     /// Returns true if this type is variable-length.
     pub fn is_variable(&self) -> bool {
         self.fixed_size().is_none()
+    }
+
+    /// Returns the element type if this is an array, None otherwise.
+    pub fn element_type(&self) -> Option<&ColumnType> {
+        match self {
+            ColumnType::Array(elem) => Some(elem),
+            _ => None,
+        }
+    }
+
+    /// Returns the row descriptor if this is a Row type, None otherwise.
+    pub fn row_descriptor(&self) -> Option<&RowDescriptor> {
+        match self {
+            ColumnType::Row(desc) => Some(desc),
+            _ => None,
+        }
     }
 }
 
@@ -155,11 +178,17 @@ pub enum Value {
     Text(String),
     Timestamp(u64),
     Uuid(ObjectId),
+    /// Homogeneous array of values.
+    Array(Vec<Value>),
+    /// Heterogeneous row/tuple of values (for nested rows in arrays).
+    /// The schema is external (from ColumnType::Row).
+    Row(Vec<Value>),
     Null,
 }
 
 impl Value {
-    /// Returns the column type this value represents, or None for Null.
+    /// Returns the column type this value represents, or None for Null/Row.
+    /// Row returns None because its schema is external.
     pub fn column_type(&self) -> Option<ColumnType> {
         match self {
             Value::Integer(_) => Some(ColumnType::Integer),
@@ -168,6 +197,15 @@ impl Value {
             Value::Text(_) => Some(ColumnType::Text),
             Value::Timestamp(_) => Some(ColumnType::Timestamp),
             Value::Uuid(_) => Some(ColumnType::Uuid),
+            Value::Array(elements) => {
+                // Infer element type from first element; empty arrays have no inferable type
+                elements
+                    .iter()
+                    .find_map(|v| v.column_type())
+                    .map(|elem_type| ColumnType::Array(Box::new(elem_type)))
+            }
+            // Row type requires external schema, can't be inferred
+            Value::Row(_) => None,
             Value::Null => None,
         }
     }
@@ -175,6 +213,32 @@ impl Value {
     /// Returns true if this is a Null value.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    /// Returns true if this is an Array value.
+    pub fn is_array(&self) -> bool {
+        matches!(self, Value::Array(_))
+    }
+
+    /// Returns true if this is a Row value.
+    pub fn is_row(&self) -> bool {
+        matches!(self, Value::Row(_))
+    }
+
+    /// Returns the array elements if this is an Array, None otherwise.
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Array(elements) => Some(elements),
+            _ => None,
+        }
+    }
+
+    /// Returns the row values if this is a Row, None otherwise.
+    pub fn as_row(&self) -> Option<&[Value]> {
+        match self {
+            Value::Row(values) => Some(values),
+            _ => None,
+        }
     }
 }
 

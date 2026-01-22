@@ -1,4 +1,5 @@
 pub mod alias;
+pub mod array_subquery;
 pub mod filter;
 pub mod index_scan;
 pub mod join;
@@ -7,6 +8,7 @@ pub mod materialize;
 pub mod output;
 pub mod project;
 pub mod sort;
+pub mod subgraph;
 pub mod union;
 
 use std::collections::HashMap;
@@ -83,6 +85,7 @@ pub trait RowNode {
 }
 
 pub use alias::AliasNode;
+pub use array_subquery::ArraySubqueryNode;
 pub use filter::FilterNode;
 pub use index_scan::IndexScanNode;
 pub use join::JoinNode;
@@ -91,4 +94,5 @@ pub use materialize::MaterializeNode;
 pub use output::OutputNode;
 pub use project::ProjectNode;
 pub use sort::SortNode;
+pub use subgraph::{SubgraphBuilder, SubgraphInstance, SubgraphTemplate};
 pub use union::UnionNode;
