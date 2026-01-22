@@ -6,8 +6,10 @@ import React from "react";
 import { PerformancePage } from "../../../pages/performance/index.js";
 import { RouterContext } from "../../../router/context.js";
 import type { Router } from "../../../router/context.js";
+import { SubscriptionScope } from "jazz-tools";
 
 beforeAll(() => {
+  SubscriptionScope.enableProfiling();
   setup(React.createElement);
 });
 
