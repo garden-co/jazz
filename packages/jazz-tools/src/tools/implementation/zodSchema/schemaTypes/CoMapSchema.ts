@@ -59,7 +59,12 @@ export class CoMapSchema<
   catchAll?: CatchAll;
   getDefinition: () => CoMapSchemaDefinition;
 
+  #validationSchema: z.ZodType | undefined = undefined;
   getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
     const plainShape: Record<string, z.ZodTypeAny> = {};
 
     for (const key in this.shape) {
@@ -85,7 +90,8 @@ export class CoMapSchema<
       );
     }
 
-    return z.instanceof(CoMap).or(validationSchema);
+    this.#validationSchema = z.instanceof(CoMap).or(validationSchema);
+    return this.#validationSchema;
   };
 
   /**

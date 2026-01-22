@@ -57,6 +57,10 @@ import {
   resolveValidationMode,
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
+import {
+  extractFieldElementFromUnionSchema,
+  normalizeZodSchema,
+} from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -375,28 +379,20 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   }
 
   private getItemSchema(): z.ZodType {
-    const feedSchema = this.coFeedSchema?.getValidationSchema();
-
-    if (!feedSchema || ("type" in feedSchema && feedSchema.type !== "union")) {
-      throw new Error("Feed schema is not a union");
-    }
-
-    // @ts-expect-error as union, it has options fields and 2nd is the plain shape
-    const fieldSchema = feedSchema.options[1]?.element as z.ZodType | undefined;
-
-    // ignore codecs/pipes
-    // even if they are optional and nullable
-    if (
-      fieldSchema?.def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?.def?.innerType?.def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?.def?.innerType?.def?.innerType?.def?.type === "pipe"
-    ) {
+    /**
+     * coFeedSchema may be undefined if the CoFeed is created directly with its constructor,
+     * without using a co.feed().create() to create it.
+     * In that case, we can't validate the values.
+     */
+    if (this.coFeedSchema === undefined) {
       return z.any();
     }
 
-    return fieldSchema ?? z.any();
+    const fieldSchema = extractFieldElementFromUnionSchema(
+      this.coFeedSchema.getValidationSchema(),
+    );
+
+    return normalizeZodSchema(fieldSchema);
   }
 
   get owner(): Group {

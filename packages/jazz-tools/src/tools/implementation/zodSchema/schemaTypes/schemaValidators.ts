@@ -40,3 +40,67 @@ export function generateValidationSchemaFromItem(item: InputSchema): z.ZodType {
 
   throw new Error(`Unsupported schema type: ${item}`);
 }
+
+function isUnionSchema(schema: unknown): schema is z.ZodUnion {
+  if (typeof schema !== "object" || schema === null) {
+    return false;
+  }
+
+  if ("type" in schema && schema.type === "union") {
+    return true;
+  }
+
+  return false;
+}
+
+export function extractFieldShapeFromUnionSchema(schema: unknown): z.ZodObject {
+  if (!isUnionSchema(schema)) {
+    throw new Error("Schema is not a union");
+  }
+
+  const unionElement = schema.options[1];
+
+  if (typeof unionElement !== "object" || unionElement === null) {
+    throw new Error("Union element is not an object");
+  }
+
+  if ("shape" in unionElement) {
+    return unionElement as z.ZodObject;
+  }
+
+  throw new Error("Union element is not an object with shape");
+}
+
+export function extractFieldElementFromUnionSchema(schema: unknown): z.ZodType {
+  if (!isUnionSchema(schema)) {
+    throw new Error("Schema is not a union");
+  }
+
+  const unionElement = schema.options[1];
+
+  if (typeof unionElement !== "object" || unionElement === null) {
+    throw new Error("Union element is not an object");
+  }
+
+  if ("element" in unionElement) {
+    return unionElement.element as z.ZodType;
+  }
+
+  throw new Error("Union element is not an object with element");
+}
+
+export function normalizeZodSchema(schema: z.ZodType): z.ZodType {
+  // ignore codecs/pipes
+  // even if they are nested into optional and nullable
+  if (
+    schema.def?.type === "pipe" ||
+    // @ts-expect-error
+    schema.def?.innerType?.def?.type === "pipe" ||
+    // @ts-expect-error
+    schema.def?.innerType?.def?.innerType?.def?.type === "pipe"
+  ) {
+    return z.any();
+  }
+
+  return schema;
+}

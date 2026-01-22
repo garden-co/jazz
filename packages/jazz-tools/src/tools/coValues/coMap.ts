@@ -62,6 +62,10 @@ import {
   resolveValidationMode,
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
+import {
+  extractFieldShapeFromUnionSchema,
+  normalizeZodSchema,
+} from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 
 export type CoMapEdit<V> = {
   value?: V;
@@ -576,14 +580,12 @@ export class CoMap extends CoValueBase implements CoValue {
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
 class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
-  private cachedSchema: z.core.$ZodTypeDef | undefined;
   constructor(
     private coMap: M,
     private getRaw: () => RawCoMap,
     private coMapSchema?: CoreCoMapSchema,
   ) {
     super(coMap);
-    this.cachedSchema = this.coMapSchema?.getValidationSchema?.()._zod.def;
   }
 
   get owner(): Group {
@@ -591,32 +593,27 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   }
 
   private getPropertySchema(key: string): z.ZodType {
-    if (this.cachedSchema === undefined) {
+    /**
+     * coMapSchema may be undefined if the CoMap is created directly with its constructor,
+     * without using a co.map().create() to create it.
+     * In that case, we can't validate the values.
+     */
+    if (this.coMapSchema === undefined) {
       return z.any();
     }
 
-    if (this.cachedSchema?.type !== "union") {
-      throw new Error("Cached schema is not a union");
+    const objectValidation = extractFieldShapeFromUnionSchema(
+      this.coMapSchema.getValidationSchema(),
+    );
+
+    const fieldSchema =
+      objectValidation.shape[key] ?? objectValidation.def.catchall;
+
+    if (fieldSchema === undefined) {
+      throw new Error(`Field ${key} is not defined in the CoMap schema`);
     }
 
-    // @ts-expect-error as union, it has options fields and 2nd is the plain shape
-    const fieldSchema = this.cachedSchema.options[1]?.shape?.[key] as
-      | z.ZodType
-      | undefined;
-
-    // ignore codecs/pipes
-    // even if they are optional and nullable
-    if (
-      fieldSchema?.def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?.def?.innerType?.def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?.def?.innerType?.def?.innerType?.def?.type === "pipe"
-    ) {
-      return z.any();
-    }
-
-    return fieldSchema ?? z.any();
+    return normalizeZodSchema(fieldSchema);
   }
 
   /**

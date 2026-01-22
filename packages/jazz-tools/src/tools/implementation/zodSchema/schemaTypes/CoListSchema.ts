@@ -60,10 +60,16 @@ export class CoListSchema<
     return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
   }
 
+  #validationSchema: z.ZodType | undefined = undefined;
   getValidationSchema = () => {
-    return z
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z
       .instanceof(CoList)
       .or(z.array(generateValidationSchemaFromItem(this.element)));
+    return this.#validationSchema;
   };
 
   constructor(

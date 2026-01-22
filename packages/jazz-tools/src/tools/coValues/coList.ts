@@ -53,6 +53,10 @@ import {
   resolveValidationMode,
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
+import {
+  extractFieldElementFromUnionSchema,
+  normalizeZodSchema,
+} from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -537,28 +541,20 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   }
 
   private getItemSchema(): z.ZodType {
-    const listSchema = this.coListSchema?.getValidationSchema();
-
-    if (!listSchema || ("type" in listSchema && listSchema.type !== "union")) {
-      throw new Error("List schema is not a union");
-    }
-
-    // @ts-expect-error as union, it has options fields and 2nd is the plain shape
-    const fieldSchema = listSchema.options[1]?.element as z.ZodType | undefined;
-
-    // ignore codecs/pipes
-    // even if they are optional and nullable
-    if (
-      fieldSchema?.def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?.def?.innerType?.def?.type === "pipe" ||
-      // @ts-expect-error
-      fieldSchema?.def?.innerType?.def?.innerType?.def?.type === "pipe"
-    ) {
+    /**
+     * coMapSchema may be undefined if the CoMap is created directly with its constructor,
+     * without using a co.list().create() to create it.
+     * In that case, we can't validate the values.
+     */
+    if (this.coListSchema === undefined) {
       return z.any();
     }
 
-    return fieldSchema ?? z.any();
+    const fieldSchema = extractFieldElementFromUnionSchema(
+      this.coListSchema.getValidationSchema(),
+    );
+
+    return normalizeZodSchema(fieldSchema);
   }
 
   /** @category Collaboration */
