@@ -816,15 +816,10 @@ impl IndexState {
                     return Err(IndexError::ObjectNotReady(node_id));
                 }
                 ObjectState::Creating(_) | ObjectState::Available(_) => {
-                    // Object exists, add a new commit
-                    let tips = object_manager
-                        .get_tip_ids(node_id, INDEX_BRANCH)
-                        .map_err(|e| IndexError::ObjectManagerError(format!("{:?}", e)))?
-                        .clone();
-
-                    let parents: Vec<_> = tips.into_iter().collect();
+                    // Object exists - replace content without history.
+                    // Indices don't need commit history, only the latest state.
                     let commit_id = object_manager
-                        .add_commit(node_id, INDEX_BRANCH, parents, data, node_id, None)
+                        .replace_content(node_id, INDEX_BRANCH, data, node_id)
                         .map_err(|e| IndexError::ObjectManagerError(format!("{:?}", e)))?;
 
                     return Ok(Some(commit_id));

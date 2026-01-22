@@ -361,6 +361,64 @@ impl ObjectManager {
         Ok(commit_id)
     }
 
+    /// Replace all content on a branch with a single new commit, discarding history.
+    ///
+    /// This is useful for indices and other derived data that don't need history.
+    /// Unlike `add_commit`, this method:
+    /// - Removes all existing commits from memory immediately
+    /// - Creates a new commit with no parents
+    /// - Does NOT queue storage requests (caller should handle persistence if needed)
+    ///
+    /// Returns the new commit ID.
+    pub fn replace_content(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        content: Vec<u8>,
+        author: ObjectId,
+    ) -> Result<CommitId, Error> {
+        let branch_name = branch_name.into();
+
+        if self.is_loading(object_id) {
+            return Err(Error::ObjectNotReady(object_id));
+        }
+
+        let object = self
+            .get_mut(object_id)
+            .ok_or(Error::ObjectNotFound(object_id))?;
+
+        let branch = object
+            .branches
+            .get_mut(&branch_name)
+            .ok_or_else(|| Error::BranchNotFound(branch_name.clone()))?;
+
+        // Clear all existing commits and tips
+        branch.commits.clear();
+        branch.tips.clear();
+        branch.tails = None;
+
+        // Create new commit with no parents
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        let commit = Commit {
+            parents: vec![],
+            content,
+            timestamp,
+            author,
+            metadata: None,
+            stored_state: StoredState::Pending,
+        };
+
+        let commit_id = commit.id();
+        branch.tips.insert(commit_id);
+        branch.commits.insert(commit_id, commit);
+
+        Ok(commit_id)
+    }
+
     /// Get tip IDs for a branch.
     /// Requires at least TipIdsOnly load depth for Loading objects.
     pub fn get_tip_ids(
