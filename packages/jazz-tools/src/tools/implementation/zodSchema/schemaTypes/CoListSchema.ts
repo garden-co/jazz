@@ -30,11 +30,7 @@ import {
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
 import { generateValidationSchemaFromItem } from "./schemaValidators.js";
-import {
-  executeValidation,
-  resolveValidationMode,
-  type LocalValidationMode,
-} from "../validationSettings.js";
+import type { LocalValidationMode } from "../validationSettings.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -111,15 +107,6 @@ export class CoListSchema<
       | Group,
   ): CoListInstance<T>;
   create(items: any, options?: any): CoListInstance<T> {
-    const validationMode = resolveValidationMode(options?.validation);
-    if (validationMode !== "loose") {
-      items = executeValidation(
-        this.getValidationSchema(),
-        items,
-        validationMode,
-      ) as CoListSchemaInit<T>;
-    }
-
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,

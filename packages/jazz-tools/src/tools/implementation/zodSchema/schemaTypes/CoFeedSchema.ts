@@ -28,11 +28,7 @@ import {
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
 import { generateValidationSchemaFromItem } from "./schemaValidators.js";
-import {
-  executeValidation,
-  resolveValidationMode,
-  type LocalValidationMode,
-} from "../validationSettings.js";
+import { type LocalValidationMode } from "../validationSettings.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -98,26 +94,10 @@ export class CoFeedSchema<
       options,
       this.permissions,
     );
-
-    // Handle validation directly using the schema
-    const validation =
-      options && typeof options === "object" && "validation" in options
-        ? options.validation
-        : undefined;
-    const validationMode = resolveValidationMode(validation);
-    if (validationMode !== "loose") {
-      init = executeValidation(
-        this.getValidationSchema(),
-        init,
-        validationMode,
-      ) as CoFeedSchemaInit<T>;
-    }
-
-    // Pass validation: "loose" to avoid double validation in CoFeed.create
-    return this.coValueClass.create(init as any, {
-      ...optionsWithPermissions,
-      validation: "loose" as const,
-    }) as CoFeedInstance<T>;
+    return this.coValueClass.create(
+      init as any,
+      optionsWithPermissions,
+    ) as CoFeedInstance<T>;
   }
 
   load<

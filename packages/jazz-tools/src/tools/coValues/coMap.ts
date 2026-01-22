@@ -187,6 +187,7 @@ export class CoMap extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
         }
       | Account
       | Group,
@@ -265,10 +266,23 @@ export class CoMap extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
         }
       | Account
       | Group,
   ): M {
+    const validationMode = resolveValidationMode(
+      options && "validation" in options ? options.validation : undefined,
+    );
+
+    if (schema && validationMode !== "loose") {
+      init = executeValidation(
+        schema.getValidationSchema(),
+        init,
+        validationMode,
+      ) as typeof init;
+    }
+
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
@@ -515,6 +529,7 @@ export class CoMap extends CoValueBase implements CoValue {
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
+      validation?: LocalValidationMode;
     },
   ): Promise<Settled<Resolved<M, R>>> {
     const header = CoMap._getUniqueHeader(
@@ -531,10 +546,13 @@ export class CoMap extends CoValueBase implements CoValue {
           owner: options.owner,
           unique: options.unique,
           coMapSchema: this,
+          validation: options.validation,
         });
       },
       onUpdateWhenFound(value) {
-        value.$jazz.applyDiff(options.value);
+        value.$jazz.applyDiff(options.value, {
+          validation: options.validation,
+        });
       },
     });
   }

@@ -183,10 +183,23 @@ export class CoList<out Item = any>
       | {
           owner: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
         }
       | Account
       | Group,
   ) {
+    const validationMode = resolveValidationMode(
+      options && "validation" in options ? options.validation : undefined,
+    );
+
+    if (this.coValueSchema && validationMode !== "loose") {
+      items = executeValidation(
+        this.coValueSchema.getValidationSchema(),
+        items,
+        validationMode,
+      ) as typeof items;
+    }
+
     const instance = new this();
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
