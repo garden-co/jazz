@@ -2,6 +2,7 @@ import { LocalNode } from "cojson";
 import type {
   CoValue,
   CoValueClassOrSchema,
+  Loaded,
   RefEncoded,
   RefsToResolve,
   ResolveQuery,
@@ -188,7 +189,7 @@ export class SubscriptionCache {
     skipRetry?: boolean,
     bestEffortResolution?: boolean,
     branch?: BranchDefinition,
-  ): SubscriptionScope<CoValue> {
+  ): SubscriptionScope<Loaded<S, ResolveQuery<S>>> {
     // Handle undefined/null id case
     if (!id) {
       throw new Error("Cannot create subscription with undefined or null id");
@@ -201,7 +202,9 @@ export class SubscriptionCache {
       // Found existing entry - cancel any pending cleanup since we're reusing it
       this.cancelCleanup(matchingEntry);
 
-      return matchingEntry.subscriptionScope as SubscriptionScope<CoValue>;
+      return matchingEntry.subscriptionScope as SubscriptionScope<
+        Loaded<S, ResolveQuery<S>>
+      >;
     }
 
     // Create new SubscriptionScope
@@ -212,9 +215,8 @@ export class SubscriptionCache {
     };
 
     // Create new SubscriptionScope with all required parameters
-    const subscriptionScope = new SubscriptionScope<CoValue>(
+    const subscriptionScope = new SubscriptionScope<Loaded<S, ResolveQuery<S>>>(
       node,
-      // @ts-expect-error the SubscriptionScope is too generic for TS to infer its instances are CoValues
       resolve,
       id,
       refEncoded,

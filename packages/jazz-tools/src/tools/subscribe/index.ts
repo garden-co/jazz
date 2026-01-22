@@ -100,7 +100,7 @@ export function accessChildById<D extends CoValue>(
 
   // TODO: this doesn't check the subscription tree loading state
   if (value?.type === CoValueLoadingState.LOADED) {
-    return value.value;
+    return value.value as D;
   }
 
   const childNode = subscriptionScope.childNodes.get(childId);

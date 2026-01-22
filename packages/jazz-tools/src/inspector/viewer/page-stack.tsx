@@ -1,5 +1,6 @@
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { styled } from "goober";
+import type { CSSProperties } from "react";
 import { Page } from "./page.js";
 import { ErrorBoundary } from "../ui/error-boundary.js";
 import { useRouter } from "../router/context.js";
@@ -17,9 +18,10 @@ const PageStackContainer = styled("article")`
 
 type PageStackProps = {
   homePage?: React.ReactNode;
+  style?: CSSProperties;
 };
 
-export function PageStack({ homePage }: PageStackProps) {
+export function PageStack({ homePage, style }: PageStackProps) {
   const { path, addPages, goBack } = useRouter();
   const { localNode } = useNode();
 
@@ -27,25 +29,27 @@ export function PageStack({ homePage }: PageStackProps) {
   const index = path.length - 1;
 
   if (path.length <= 0) {
-    return <PageStackContainer>{homePage ?? <HomePage />}</PageStackContainer>;
+    return (
+      <PageStackContainer style={style}>
+        {homePage ?? <HomePage />}
+      </PageStackContainer>
+    );
   }
 
   return (
-    <>
-      <PageStackContainer>
-        {localNode && page && (
-          <ErrorBoundary title="An error occurred while rendering this CoValue">
-            <Page
-              coId={page.coId}
-              node={localNode}
-              name={page.name || page.coId}
-              onHeaderClick={goBack}
-              onNavigate={addPages}
-              isTopLevel={index === path.length - 1}
-            />
-          </ErrorBoundary>
-        )}
-      </PageStackContainer>
-    </>
+    <PageStackContainer style={style}>
+      {localNode && page && (
+        <ErrorBoundary title="An error occurred while rendering this CoValue">
+          <Page
+            coId={page.coId}
+            node={localNode}
+            name={page.name || page.coId}
+            onHeaderClick={goBack}
+            onNavigate={addPages}
+            isTopLevel={index === path.length - 1}
+          />
+        </ErrorBoundary>
+      )}
+    </PageStackContainer>
   );
 }

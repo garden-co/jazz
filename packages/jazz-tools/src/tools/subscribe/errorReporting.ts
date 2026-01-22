@@ -5,7 +5,7 @@ import type { JazzError } from "./JazzError";
  *
  * Works in Node.js and bundled code, falls back to false if process is not available
  */
-const isDev = (function () {
+export const isDev = (function () {
   try {
     return process.env.NODE_ENV === "development";
   } catch {

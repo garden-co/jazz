@@ -349,6 +349,9 @@ export function subscribeToCoValue<
     options.unstable_branch,
   );
 
+  // Track performance for API subscriptions
+  rootNode.trackLoadingPerformance("subscribe");
+
   const handleUpdate = () => {
     if (unsubscribed) return;
 
