@@ -55,6 +55,8 @@ export interface BenchmarkConfig {
 
   /** Scenario-specific options (only used if no id provided) */
   scenarioOptions: Record<string, unknown>;
+
+  timeout?: number;
 }
 
 /**
