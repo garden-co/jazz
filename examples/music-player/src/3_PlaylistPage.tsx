@@ -18,7 +18,7 @@ import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react-core";
 import { useIsMobile } from "./hooks/use-mobile";
 import { Pencil } from "lucide-react";
 
-export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
+export function PlaylistPage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const params = useParams<{ playlistId: string }>();
   const playlistId = useSuspenseAccount(MusicaAccount, {
     select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
@@ -157,9 +157,8 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                       key={track.$jazz.id}
                       index={index}
                       isPlaying={
-                        mediaPlayer.activeTrackId === track.$jazz.id &&
-                        isActivePlaylist &&
-                        isPlaying
+                        isPlaying &&
+                        mediaPlayer.activeTrackId === track.$jazz.id
                       }
                       isLoading={mediaPlayer.loading === track.$jazz.id}
                       onClick={() => {

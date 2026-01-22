@@ -36,13 +36,13 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   });
   const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId);
 
-  if (!activeTrack.$isLoaded) return null;
-
-  const activeTrackTitle = activeTrack.title;
-
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const isLoading = mediaPlayer.loading !== null;
+
+  if (!activeTrack.$isLoaded) return null;
+
+  const activeTrackTitle = activeTrack.title;
 
   return (
     <Drawer open={drawerOpen} onOpenChange={setDrawerOpen}>

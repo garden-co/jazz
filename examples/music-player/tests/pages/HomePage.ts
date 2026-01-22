@@ -265,4 +265,62 @@ export class HomePage {
       this.page.getByRole("textbox", { name: "Username" }),
     ).toBeVisible();
   }
+
+  async deleteAccountWithoutWaitingForRedirect() {
+    await this.page.getByRole("button", { name: "Delete account" }).click();
+
+    await this.page
+      .getByRole("textbox", { name: "Type the phrase to confirm" })
+      .fill("I want to delete my account");
+
+    await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete account" })
+      .click();
+  }
+
+  async getPassphrase(): Promise<string> {
+    // Wait for the passphrase textarea to be visible and have content
+    const passphraseTextarea = this.page.locator("textarea").first();
+    await passphraseTextarea.waitFor({ state: "visible" });
+
+    // Wait until the passphrase is loaded (not "Loading...")
+    await expect(passphraseTextarea).not.toHaveValue("Loading...", {
+      timeout: 10_000,
+    });
+
+    const passphrase = await passphraseTextarea.inputValue();
+    expect(passphrase).toBeTruthy();
+    expect(passphrase).not.toBe("Loading...");
+
+    return passphrase;
+  }
+
+  async loginWithPassphrase(passphrase: string) {
+    // Click on "Login with passphrase" or "Passphrase" button
+    const passphraseButton = this.page.getByRole("button", {
+      name: /passphrase/i,
+    });
+    await passphraseButton.first().click();
+
+    // Fill in the passphrase
+    const passphraseInput = this.page.getByTestId("passphrase-input");
+    await passphraseInput.fill(passphrase);
+
+    // Click Login button
+    await this.page.getByRole("button", { name: "Login" }).click();
+
+    // Wait for the app to load after login
+    await this.page.waitForTimeout(2000);
+  }
+
+  async expectAccountDeletedScreen() {
+    await expect(
+      this.page.getByText(
+        "The account data associated with your session no longer exists.",
+      ),
+    ).toBeVisible({
+      timeout: 30_000,
+    });
+  }
 }

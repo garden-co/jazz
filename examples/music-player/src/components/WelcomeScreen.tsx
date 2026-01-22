@@ -179,6 +179,7 @@ export function WelcomeScreen() {
                       <div className="text-sm text-red-500">{error}</div>
                     )}
                     <Textarea
+                      data-testid="passphrase-input"
                       value={loginPassphrase}
                       onChange={(e) => setLoginPassphrase(e.target.value)}
                       placeholder="Enter your passphrase..."
