@@ -5,6 +5,14 @@ use uuid::Uuid;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{BlobId, ObjectManager};
+use crate::query_manager::policy::Operation;
+use crate::query_manager::session::Session;
+
+/// Error returned when a policy denies an operation.
+#[derive(Debug, Clone)]
+pub struct PolicyError {
+    pub message: String,
+}
 
 // ============================================================================
 // ID Types
@@ -59,29 +67,6 @@ type BranchSyncData = (
 );
 
 // ============================================================================
-// Permission
-// ============================================================================
-
-/// Permission level for client access to an object/branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Permission {
-    Readable,
-    ReadableAndWritable,
-}
-
-impl Permission {
-    /// Returns the more permissive of two permissions.
-    pub fn merge(self, other: Permission) -> Permission {
-        match (self, other) {
-            (Permission::ReadableAndWritable, _) | (_, Permission::ReadableAndWritable) => {
-                Permission::ReadableAndWritable
-            }
-            _ => Permission::Readable,
-        }
-    }
-}
-
-// ============================================================================
 // Connection State
 // ============================================================================
 
@@ -92,17 +77,17 @@ pub struct ServerState {
     pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
-    /// Queries we've forwarded to this server.
-    pub forwarded_queries: HashMap<QueryId, HashMap<(ObjectId, BranchName), Permission>>,
+    /// Queries we've forwarded to this server (scope only, no permissions).
+    pub forwarded_queries: HashMap<QueryId, HashSet<(ObjectId, BranchName)>>,
 }
 
 /// Tracking state for a connected client.
 #[derive(Debug, Clone, Default)]
 pub struct ClientState {
-    /// Active queries from this client.
-    pub queries: HashMap<QueryId, HashMap<(ObjectId, BranchName), Permission>>,
-    /// Derived effective scope (most permissive permission per object/branch).
-    pub effective_scope: HashMap<(ObjectId, BranchName), Permission>,
+    /// Client's session for policy evaluation.
+    pub session: Option<Session>,
+    /// Active queries from this client (scope only, permissions via callback).
+    pub queries: HashMap<QueryId, HashSet<(ObjectId, BranchName)>>,
     /// What we've sent to this client.
     pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
@@ -110,18 +95,19 @@ pub struct ClientState {
 }
 
 impl ClientState {
-    /// Recompute effective_scope from all active queries.
-    pub fn recompute_effective_scope(&mut self) {
-        self.effective_scope.clear();
-        for scope in self.queries.values() {
-            for ((object_id, branch_name), permission) in scope {
-                let entry = self
-                    .effective_scope
-                    .entry((*object_id, branch_name.clone()))
-                    .or_insert(Permission::Readable);
-                *entry = entry.merge(*permission);
-            }
+    /// Create a new ClientState with an optional session.
+    pub fn with_session(session: Option<Session>) -> Self {
+        Self {
+            session,
+            ..Default::default()
         }
+    }
+
+    /// Check if an object/branch is in any of this client's query scopes.
+    pub fn is_in_scope(&self, object_id: ObjectId, branch_name: &BranchName) -> bool {
+        self.queries
+            .values()
+            .any(|scope| scope.contains(&(object_id, branch_name.clone())))
     }
 }
 
@@ -182,7 +168,7 @@ pub enum SyncPayload {
     /// Register a query (to servers only).
     QueryRegistration {
         query_id: QueryId,
-        scope: HashMap<(ObjectId, BranchName), Permission>,
+        scope: HashSet<(ObjectId, BranchName)>,
     },
 
     /// Unregister a query (to servers only).
@@ -228,6 +214,26 @@ pub struct PendingUpdate {
     pub payload: SyncPayload,
 }
 
+/// A write from a client awaiting permission check (policy evaluation).
+///
+/// Unlike PendingUpdate which is for scope-based approval, PendingPermissionCheck
+/// is for row-level policy evaluation which may require async graph settling.
+#[derive(Debug, Clone)]
+pub struct PendingPermissionCheck {
+    pub id: PendingUpdateId,
+    pub client_id: ClientId,
+    pub payload: SyncPayload,
+    pub session: Session,
+    /// Object metadata for policy evaluation.
+    pub metadata: HashMap<String, String>,
+    /// Old content for UPDATE/DELETE (None for INSERT).
+    pub old_content: Option<Vec<u8>>,
+    /// New content for INSERT/UPDATE (None for DELETE).
+    pub new_content: Option<Vec<u8>>,
+    /// Inferred operation type.
+    pub operation: Operation,
+}
+
 // ============================================================================
 // SyncManager
 // ============================================================================
@@ -237,7 +243,7 @@ pub struct PendingUpdate {
 /// Coordinates:
 /// - Upstream servers (trusted, receive all our objects)
 /// - Downstream clients (untrusted, receive query-filtered subsets)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SyncManager {
     pub object_manager: ObjectManager,
 
@@ -247,8 +253,25 @@ pub struct SyncManager {
     inbox: Vec<InboxEntry>,
     outbox: Vec<OutboxEntry>,
     pending_updates: Vec<PendingUpdate>,
+    /// Pending permission checks awaiting policy evaluation.
+    pending_permission_checks: Vec<PendingPermissionCheck>,
 
     next_pending_id: u64,
+}
+
+impl std::fmt::Debug for SyncManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncManager")
+            .field("object_manager", &self.object_manager)
+            .field("servers", &self.servers)
+            .field("clients", &self.clients)
+            .field("inbox", &self.inbox)
+            .field("outbox", &self.outbox)
+            .field("pending_updates", &self.pending_updates)
+            .field("pending_permission_checks", &self.pending_permission_checks)
+            .field("next_pending_id", &self.next_pending_id)
+            .finish()
+    }
 }
 
 impl Default for SyncManager {
@@ -266,6 +289,7 @@ impl SyncManager {
             inbox: Vec::new(),
             outbox: Vec::new(),
             pending_updates: Vec::new(),
+            pending_permission_checks: Vec::new(),
             next_pending_id: 0,
         }
     }
@@ -279,6 +303,7 @@ impl SyncManager {
             inbox: Vec::new(),
             outbox: Vec::new(),
             pending_updates: Vec::new(),
+            pending_permission_checks: Vec::new(),
             next_pending_id: 0,
         }
     }
@@ -316,6 +341,13 @@ impl SyncManager {
     /// Get client state.
     pub fn get_client(&self, client_id: ClientId) -> Option<&ClientState> {
         self.clients.get(&client_id)
+    }
+
+    /// Set the session for a client.
+    pub fn set_client_session(&mut self, client_id: ClientId, session: Session) {
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.session = Some(session);
+        }
     }
 
     // ========================================================================
@@ -390,6 +422,84 @@ impl SyncManager {
     }
 
     // ========================================================================
+    // Pending Permission Checks
+    // ========================================================================
+
+    /// Take all pending permission checks for policy evaluation.
+    ///
+    /// Called by QueryManager to get writes that need permission evaluation.
+    pub fn take_pending_permission_checks(&mut self) -> Vec<PendingPermissionCheck> {
+        std::mem::take(&mut self.pending_permission_checks)
+    }
+
+    /// Approve a pending permission check, applying the payload.
+    ///
+    /// This takes the full PendingPermissionCheck since it was already taken
+    /// from the queue by take_pending_permission_checks().
+    pub fn approve_permission_check(&mut self, check: PendingPermissionCheck) {
+        self.apply_payload_from_client(check.client_id, check.payload, true);
+    }
+
+    /// Reject a pending permission check, sending error back to client.
+    ///
+    /// This takes the full PendingPermissionCheck since it was already taken
+    /// from the queue by take_pending_permission_checks().
+    pub fn reject_permission_check(&mut self, check: PendingPermissionCheck, reason: String) {
+        // Extract object_id and branch_name from payload
+        let (object_id, branch_name) = match &check.payload {
+            SyncPayload::ObjectUpdated {
+                object_id,
+                branch_name,
+                ..
+            } => (*object_id, branch_name.clone()),
+            SyncPayload::ObjectTruncated {
+                object_id,
+                branch_name,
+                ..
+            } => (*object_id, branch_name.clone()),
+            _ => return,
+        };
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(check.client_id),
+            payload: SyncPayload::Error(SyncError::PermissionDenied {
+                object_id,
+                branch_name,
+                reason,
+            }),
+        });
+    }
+
+    /// Queue a payload for permission checking.
+    ///
+    /// Called internally when a client write needs policy evaluation.
+    #[allow(clippy::too_many_arguments)]
+    fn queue_for_permission_check(
+        &mut self,
+        client_id: ClientId,
+        payload: SyncPayload,
+        session: Session,
+        metadata: HashMap<String, String>,
+        old_content: Option<Vec<u8>>,
+        new_content: Option<Vec<u8>>,
+        operation: Operation,
+    ) -> PendingUpdateId {
+        let id = PendingUpdateId(self.next_pending_id);
+        self.next_pending_id += 1;
+        self.pending_permission_checks.push(PendingPermissionCheck {
+            id,
+            client_id,
+            payload,
+            session,
+            metadata,
+            old_content,
+            new_content,
+            operation,
+        });
+        id
+    }
+
+    // ========================================================================
     // Query Management (Clients)
     // ========================================================================
 
@@ -398,7 +508,7 @@ impl SyncManager {
         &mut self,
         client_id: ClientId,
         query_id: QueryId,
-        scope: HashMap<(ObjectId, BranchName), Permission>,
+        scope: HashSet<(ObjectId, BranchName)>,
     ) {
         // Collect newly visible keys while holding the mutable borrow
         let newly_visible: Vec<(ObjectId, BranchName)> = {
@@ -406,19 +516,25 @@ impl SyncManager {
                 return;
             };
 
-            let old_scope = client.effective_scope.clone();
+            // Collect all objects currently in any query scope
+            let old_scope: HashSet<(ObjectId, BranchName)> = client
+                .queries
+                .values()
+                .flat_map(|q| q.iter().cloned())
+                .collect();
 
             // Update the query
             client.queries.insert(query_id, scope);
-            client.recompute_effective_scope();
+
+            // Collect all objects now in any query scope
+            let new_scope: HashSet<(ObjectId, BranchName)> = client
+                .queries
+                .values()
+                .flat_map(|q| q.iter().cloned())
+                .collect();
 
             // Find newly visible (object, branch) pairs
-            client
-                .effective_scope
-                .keys()
-                .filter(|key| !old_scope.contains_key(*key))
-                .cloned()
-                .collect()
+            new_scope.difference(&old_scope).cloned().collect()
         };
 
         // Now queue initial syncs (no longer borrowing clients mutably for iteration)
@@ -434,7 +550,6 @@ impl SyncManager {
         };
 
         client.queries.remove(&query_id);
-        client.recompute_effective_scope();
         // Note: We don't "unsend" - just stop sending future updates
     }
 
@@ -447,7 +562,7 @@ impl SyncManager {
         &mut self,
         server_id: ServerId,
         query_id: QueryId,
-        scope: HashMap<(ObjectId, BranchName), Permission>,
+        scope: HashSet<(ObjectId, BranchName)>,
     ) {
         let Some(server) = self.servers.get_mut(&server_id) else {
             return;
@@ -610,9 +725,7 @@ impl SyncManager {
             };
 
             // Check if in scope
-            let in_scope = client
-                .effective_scope
-                .contains_key(&(object_id, branch_name.clone()));
+            let in_scope = client.is_in_scope(object_id, &branch_name);
 
             let include_metadata = !client.sent_metadata.contains(&object_id);
 
@@ -825,36 +938,67 @@ impl SyncManager {
             SyncPayload::ObjectUpdated {
                 object_id,
                 branch_name,
+                commits,
                 ..
             } => {
-                let key = (*object_id, branch_name.clone());
+                // Check if object is in any query scope
+                if !client.is_in_scope(*object_id, branch_name) {
+                    // Out of scope - queue for approval
+                    let id = PendingUpdateId(self.next_pending_id);
+                    self.next_pending_id += 1;
+                    self.pending_updates.push(PendingUpdate {
+                        id,
+                        client_id,
+                        payload,
+                    });
+                    return;
+                }
 
-                match client.effective_scope.get(&key) {
-                    Some(Permission::ReadableAndWritable) => {
-                        // Client has write permission - apply immediately
-                        self.apply_payload_from_client(client_id, payload, false);
-                    }
-                    Some(Permission::Readable) => {
-                        // Client has read-only permission - reject
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::Error(SyncError::PermissionDenied {
-                                object_id: *object_id,
-                                branch_name: branch_name.clone(),
-                                reason: "read-only access".to_string(),
-                            }),
-                        });
-                    }
-                    None => {
-                        // Out of scope - queue for approval
-                        let id = PendingUpdateId(self.next_pending_id);
-                        self.next_pending_id += 1;
-                        self.pending_updates.push(PendingUpdate {
-                            id,
-                            client_id,
-                            payload,
-                        });
-                    }
+                // Queue for permission check if client has a session
+                if let Some(session) = &client.session {
+                    // Get object metadata and old content from current tip (if exists)
+                    let (metadata, old_content) = self
+                        .object_manager
+                        .get(*object_id)
+                        .map(|obj| {
+                            let old = obj
+                                .branches
+                                .get(branch_name)
+                                .and_then(|branch| {
+                                    branch
+                                        .tips
+                                        .iter()
+                                        .next()
+                                        .and_then(|tip_id| branch.commits.get(tip_id))
+                                })
+                                .map(|commit| commit.content.clone());
+                            (obj.metadata.clone(), old)
+                        })
+                        .unwrap_or_default();
+
+                    // Get new content from incoming commits
+                    let new_content = commits.last().map(|c| c.content.clone());
+
+                    // Determine operation (INSERT if no old content, UPDATE otherwise)
+                    let operation = if old_content.is_some() {
+                        Operation::Update
+                    } else {
+                        Operation::Insert
+                    };
+
+                    // Queue for async permission evaluation
+                    self.queue_for_permission_check(
+                        client_id,
+                        payload,
+                        session.clone(),
+                        metadata,
+                        old_content,
+                        new_content,
+                        operation,
+                    );
+                } else {
+                    // No session - allow (permissive mode)
+                    self.apply_payload_from_client(client_id, payload, false);
                 }
             }
             SyncPayload::ObjectTruncated {
@@ -862,38 +1006,62 @@ impl SyncManager {
                 branch_name,
                 ..
             } => {
-                let key = (*object_id, branch_name.clone());
+                // Check if object is in any query scope
+                if !client.is_in_scope(*object_id, branch_name) {
+                    // Out of scope - queue for approval
+                    let id = PendingUpdateId(self.next_pending_id);
+                    self.next_pending_id += 1;
+                    self.pending_updates.push(PendingUpdate {
+                        id,
+                        client_id,
+                        payload,
+                    });
+                    return;
+                }
 
-                match client.effective_scope.get(&key) {
-                    Some(Permission::ReadableAndWritable) => {
-                        self.apply_payload_from_client(client_id, payload, false);
-                    }
-                    Some(Permission::Readable) => {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::Error(SyncError::PermissionDenied {
-                                object_id: *object_id,
-                                branch_name: branch_name.clone(),
-                                reason: "read-only access".to_string(),
-                            }),
-                        });
-                    }
-                    None => {
-                        let id = PendingUpdateId(self.next_pending_id);
-                        self.next_pending_id += 1;
-                        self.pending_updates.push(PendingUpdate {
-                            id,
-                            client_id,
-                            payload,
-                        });
-                    }
+                // Queue for permission check if client has a session
+                if let Some(session) = &client.session {
+                    // Get object metadata and old content from current tip
+                    let (metadata, old_content) = self
+                        .object_manager
+                        .get(*object_id)
+                        .map(|obj| {
+                            let old = obj
+                                .branches
+                                .get(branch_name)
+                                .and_then(|branch| {
+                                    branch
+                                        .tips
+                                        .iter()
+                                        .next()
+                                        .and_then(|tip_id| branch.commits.get(tip_id))
+                                })
+                                .map(|commit| commit.content.clone());
+                            (obj.metadata.clone(), old)
+                        })
+                        .unwrap_or_default();
+
+                    // Truncation is a delete operation - queue for async permission evaluation
+                    self.queue_for_permission_check(
+                        client_id,
+                        payload,
+                        session.clone(),
+                        metadata,
+                        old_content,
+                        None,
+                        Operation::Delete,
+                    );
+                } else {
+                    // No session - allow (permissive mode)
+                    self.apply_payload_from_client(client_id, payload, false);
                 }
             }
             SyncPayload::BlobRequest { blob_id } => {
                 // Check if client has read permission for any object referencing this blob
                 let has_permission = client
-                    .effective_scope
-                    .keys()
+                    .queries
+                    .values()
+                    .flat_map(|q| q.iter())
                     .any(|(obj_id, _)| *obj_id == blob_id.object_id);
 
                 if !has_permission {
@@ -1042,12 +1210,7 @@ impl SyncManager {
         let client_ids: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(id, client)| {
-                **id != except
-                    && client
-                        .effective_scope
-                        .contains_key(&(object_id, branch_name.clone()))
-            })
+            .filter(|(id, client)| **id != except && client.is_in_scope(object_id, &branch_name))
             .map(|(id, _)| *id)
             .collect();
 
@@ -1144,12 +1307,7 @@ impl SyncManager {
         let client_ids: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(id, client)| {
-                **id != except
-                    && client
-                        .effective_scope
-                        .contains_key(&(object_id, branch_name.clone()))
-            })
+            .filter(|(id, client)| **id != except && client.is_in_scope(object_id, &branch_name))
             .map(|(id, _)| *id)
             .collect();
 
@@ -1183,22 +1341,6 @@ mod tests {
         let sm = SyncManager::new();
         assert!(sm.servers.is_empty());
         assert!(sm.clients.is_empty());
-    }
-
-    #[test]
-    fn permission_merge_takes_most_permissive() {
-        assert_eq!(
-            Permission::Readable.merge(Permission::Readable),
-            Permission::Readable
-        );
-        assert_eq!(
-            Permission::Readable.merge(Permission::ReadableAndWritable),
-            Permission::ReadableAndWritable
-        );
-        assert_eq!(
-            Permission::ReadableAndWritable.merge(Permission::Readable),
-            Permission::ReadableAndWritable
-        );
     }
 
     // ========================================================================
@@ -1352,8 +1494,8 @@ mod tests {
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
 
         let outbox = sm.take_outbox();
@@ -1401,8 +1543,8 @@ mod tests {
         let obj_id = sm.object_manager.create(None);
         let author = ObjectId::new();
 
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox(); // Clear initial sync
 
@@ -1434,8 +1576,8 @@ mod tests {
 
         // Client has query for obj1/main
         let obj1 = sm.object_manager.create(None);
-        let mut scope = HashMap::new();
-        scope.insert((obj1, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj1, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox();
 
@@ -1471,15 +1613,15 @@ mod tests {
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
-        let mut scope = HashMap::new();
-        scope.insert((obj1, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj1, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox(); // Clear obj1 sync
 
         // Update query to also include obj2
-        let mut new_scope = HashMap::new();
-        new_scope.insert((obj1, "main".into()), Permission::Readable);
-        new_scope.insert((obj2, "main".into()), Permission::Readable);
+        let mut new_scope = HashSet::new();
+        new_scope.insert((obj1, "main".into()));
+        new_scope.insert((obj2, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), new_scope);
 
         let outbox = sm.take_outbox();
@@ -1503,8 +1645,8 @@ mod tests {
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox();
 
@@ -1523,73 +1665,12 @@ mod tests {
     }
 
     // ========================================================================
-    // Phase 4: Permission Enforcement Tests
+    // ReBAC Permission Enforcement Tests
     // ========================================================================
 
     #[test]
-    fn client_with_readable_permission_cannot_push() {
-        let mut sm = SyncManager::new();
-
-        let obj_id = sm.object_manager.create(None);
-        let author = ObjectId::new();
-        let _ = sm.object_manager.add_commit(
-            obj_id,
-            "main",
-            vec![],
-            b"original".to_vec(),
-            author,
-            None,
-        );
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable); // Read-only
-        sm.add_or_update_query(client_id, QueryId(1), scope);
-        sm.take_outbox();
-
-        // Client tries to push update
-        let commit = Commit {
-            parents: vec![],
-            content: b"malicious".to_vec(),
-            timestamp: 1000,
-            author,
-            metadata: None,
-            stored_state: crate::commit::StoredState::Stored,
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: obj_id,
-                metadata: None,
-                branch_name: "main".into(),
-                commits: vec![commit],
-            },
-        });
-
-        sm.process_inbox();
-
-        let outbox = sm.take_outbox();
-        assert_eq!(outbox.len(), 1);
-
-        match &outbox[0].payload {
-            SyncPayload::Error(SyncError::PermissionDenied {
-                object_id,
-                branch_name,
-                reason,
-            }) => {
-                assert_eq!(*object_id, obj_id);
-                assert_eq!(branch_name.0, "main");
-                assert_eq!(reason, "read-only access");
-            }
-            _ => panic!("Expected PermissionDenied error"),
-        }
-    }
-
-    #[test]
-    fn client_with_writable_permission_can_push() {
+    fn no_callback_allows_all_writes() {
+        // When no permission callback is set, all writes in scope are allowed
         let mut sm = SyncManager::new();
 
         let obj_id = sm.object_manager.create(None);
@@ -1602,12 +1683,12 @@ mod tests {
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::ReadableAndWritable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox();
 
-        // Client pushes valid update
+        // Client pushes update - should be allowed (no callback)
         let commit = Commit {
             parents: vec![c1],
             content: b"update".to_vec(),
@@ -1630,6 +1711,243 @@ mod tests {
         sm.process_inbox();
 
         // Verify commit was applied
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn write_with_session_goes_to_pending_permission_checks() {
+        let mut sm = SyncManager::new();
+
+        let obj_id = sm.object_manager.create(None);
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .unwrap();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+
+        // Set session on client
+        if let Some(client) = sm.clients.get_mut(&client_id) {
+            client.session = Some(Session::new("user123"));
+        }
+
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+        sm.add_or_update_query(client_id, QueryId(1), scope);
+        sm.take_outbox();
+
+        // Client tries to push update
+        let commit = Commit {
+            parents: vec![c1],
+            content: b"new_content".to_vec(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox();
+
+        // Should be in pending permission checks
+        let pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session.user_id, "user123");
+        assert_eq!(pending[0].operation, Operation::Update);
+        assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+        assert_eq!(pending[0].new_content, Some(b"new_content".to_vec()));
+
+        // Commit should NOT be applied yet
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(!tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn approve_permission_check_applies_write() {
+        let mut sm = SyncManager::new();
+
+        let obj_id = sm.object_manager.create(None);
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .unwrap();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+
+        // Set session on client
+        if let Some(client) = sm.clients.get_mut(&client_id) {
+            client.session = Some(Session::new("user123"));
+        }
+
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+        sm.add_or_update_query(client_id, QueryId(1), scope);
+        sm.take_outbox();
+
+        // Client pushes update
+        let commit = Commit {
+            parents: vec![c1],
+            content: b"allowed".to_vec(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox();
+
+        // Get pending check and approve it
+        let mut pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 1);
+        let check = pending.remove(0);
+
+        sm.approve_permission_check(check);
+
+        // Commit should now be applied
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn reject_permission_check_sends_error() {
+        let mut sm = SyncManager::new();
+
+        let obj_id = sm.object_manager.create(None);
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .unwrap();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+
+        // Set session on client
+        if let Some(client) = sm.clients.get_mut(&client_id) {
+            client.session = Some(Session::new("user123"));
+        }
+
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+        sm.add_or_update_query(client_id, QueryId(1), scope);
+        sm.take_outbox();
+
+        // Client tries to push update
+        let commit = Commit {
+            parents: vec![c1],
+            content: b"denied".to_vec(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox();
+
+        // Get pending check and reject it
+        let mut pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 1);
+        let check = pending.remove(0);
+
+        sm.reject_permission_check(check, "access denied by policy".to_string());
+
+        // Should get permission denied error
+        let outbox = sm.take_outbox();
+        assert_eq!(outbox.len(), 1);
+
+        match &outbox[0].payload {
+            SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
+                assert_eq!(reason, "access denied by policy");
+            }
+            _ => panic!("Expected PermissionDenied error"),
+        }
+
+        // Commit should NOT be applied
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(!tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn no_session_allows_write_immediately() {
+        let mut sm = SyncManager::new();
+
+        let obj_id = sm.object_manager.create(None);
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .unwrap();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        // Note: NOT setting session on client
+
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+        sm.add_or_update_query(client_id, QueryId(1), scope);
+        sm.take_outbox();
+
+        // Client pushes update
+        let commit = Commit {
+            parents: vec![c1],
+            content: b"update".to_vec(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox();
+
+        // No pending permission checks (no session means permissive mode)
+        let pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 0);
+
+        // Commit should be applied immediately
         let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
         assert!(tips.contains(&commit.id()));
     }
@@ -1795,8 +2113,8 @@ mod tests {
         sm.take_outbox();
 
         let obj_id = ObjectId::new();
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
 
         sm.forward_query_to_server(server_id, QueryId(1), scope.clone());
 
@@ -1823,8 +2141,8 @@ mod tests {
         sm.add_server(server_id);
 
         let obj_id = ObjectId::new();
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.forward_query_to_server(server_id, QueryId(1), scope);
         sm.take_outbox();
 
@@ -1855,8 +2173,8 @@ mod tests {
         sm.add_client(client_id);
 
         let obj_id = ObjectId::new();
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox();
 
@@ -1927,8 +2245,8 @@ mod tests {
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox();
 
@@ -2043,8 +2361,8 @@ mod tests {
         sm.add_client(client1);
         sm.add_client(client2);
 
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::ReadableAndWritable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client1, QueryId(1), scope.clone());
         sm.add_or_update_query(client2, QueryId(1), scope);
         sm.take_outbox();
@@ -2179,8 +2497,8 @@ mod tests {
         // Add client with scope including the object
         let client_id = ClientId::new();
         sm.add_client(client_id);
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
 
         let outbox = sm.take_outbox();
@@ -2285,8 +2603,8 @@ mod tests {
         // Add client with scope including the object
         let client_id = ClientId::new();
         sm.add_client(client_id);
-        let mut scope = HashMap::new();
-        scope.insert((obj_id, "main".into()), Permission::Readable);
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
         sm.add_or_update_query(client_id, QueryId(1), scope);
         sm.take_outbox(); // Clear any initial sync messages
 

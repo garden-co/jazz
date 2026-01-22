@@ -7,3 +7,4 @@ edition = "2024"
 uuid = { version = "1", features = ["v5", "v7"] }
 blake3 = "1"
 rand = "0.8"
+serde_json = "1"

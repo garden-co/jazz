@@ -8,12 +8,14 @@ use crate::object_manager::ObjectManager;
 use super::encoding::encode_value;
 use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::array_subquery::ArraySubqueryNode;
+use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
 use super::graph_nodes::index_scan::{IndexScanNode, ScanCondition};
 use super::graph_nodes::join::JoinNode;
 use super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::output::{OutputMode, OutputNode};
+use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::graph_nodes::project::ProjectNode;
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
@@ -21,6 +23,7 @@ use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::IndexState;
 use super::query::{Condition, Query};
+use super::session::Session;
 use super::types::{
     ColumnDescriptor, ColumnType, Row, RowDelta, RowDescriptor, Schema, TableName, Tuple,
     TupleDelta, TupleDescriptor,
@@ -36,10 +39,12 @@ pub enum GraphNode {
     Materialize(MaterializeNode),
     Project(ProjectNode),
     Filter(FilterNode),
+    PolicyFilter(PolicyFilterNode),
     Sort(SortNode),
     LimitOffset(LimitOffsetNode),
     ArraySubquery(ArraySubqueryNode),
     Output(OutputNode),
+    ExistsOutput(ExistsOutputNode),
 }
 
 /// Compiled query graph for a single query.
@@ -61,6 +66,8 @@ pub struct QueryGraph {
     pub index_scan_nodes: Vec<(NodeId, String, String)>, // (node_id, table, column)
     /// Array subquery nodes and their inner tables (for marking dirty on inner table updates).
     pub array_subquery_tables: Vec<(NodeId, String)>, // (node_id, inner_table)
+    /// PolicyFilter nodes and their INHERITS-referenced tables (for marking dirty on table updates).
+    pub policy_filter_tables: Vec<(NodeId, String)>, // (node_id, inherits_table)
     /// Per-table descriptors in join order (for flattening multi-element tuples).
     pub table_descriptors: Vec<RowDescriptor>,
     /// Combined descriptor for output (all columns from all tables).
@@ -80,6 +87,7 @@ impl QueryGraph {
             table,
             index_scan_nodes: Vec::new(),
             array_subquery_tables: Vec::new(),
+            policy_filter_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
             next_node_id: 0,
@@ -101,18 +109,44 @@ impl QueryGraph {
         id
     }
 
-    fn add_edge(&mut self, from: NodeId, to: NodeId) {
+    /// Add an edge from one node to another.
+    pub fn add_edge(&mut self, from: NodeId, to: NodeId) {
         self.edges.entry(from).or_default().push(to);
         self.reverse_edges.entry(to).or_default().push(from);
     }
 
-    /// Compile a query into a graph.
+    /// Add a node and return its ID.
+    pub fn add_node_with_id(&mut self, node: GraphNode) -> NodeId {
+        let id = self.next_id();
+        self.nodes.insert(id, node);
+        self.edges.insert(id, Vec::new());
+        self.reverse_edges.insert(id, Vec::new());
+        self.dirty_nodes.insert(id);
+        id
+    }
+
+    /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
+        Self::compile_with_session(query, schema, None)
+    }
+
+    /// Compile a query into a graph with optional session-based policy filtering.
+    ///
+    /// When a session is provided and the table has a SELECT policy, a PolicyFilterNode
+    /// is inserted after materialization to filter rows based on the policy.
+    pub fn compile_with_session(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+    ) -> Option<Self> {
         if query.is_join() {
+            // TODO: Add policy support for joins
             return Self::compile_join(query, schema);
         }
 
-        let descriptor = schema.get(&query.table)?.clone();
+        let table_schema = schema.get(&query.table)?;
+        let descriptor = table_schema.descriptor.clone();
+        let select_policy = table_schema.policies.select.using.clone();
         let mut graph = QueryGraph::new(query.table.clone(), descriptor.clone());
 
         // Phase 1: Build IndexScan nodes (one per disjunct)
@@ -182,6 +216,26 @@ impl QueryGraph {
 
         let mut phase2_input = materialize_id;
         let mut current_descriptor = descriptor.clone();
+
+        // Policy filter node (if session provided and table has SELECT policy)
+        if let (Some(session), Some(policy)) = (&session, select_policy) {
+            let policy_node = PolicyFilterNode::new(
+                current_descriptor.clone(),
+                policy,
+                session.clone(),
+                schema.clone(),
+                query.table.0.clone(),
+            );
+            // Collect INHERITS tables before moving the node
+            let inherits_tables: Vec<_> = policy_node.inherits_tables().iter().cloned().collect();
+            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+            graph.add_edge(policy_id, phase2_input);
+            // Track INHERITS-referenced tables for dirty marking
+            for inherits_table in inherits_tables {
+                graph.policy_filter_tables.push((policy_id, inherits_table));
+            }
+            phase2_input = policy_id;
+        }
 
         // Array subqueries: insert ArraySubqueryNode for each array subquery
         for subquery_spec in &query.array_subqueries {
@@ -257,7 +311,7 @@ impl QueryGraph {
         schema: &Schema,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
-        let inner_descriptor = schema.get(&spec.table)?.clone();
+        let inner_descriptor = schema.get(&spec.table)?.descriptor.clone();
 
         // Find outer correlation column index
         // The outer_column may be qualified (table.column) or unqualified
@@ -282,8 +336,8 @@ impl QueryGraph {
         // Build combined descriptor: base table + all joined tables + nested array columns
         let mut combined_columns = inner_descriptor.columns.clone();
         for join_spec in &spec.joins {
-            if let Some(joined_desc) = schema.get(&join_spec.table) {
-                combined_columns.extend(joined_desc.columns.clone());
+            if let Some(joined_schema) = schema.get(&join_spec.table) {
+                combined_columns.extend(joined_schema.descriptor.columns.clone());
             }
         }
 
@@ -348,13 +402,13 @@ impl QueryGraph {
         spec: &crate::query_manager::query::ArraySubquerySpec,
         schema: &Schema,
     ) -> Option<RowDescriptor> {
-        let inner_descriptor = schema.get(&spec.table)?;
+        let inner_schema = schema.get(&spec.table)?;
 
         // Start with base table columns + joined table columns
-        let mut columns = inner_descriptor.columns.clone();
+        let mut columns = inner_schema.descriptor.columns.clone();
         for join_spec in &spec.joins {
-            if let Some(joined_desc) = schema.get(&join_spec.table) {
-                columns.extend(joined_desc.columns.clone());
+            if let Some(joined_schema) = schema.get(&join_spec.table) {
+                columns.extend(joined_schema.descriptor.columns.clone());
             }
         }
 
@@ -388,7 +442,8 @@ impl QueryGraph {
     /// AliasNode integration to properly distinguish duplicate table columns.
     /// TODO: Insert AliasNodes when aliases are present to enable self-joins.
     fn compile_join(query: &Query, schema: &Schema) -> Option<Self> {
-        let base_descriptor = schema.get(&query.table)?.clone();
+        let base_table_schema = schema.get(&query.table)?;
+        let base_descriptor = base_table_schema.descriptor.clone();
         let mut graph = QueryGraph::new(query.table.clone(), base_descriptor.clone());
 
         // Track all table names and descriptors for TupleDescriptor
@@ -418,7 +473,8 @@ impl QueryGraph {
 
         // Process each join
         for join_spec in &query.joins {
-            let right_descriptor = schema.get(&join_spec.table)?.clone();
+            let right_table_schema = schema.get(&join_spec.table)?;
+            let right_descriptor = right_table_schema.descriptor.clone();
 
             // Build pipeline for right table: IndexScan → Materialize
             let right_scan = IndexScanNode::new(
@@ -549,6 +605,7 @@ impl QueryGraph {
 
     /// Mark all index scan nodes for a table dirty.
     /// Also marks array subquery nodes dirty if the table is their inner table.
+    /// Also marks PolicyFilter nodes dirty if the table is INHERITS-referenced.
     pub fn mark_dirty_for_table(&mut self, table: &str) {
         // Mark index scan nodes and propagate downstream
         let affected_index_scans: Vec<NodeId> = self
@@ -588,12 +645,36 @@ impl QueryGraph {
             // Propagate dirty marks to downstream nodes (Output, etc.)
             self.mark_downstream_dirty(node_id);
         }
+
+        // Mark PolicyFilter nodes whose INHERITS-referenced tables changed
+        let affected_policy_filters: Vec<NodeId> = self
+            .policy_filter_tables
+            .iter()
+            .filter_map(|(node_id, inherits_table)| {
+                if inherits_table == table {
+                    Some(*node_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for node_id in affected_policy_filters {
+            self.dirty_nodes.insert(node_id);
+            // Mark the node as needing INHERITS re-evaluation
+            if let Some(GraphNode::PolicyFilter(node)) = self.nodes.get_mut(&node_id) {
+                node.mark_inherits_dirty();
+            }
+            // Propagate dirty marks to downstream nodes
+            self.mark_downstream_dirty(node_id);
+        }
     }
 
-    /// Check if this graph involves a table (either as index scan or array subquery inner table).
+    /// Check if this graph involves a table (as index scan, array subquery inner table, or INHERITS reference).
     pub fn involves_table(&self, table: &str) -> bool {
         self.index_scan_nodes.iter().any(|(_, t, _)| t == table)
             || self.array_subquery_tables.iter().any(|(_, t)| t == table)
+            || self.policy_filter_tables.iter().any(|(_, t)| t == table)
     }
 
     /// Check if the MaterializeNode has a specific object ID pending.
@@ -829,6 +910,25 @@ impl QueryGraph {
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
+                Some(GraphNode::PolicyFilter(_)) => {
+                    let input_delta = self.edges[&node_id]
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::PolicyFilter(policy_node)) = self.nodes.get_mut(&node_id)
+                    {
+                        // Use process_with_context if the policy has INHERITS clauses
+                        let delta = if policy_node.has_inherits() {
+                            policy_node.process_with_context(input_delta, indices, om, &mut |id| {
+                                row_loader(id)
+                            })
+                        } else {
+                            RowNode::process(policy_node, input_delta)
+                        };
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
                 Some(GraphNode::Sort(_)) => {
                     let input_delta = self.edges[&node_id]
                         .first()
@@ -888,6 +988,18 @@ impl QueryGraph {
 
                     if let Some(GraphNode::Output(output_node)) = self.nodes.get_mut(&node_id) {
                         let delta = RowNode::process(output_node, input_delta);
+                        tuple_deltas.insert(node_id, delta);
+                    }
+                }
+                Some(GraphNode::ExistsOutput(_)) => {
+                    let input_delta = self.edges[&node_id]
+                        .first()
+                        .and_then(|dep| tuple_deltas.get(dep).cloned())
+                        .unwrap_or_default();
+
+                    if let Some(GraphNode::ExistsOutput(exists_node)) = self.nodes.get_mut(&node_id)
+                    {
+                        let delta = RowNode::process(exists_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1014,7 +1126,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
                 ColumnDescriptor::new("score", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema
     }
@@ -1208,7 +1321,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -1216,7 +1330,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema
     }
@@ -1346,7 +1461,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("text", ColumnType::Text),
                 ColumnDescriptor::new("user_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
 
         let query = QueryBuilder::new("users")

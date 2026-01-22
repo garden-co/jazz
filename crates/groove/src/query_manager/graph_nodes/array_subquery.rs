@@ -430,7 +430,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -438,7 +439,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema
     }
@@ -449,7 +451,11 @@ mod tests {
 
         let outer_descriptor = TupleDescriptor::single_with_materialization(
             "users",
-            schema.get(&TableName::new("users")).unwrap().clone(),
+            schema
+                .get(&TableName::new("users"))
+                .unwrap()
+                .descriptor
+                .clone(),
             true,
         );
 
@@ -475,7 +481,11 @@ mod tests {
 
         let outer_descriptor = TupleDescriptor::single_with_materialization(
             "users",
-            schema.get(&TableName::new("users")).unwrap().clone(),
+            schema
+                .get(&TableName::new("users"))
+                .unwrap()
+                .descriptor
+                .clone(),
             true,
         );
 
@@ -494,7 +504,7 @@ mod tests {
 
         // Create a tuple with user id=42
         let user_values = vec![Value::Integer(42), Value::Text("Alice".into())];
-        let user_row_desc = schema.get(&TableName::new("users")).unwrap();
+        let user_row_desc = &schema.get(&TableName::new("users")).unwrap().descriptor;
         let user_data = encode_row(user_row_desc, &user_values).unwrap();
         let user_tuple = Tuple::new(vec![TupleElement::Row {
             id: ObjectId::new(),

@@ -1,16 +1,20 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::commit::{CommitId, StoredState};
 use crate::object::{BranchName, ObjectId, ObjectState};
 use crate::object_manager::AllObjectUpdate;
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{PendingPermissionCheck, PendingUpdateId, SyncManager};
 
 use super::encoding::{decode_row, encode_row};
 use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
 use super::index::{IndexError, IndexState};
+use super::policy::{ComplexClause, Operation, evaluate_simple_parts, resolve_session_value};
+use super::policy_graph::PolicyGraph;
 use super::query::{Query, QueryBuilder};
-use super::types::{RowDelta, RowDescriptor, Schema, TableName, Value};
+use super::session::Session;
+use super::types::{Row, RowDelta, RowDescriptor, Schema, TableName, TableSchema, Value};
 
 /// Row branch name (all row data goes on "main" branch).
 const ROW_BRANCH: &str = "main";
@@ -33,6 +37,11 @@ pub enum QueryError {
     RowAlreadyDeleted(ObjectId),
     /// Cannot operate on a hard-deleted row (it no longer exists).
     RowHardDeleted(ObjectId),
+    /// Policy denied the operation.
+    PolicyDenied {
+        table: TableName,
+        operation: Operation,
+    },
 }
 
 impl std::fmt::Display for QueryError {
@@ -52,6 +61,9 @@ impl std::fmt::Display for QueryError {
             QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {:?}", id),
             QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {:?}", id),
             QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
+            QueryError::PolicyDenied { table, operation } => {
+                write!(f, "policy denied {} on table {}", operation, table)
+            }
         }
     }
 }
@@ -123,6 +135,17 @@ pub struct QueryUpdate {
     pub delta: RowDelta,
 }
 
+/// State for an active policy check (graphs and associated data).
+#[derive(Debug)]
+struct PolicyCheckState {
+    /// Policy graphs that need to settle.
+    graphs: Vec<PolicyGraph>,
+    /// Table name for error messages.
+    table: TableName,
+    /// The original pending permission check.
+    pending_check: PendingPermissionCheck,
+}
+
 /// Manages reactive SQL queries over object-based storage.
 ///
 /// No global Setup/Ready state machine - indices and data are loaded lazily
@@ -132,7 +155,7 @@ pub struct QueryUpdate {
 /// ObjectManager is the source of truth for row data - no caching layer on top.
 pub struct QueryManager {
     sync_manager: SyncManager,
-    schema: Schema,
+    schema: Arc<Schema>,
 
     /// Indices: (table, column) -> IndexState
     indices: HashMap<(String, String), IndexState>,
@@ -143,6 +166,9 @@ pub struct QueryManager {
 
     /// Pending query updates
     update_outbox: Vec<QueryUpdate>,
+
+    /// Active policy checks being evaluated.
+    active_policy_checks: HashMap<PendingUpdateId, PolicyCheckState>,
 }
 
 impl QueryManager {
@@ -150,10 +176,13 @@ impl QueryManager {
     ///
     /// Indices are created lazily when data is inserted. Existing data in
     /// ObjectManager is discovered via index scans (zero-copy reads).
+    ///
+    /// Row-level security is evaluated via `process()` which handles pending
+    /// permission checks from SyncManager.
     pub fn new(sync_manager: SyncManager, schema: Schema) -> Self {
         // Initialize indices for all tables
         let mut indices = HashMap::new();
-        for (table_name, descriptor) in &schema {
+        for (table_name, table_schema) in &schema {
             // Primary "_id" index (for live rows)
             indices.insert(
                 (table_name.0.clone(), "_id".to_string()),
@@ -167,7 +196,7 @@ impl QueryManager {
             );
 
             // Index for each column
-            for col in &descriptor.columns {
+            for col in &table_schema.descriptor.columns {
                 indices.insert(
                     (table_name.0.clone(), col.name.clone()),
                     IndexState::new(&table_name.0, &col.name),
@@ -177,11 +206,12 @@ impl QueryManager {
 
         Self {
             sync_manager,
-            schema,
+            schema: Arc::new(schema),
             indices,
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
+            active_policy_checks: HashMap::new(),
         }
     }
 
@@ -295,17 +325,42 @@ impl QueryManager {
     /// Returns an `InsertHandle` that can be polled to check durability.
     /// Index updates happen immediately (creating sentinels if needed).
     pub fn insert(&mut self, table: &str, values: &[Value]) -> Result<InsertHandle, QueryError> {
+        self.insert_with_session(table, values, None)
+    }
+
+    /// Insert a new row with session-based policy checking.
+    ///
+    /// If the table has an INSERT WITH CHECK policy and a session is provided,
+    /// the policy is evaluated against the new row values. If the policy
+    /// denies the insert, `PolicyDenied` is returned.
+    pub fn insert_with_session(
+        &mut self,
+        table: &str,
+        values: &[Value],
+        session: Option<&Session>,
+    ) -> Result<InsertHandle, QueryError> {
         let table_name = TableName::new(table);
-        let descriptor = self
+        let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
-            .clone();
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
+        let insert_policy = table_schema.policies.insert.with_check.clone();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
                 expected: descriptor.columns.len(),
                 actual: values.len(),
+            });
+        }
+
+        // Check INSERT WITH CHECK policy
+        if let (Some(session), Some(policy)) = (session, insert_policy)
+            && !self.evaluate_policy_for_values(&policy, values, &descriptor, session, table)
+        {
+            return Err(QueryError::PolicyDenied {
+                table: table_name,
+                operation: Operation::Insert,
             });
         }
 
@@ -339,8 +394,152 @@ impl QueryManager {
         })
     }
 
+    /// Evaluate a policy expression against row values (pre-encoding).
+    ///
+    /// This is used for write policy checking (INSERT/UPDATE WITH CHECK).
+    #[allow(clippy::only_used_in_recursion)]
+    fn evaluate_policy_for_values(
+        &self,
+        policy: &crate::query_manager::policy::PolicyExpr,
+        values: &[Value],
+        descriptor: &RowDescriptor,
+        session: &Session,
+        table: &str,
+    ) -> bool {
+        use crate::query_manager::policy::PolicyExpr;
+
+        match policy {
+            PolicyExpr::True => true,
+            PolicyExpr::False => false,
+
+            PolicyExpr::Cmp { column, op, value } => {
+                let col_index = match descriptor.column_index(column) {
+                    Some(idx) => idx,
+                    None => return false,
+                };
+                let col_value = &values[col_index];
+                let cmp_value = match value {
+                    crate::query_manager::policy::PolicyValue::Literal(v) => v.clone(),
+                    crate::query_manager::policy::PolicyValue::SessionRef(path) => {
+                        match resolve_session_value(path, session) {
+                            Some(v) => v,
+                            None => return false,
+                        }
+                    }
+                };
+                self.compare_values(col_value, &cmp_value, op)
+            }
+
+            PolicyExpr::IsNull { column } => {
+                let col_index = match descriptor.column_index(column) {
+                    Some(idx) => idx,
+                    None => return false,
+                };
+                matches!(values[col_index], Value::Null)
+            }
+
+            PolicyExpr::IsNotNull { column } => {
+                let col_index = match descriptor.column_index(column) {
+                    Some(idx) => idx,
+                    None => return false,
+                };
+                !matches!(values[col_index], Value::Null)
+            }
+
+            PolicyExpr::In {
+                column,
+                session_path,
+            } => {
+                let col_index = match descriptor.column_index(column) {
+                    Some(idx) => idx,
+                    None => return false,
+                };
+                let col_value = &values[col_index];
+                let session_array = match session.get_array(session_path) {
+                    Some(arr) => arr,
+                    None => return false,
+                };
+                self.value_in_json_array(col_value, session_array)
+            }
+
+            PolicyExpr::And(exprs) => exprs
+                .iter()
+                .all(|e| self.evaluate_policy_for_values(e, values, descriptor, session, table)),
+
+            PolicyExpr::Or(exprs) => exprs
+                .iter()
+                .any(|e| self.evaluate_policy_for_values(e, values, descriptor, session, table)),
+
+            PolicyExpr::Not(expr) => {
+                !self.evaluate_policy_for_values(expr, values, descriptor, session, table)
+            }
+
+            PolicyExpr::Exists { .. } | PolicyExpr::Inherits { .. } => {
+                // EXISTS and INHERITS require actual row data - for writes, return true
+                // (TODO: implement for write policies that need these)
+                true
+            }
+        }
+    }
+
+    /// Compare two Values with the given operator.
+    fn compare_values(
+        &self,
+        a: &Value,
+        b: &Value,
+        op: &crate::query_manager::policy::CmpOp,
+    ) -> bool {
+        use crate::query_manager::policy::CmpOp;
+        use std::cmp::Ordering;
+
+        let ord = match (a, b) {
+            (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+            (Value::BigInt(x), Value::BigInt(y)) => x.cmp(y),
+            (Value::Integer(x), Value::BigInt(y)) => (*x as i64).cmp(y),
+            (Value::BigInt(x), Value::Integer(y)) => x.cmp(&(*y as i64)),
+            (Value::Text(x), Value::Text(y)) => x.cmp(y),
+            (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
+            (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
+            (Value::Uuid(x), Value::Uuid(y)) => x.0.cmp(&y.0),
+            _ => return false, // Type mismatch
+        };
+
+        match op {
+            CmpOp::Eq => ord == Ordering::Equal,
+            CmpOp::Ne => ord != Ordering::Equal,
+            CmpOp::Lt => ord == Ordering::Less,
+            CmpOp::Le => ord != Ordering::Greater,
+            CmpOp::Gt => ord == Ordering::Greater,
+            CmpOp::Ge => ord != Ordering::Less,
+        }
+    }
+
+    /// Check if a Value is in a JSON array.
+    fn value_in_json_array(&self, value: &Value, array: &[serde_json::Value]) -> bool {
+        match value {
+            Value::Text(s) => array.iter().any(|v| v.as_str() == Some(s.as_str())),
+            Value::Integer(i) => array.iter().any(|v| v.as_i64() == Some(*i as i64)),
+            Value::BigInt(i) => array.iter().any(|v| v.as_i64() == Some(*i)),
+            _ => false,
+        }
+    }
+
     /// Update a row.
     pub fn update(&mut self, id: ObjectId, values: &[Value]) -> Result<(), QueryError> {
+        self.update_with_session(id, values, None)
+    }
+
+    /// Update a row with session-based policy checking.
+    ///
+    /// If the table has policies and a session is provided:
+    /// - USING policy is checked against the old row (if exists)
+    /// - WITH CHECK policy is checked against the new values
+    pub fn update_with_session(
+        &mut self,
+        id: ObjectId,
+        values: &[Value],
+        session: Option<&Session>,
+    ) -> Result<(), QueryError> {
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -352,20 +551,43 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Get old data from ObjectManager
-        let (old_data, _) = self
+        let (old_data, commit_id) = self
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
-        let descriptor = self
+        let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
-            .clone();
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
+        let using_policy = table_schema.policies.update.using.clone();
+        let check_policy = table_schema.policies.update.with_check.clone();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
                 expected: descriptor.columns.len(),
                 actual: values.len(),
+            });
+        }
+
+        // Check UPDATE USING policy against old row
+        if let (Some(session), Some(policy)) = (session, &using_policy) {
+            let old_row = crate::query_manager::types::Row::new(id, old_data.clone(), commit_id);
+            if !self.evaluate_policy_for_row(policy, &old_row, &descriptor, session, &table) {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Update,
+                });
+            }
+        }
+
+        // Check UPDATE WITH CHECK policy against new values
+        if let (Some(session), Some(policy)) = (session, check_policy)
+            && !self.evaluate_policy_for_values(&policy, values, &descriptor, session, &table)
+        {
+            return Err(QueryError::PolicyDenied {
+                table: table_name,
+                operation: Operation::Update,
             });
         }
 
@@ -401,6 +623,28 @@ impl QueryManager {
         Ok(())
     }
 
+    /// Evaluate a policy expression against an encoded row.
+    fn evaluate_policy_for_row(
+        &self,
+        policy: &crate::query_manager::policy::PolicyExpr,
+        row: &crate::query_manager::types::Row,
+        descriptor: &RowDescriptor,
+        session: &Session,
+        table: &str,
+    ) -> bool {
+        use crate::query_manager::graph_nodes::policy_filter::PolicyFilterNode;
+
+        // Create a temporary PolicyFilterNode to evaluate the policy
+        let filter = PolicyFilterNode::new(
+            descriptor.clone(),
+            policy.clone(),
+            session.clone(),
+            (*self.schema).clone(),
+            table,
+        );
+        filter.evaluate(row)
+    }
+
     /// Soft delete a row.
     ///
     /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
@@ -432,11 +676,106 @@ impl QueryManager {
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
-        let descriptor = self
+        let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
+
+        // Get parent commit
+        let tips = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, ROW_BRANCH)
+            .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
+
+        let parents: Vec<_> = tips.into_iter().collect();
+        let author = id;
+
+        // Create delete metadata
+        let mut delete_metadata = std::collections::BTreeMap::new();
+        delete_metadata.insert("delete".to_string(), "soft".to_string());
+
+        // Add commit with preserved content + delete: soft metadata
+        // Content is copied from previous tip so soft-deleted rows can still be read
+        let delete_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(
+                id,
+                ROW_BRANCH,
+                parents,
+                old_data.clone(), // Preserve content for soft deletes
+                author,
+                Some(delete_metadata),
+            )
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Update indices: remove from _id and column indices, add to _id_deleted
+        self.update_indices_for_soft_delete(&table, id, &old_data, &descriptor)?;
+
+        // Mark subscriptions dirty and mark row as deleted
+        self.mark_subscriptions_dirty(&table);
+        self.mark_row_deleted_in_subscriptions(&table, id);
+
+        Ok(DeleteHandle {
+            row_id: id,
+            delete_commit_id,
+        })
+    }
+
+    /// Soft delete a row with session-based policy checking.
+    ///
+    /// Checks DELETE USING policy against the existing row before allowing deletion.
+    /// Falls back to UPDATE's USING policy if no DELETE policy is defined.
+    pub fn delete_with_session(
+        &mut self,
+        id: ObjectId,
+        session: Option<&Session>,
+    ) -> Result<DeleteHandle, QueryError> {
+        // Check for hard delete first
+        if self.is_hard_deleted(id) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
+
+        // Get table name from object metadata
+        let table = self
+            .sync_manager
+            .object_manager
+            .get(id)
+            .and_then(|obj| obj.metadata.get("table").cloned())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let table_name = TableName::new(&table);
+
+        // Check if already soft-deleted
+        if self.row_is_deleted(&table, id) {
+            return Err(QueryError::RowAlreadyDeleted(id));
+        }
+
+        // Get old data from ObjectManager (for index removal and content preservation)
+        let (old_data, commit_id) = self
+            .load_row_from_object(id)
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let table_schema = self
+            .schema
+            .get(&table_name)
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
+
+        // Check DELETE USING policy (falls back to UPDATE's USING)
+        let using_policy = table_schema.policies.effective_delete_using().cloned();
+        if let (Some(session), Some(policy)) = (session, using_policy) {
+            let old_row = Row::new(id, old_data.clone(), commit_id);
+            if !self.evaluate_policy_for_row(&policy, &old_row, &descriptor, session, &table) {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Delete,
+                });
+            }
+        }
 
         // Get parent commit
         let tips = self
@@ -506,11 +845,11 @@ impl QueryManager {
             return Err(QueryError::RowNotDeleted(id));
         }
 
-        let descriptor = self
+        let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
-            .clone();
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
 
         if values.len() != descriptor.columns.len() {
             return Err(QueryError::ColumnCountMismatch {
@@ -582,11 +921,11 @@ impl QueryManager {
             .map(|(data, _)| data)
             .filter(|data| !data.is_empty());
 
-        let descriptor = self
+        let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?
-            .clone();
+            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
 
         // Get parent commit
         let tips = self
@@ -686,8 +1025,8 @@ impl QueryManager {
         // Get row data from ObjectManager
         let (data, _) = self.load_row_from_object(id)?;
 
-        let descriptor = self.schema.get(&table_name)?;
-        decode_row(descriptor, &data).ok()
+        let table_schema = self.schema.get(&table_name)?;
+        decode_row(&table_schema.descriptor, &data).ok()
     }
 
     /// Create a query builder for a table.
@@ -697,11 +1036,11 @@ impl QueryManager {
 
     /// Execute a query and return results (one-shot).
     pub fn execute(&mut self, query: Query) -> Result<Vec<Vec<Value>>, QueryError> {
-        let descriptor = self
+        let table_schema = self
             .schema
             .get(&query.table)
-            .ok_or_else(|| QueryError::TableNotFound(query.table.clone()))?
-            .clone();
+            .ok_or_else(|| QueryError::TableNotFound(query.table.clone()))?;
+        let descriptor = table_schema.descriptor.clone();
 
         let mut graph = QueryGraph::compile(&query, &self.schema)
             .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
@@ -728,7 +1067,19 @@ impl QueryManager {
 
     /// Subscribe to query results (delta mode).
     pub fn subscribe(&mut self, query: Query) -> Result<QuerySubscriptionId, QueryError> {
-        let graph = QueryGraph::compile(&query, &self.schema)
+        self.subscribe_with_session(query, None)
+    }
+
+    /// Subscribe to query results with session-based policy filtering.
+    ///
+    /// When a session is provided and the table has a SELECT policy, rows are
+    /// filtered based on the policy expression evaluated against the session context.
+    pub fn subscribe_with_session(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        let graph = QueryGraph::compile_with_session(&query, &self.schema, session)
             .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
@@ -758,25 +1109,37 @@ impl QueryManager {
     /// Process pending changes and settle all subscription graphs.
     ///
     /// This method drives async progress:
+    /// - Processes SyncManager inbox (receives client writes)
+    /// - Evaluates pending permission checks
+    /// - Settles policy graphs and finalizes completed checks
     /// - Processes object updates from SyncManager
     /// - Flushes pending index updates when indices become ready
     /// - Marks subscriptions with pending IDs dirty when objects become available
     /// - Settles all subscription graphs (row data loaded on-demand from ObjectManager)
     pub fn process(&mut self) {
-        // Process object updates from SyncManager
+        // 1. Process SyncManager inbox (receives client writes)
+        self.sync_manager.process_inbox();
+
+        // 2. Pick up new permission check intents from SyncManager
+        self.pick_up_pending_permission_checks();
+
+        // 3. Settle policy graphs and finalize completed checks
+        self.settle_policy_checks();
+
+        // 4. Process object updates from SyncManager
         let updates = self.sync_manager.object_manager.take_all_object_updates();
         for update in updates {
             self.handle_object_update(update);
         }
 
-        // Flush pending index updates for indices that became ready
+        // 5. Flush pending index updates for indices that became ready
         self.flush_pending_index_updates();
 
-        // Mark subscriptions dirty if they have pending IDs that might now be available
+        // 6. Mark subscriptions dirty if they have pending IDs that might now be available
         // This ensures settle() will be called to check pending rows
         self.mark_subscriptions_with_pending_dirty();
 
-        // Settle all subscriptions - row_loader reads directly from ObjectManager
+        // 7. Settle all subscriptions - row_loader reads directly from ObjectManager
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
         let indices = &self.indices;
@@ -807,6 +1170,422 @@ impl QueryManager {
                     subscription_id: *sub_id,
                     delta,
                 });
+            }
+        }
+    }
+
+    /// Pick up pending permission checks from SyncManager and evaluate them.
+    fn pick_up_pending_permission_checks(&mut self) {
+        let pending = self.sync_manager.take_pending_permission_checks();
+
+        for check in pending {
+            self.evaluate_write_permission(check);
+        }
+    }
+
+    /// Evaluate a write permission check.
+    ///
+    /// If the simple parts of the policy fail, reject immediately.
+    /// If there are complex clauses (INHERITS/EXISTS), create policy graphs.
+    /// If all simple parts pass and no complex clauses, approve immediately.
+    ///
+    /// For UPDATE operations, we evaluate two policies:
+    /// - USING against old_content (can the session see the old row?)
+    /// - WITH CHECK against new_content (is the new row valid?)
+    fn evaluate_write_permission(&mut self, check: PendingPermissionCheck) {
+        // Get table name from metadata
+        let table_name = match check.metadata.get("table") {
+            Some(t) => TableName::new(t),
+            None => {
+                // Not a row object, allow
+                self.sync_manager.approve_permission_check(check);
+                return;
+            }
+        };
+
+        // Look up table schema - clone to avoid borrowing self
+        let table_schema = match self.schema.get(&table_name).cloned() {
+            Some(s) => s,
+            None => {
+                // Unknown table, allow
+                self.sync_manager.approve_permission_check(check);
+                return;
+            }
+        };
+
+        // Handle UPDATE specially - needs both USING and WITH CHECK
+        if check.operation == Operation::Update {
+            self.evaluate_update_permission(check, table_name, table_schema);
+            return;
+        }
+
+        // Get the appropriate policy based on operation
+        let policy = match check.operation {
+            Operation::Insert => table_schema.policies.insert.with_check.as_ref(),
+            Operation::Update => unreachable!(), // Handled above
+            Operation::Delete => table_schema.policies.effective_delete_using(),
+            Operation::Select => {
+                // SELECT not checked via write permission
+                self.sync_manager.approve_permission_check(check);
+                return;
+            }
+        };
+
+        // If no policy defined, allow
+        let policy = match policy {
+            Some(p) => p.clone(),
+            None => {
+                self.sync_manager.approve_permission_check(check);
+                return;
+            }
+        };
+
+        // Get the content to evaluate
+        let content = match check.operation {
+            Operation::Insert => check.new_content.as_ref(),
+            Operation::Update => unreachable!(), // Handled above
+            Operation::Delete => check.old_content.as_ref(),
+            Operation::Select => {
+                self.sync_manager.approve_permission_check(check);
+                return;
+            }
+        };
+
+        let content = match content {
+            Some(c) => c,
+            None => {
+                // No content to evaluate - allow
+                self.sync_manager.approve_permission_check(check);
+                return;
+            }
+        };
+
+        // Evaluate simple parts of the policy
+        let result =
+            evaluate_simple_parts(&policy, content, &table_schema.descriptor, &check.session);
+
+        if !result.passed {
+            // Simple parts failed - reject immediately
+            let reason = format!(
+                "{:?} denied by policy on table {}",
+                check.operation, table_name.0
+            );
+            self.sync_manager.reject_permission_check(check, reason);
+            return;
+        }
+
+        if result.complex_clauses.is_empty() {
+            // All simple parts passed and no complex clauses - approve immediately
+            self.sync_manager.approve_permission_check(check);
+            return;
+        }
+
+        // Has complex clauses - create policy graphs for them
+        let graphs = self.create_policy_graphs_for_complex_clauses(
+            &result.complex_clauses,
+            content,
+            &table_schema.descriptor,
+            &table_name,
+            &check.session,
+        );
+
+        if graphs.is_empty() {
+            // No graphs created (maybe missing tables) - allow
+            self.sync_manager.approve_permission_check(check);
+            return;
+        }
+
+        // Store for settling
+        let check_id = check.id;
+        self.active_policy_checks.insert(
+            check_id,
+            PolicyCheckState {
+                graphs,
+                table: table_name,
+                pending_check: check,
+            },
+        );
+    }
+
+    /// Evaluate UPDATE permission with both USING (old row) and WITH CHECK (new row).
+    ///
+    /// For UPDATE, we need to check:
+    /// 1. USING policy against old_content - can the session see the row being updated?
+    /// 2. WITH CHECK policy against new_content - is the resulting row valid?
+    ///
+    /// Both must pass for the update to be allowed.
+    fn evaluate_update_permission(
+        &mut self,
+        check: PendingPermissionCheck,
+        table_name: TableName,
+        table_schema: TableSchema,
+    ) {
+        let using_policy = table_schema.policies.update.using.as_ref();
+        let check_policy = table_schema.policies.update.with_check.as_ref();
+
+        // If no policies defined, allow
+        if using_policy.is_none() && check_policy.is_none() {
+            self.sync_manager.approve_permission_check(check);
+            return;
+        }
+
+        let mut all_complex_clauses: Vec<(ComplexClause, Vec<u8>)> = Vec::new();
+
+        // Step 1: Evaluate USING policy against old_content
+        if let Some(using) = using_policy {
+            let old_content = match check.old_content.as_ref() {
+                Some(c) if !c.is_empty() => c,
+                _ => {
+                    // No old content means this is actually an INSERT, not UPDATE
+                    // Reject - UPDATE USING requires seeing the old row
+                    let reason = format!(
+                        "Update denied by USING policy on table {} - no old content",
+                        table_name.0
+                    );
+                    self.sync_manager.reject_permission_check(check, reason);
+                    return;
+                }
+            };
+
+            let result =
+                evaluate_simple_parts(using, old_content, &table_schema.descriptor, &check.session);
+
+            if !result.passed {
+                // USING check failed - session cannot see the old row
+                let reason = format!(
+                    "Update denied by USING policy on table {} - cannot see old row",
+                    table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
+                return;
+            }
+
+            // Collect complex clauses with old_content for USING
+            for clause in result.complex_clauses {
+                all_complex_clauses.push((clause, old_content.clone()));
+            }
+        }
+
+        // Step 2: Evaluate WITH CHECK policy against new_content
+        if let Some(with_check) = check_policy {
+            let new_content = match check.new_content.as_ref() {
+                Some(c) => c,
+                None => {
+                    // No new content - allow (shouldn't happen for UPDATE)
+                    self.sync_manager.approve_permission_check(check);
+                    return;
+                }
+            };
+
+            let result = evaluate_simple_parts(
+                with_check,
+                new_content,
+                &table_schema.descriptor,
+                &check.session,
+            );
+
+            if !result.passed {
+                // WITH CHECK failed - new row is not valid
+                let reason = format!(
+                    "Update denied by WITH CHECK policy on table {}",
+                    table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
+                return;
+            }
+
+            // Collect complex clauses with new_content for WITH CHECK
+            for clause in result.complex_clauses {
+                all_complex_clauses.push((clause, new_content.clone()));
+            }
+        }
+
+        // If no complex clauses, both simple checks passed - approve
+        if all_complex_clauses.is_empty() {
+            self.sync_manager.approve_permission_check(check);
+            return;
+        }
+
+        // Create policy graphs for all complex clauses
+        let mut graphs = Vec::new();
+        for (clause, content) in &all_complex_clauses {
+            let clause_graphs = self.create_policy_graphs_for_complex_clauses(
+                std::slice::from_ref(clause),
+                content,
+                &table_schema.descriptor,
+                &table_name,
+                &check.session,
+            );
+            graphs.extend(clause_graphs);
+        }
+
+        if graphs.is_empty() {
+            // No graphs created (maybe missing tables) - allow
+            self.sync_manager.approve_permission_check(check);
+            return;
+        }
+
+        // Store for settling
+        let check_id = check.id;
+        self.active_policy_checks.insert(
+            check_id,
+            PolicyCheckState {
+                graphs,
+                table: table_name,
+                pending_check: check,
+            },
+        );
+    }
+
+    /// Create policy graphs for complex clauses (INHERITS/EXISTS).
+    fn create_policy_graphs_for_complex_clauses(
+        &self,
+        clauses: &[ComplexClause],
+        content: &[u8],
+        descriptor: &RowDescriptor,
+        _table: &TableName,
+        session: &Session,
+    ) -> Vec<PolicyGraph> {
+        let mut graphs = Vec::new();
+
+        for clause in clauses {
+            match clause {
+                ComplexClause::Inherits {
+                    operation,
+                    via_column,
+                } => {
+                    // Get the FK column to find the parent
+                    let col_idx = match descriptor.column_index(via_column) {
+                        Some(idx) => idx,
+                        None => continue, // Column not found
+                    };
+
+                    // Get the referenced table
+                    let parent_table = match &descriptor.columns[col_idx].references {
+                        Some(t) => t.clone(),
+                        None => continue, // No FK reference
+                    };
+
+                    // Check if FK is NULL - if so, INHERITS passes
+                    if super::encoding::column_is_null(descriptor, content, col_idx)
+                        .unwrap_or(false)
+                    {
+                        continue; // NULL FK passes INHERITS
+                    }
+
+                    // Decode the FK value to get parent ObjectId
+                    let parent_id =
+                        match super::encoding::decode_column(descriptor, content, col_idx) {
+                            Ok(Value::Uuid(id)) => id,
+                            _ => continue, // Can't decode FK
+                        };
+
+                    // Get parent's policy for the specified operation
+                    let parent_schema = match self.schema.get(&parent_table) {
+                        Some(s) => s,
+                        None => continue, // Parent table not in schema
+                    };
+
+                    let parent_policy = match operation {
+                        Operation::Select => parent_schema.policies.select.using.as_ref(),
+                        Operation::Insert => parent_schema.policies.insert.with_check.as_ref(),
+                        Operation::Update => parent_schema.policies.update.using.as_ref(),
+                        Operation::Delete => parent_schema.policies.effective_delete_using(),
+                    };
+
+                    // If parent has no policy, INHERITS passes
+                    let parent_policy = match parent_policy {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    // Create policy graph for INHERITS
+                    if let Some(graph) = PolicyGraph::for_inherits(
+                        &parent_table,
+                        parent_id,
+                        parent_policy,
+                        session,
+                        &self.schema,
+                    ) {
+                        graphs.push(graph);
+                    }
+                }
+                ComplexClause::Exists { table, condition } => {
+                    let target_table = TableName::new(table);
+                    if let Some(graph) =
+                        PolicyGraph::for_exists(&target_table, condition, session, &self.schema)
+                    {
+                        graphs.push(graph);
+                    }
+                }
+            }
+        }
+
+        graphs
+    }
+
+    /// Settle active policy checks and finalize completed ones.
+    fn settle_policy_checks(&mut self) {
+        // Collect IDs to finalize
+        let mut to_approve = Vec::new();
+        let mut to_reject = Vec::new();
+
+        // Create row loader for settling
+        let om = &self.sync_manager.object_manager;
+        let indices = &self.indices;
+
+        // Settle each active policy check
+        for (pending_id, state) in &mut self.active_policy_checks {
+            let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+                let obj_state = om.get_state(id)?;
+                match obj_state {
+                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                        let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
+                        let tip_id = branch.tips.iter().next()?;
+                        let commit = branch.commits.get(tip_id)?;
+                        if commit.content.is_empty() {
+                            return None;
+                        }
+                        Some((commit.content.clone(), *tip_id))
+                    }
+                    ObjectState::Loading => None,
+                }
+            };
+
+            // Settle all graphs
+            let all_complete = state
+                .graphs
+                .iter_mut()
+                .all(|g| g.settle(indices, om, &mut row_loader));
+
+            if all_complete {
+                // All graphs settled - check results
+                let all_pass = state.graphs.iter().all(|g| g.result());
+
+                if all_pass {
+                    to_approve.push(*pending_id);
+                } else {
+                    let reason = format!(
+                        "{:?} denied by policy on table {} (INHERITS check failed)",
+                        state.pending_check.operation, state.table.0
+                    );
+                    to_reject.push((*pending_id, reason));
+                }
+            }
+        }
+
+        // Finalize completed checks
+        for id in to_approve {
+            if let Some(state) = self.active_policy_checks.remove(&id) {
+                self.sync_manager
+                    .approve_permission_check(state.pending_check);
+            }
+        }
+
+        for (id, reason) in to_reject {
+            if let Some(state) = self.active_policy_checks.remove(&id) {
+                self.sync_manager
+                    .reject_permission_check(state.pending_check, reason);
             }
         }
     }
@@ -876,10 +1655,11 @@ impl QueryManager {
         };
 
         let table_name = TableName::new(&table);
-        let descriptor = match self.schema.get(&table_name).cloned() {
-            Some(desc) => desc,
+        let table_schema = match self.schema.get(&table_name) {
+            Some(schema) => schema,
             None => return,
         };
+        let descriptor = table_schema.descriptor.clone();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
         if self.is_hard_deleted(update.object_id) {
@@ -1266,7 +2046,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("name", ColumnType::Text),
                 ColumnDescriptor::new("score", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema
     }
@@ -3011,7 +3792,12 @@ mod tests {
 
         // Create two concurrent updates with different timestamps and content.
         // Both have the same parent, creating diverging tips.
-        let descriptor = qm.schema.get(&TableName::new("users")).unwrap().clone();
+        let descriptor = qm
+            .schema
+            .get(&TableName::new("users"))
+            .unwrap()
+            .descriptor
+            .clone();
 
         // Commit A: lower timestamp, content "TipA"
         let content_a = encode_row(
@@ -3554,7 +4340,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -3562,7 +4349,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema
     }
@@ -3637,7 +4425,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
                 ColumnDescriptor::new("manager_id", ColumnType::Integer).nullable(),
-            ]),
+            ])
+            .into(),
         );
 
         let sync_manager = SyncManager::new();
@@ -3667,21 +4456,24 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("customer_id", ColumnType::Integer),
                 ColumnDescriptor::new("product_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("customers"),
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("products"),
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
 
         let sync_manager = SyncManager::new();
@@ -3901,7 +4693,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -3909,7 +4702,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema
     }
@@ -4564,7 +5358,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -4572,7 +5367,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("comments"),
@@ -4580,7 +5376,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("text", ColumnType::Text),
                 ColumnDescriptor::new("post_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
 
         let mut qm = QueryManager::new(sync_manager, schema);
@@ -4716,7 +5513,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -4724,7 +5522,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("comments"),
@@ -4732,7 +5531,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("text", ColumnType::Text),
                 ColumnDescriptor::new("post_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
 
         let mut qm = QueryManager::new(sync_manager, schema);
@@ -4892,7 +5692,8 @@ mod tests {
             RowDescriptor::new(vec![
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("name", ColumnType::Text),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("posts"),
@@ -4900,7 +5701,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("title", ColumnType::Text),
                 ColumnDescriptor::new("author_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
         schema.insert(
             TableName::new("comments"),
@@ -4908,7 +5710,8 @@ mod tests {
                 ColumnDescriptor::new("id", ColumnType::Integer),
                 ColumnDescriptor::new("text", ColumnType::Text),
                 ColumnDescriptor::new("user_id", ColumnType::Integer),
-            ]),
+            ])
+            .into(),
         );
 
         let mut qm = QueryManager::new(sync_manager, schema);
@@ -5049,5 +5852,198 @@ mod tests {
                 panic!("Unexpected user id: {}", user_id);
             }
         }
+    }
+
+    // ========================================================================
+    // Policy (ReBAC) integration tests
+    // ========================================================================
+
+    use crate::query_manager::policy::PolicyExpr;
+    use crate::query_manager::session::Session as PolicySession;
+    use crate::query_manager::types::{TablePolicies, TableSchema};
+    use serde_json::json;
+
+    fn policy_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("documents"),
+            TableSchema::with_policies(
+                RowDescriptor::new(vec![
+                    ColumnDescriptor::new("owner_id", ColumnType::Text),
+                    ColumnDescriptor::new("team_id", ColumnType::Text),
+                    ColumnDescriptor::new("title", ColumnType::Text),
+                ]),
+                TablePolicies::new().with_select(
+                    // owner_id = @session.user_id OR team_id IN @session.claims.teams
+                    PolicyExpr::or(vec![
+                        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                        PolicyExpr::in_session("team_id", vec!["claims".into(), "teams".into()]),
+                    ]),
+                ),
+            ),
+        );
+        schema
+    }
+
+    #[test]
+    fn policy_filters_select_results() {
+        let sync_manager = SyncManager::new();
+        let schema = policy_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert documents
+        qm.insert(
+            "documents",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("eng".into()),
+                Value::Text("Alice's eng doc".into()),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "documents",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("eng".into()),
+                Value::Text("Bob's eng doc".into()),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "documents",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("sales".into()),
+                Value::Text("Bob's sales doc".into()),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "documents",
+            &[
+                Value::Text("charlie".into()),
+                Value::Text("design".into()),
+                Value::Text("Charlie's design doc".into()),
+            ],
+        )
+        .unwrap();
+
+        // Alice can see: her own doc + all eng docs = 2 docs
+        let alice_session = PolicySession::new("alice").with_claims(json!({"teams": ["eng"]}));
+
+        let query = qm.query("documents").build();
+        let sub_id = qm
+            .subscribe_with_session(query, Some(alice_session))
+            .unwrap();
+
+        qm.process();
+        let updates = qm.take_updates();
+        let alice_update = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .unwrap();
+
+        assert_eq!(
+            alice_update.delta.added.len(),
+            2,
+            "Alice should see 2 docs (her own + Bob's eng doc)"
+        );
+
+        // Bob on sales team can see: his 2 docs + no team docs (sales only) = 2 docs
+        let bob_session = PolicySession::new("bob").with_claims(json!({"teams": ["sales"]}));
+
+        let query2 = qm.query("documents").build();
+        let sub_id2 = qm
+            .subscribe_with_session(query2, Some(bob_session))
+            .unwrap();
+
+        qm.process();
+        let updates2 = qm.take_updates();
+        let bob_update = updates2
+            .iter()
+            .find(|u| u.subscription_id == sub_id2)
+            .unwrap();
+
+        assert_eq!(
+            bob_update.delta.added.len(),
+            2,
+            "Bob should see 2 docs (his own 2 docs)"
+        );
+    }
+
+    #[test]
+    fn no_session_returns_all_rows() {
+        let sync_manager = SyncManager::new();
+        let schema = policy_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert documents
+        qm.insert(
+            "documents",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("eng".into()),
+                Value::Text("Doc 1".into()),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "documents",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("sales".into()),
+                Value::Text("Doc 2".into()),
+            ],
+        )
+        .unwrap();
+
+        // Without session, all rows should be returned (policy not applied)
+        let query = qm.query("documents").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process();
+        let updates = qm.take_updates();
+        let update = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .unwrap();
+
+        assert_eq!(
+            update.delta.added.len(),
+            2,
+            "Without session, should see all 2 docs"
+        );
+    }
+
+    #[test]
+    fn table_without_policy_returns_all_rows() {
+        let sync_manager = SyncManager::new();
+        // Use the regular test_schema which has no policies
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(200)])
+            .unwrap();
+
+        // Even with session, table without policy returns all rows
+        let session = PolicySession::new("some_user");
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe_with_session(query, Some(session)).unwrap();
+
+        qm.process();
+        let updates = qm.take_updates();
+        let update = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .unwrap();
+
+        assert_eq!(
+            update.delta.added.len(),
+            2,
+            "Table without policy should return all rows"
+        );
     }
 }
