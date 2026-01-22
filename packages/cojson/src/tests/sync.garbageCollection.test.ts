@@ -207,6 +207,57 @@ describe("sync after the garbage collector has run", () => {
     `);
   });
 
+  test("knownStateWithStreaming returns lastKnownState for garbageCollected CoValues", async () => {
+    // This test verifies that knownStateWithStreaming() returns the cached lastKnownState
+    // for garbage-collected CoValues, not an empty state. This is important for peer
+    // reconciliation where we want to send the last known state to minimize data transfer.
+
+    const client = setupTestNode();
+    client.addStorage({ ourName: "client" });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    // Sync to server
+    client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // Capture known state before GC
+    const originalKnownState = map.core.knownState();
+    const originalKnownStateWithStreaming = map.core.knownStateWithStreaming();
+
+    // For available CoValues, both should be equal (no streaming in progress)
+    expect(originalKnownState).toEqual(originalKnownStateWithStreaming);
+    expect(originalKnownState.header).toBe(true);
+    expect(Object.values(originalKnownState.sessions)[0]).toBe(1);
+
+    // Disconnect before GC
+    client.disconnect();
+
+    // Run GC to create garbageCollected shell
+    client.node.garbageCollector?.collect();
+    client.node.garbageCollector?.collect();
+
+    const gcCoValue = client.node.getCoValue(map.id);
+    expect(gcCoValue.loadingState).toBe("garbageCollected");
+
+    // Key assertion: knownStateWithStreaming() should return lastKnownState, not empty state
+    const gcKnownState = gcCoValue.knownState();
+    const gcKnownStateWithStreaming = gcCoValue.knownStateWithStreaming();
+
+    // Both should equal the original known state (the cached lastKnownState)
+    expect(gcKnownState).toEqual(originalKnownState);
+    expect(gcKnownStateWithStreaming).toEqual(originalKnownState);
+
+    // Specifically verify it's NOT an empty state
+    expect(gcKnownStateWithStreaming.header).toBe(true);
+    expect(
+      Object.keys(gcKnownStateWithStreaming.sessions).length,
+    ).toBeGreaterThan(0);
+  });
+
   test("garbageCollected CoValues read from verified content after reload", async () => {
     // This test verifies that after reloading a GC'd CoValue:
     // 1. lastKnownState is cleared
