@@ -7,6 +7,7 @@ import { SubscriptionRow } from "./SubscriptionRow.js";
 import { SubscriptionDetailPanel } from "./SubscriptionDetailPanel.js";
 import { usePerformanceEntries } from "./usePerformanceEntries.js";
 import type { SubscriptionEntry } from "./types.js";
+import { SubscriptionScope } from "jazz-tools";
 
 // ============================================================================
 // Styled Components
@@ -149,6 +150,14 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
     setPage(id as CoID<RawCoValue>);
     onNavigate();
   };
+
+  if (!SubscriptionScope.isProfilingEnabled) {
+    return (
+      <Container style={style}>
+        <EmptyState>Profiling is not enabled in production builds.</EmptyState>
+      </Container>
+    );
+  }
 
   if (entries.length === 0) {
     return (

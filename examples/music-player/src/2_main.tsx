@@ -1,5 +1,5 @@
 import { Toaster } from "@/components/ui/toaster";
-import { JazzInspector } from "jazz-tools/inspector";
+import { JazzInspector, enableProfiling } from "jazz-tools/inspector";
 /* eslint-disable react-refresh/only-export-components */
 import React from "react";
 import ReactDOM from "react-dom/client";
@@ -19,6 +19,11 @@ import { JazzReactProvider, useSuspenseAccount } from "jazz-tools/react";
 import { onAnonymousAccountDiscarded } from "./4_actions";
 import { KeyboardListener } from "./components/PlayerControls";
 import { useSetupAppState } from "./lib/useSetupAppState";
+
+// Normally profiling is enabled only in development mode
+// but we enable it for the music player example to show
+// profiling data in the production environment
+enableProfiling();
 
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
