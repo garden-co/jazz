@@ -14,6 +14,7 @@ const argsConfig = {
     sync: { type: "string" as const, short: "s" },
     headful: { type: "boolean" as const, default: false },
     "cold-storage": { type: "boolean" as const, default: false },
+    timeout: { type: "string" as const, short: "t" },
     help: { type: "boolean" as const, short: "h" },
     // Grid scenario options
     size: { type: "string" as const },
@@ -49,6 +50,9 @@ function buildConfig(
   const sync = values.sync ? String(values.sync) : undefined;
   const headless = values.headful !== true; // Default to headless (true)
   const coldStorage = values["cold-storage"] === true; // Default to false (warm storage)
+  const timeout = values.timeout
+    ? parseInt(String(values.timeout), 10)
+    : undefined;
 
   // Build scenario-specific options
   const scenarioOptions: Record<string, unknown> = {};
@@ -72,6 +76,7 @@ function buildConfig(
     sync,
     headless,
     coldStorage,
+    timeout,
     scenarioOptions,
   };
 }
@@ -106,6 +111,9 @@ async function main(): Promise<void> {
     console.log(`  Headful: ${!config.headless}`);
     console.log(
       `  Storage: ${config.coldStorage ? "cold (fresh each run)" : "warm (reused)"}`,
+    );
+    console.log(
+      `  Timeout: ${config.timeout === 0 ? "disabled" : config.timeout ? `${config.timeout}ms` : "default"}`,
     );
     if (Object.keys(config.scenarioOptions).length > 0) {
       console.log(`  Options: ${JSON.stringify(config.scenarioOptions)}`);

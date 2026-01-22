@@ -48,7 +48,6 @@ export const gridScenario: ScenarioDefinition = {
     // Wait for the button to show "Generate Grid" again (not "Generating...")
     await page.getByRole("button", { name: "Generate Grid" }).waitFor({
       state: "visible",
-      timeout: 120000, // Allow up to 2 minutes for large grids
     });
 
     // Wait a bit for the grid to appear in the list
@@ -81,19 +80,16 @@ export const gridScenario: ScenarioDefinition = {
     const loadTimeElement = page.locator('[data-testid="load-time"]');
 
     // Wait for the element to have a non-null data-load-time-ms attribute
-    await loadTimeElement.waitFor({ state: "visible", timeout: 120000 });
+    await loadTimeElement.waitFor({ state: "visible" });
 
     // Poll until the attribute is set (not null)
-    const loadTimeMs = await page.waitForFunction(
-      () => {
-        const el = document.querySelector('[data-testid="load-time"]');
-        if (!el) return null;
-        const value = el.getAttribute("data-load-time-ms");
-        if (value === null) return null;
-        return parseFloat(value);
-      },
-      { timeout: 120000 },
-    );
+    const loadTimeMs = await page.waitForFunction(() => {
+      const el = document.querySelector('[data-testid="load-time"]');
+      if (!el) return null;
+      const value = el.getAttribute("data-load-time-ms");
+      if (value === null) return null;
+      return parseFloat(value);
+    });
 
     const value = await loadTimeMs.jsonValue();
     if (value === null) {
