@@ -18,7 +18,7 @@ const USER_ID: &str = "benchmark_user";
 fn single_subscription_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/single_latency");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup
@@ -73,7 +73,7 @@ fn single_subscription_latency(c: &mut Criterion) {
 fn fanout_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/fanout");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         let num_subscriptions = 100;
         group.throughput(Throughput::Elements(num_subscriptions));
         group.bench_with_input(
@@ -145,7 +145,7 @@ fn fanout_latency(c: &mut Criterion) {
 fn complex_query_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/complex_query");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(
             BenchmarkId::new("order_limit", scale),
@@ -209,7 +209,7 @@ fn complex_query_latency(c: &mut Criterion) {
 fn cold_start_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/cold_start");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.bench_with_input(
             BenchmarkId::new("initial_load", scale),
             &scale,
@@ -251,7 +251,7 @@ fn cold_start_latency(c: &mut Criterion) {
 fn filtered_subscription_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/filtered");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(
             BenchmarkId::new("author_filter", scale),

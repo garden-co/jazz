@@ -23,7 +23,7 @@ const USER_ID: &str = "benchmark_user";
 fn main() {
     println!("=== Memory Overhead Benchmark ===\n");
 
-    for scale in [1_000, 10_000] {
+    for scale in [1_000usize] {
         run_memory_benchmark(scale);
         println!();
     }

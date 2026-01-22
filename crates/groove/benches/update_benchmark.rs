@@ -17,7 +17,7 @@ const USER_ID: &str = "benchmark_user";
 fn update_own_documents(c: &mut Criterion) {
     let mut group = c.benchmark_group("update/own_documents");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup
@@ -63,7 +63,7 @@ fn update_own_documents(c: &mut Criterion) {
 fn update_team_documents(c: &mut Criterion) {
     let mut group = c.benchmark_group("update/team_documents");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup: Create data where user has team access to documents authored by others
@@ -129,7 +129,7 @@ fn update_team_documents(c: &mut Criterion) {
 fn update_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("update/batch");
 
-    for scale in [10_000usize, 100_000] {
+    for scale in [1_000usize] {
         let batch_size = 100;
         group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
