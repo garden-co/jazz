@@ -223,7 +223,7 @@ crates/groove/src/query_manager/
 ├── types.rs              # ColumnType, RowDescriptor, Row, TupleElement, Tuple, TupleDelta
 ├── encoding.rs           # encode/decode (boundary), binary ops (internal)
 ├── manager.rs            # QueryManager
-├── query.rs              # Query, QueryBuilder, Value (boundary type)
+├── query.rs              # Query, QueryBuilder, ArraySubqueryBuilder, Value (boundary type)
 ├── graph.rs              # Graph structure, dirty marking, settling
 ├── index/
 │   ├── mod.rs
@@ -239,7 +239,9 @@ crates/groove/src/query_manager/
     ├── output.rs         # Terminal node (TupleDelta)
     ├── alias.rs          # Table aliasing for self-joins (TupleDelta)
     ├── project.rs        # Column selection (TupleDelta)
-    └── join.rs           # Equi-join with hash indices (TupleDelta)
+    ├── join.rs           # Equi-join with hash indices (TupleDelta)
+    ├── subgraph.rs       # SubgraphTemplate for correlated subqueries
+    └── array_subquery.rs # ArraySubqueryNode for array expressions
 ```
 
 ## Node Trait Architecture
@@ -446,6 +448,49 @@ let query = qm.query("employees")
     .alias("m")
     .on("e.manager_id", "m.id")
     .build();
+
+// Array subquery (correlated subquery producing array column)
+let query = qm.query("users")
+    .with_array("posts", |sub| {
+        sub.from("posts")
+           .correlate("author_id", "users.id")
+           .select(&["id", "title"])
+           .order_by_desc("created_at")
+           .limit(10)
+    })
+    .build();
+
+// Nested array subqueries
+let query = qm.query("users")
+    .with_array("posts", |sub| {
+        sub.from("posts")
+           .correlate("author_id", "users.id")
+           .with_array("comments", |sub2| {
+               sub2.from("comments")
+                   .correlate("post_id", "posts.id")
+           })
+    })
+    .build();
+
+// Multiple array columns
+let query = qm.query("users")
+    .with_array("posts", |sub| {
+        sub.from("posts").correlate("author_id", "users.id")
+    })
+    .with_array("comments", |sub| {
+        sub.from("comments").correlate("user_id", "users.id")
+    })
+    .build();
+
+// Join inside array subquery
+let query = qm.query("users")
+    .with_array("post_comments", |sub| {
+        sub.from("posts")
+           .join("comments")
+           .on("posts.id", "comments.post_id")
+           .correlate("author_id", "users.id")
+    })
+    .build();
 ```
 
 ### Query Struct
@@ -461,6 +506,7 @@ pub struct Query {
     pub offset: usize,
     pub include_deleted: bool,
     pub select_columns: Option<Vec<String>>,
+    pub array_subqueries: Vec<ArraySubquerySpec>,
 }
 
 pub struct JoinSpec {
@@ -468,19 +514,32 @@ pub struct JoinSpec {
     pub alias: Option<String>,
     pub on: Option<(String, String)>,
 }
+
+pub struct ArraySubquerySpec {
+    pub column_name: String,
+    pub table: TableName,
+    pub joins: Vec<JoinSpec>,
+    pub inner_column: String,
+    pub outer_column: String,
+    pub filters: Vec<Condition>,
+    pub select_columns: Option<Vec<String>>,
+    pub order_by: Vec<(String, SortDirection)>,
+    pub limit: Option<usize>,
+    pub nested_arrays: Vec<ArraySubquerySpec>,
+}
 ```
 
 ## Implementation Status
 
 ### Completed
-- [x] types.rs - ColumnType, RowDescriptor, Row, TupleElement, Tuple, TupleDelta, CombinedRowDescriptor
-- [x] encoding.rs - binary format + operations
+- [x] types.rs - ColumnType (incl. Array, Row), RowDescriptor, Row, TupleElement, Tuple, TupleDelta, Value (incl. Array, Row)
+- [x] encoding.rs - binary format + operations (incl. Array/Row encoding)
 - [x] Global subscription in object_manager.rs
 - [x] skip_list.rs - index with binary keys
-- [x] All graph nodes: index_scan, union, materialize, filter, sort, limit_offset, output, alias, project, join
+- [x] All graph nodes: index_scan, union, materialize, filter, sort, limit_offset, output, alias, project, join, array_subquery, subgraph
 - [x] graph.rs - settling algorithm (single-table and join queries)
 - [x] manager.rs + query.rs - QueryManager with Value boundary
-- [x] Query API: alias(), select(), join(), on() methods on QueryBuilder
+- [x] Query API: alias(), select(), join(), on(), with_array() methods on QueryBuilder
 - [x] Join graph compilation (multi-table queries with JoinNode)
 - [x] `create_with_id()` in ObjectManager for deterministic root IDs
 - [x] Zero-copy index architecture:
@@ -924,6 +983,147 @@ OutputNode                       → flattens to RowDelta
 - `MaterializeNode::with_elements(desc, HashSet<usize>)` - only materialize specified elements
 - Graph analysis can determine which elements filter/sort actually need
 - Skip loading row data for elements not referenced by downstream nodes
+
+#### Array Subqueries (Correlated Subqueries) ✓
+
+Implemented inline array expressions that collect related rows into array columns.
+
+**Core Types:**
+
+```rust
+// Value types for arrays and heterogeneous rows
+pub enum ColumnType {
+    // ... existing ...
+    Array(Box<ColumnType>),      // Homogeneous array
+    Row(Box<RowDescriptor>),     // Heterogeneous tuple (for array elements)
+}
+
+pub enum Value {
+    // ... existing ...
+    Array(Vec<Value>),           // Array of values
+    Row(Vec<Value>),             // Heterogeneous tuple
+}
+```
+
+**Architecture: Dynamic Graph Instances**
+
+Each outer row gets its own subgraph evaluation ("recompile per binding"):
+
+```
+OuterScan → Materialize → ArraySubqueryNode
+                              ↓
+                    For each outer tuple:
+                      1. Extract correlation value
+                      2. Instantiate SubgraphTemplate
+                      3. Settle subgraph
+                      4. Collect results as Array<Row>
+                              ↓
+                    outer tuple + array column
+```
+
+This approach was chosen over shared hash indices to:
+1. Support complex inner queries (filters, joins, nested arrays)
+2. Explore subgraph patterns for future optimization
+3. Keep implementation simple and correct
+
+See `/specs/subgraph_sharing.md` for learnings and future optimization paths.
+
+**Core Components:**
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| `SubgraphTemplate` | `subgraph.rs` | Parameterized query template |
+| `SubgraphInstance` | `subgraph.rs` | Instantiated graph with bound correlation |
+| `ArraySubqueryNode` | `array_subquery.rs` | Manages instances, emits deltas |
+| `ArraySubquerySpec` | `query.rs` | Query-level specification |
+| `ArraySubqueryBuilder` | `query.rs` | Fluent API for building specs |
+
+**Subgraph Instantiation:**
+
+```rust
+impl SubgraphTemplate {
+    /// Create instance with bound correlation value.
+    /// Compiles fresh QueryGraph with correlation as equality filter.
+    pub fn instantiate(&self, correlation_value: Value, schema: &Schema)
+        -> Option<SubgraphInstance>;
+}
+```
+
+The instantiated query includes:
+- Correlation filter: `inner_column = correlation_value`
+- All filters, order_by, limit from spec
+- Joins within the subquery
+- Nested array subqueries (recursive)
+
+**Delta Reactivity:**
+
+| Event | Handling |
+|-------|----------|
+| Outer row added | Evaluate subgraph, emit output with array |
+| Outer row removed | Remove instance, emit removal |
+| Outer row updated (correlation unchanged) | Keep existing array |
+| Outer row updated (correlation changed) | Re-evaluate subgraph |
+| Inner table changed | Mark `inner_dirty`, call `reevaluate_all()` |
+
+Inner table changes trigger full re-evaluation of all instances:
+```rust
+impl ArraySubqueryNode {
+    pub fn mark_inner_dirty(&mut self);
+    pub fn reevaluate_all(&mut self, ...) -> TupleDelta;
+}
+```
+
+**Graph Integration:**
+
+`QueryGraph` tracks which tables affect array subquery nodes:
+```rust
+pub struct QueryGraph {
+    // ... existing ...
+    pub array_subquery_tables: Vec<(NodeId, String)>, // (node_id, inner_table)
+}
+```
+
+`mark_dirty_for_table()` marks both IndexScanNodes and ArraySubqueryNodes dirty.
+
+**Supported Features:**
+
+| Feature | Status | Example |
+|---------|--------|---------|
+| Simple correlation | ✓ | `posts.author_id = users.id` |
+| Filters inside | ✓ | `.filter_eq("published", true)` |
+| Order by inside | ✓ | `.order_by_desc("created_at")` |
+| Limit inside | ✓ | `.limit(10)` |
+| Select columns | ✓ | `.select(&["id", "title"])` |
+| Joins inside | ✓ | `.join("comments").on(...)` |
+| Nested arrays | ✓ | `.with_array("comments", \|...\|)` |
+| Multiple array columns | ✓ | Two `.with_array()` calls |
+| Delta on inner change | ✓ | `reevaluate_all()` |
+| Delta on outer change | ✓ | `process_with_context()` |
+
+**Output Descriptor:**
+
+Array elements are typed as `Array<Row<descriptor>>`:
+```rust
+// For users.with_array("posts", ...)
+// Output: [id, name, posts]
+// posts column type: Array(Row([id, title, author_id]))
+```
+
+**Tests:**
+
+| Test | Description |
+|------|-------------|
+| `array_subquery_single_user_with_posts` | Basic correlation |
+| `array_subquery_user_with_no_posts` | Empty array result |
+| `array_subquery_multiple_users_correct_correlation` | Multiple outer rows |
+| `array_subquery_delta_on_inner_insert` | Reactivity for inner changes |
+| `array_subquery_delta_on_outer_insert` | Reactivity for outer changes |
+| `array_subquery_with_order_by` | Order by in subquery |
+| `array_subquery_with_limit` | Limit in subquery |
+| `array_subquery_with_select_columns` | Column projection in subquery |
+| `array_subquery_with_join` | Join inside subquery |
+| `array_subquery_nested` | Nested array subqueries |
+| `array_subquery_multiple_columns` | Multiple array columns |
 
 ### Pending Followups
 

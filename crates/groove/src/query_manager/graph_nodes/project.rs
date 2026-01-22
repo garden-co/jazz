@@ -46,7 +46,7 @@ impl ProjectNode {
                 let col = &input_descriptor.columns[src_idx];
                 output_columns.push(ColumnDescriptor {
                     name: col.name.clone(),
-                    column_type: col.column_type,
+                    column_type: col.column_type.clone(),
                     nullable: col.nullable,
                     references: col.references.clone(),
                 });
@@ -85,7 +85,7 @@ impl ProjectNode {
                 let col = &input_descriptor.columns[src_idx];
                 output_columns.push(ColumnDescriptor {
                     name: col.name.clone(),
-                    column_type: col.column_type,
+                    column_type: col.column_type.clone(),
                     nullable: col.nullable,
                     references: col.references.clone(),
                 });

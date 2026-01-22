@@ -211,6 +211,49 @@ impl Conjunction {
     }
 }
 
+/// Specification for an array subquery (correlated subquery producing array column).
+#[derive(Debug, Clone)]
+pub struct ArraySubquerySpec {
+    /// Name for the output array column.
+    pub column_name: String,
+    /// Inner table to query.
+    pub table: TableName,
+    /// Joins within the inner query.
+    pub joins: Vec<JoinSpec>,
+    /// Column in inner table to correlate with outer.
+    pub inner_column: String,
+    /// Column in outer table (or alias.column) to use as correlation value.
+    pub outer_column: String,
+    /// Filters to apply to inner query.
+    pub filters: Vec<Condition>,
+    /// Columns to select from inner query (None = all columns).
+    pub select_columns: Option<Vec<String>>,
+    /// Order by for inner query results.
+    pub order_by: Vec<(String, SortDirection)>,
+    /// Limit on inner query results.
+    pub limit: Option<usize>,
+    /// Nested array subqueries (for recursive structures).
+    pub nested_arrays: Vec<ArraySubquerySpec>,
+}
+
+impl ArraySubquerySpec {
+    /// Create a new array subquery specification.
+    pub fn new(column_name: impl Into<String>, table: impl Into<TableName>) -> Self {
+        Self {
+            column_name: column_name.into(),
+            table: table.into(),
+            joins: Vec::new(),
+            inner_column: String::new(),
+            outer_column: String::new(),
+            filters: Vec::new(),
+            select_columns: None,
+            order_by: Vec::new(),
+            limit: None,
+            nested_arrays: Vec::new(),
+        }
+    }
+}
+
 /// A query specification (DNF: disjunction of conjunctions).
 #[derive(Debug, Clone)]
 pub struct Query {
@@ -231,6 +274,8 @@ pub struct Query {
     pub include_deleted: bool,
     /// Columns to select (None = all columns).
     pub select_columns: Option<Vec<String>>,
+    /// Array subqueries (correlated subqueries producing array columns).
+    pub array_subqueries: Vec<ArraySubquerySpec>,
 }
 
 impl Query {
@@ -246,7 +291,13 @@ impl Query {
             offset: 0,
             include_deleted: false,
             select_columns: None,
+            array_subqueries: Vec::new(),
         }
+    }
+
+    /// Check if this query has array subqueries.
+    pub fn has_array_subqueries(&self) -> bool {
+        !self.array_subqueries.is_empty()
     }
 
     /// Check if this is a join query.
@@ -498,9 +549,182 @@ impl QueryBuilder {
         self
     }
 
+    /// Add an array subquery (correlated subquery producing an array column).
+    ///
+    /// The closure receives an `ArraySubqueryBuilder` to configure the subquery.
+    ///
+    /// # Example
+    /// ```ignore
+    /// QueryBuilder::new("users")
+    ///     .with_array("posts", |sub| {
+    ///         sub.from("posts")
+    ///            .correlate("author_id", "users.id")
+    ///            .select(&["id", "title"])
+    ///            .order_by_desc("created_at")
+    ///            .limit(10)
+    ///     })
+    ///     .build()
+    /// ```
+    pub fn with_array<F>(mut self, column_name: impl Into<String>, builder_fn: F) -> Self
+    where
+        F: FnOnce(ArraySubqueryBuilder) -> ArraySubqueryBuilder,
+    {
+        let builder = ArraySubqueryBuilder::new(column_name);
+        let configured = builder_fn(builder);
+        self.query.array_subqueries.push(configured.build());
+        self
+    }
+
     /// Build the query.
     pub fn build(self) -> Query {
         self.query
+    }
+}
+
+/// Builder for configuring array subqueries.
+///
+/// Used with `QueryBuilder::with_array()` to define correlated subqueries
+/// that produce array columns.
+#[derive(Debug)]
+pub struct ArraySubqueryBuilder {
+    column_name: String,
+    table: Option<TableName>,
+    joins: Vec<JoinSpec>,
+    inner_column: String,
+    outer_column: String,
+    filters: Vec<Condition>,
+    select_columns: Option<Vec<String>>,
+    order_by: Vec<(String, SortDirection)>,
+    limit: Option<usize>,
+    nested_arrays: Vec<ArraySubquerySpec>,
+}
+
+impl ArraySubqueryBuilder {
+    /// Create a new array subquery builder with the given output column name.
+    pub fn new(column_name: impl Into<String>) -> Self {
+        Self {
+            column_name: column_name.into(),
+            table: None,
+            joins: Vec::new(),
+            inner_column: String::new(),
+            outer_column: String::new(),
+            filters: Vec::new(),
+            select_columns: None,
+            order_by: Vec::new(),
+            limit: None,
+            nested_arrays: Vec::new(),
+        }
+    }
+
+    /// Set the inner table to query.
+    pub fn from(mut self, table: impl Into<TableName>) -> Self {
+        self.table = Some(table.into());
+        self
+    }
+
+    /// Join another table within the subquery.
+    pub fn join(mut self, table: impl Into<TableName>) -> Self {
+        self.joins.push(JoinSpec {
+            table: table.into(),
+            alias: None,
+            on: None,
+        });
+        self
+    }
+
+    /// Specify the join condition for the most recent join.
+    pub fn on(mut self, left_col: impl Into<String>, right_col: impl Into<String>) -> Self {
+        if let Some(last_join) = self.joins.last_mut() {
+            last_join.on = Some((left_col.into(), right_col.into()));
+        }
+        self
+    }
+
+    /// Set the correlation columns.
+    ///
+    /// # Arguments
+    /// * `inner_column` - Column in the inner table to match
+    /// * `outer_column` - Column in the outer table (e.g., "users.id")
+    pub fn correlate(
+        mut self,
+        inner_column: impl Into<String>,
+        outer_column: impl Into<String>,
+    ) -> Self {
+        self.inner_column = inner_column.into();
+        self.outer_column = outer_column.into();
+        self
+    }
+
+    /// Select specific columns from the inner query.
+    pub fn select(mut self, columns: &[&str]) -> Self {
+        self.select_columns = Some(columns.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    /// Add an equality filter on the inner query.
+    pub fn filter_eq(mut self, column: impl Into<String>, value: Value) -> Self {
+        self.filters.push(Condition::Eq {
+            column: column.into(),
+            value,
+        });
+        self
+    }
+
+    /// Add ascending order by on inner query results.
+    pub fn order_by(mut self, column: impl Into<String>) -> Self {
+        self.order_by
+            .push((column.into(), SortDirection::Ascending));
+        self
+    }
+
+    /// Add descending order by on inner query results.
+    pub fn order_by_desc(mut self, column: impl Into<String>) -> Self {
+        self.order_by
+            .push((column.into(), SortDirection::Descending));
+        self
+    }
+
+    /// Limit the number of results from the inner query.
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    /// Add a nested array subquery.
+    ///
+    /// # Example
+    /// ```ignore
+    /// sub.from("posts")
+    ///    .correlate("author_id", "users.id")
+    ///    .with_array("comments", |sub2| {
+    ///        sub2.from("comments")
+    ///            .correlate("post_id", "posts.id")
+    ///    })
+    /// ```
+    pub fn with_array<F>(mut self, column_name: impl Into<String>, builder_fn: F) -> Self
+    where
+        F: FnOnce(ArraySubqueryBuilder) -> ArraySubqueryBuilder,
+    {
+        let builder = ArraySubqueryBuilder::new(column_name);
+        let configured = builder_fn(builder);
+        self.nested_arrays.push(configured.build());
+        self
+    }
+
+    /// Build the ArraySubquerySpec.
+    pub fn build(self) -> ArraySubquerySpec {
+        ArraySubquerySpec {
+            column_name: self.column_name,
+            table: self.table.unwrap_or_else(|| TableName::new("")),
+            joins: self.joins,
+            inner_column: self.inner_column,
+            outer_column: self.outer_column,
+            filters: self.filters,
+            select_columns: self.select_columns,
+            order_by: self.order_by,
+            limit: self.limit,
+            nested_arrays: self.nested_arrays,
+        }
     }
 }
 
@@ -738,5 +962,89 @@ mod tests {
 
         assert!(!query.is_join());
         assert!(query.joins.is_empty());
+    }
+
+    // ========================================================================
+    // Array subquery tests
+    // ========================================================================
+
+    #[test]
+    fn query_with_array_subquery() {
+        let query = QueryBuilder::new("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .select(&["id", "title"])
+            })
+            .build();
+
+        assert!(query.has_array_subqueries());
+        assert_eq!(query.array_subqueries.len(), 1);
+        assert_eq!(query.array_subqueries[0].column_name, "posts");
+        assert_eq!(query.array_subqueries[0].table.0, "posts");
+        assert_eq!(query.array_subqueries[0].inner_column, "author_id");
+        assert_eq!(query.array_subqueries[0].outer_column, "users.id");
+    }
+
+    #[test]
+    fn query_with_array_subquery_filters_and_order() {
+        let query = QueryBuilder::new("users")
+            .with_array("recent_posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .filter_eq("published", Value::Boolean(true))
+                    .order_by_desc("created_at")
+                    .limit(5)
+            })
+            .build();
+
+        let subquery = &query.array_subqueries[0];
+        assert_eq!(subquery.filters.len(), 1);
+        assert_eq!(subquery.limit, Some(5));
+        assert_eq!(subquery.order_by.len(), 1);
+        assert_eq!(subquery.order_by[0].0, "created_at");
+    }
+
+    #[test]
+    fn query_with_nested_array_subquery() {
+        let query = QueryBuilder::new("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .with_array("comments", |sub2| {
+                        sub2.from("comments").correlate("post_id", "posts.id")
+                    })
+            })
+            .build();
+
+        assert_eq!(query.array_subqueries.len(), 1);
+        let posts_subquery = &query.array_subqueries[0];
+        assert_eq!(posts_subquery.nested_arrays.len(), 1);
+        assert_eq!(posts_subquery.nested_arrays[0].column_name, "comments");
+        assert_eq!(posts_subquery.nested_arrays[0].table.0, "comments");
+    }
+
+    #[test]
+    fn query_without_array_subqueries() {
+        let query = QueryBuilder::new("users").build();
+
+        assert!(!query.has_array_subqueries());
+        assert!(query.array_subqueries.is_empty());
+    }
+
+    #[test]
+    fn query_multiple_array_subqueries() {
+        let query = QueryBuilder::new("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .with_array("comments", |sub| {
+                sub.from("comments").correlate("user_id", "users.id")
+            })
+            .build();
+
+        assert_eq!(query.array_subqueries.len(), 2);
+        assert_eq!(query.array_subqueries[0].column_name, "posts");
+        assert_eq!(query.array_subqueries[1].column_name, "comments");
     }
 }

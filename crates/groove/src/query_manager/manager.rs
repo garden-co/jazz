@@ -1247,10 +1247,9 @@ impl QueryManager {
         }
     }
 
-    /// Check if a subscription involves a given table (base table or any joined table).
+    /// Check if a subscription involves a given table (base table, joined table, or array subquery inner table).
     fn subscription_involves_table(graph: &super::graph::QueryGraph, table: &str) -> bool {
-        // Check all index scan nodes - each one tracks (node_id, table_name, column)
-        graph.index_scan_nodes.iter().any(|(_, t, _)| t == table)
+        graph.involves_table(table)
     }
 }
 
@@ -3889,5 +3888,1166 @@ mod tests {
             1,
             "Filter on joined table column should work"
         );
+    }
+
+    // ========================================================================
+    // Array subquery (correlated subquery) tests
+    // ========================================================================
+
+    fn users_posts_schema() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+        );
+        schema
+    }
+
+    /// Output descriptor for users with posts array subquery.
+    fn users_with_posts_descriptor() -> RowDescriptor {
+        // Posts row descriptor: [id, title, author_id]
+        let posts_row_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Integer),
+        ]);
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "posts",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ),
+        ])
+    }
+
+    #[test]
+    fn array_subquery_single_user_with_posts() {
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert one user: Alice with id=1
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert two posts for Alice
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Alice Post 1".into()),
+                Value::Integer(1), // author_id = 1 (Alice)
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Alice Post 2".into()),
+                Value::Integer(1), // author_id = 1 (Alice)
+            ],
+        )
+        .unwrap();
+
+        // Query users with their posts as array
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have subscription update");
+
+        // Should have exactly 1 user row
+        assert_eq!(delta.added.len(), 1, "Expected 1 user row");
+
+        // Decode the output row
+        let output_descriptor = users_with_posts_descriptor();
+        let row_data = &delta.added[0].data;
+        let values = decode_row(&output_descriptor, row_data).expect("Should decode output row");
+
+        // Verify user fields
+        assert_eq!(values[0], Value::Integer(1), "User id should be 1");
+        assert_eq!(
+            values[1],
+            Value::Text("Alice".into()),
+            "User name should be Alice"
+        );
+
+        // Verify posts array
+        let posts = values[2].as_array().expect("Third column should be array");
+        assert_eq!(posts.len(), 2, "Alice should have 2 posts");
+
+        // Each post is a Row of [id, title, author_id]
+        for post in posts {
+            let post_values = post.as_row().expect("Each post should be a Row");
+            assert_eq!(post_values.len(), 3, "Post should have 3 fields");
+            // Verify author_id matches Alice
+            assert_eq!(
+                post_values[2],
+                Value::Integer(1),
+                "Post author_id should be 1 (Alice)"
+            );
+        }
+    }
+
+    #[test]
+    fn array_subquery_user_with_no_posts() {
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user with no posts
+        qm.insert("users", &[Value::Integer(1), Value::Text("Lonely".into())])
+            .unwrap();
+
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have subscription update");
+
+        assert_eq!(delta.added.len(), 1, "Should have 1 user");
+
+        let output_descriptor = users_with_posts_descriptor();
+        let values =
+            decode_row(&output_descriptor, &delta.added[0].data).expect("Should decode output row");
+
+        assert_eq!(values[0], Value::Integer(1));
+        assert_eq!(values[1], Value::Text("Lonely".into()));
+
+        // Posts array should be empty
+        let posts = values[2].as_array().expect("Should have posts array");
+        assert_eq!(posts.len(), 0, "User with no posts should have empty array");
+    }
+
+    #[test]
+    fn array_subquery_multiple_users_correct_correlation() {
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert users
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+        qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
+            .unwrap();
+
+        // Alice's posts (author_id = 1)
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Alice Post".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Bob's posts (author_id = 2)
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(200),
+                Value::Text("Bob Post".into()),
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have updates");
+
+        assert_eq!(delta.added.len(), 2, "Should have 2 users");
+
+        let output_descriptor = users_with_posts_descriptor();
+
+        // Build a map of user_id -> posts for verification
+        let mut user_posts: std::collections::HashMap<i32, Vec<i32>> =
+            std::collections::HashMap::new();
+        for row in &delta.added {
+            let values = decode_row(&output_descriptor, &row.data).expect("decode");
+            let user_id = match &values[0] {
+                Value::Integer(id) => *id,
+                _ => panic!("User id should be integer"),
+            };
+            let posts = values[2].as_array().expect("posts array");
+            let post_ids: Vec<i32> = posts
+                .iter()
+                .filter_map(|p| {
+                    let row_vals = p.as_row()?;
+                    match &row_vals[0] {
+                        Value::Integer(id) => Some(*id),
+                        _ => None,
+                    }
+                })
+                .collect();
+            user_posts.insert(user_id, post_ids);
+        }
+
+        // Alice (id=1) should have post 100
+        assert_eq!(
+            user_posts.get(&1),
+            Some(&vec![100]),
+            "Alice should have post 100"
+        );
+
+        // Bob (id=2) should have post 200
+        assert_eq!(
+            user_posts.get(&2),
+            Some(&vec![200]),
+            "Bob should have post 200"
+        );
+    }
+
+    #[test]
+    fn array_subquery_delta_on_inner_insert() {
+        // Test: after subscription, inserting a new post should emit a delta
+        // with the updated user row containing the new post in the array.
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user Alice
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert initial post
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post 1".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Subscribe to users with posts
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        // Consume initial update
+        let initial_updates = qm.take_updates();
+        let initial_delta = initial_updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have initial update");
+        assert_eq!(initial_delta.added.len(), 1, "Initial: 1 user");
+
+        // Verify initial state: Alice has 1 post
+        let output_descriptor = users_with_posts_descriptor();
+        let initial_values =
+            decode_row(&output_descriptor, &initial_delta.added[0].data).expect("decode initial");
+        let initial_posts = initial_values[2].as_array().expect("posts array");
+        assert_eq!(initial_posts.len(), 1, "Initially Alice has 1 post");
+
+        // NOW: Insert a new post for Alice
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Post 2".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.process();
+
+        // Check delta after inner insert
+        let updates_after_insert = qm.take_updates();
+        let delta_after = updates_after_insert
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have delta after post insert");
+
+        // Should have an update (old row removed, new row with updated array added)
+        // or just updated entries
+        let total_changes = delta_after.added.len() + delta_after.updated.len();
+        assert!(
+            total_changes > 0,
+            "Should have changes after inserting post"
+        );
+
+        // Find the new state - either in added or as new part of updated
+        let new_row_data = if !delta_after.added.is_empty() {
+            &delta_after.added[0].data
+        } else if !delta_after.updated.is_empty() {
+            &delta_after.updated[0].1.data
+        } else {
+            panic!("Expected added or updated row");
+        };
+
+        let new_values = decode_row(&output_descriptor, new_row_data).expect("decode new");
+        let new_posts = new_values[2].as_array().expect("posts array");
+        assert_eq!(
+            new_posts.len(),
+            2,
+            "After insert, Alice should have 2 posts"
+        );
+
+        // Verify both post IDs are present
+        let post_ids: Vec<i32> = new_posts
+            .iter()
+            .filter_map(|p| match &p.as_row()?[0] {
+                Value::Integer(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(post_ids.contains(&100), "Should contain post 100");
+        assert!(post_ids.contains(&101), "Should contain post 101");
+    }
+
+    #[test]
+    fn array_subquery_delta_on_outer_insert() {
+        // Test: after subscription, inserting a new user should emit a delta
+        // with the new user row (with their posts array).
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user Alice with a post
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Alice Post".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Also insert a post for Bob (who doesn't exist yet)
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(200),
+                Value::Text("Bob Post".into()),
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+
+        // Subscribe
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        // Consume initial update (just Alice)
+        let initial_updates = qm.take_updates();
+        let initial_delta = initial_updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have initial update");
+        assert_eq!(initial_delta.added.len(), 1, "Initial: only Alice");
+
+        // NOW: Insert Bob
+        qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
+            .unwrap();
+        qm.process();
+
+        // Check delta after outer insert
+        let updates_after = qm.take_updates();
+        let delta_after = updates_after
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have delta after user insert");
+
+        // Should have Bob added
+        assert_eq!(delta_after.added.len(), 1, "Bob should be added");
+
+        let output_descriptor = users_with_posts_descriptor();
+        let bob_values =
+            decode_row(&output_descriptor, &delta_after.added[0].data).expect("decode Bob");
+
+        assert_eq!(bob_values[0], Value::Integer(2), "Should be Bob (id=2)");
+        assert_eq!(
+            bob_values[1],
+            Value::Text("Bob".into()),
+            "Name should be Bob"
+        );
+
+        // Bob should have his post (id=200)
+        let bob_posts = bob_values[2].as_array().expect("posts array");
+        assert_eq!(bob_posts.len(), 1, "Bob should have 1 post");
+
+        let post_row = bob_posts[0].as_row().expect("post should be Row");
+        assert_eq!(
+            post_row[0],
+            Value::Integer(200),
+            "Bob's post should be id=200"
+        );
+    }
+
+    #[test]
+    fn array_subquery_with_order_by() {
+        // Test: posts should be ordered by id descending
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert posts in random order
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(102),
+                Value::Text("Middle".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("First".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Last".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Query with order_by_desc on id
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .order_by_desc("id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have update");
+
+        let output_descriptor = users_with_posts_descriptor();
+        let values = decode_row(&output_descriptor, &delta.added[0].data).expect("decode");
+        let posts = values[2].as_array().expect("posts array");
+
+        assert_eq!(posts.len(), 3, "Should have 3 posts");
+
+        // Verify order: should be 102, 101, 100 (descending by id)
+        let post_ids: Vec<i32> = posts
+            .iter()
+            .filter_map(|p| match &p.as_row()?[0] {
+                Value::Integer(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            post_ids,
+            vec![102, 101, 100],
+            "Posts should be ordered by id desc"
+        );
+    }
+
+    #[test]
+    fn array_subquery_with_limit() {
+        // Test: limit should restrict number of posts returned
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert 5 posts
+        for i in 100..105 {
+            qm.insert(
+                "posts",
+                &[
+                    Value::Integer(i),
+                    Value::Text(format!("Post {}", i).into()),
+                    Value::Integer(1),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Query with limit 2
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .order_by("id")
+                    .limit(2)
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have update");
+
+        let output_descriptor = users_with_posts_descriptor();
+        let values = decode_row(&output_descriptor, &delta.added[0].data).expect("decode");
+        let posts = values[2].as_array().expect("posts array");
+
+        assert_eq!(posts.len(), 2, "Limit should restrict to 2 posts");
+
+        // Verify first 2 posts by id ascending
+        let post_ids: Vec<i32> = posts
+            .iter()
+            .filter_map(|p| match &p.as_row()?[0] {
+                Value::Integer(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(post_ids, vec![100, 101], "Should get first 2 posts by id");
+    }
+
+    #[test]
+    fn array_subquery_with_select_columns() {
+        // Test: select specific columns from inner query
+        let sync_manager = SyncManager::new();
+        let schema = users_posts_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user and post
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post Title".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Query selecting only id and title (not author_id)
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .select(&["id", "title"])
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have update");
+
+        // Build descriptor for selected columns only
+        let posts_row_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ]);
+        let output_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "posts",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ),
+        ]);
+
+        let values = decode_row(&output_descriptor, &delta.added[0].data).expect("decode");
+        let posts = values[2].as_array().expect("posts array");
+
+        assert_eq!(posts.len(), 1, "Should have 1 post");
+
+        let post_row = posts[0].as_row().expect("post Row");
+        assert_eq!(post_row.len(), 2, "Post should have 2 columns (id, title)");
+        assert_eq!(post_row[0], Value::Integer(100));
+        assert_eq!(post_row[1], Value::Text("Post Title".into()));
+    }
+
+    #[test]
+    fn array_subquery_with_join() {
+        // Test: join inside array subquery
+        // users with_array of (posts joined with comments)
+        let sync_manager = SyncManager::new();
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+        );
+        schema.insert(
+            TableName::new("comments"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("text", ColumnType::Text),
+                ColumnDescriptor::new("post_id", ColumnType::Integer),
+            ]),
+        );
+
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert posts
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post A".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Post B".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Insert comments
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1000),
+                Value::Text("Comment on A".into()),
+                Value::Integer(100), // post_id = 100
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1001),
+                Value::Text("Another on A".into()),
+                Value::Integer(100), // post_id = 100
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1002),
+                Value::Text("Comment on B".into()),
+                Value::Integer(101), // post_id = 101
+            ],
+        )
+        .unwrap();
+
+        // Query users with (posts joined with comments)
+        // This should give us: for each user, an array of (post, comment) pairs
+        let query = qm
+            .query("users")
+            .with_array("post_comments", |sub| {
+                sub.from("posts")
+                    .join("comments")
+                    .on("posts.id", "comments.post_id")
+                    .correlate("author_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have update");
+
+        // Build descriptor for joined output:
+        // posts columns + comments columns
+        let joined_row_desc = RowDescriptor::new(vec![
+            // posts columns
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Integer),
+            // comments columns
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("text", ColumnType::Text),
+            ColumnDescriptor::new("post_id", ColumnType::Integer),
+        ]);
+        let output_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "post_comments",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(joined_row_desc)))),
+            ),
+        ]);
+
+        assert_eq!(delta.added.len(), 1, "Should have 1 user");
+        let values = decode_row(&output_descriptor, &delta.added[0].data).expect("decode");
+        assert_eq!(values[0], Value::Integer(1)); // user id
+        assert_eq!(values[1], Value::Text("Alice".into())); // user name
+
+        let post_comments = values[2].as_array().expect("post_comments array");
+        // Each (post, comment) pair - Post A has 2 comments, Post B has 1
+        assert_eq!(post_comments.len(), 3, "Should have 3 post-comment pairs");
+
+        // Verify the joined rows contain both post and comment data
+        for pc in post_comments {
+            let row = pc.as_row().expect("joined row");
+            assert_eq!(row.len(), 6, "Joined row should have 6 columns");
+            // Post id should be either 100 or 101
+            let post_id = match &row[0] {
+                Value::Integer(id) => *id,
+                _ => panic!("Expected integer for post id"),
+            };
+            assert!(post_id == 100 || post_id == 101);
+            // Comment post_id should match the post id
+            assert_eq!(row[5], Value::Integer(post_id));
+        }
+    }
+
+    #[test]
+    fn array_subquery_nested() {
+        // Test: nested array subqueries
+        // users with_array(posts with_array(comments))
+        let sync_manager = SyncManager::new();
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+        );
+        schema.insert(
+            TableName::new("comments"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("text", ColumnType::Text),
+                ColumnDescriptor::new("post_id", ColumnType::Integer),
+            ]),
+        );
+
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert user
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+
+        // Insert posts
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Post A".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Post B".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+        // Insert comments - 2 on Post A, 1 on Post B
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1000),
+                Value::Text("Comment 1 on A".into()),
+                Value::Integer(100),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1001),
+                Value::Text("Comment 2 on A".into()),
+                Value::Integer(100),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1002),
+                Value::Text("Comment on B".into()),
+                Value::Integer(101),
+            ],
+        )
+        .unwrap();
+
+        // Query: users with posts, where each post has its comments
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .with_array("comments", |sub2| {
+                        sub2.from("comments").correlate("post_id", "posts.id")
+                    })
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have update");
+
+        // Build nested descriptor:
+        // comments row: [id, text, post_id]
+        let comments_row_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("text", ColumnType::Text),
+            ColumnDescriptor::new("post_id", ColumnType::Integer),
+        ]);
+        // posts row with comments array: [id, title, author_id, comments[]]
+        let posts_row_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ColumnDescriptor::new(
+                "comments",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ),
+        ]);
+        // users row with posts array: [id, name, posts[]]
+        let output_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "posts",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ),
+        ]);
+
+        assert_eq!(delta.added.len(), 1, "Should have 1 user");
+        let values = decode_row(&output_descriptor, &delta.added[0].data).expect("decode");
+        assert_eq!(values[0], Value::Integer(1)); // user id
+        assert_eq!(values[1], Value::Text("Alice".into())); // user name
+
+        let posts = values[2].as_array().expect("posts array");
+        assert_eq!(posts.len(), 2, "Alice should have 2 posts");
+
+        // Check each post has its comments
+        for post in posts {
+            let post_row = post.as_row().expect("post row");
+            assert_eq!(
+                post_row.len(),
+                4,
+                "Post should have 4 columns (id, title, author_id, comments)"
+            );
+
+            let post_id = match &post_row[0] {
+                Value::Integer(id) => *id,
+                _ => panic!("Expected integer for post id"),
+            };
+
+            let comments = post_row[3].as_array().expect("comments array");
+
+            if post_id == 100 {
+                // Post A has 2 comments
+                assert_eq!(comments.len(), 2, "Post A should have 2 comments");
+                for comment in comments {
+                    let comment_row = comment.as_row().expect("comment row");
+                    assert_eq!(comment_row[2], Value::Integer(100)); // post_id
+                }
+            } else if post_id == 101 {
+                // Post B has 1 comment
+                assert_eq!(comments.len(), 1, "Post B should have 1 comment");
+                let comment_row = comments[0].as_row().expect("comment row");
+                assert_eq!(comment_row[2], Value::Integer(101)); // post_id
+            } else {
+                panic!("Unexpected post id: {}", post_id);
+            }
+        }
+    }
+
+    #[test]
+    fn array_subquery_multiple_columns() {
+        // Test: two separate (non-nested) array subquery columns
+        // users with posts[] and with comments[] (comments directly on user)
+        let sync_manager = SyncManager::new();
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ]),
+        );
+        schema.insert(
+            TableName::new("posts"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("author_id", ColumnType::Integer),
+            ]),
+        );
+        schema.insert(
+            TableName::new("comments"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("id", ColumnType::Integer),
+                ColumnDescriptor::new("text", ColumnType::Text),
+                ColumnDescriptor::new("user_id", ColumnType::Integer),
+            ]),
+        );
+
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert users
+        qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+            .unwrap();
+        qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
+            .unwrap();
+
+        // Insert posts - Alice has 2, Bob has 1
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Alice Post 1".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(101),
+                Value::Text("Alice Post 2".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "posts",
+            &[
+                Value::Integer(102),
+                Value::Text("Bob Post".into()),
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+
+        // Insert comments (directly on users) - Alice has 1, Bob has 2
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1000),
+                Value::Text("Alice comment".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1001),
+                Value::Text("Bob comment 1".into()),
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+        qm.insert(
+            "comments",
+            &[
+                Value::Integer(1002),
+                Value::Text("Bob comment 2".into()),
+                Value::Integer(2),
+            ],
+        )
+        .unwrap();
+
+        // Query: users with both posts[] and comments[]
+        let query = qm
+            .query("users")
+            .with_array("posts", |sub| {
+                sub.from("posts").correlate("author_id", "users.id")
+            })
+            .with_array("comments", |sub| {
+                sub.from("comments").correlate("user_id", "users.id")
+            })
+            .build();
+
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+
+        let updates = qm.take_updates();
+        let delta = updates
+            .iter()
+            .find(|u| u.subscription_id == sub_id)
+            .map(|u| &u.delta)
+            .expect("Should have update");
+
+        // Build descriptor: users + posts[] + comments[]
+        let posts_row_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("author_id", ColumnType::Integer),
+        ]);
+        let comments_row_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("text", ColumnType::Text),
+            ColumnDescriptor::new("user_id", ColumnType::Integer),
+        ]);
+        let output_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "posts",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(posts_row_desc)))),
+            ),
+            ColumnDescriptor::new(
+                "comments",
+                ColumnType::Array(Box::new(ColumnType::Row(Box::new(comments_row_desc)))),
+            ),
+        ]);
+
+        assert_eq!(delta.added.len(), 2, "Should have 2 users");
+
+        // Decode and verify each user
+        for row in &delta.added {
+            let values = decode_row(&output_descriptor, &row.data).expect("decode");
+            let user_id = match &values[0] {
+                Value::Integer(id) => *id,
+                _ => panic!("Expected integer for user id"),
+            };
+
+            let posts = values[2].as_array().expect("posts array");
+            let comments = values[3].as_array().expect("comments array");
+
+            if user_id == 1 {
+                // Alice: 2 posts, 1 comment
+                assert_eq!(values[1], Value::Text("Alice".into()));
+                assert_eq!(posts.len(), 2, "Alice should have 2 posts");
+                assert_eq!(comments.len(), 1, "Alice should have 1 comment");
+            } else if user_id == 2 {
+                // Bob: 1 post, 2 comments
+                assert_eq!(values[1], Value::Text("Bob".into()));
+                assert_eq!(posts.len(), 1, "Bob should have 1 post");
+                assert_eq!(comments.len(), 2, "Bob should have 2 comments");
+            } else {
+                panic!("Unexpected user id: {}", user_id);
+            }
+        }
     }
 }
