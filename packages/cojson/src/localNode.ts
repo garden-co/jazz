@@ -39,7 +39,7 @@ import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromS
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
 import { connectedPeers } from "./streamUtils.js";
-import { emptyKnownState } from "./knownState.js";
+import { CoValueKnownState, emptyKnownState } from "./knownState.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -82,15 +82,12 @@ export class LocalNode {
     this.crypto = crypto;
   }
 
-  enableGarbageCollector(opts?: { garbageCollectGroups?: boolean }) {
+  enableGarbageCollector() {
     if (this.garbageCollector) {
       return;
     }
 
-    this.garbageCollector = new GarbageCollector(
-      this.coValues,
-      opts?.garbageCollectGroups ?? false,
-    );
+    this.garbageCollector = new GarbageCollector(this);
   }
 
   setStorage(storage: StorageAPI) {
@@ -104,6 +101,21 @@ export class LocalNode {
     this.syncManager.removeStorage();
   }
 
+  /**
+   * Enable background erasure of deleted coValues (space reclamation).
+   *
+   * Deleted coValues are immediately blocked from syncing via tombstones; this feature
+   * only reclaims local storage space by deleting historical content while preserving
+   * the tombstone (header + delete session).
+   *
+   * This is opt-in and affects only the currently configured storage (if any)
+   *
+   * @category 3. Low-level
+   */
+  enableDeletedCoValuesErasure() {
+    this.storage?.enableDeletedCoValuesErasure();
+  }
+
   hasCoValue(id: RawCoID) {
     const coValue = this.coValues.get(id);
 
@@ -111,7 +123,13 @@ export class LocalNode {
       return false;
     }
 
-    return coValue.loadingState !== "unknown";
+    const state = coValue.loadingState;
+    // garbageCollected and onlyKnownState shells don't have actual content loaded
+    return (
+      state !== "unknown" &&
+      state !== "garbageCollected" &&
+      state !== "onlyKnownState"
+    );
   }
 
   getCoValue(id: RawCoID) {
@@ -131,8 +149,62 @@ export class LocalNode {
     return this.coValues.values();
   }
 
+  /**
+   * Simple delete of a CoValue from memory.
+   * Used for testing and forced cleanup scenarios.
+   * @internal
+   */
   internalDeleteCoValue(id: RawCoID) {
     this.coValues.delete(id);
+    this.storage?.onCoValueUnmounted(id);
+  }
+
+  /**
+   * Unmount a CoValue from memory, keeping a shell with cached knownState.
+   * This enables accurate LOAD requests during peer reconciliation.
+   *
+   * @returns true if the coValue was successfully unmounted, false otherwise
+   */
+  internalUnmountCoValue(id: RawCoID): boolean {
+    const coValue = this.coValues.get(id);
+
+    if (!coValue) {
+      return false;
+    }
+
+    if (coValue.listeners.size > 0) {
+      // The coValue is still in use
+      return false;
+    }
+
+    for (const dependant of coValue.dependant) {
+      if (this.hasCoValue(dependant)) {
+        // Another in-memory coValue depends on this coValue
+        return false;
+      }
+    }
+
+    if (!this.syncManager.isSyncedToServerPeers(id)) {
+      return false;
+    }
+
+    // Cache the knownState before replacing
+    const lastKnownState = coValue.knownState();
+
+    // Handle counter: decrement old coValue's state
+    coValue.decrementLoadingStateCounter();
+
+    // Create new shell CoValueCore in garbageCollected state
+    const shell = new CoValueCore(id, this);
+    shell.setGarbageCollectedState(lastKnownState);
+
+    // Single map update (replacing old with shell)
+    this.coValues.set(id, shell);
+
+    // Notify storage
+    this.storage?.onCoValueUnmounted(id);
+
+    return true;
   }
 
   getCurrentAccountOrAgentID(): RawAccountID | AgentID {
@@ -436,7 +508,9 @@ export class LocalNode {
 
       if (
         coValue.loadingState === "unknown" ||
-        coValue.loadingState === "unavailable"
+        coValue.loadingState === "unavailable" ||
+        coValue.loadingState === "garbageCollected" ||
+        coValue.loadingState === "onlyKnownState"
       ) {
         const peers = this.syncManager.getServerPeers(id, skipLoadingFromPeer);
 

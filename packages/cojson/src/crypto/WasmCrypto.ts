@@ -1,6 +1,7 @@
 import {
   SessionLog,
   initialize,
+  initializeSync,
   Blake3Hasher,
   blake3HashOnce,
   blake3HashOnceWithContext,
@@ -20,7 +21,6 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -41,10 +41,34 @@ import {
   Transaction,
   TrustingTransaction,
 } from "../coValueCore/verifiedState.js";
+import { isCloudflare, isEvalAllowed } from "../platformUtils.js";
 
 type Blake3State = Blake3Hasher;
 
 let wasmInit = initialize;
+let wasmInitSync = initializeSync;
+
+const wasmCryptoErrorMessage = (
+  e: unknown,
+) => `Critical Error: Failed to load WASM module
+
+${!isEvalAllowed() ? `You need to add \`import "jazz-tools/load-edge-wasm";\` on top of your entry module to make Jazz work with ${isCloudflare() ? "Cloudflare workers" : "this runtime"}` : (e as Error).message}
+
+A native crypto module is required for Jazz to work. See https://jazz.tools/docs/react/reference/performance#use-the-best-crypto-implementation-for-your-platform for possible alternatives.`;
+
+/**
+ * Initializes the WasmCrypto module. This function can be used to initialize the WasmCrypto module in a worker or a browser.
+ * if you are using SSR and you want to initialize WASM crypto asynchronously you can use this function.
+ * @returns A promise that resolves when the WasmCrypto module is successfully initialized.
+ */
+export async function initWasmCrypto() {
+  try {
+    await wasmInit();
+  } catch (e) {
+    throw new Error(wasmCryptoErrorMessage(e), { cause: e });
+  }
+}
+
 /**
  * WebAssembly implementation of the CryptoProvider interface using cojson-core-wasm.
  * This provides the primary implementation using WebAssembly for optimal performance, offering:
@@ -54,7 +78,7 @@ let wasmInit = initialize;
  * - Hashing (BLAKE3)
  */
 export class WasmCrypto extends CryptoProvider<Blake3State> {
-  private constructor() {
+  protected constructor() {
     super();
   }
 
@@ -62,17 +86,23 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     wasmInit = value;
   }
 
-  static async create(): Promise<WasmCrypto | PureJSCrypto> {
-    try {
-      await wasmInit();
-    } catch (e) {
-      logger.warn(
-        "Failed to initialize WasmCrypto, falling back to PureJSCrypto",
-        { err: e },
-      );
-      return new PureJSCrypto();
-    }
+  static setInitSync(value: typeof initializeSync) {
+    wasmInitSync = value;
+  }
 
+  static createSync(): WasmCrypto {
+    try {
+      wasmInitSync();
+    } catch (e) {
+      throw new Error(wasmCryptoErrorMessage(e), { cause: e });
+    }
+    return new WasmCrypto();
+  }
+
+  // TODO: Remove this method and use createSync instead, this is not necessary since we can use createSync in the browser and in the worker.
+  // @deprecated
+  static async create(): Promise<WasmCrypto> {
+    await initWasmCrypto();
     return new WasmCrypto();
   }
 
@@ -204,11 +234,24 @@ class SessionLogAdapter {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
-      newSignature,
-      skipVerify,
-    );
+    // Use direct calls instead of JSON.stringify for better performance
+    for (const tx of transactions) {
+      if (tx.privacy === "private") {
+        this.sessionLog.addExistingPrivateTransaction(
+          tx.encryptedChanges,
+          tx.keyUsed,
+          tx.madeAt,
+          tx.meta,
+        );
+      } else {
+        this.sessionLog.addExistingTrustingTransaction(
+          tx.changes,
+          tx.madeAt,
+          tx.meta,
+        );
+      }
+    }
+    this.sessionLog.commitTransactions(newSignature, skipVerify);
   }
 
   addNewPrivateTransaction(
@@ -220,12 +263,14 @@ class SessionLogAdapter {
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: PrivateTransaction } {
     const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
+      // We can avoid stableStringify because it will be encrypted.
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       keySecret,
       keyID,
       madeAt,
-      meta ? stableStringify(meta) : undefined,
+      // We can avoid stableStringify because it will be encrypted.
+      meta ? JSON.stringify(meta) : undefined,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {
@@ -244,8 +289,10 @@ class SessionLogAdapter {
     madeAt: number,
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: TrustingTransaction } {
-    const stringifiedChanges = stableStringify(changes);
-    const stringifiedMeta = meta ? stableStringify(meta) : undefined;
+    // We can avoid stableStringify because the changes will be in a string format already.
+    const stringifiedChanges = JSON.stringify(changes);
+    // We can avoid stableStringify because the meta will be in a string format already.
+    const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
       stringifiedChanges,
       signerAgent.currentSignerSecret(),
@@ -255,8 +302,8 @@ class SessionLogAdapter {
     const transaction: TrustingTransaction = {
       privacy: "trusting",
       madeAt,
-      changes: stringifiedChanges,
-      meta: stringifiedMeta,
+      changes: stringifiedChanges as Stringified<JsonValue[]>,
+      meta: stringifiedMeta as Stringified<JsonObject> | undefined,
     };
     return { signature: output as Signature, transaction };
   }

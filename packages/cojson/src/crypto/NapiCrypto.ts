@@ -19,7 +19,6 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -58,7 +57,7 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
     super();
   }
 
-  static async create(): Promise<NapiCrypto | PureJSCrypto | WasmCrypto> {
+  static async create(): Promise<NapiCrypto | WasmCrypto> {
     return new NapiCrypto();
   }
 
@@ -190,11 +189,24 @@ class SessionLogAdapter {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
-      newSignature,
-      skipVerify,
-    );
+    // Use direct calls instead of JSON.stringify for better performance
+    for (const tx of transactions) {
+      if (tx.privacy === "private") {
+        this.sessionLog.addExistingPrivateTransaction(
+          tx.encryptedChanges,
+          tx.keyUsed,
+          tx.madeAt,
+          tx.meta,
+        );
+      } else {
+        this.sessionLog.addExistingTrustingTransaction(
+          tx.changes,
+          tx.madeAt,
+          tx.meta,
+        );
+      }
+    }
+    this.sessionLog.commitTransactions(newSignature, skipVerify);
   }
 
   addNewPrivateTransaction(
@@ -206,12 +218,14 @@ class SessionLogAdapter {
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: PrivateTransaction } {
     const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
+      // We can avoid stableStringify because it will be encrypted.
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       keySecret,
       keyID,
       madeAt,
-      meta ? stableStringify(meta) : undefined,
+      // We can avoid stableStringify because it will be encrypted.
+      meta ? JSON.stringify(meta) : undefined,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {
@@ -230,8 +244,10 @@ class SessionLogAdapter {
     madeAt: number,
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: TrustingTransaction } {
-    const stringifiedChanges = stableStringify(changes);
-    const stringifiedMeta = meta ? stableStringify(meta) : undefined;
+    // We can avoid stableStringify because the changes will be in a string format already.
+    const stringifiedChanges = JSON.stringify(changes);
+    // We can avoid stableStringify because the meta will be in a string format already.
+    const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
       stringifiedChanges,
       signerAgent.currentSignerSecret(),
@@ -241,8 +257,8 @@ class SessionLogAdapter {
     const transaction: TrustingTransaction = {
       privacy: "trusting",
       madeAt,
-      changes: stringifiedChanges,
-      meta: stringifiedMeta,
+      changes: stringifiedChanges as Stringified<JsonValue[]>,
+      meta: stringifiedMeta as Stringified<JsonObject> | undefined,
     };
     return { signature: output as Signature, transaction };
   }

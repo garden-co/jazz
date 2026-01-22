@@ -3,8 +3,7 @@ const taskId = "";
 
 // #region ErrorHandling
 const unsubscribe = Task.subscribe(taskId, {
-  onUnauthorized: (err) => console.error(err),
-  onUnavailable: (err) => console.error(err)
+  onError: (err) => console.error("Can't access the task data, error: ", err.$jazz.loadingState),
 }, (updatedTask) => {
   console.log("Updated task:", updatedTask);
 });

@@ -45,9 +45,31 @@ npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
 npm install @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv react-native-fast-encoder
 
 # Jazz dependencies
-npm install jazz-tools
+npm install jazz-tools cojson-core-rn
 ```
 </CodeGroup>
+
+`cojson-core-rn` is our high-performance crypto provider for React Native. And it is **required** for React Native applications.
+
+<Alert variant="info" className="mt-4" title="Note"> 
+In the React Native ecosystem, the Autolinking process (which links native code from libraries to your iOS and Android projects) 
+relies on scanning the dependencies listed in your application's root package.json. As a result, `cojson-core-rn` must be a direct dependency of the app, and not a dependency of a dependency.
+</Alert>
+
+You must keep the versions of the two packages (`jazz-tools` and `cojson-core-rn`) the same.
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
+</Alert>
 
 ### Add polyfills
 

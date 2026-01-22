@@ -355,7 +355,7 @@ test("chunks transactions when when the chars are longer than MAX_RECOMMENDED_TX
 
   await coValue.waitForSync();
 
-  client.restart();
+  await client.restart();
   client.addStorage({
     storage,
   });

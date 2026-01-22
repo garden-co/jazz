@@ -67,11 +67,9 @@ Server Worker credentials are typically stored and provided as environment varia
 
 ## Wasm on Edge runtimes
 
-To maximize compatibility, Jazz falls back to a slower, JavaScript crypto implementation if the faster WASM implementation is not available.
-
-On some edge platforms, such as Cloudflare Workers or Vercel Edge Functions, environment security restrictions may trigger this fallback unnecessarily.
-
-You can ensure that Jazz uses the faster WASM implementation by importing the WASM loader before using Jazz. For example:
+On some edge platforms, such as Cloudflare Workers or Vercel Edge Functions, environment security restrictions may trigger WASM crypto to fail.
+  
+To avoid this failure, you can ensure that Jazz uses the WASM implementation by importing the WASM loader before using Jazz. For example:
 
 <CodeGroup>
 ```ts loadJazz.ts

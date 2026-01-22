@@ -28,4 +28,7 @@ pub enum CoJsonCoreError {
 
     #[error("Invalid base58")] 
     InvalidBase58(#[from] bs58::decode::Error),
+
+    #[error("Transaction too large to be synced: {0} bytes > {1} bytes limit")]
+    TransactionTooLarge(usize, usize),
 }

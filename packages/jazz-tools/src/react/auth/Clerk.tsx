@@ -8,12 +8,15 @@ import {
   KvStoreContext,
 } from "jazz-tools";
 import { LocalStorageKVStore } from "jazz-tools/browser";
-import { useAuthSecretStorage, useJazzContext } from "jazz-tools/react-core";
+import {
+  useAuthSecretStorage,
+  useJazzContextValue,
+} from "jazz-tools/react-core";
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { JazzProviderProps, JazzReactProvider } from "../provider.js";
 
 function useJazzClerkAuth(clerk: MinimalClerkClient) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
   const authSecretStorage = useAuthSecretStorage();
 
   if ("guest" in context) {

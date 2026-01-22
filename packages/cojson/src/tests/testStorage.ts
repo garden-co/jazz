@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database, { type Database as DatabaseT } from "libsql";
 import { onTestFinished } from "vitest";
-import { RawCoID, StorageAPI } from "../exports";
+import { RawCoID, SessionID, StorageAPI } from "../exports";
 import { SQLiteDatabaseDriver } from "../storage";
 import { getSqliteStorage } from "../storage/sqlite";
 import {
@@ -12,6 +12,7 @@ import {
   getSqliteStorageAsync,
 } from "../storage/sqliteAsync";
 import { SyncMessagesLog, SyncTestMessage } from "./testUtils";
+import { knownStateFromContent } from "../coValueContentMessage";
 
 class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
   private readonly db: DatabaseT;
@@ -131,12 +132,40 @@ export function createSyncStorage({
   return storage;
 }
 
+export async function getAllCoValuesWaitingForDelete(
+  storage: StorageAPI,
+): Promise<RawCoID[]> {
+  // @ts-expect-error - dbClient is private
+  return storage.dbClient.getAllCoValuesWaitingForDelete();
+}
+
+export async function getCoValueStoredSessions(
+  storage: StorageAPI,
+  id: RawCoID,
+): Promise<SessionID[]> {
+  return new Promise<SessionID[]>((resolve) => {
+    storage.load(
+      id,
+      (content) => {
+        if (content.id === id) {
+          resolve(
+            Object.keys(knownStateFromContent(content).sessions) as SessionID[],
+          );
+        }
+      },
+      () => {},
+    );
+  });
+}
+
 export function getDbPath(defaultDbPath?: string) {
   const dbPath = defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
 
   if (!defaultDbPath) {
     onTestFinished(() => {
-      unlinkSync(dbPath);
+      setTimeout(() => {
+        unlinkSync(dbPath);
+      }, 100);
     });
   }
 

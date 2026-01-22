@@ -312,7 +312,7 @@ describe("sync resumption", () => {
     expect(unsyncedTracker.has(map.id)).toBe(true);
     expect(await getUnsyncedCoValueIDsFromStorage()).toHaveLength(2);
 
-    client.restart();
+    await client.restart();
     client.addStorage({ storage });
     const { peerState: serverPeerState } = client.connectToSyncServer();
 
@@ -350,7 +350,7 @@ describe("sync resumption", () => {
     }
     expect(await getUnsyncedCoValueIDsFromStorage()).toHaveLength(101);
 
-    client.restart();
+    await client.restart();
     client.addStorage({ storage });
     const { peerState: serverPeerState } = client.connectToSyncServer();
 
@@ -389,7 +389,7 @@ describe("sync resumption", () => {
 
     expect(await getUnsyncedCoValueIDsFromStorage()).toHaveLength(2);
 
-    client.restart();
+    await client.restart();
     client.addStorage({ storage });
     const newSyncServer = setupTestNode({ isSyncServer: true });
     const { peerState: newServerPeerState } = client.connectToSyncServer({
@@ -427,7 +427,7 @@ describe("sync resumption", () => {
     expect(unsyncedCoValueIDs).toContain(map.id);
     expect(unsyncedCoValueIDs).toContain(group.id);
 
-    client.restart();
+    await client.restart();
     client.addStorage({ storage });
     const newPeer = setupTestNode({ isSyncServer: true });
     client.connectToSyncServer({

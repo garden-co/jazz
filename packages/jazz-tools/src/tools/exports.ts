@@ -41,6 +41,7 @@ export type {
   AccountCreationProps,
   BaseProfileShape,
   ExportedCoValue,
+  SubscriptionPerformanceDetail,
 } from "./internal.js";
 
 export {
@@ -67,6 +68,7 @@ export {
   unstable_loadUnique,
   getUnloadedCoValueWithoutId,
   setDefaultSchemaPermissions,
+  deleteCoValues,
   getJazzErrorType,
 } from "./internal.js";
 
@@ -144,3 +146,8 @@ export * from "./ssr/index.js";
 export { captureStack } from "./subscribe/errorReporting.js";
 
 export * as jazzConfig from "./config.js";
+
+export {
+  JazzMessageChannel as experimental_JazzMessageChannel,
+  type JazzMessageChannelExposeOptions,
+} from "../worker/JazzMessageChannel.js";

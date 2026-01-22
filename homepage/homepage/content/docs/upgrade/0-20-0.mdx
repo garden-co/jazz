@@ -1,0 +1,244 @@
+import { Alert, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.20.0 - Full native crypto
+
+With this release, we complete our migration to a pure **native** Rust toolchain.
+We have removed the JavaScript compatibility layer, meaning our native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+## Motivation
+
+Before 0.20.0, Jazz relied on a JavaScript crypto implementation to work around compatibility issues in some runtimes-most notably React Native.
+As a result, our native Rust core wasn’t running in React Native and, on some Edge runtimes, 
+only worked when WASM was explicitly initialized (see [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes)).
+
+The JavaScript crypto implementation is much slower than native Rust crypto. Although workarounds like RNQuickCrypto for React Native improved performance, they still only wrapped certain native libraries, rather than running Jazz's full Rust crypto.
+
+With native Rust crypto now running everywhere, Jazz comes with good performance in every platform. 
+This also helps us speed up the migration of Jazz Core to Rust which will help us improve the Jazz overall performance.
+
+## What changed
+
+- There is no more fallback to Javascript crypto. If the crypto fails to initialize, it will throw an error. See [Edge runtimes](#edge-runtimes) for upgrading.
+- As Jazz crypto now runs natively in all environments, we no longer support `PureJSCrypto`. See [Expo](#expo) and [React Native](#react-native-non-expo) for upgrade instructions.
+- RNCrypto is now the default crypto provider on React Native. As a result, we're also discontinuing support for `RNQuickCrypto`.
+- Optimized the JS-to-Rust communication by implementing native data type exchange, eliminating serialization overhead.
+- You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic. See [a more strict `unique` param](#a-more-strict-unique-param).
+- The `removeMember` method now throws an error if the caller is not authorized.
+- We have introduced a way to permanently [delete CoValues](/docs/react/core-concepts/deleting). This brings a [new `deleted` loading state](#new-deleted-loading-state).
+- The React context API in `jazz-tools/react-core` changed: `useJazzContextValue` replaces `useJazzContext` for value access, and nesting `JazzProvider` now throws. See [React context/provider changes](#react-contextprovider-changes).
+
+## Breaking changes
+
+### Edge runtimes
+
+If you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized, there is no more fallback to Javascript crypto.
+See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
+
+<CodeGroup>
+```ts
+import "jazz-tools/load-edge-wasm";
+// Other Jazz Imports
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    // Jazz application logic
+    return new Response("Hello from Jazz on Cloudflare!");
+  },
+};
+```
+</CodeGroup>
+
+If you don't do this, you will get an error like this:
+
+<CodeGroup>
+```
+Critical Error: Failed to load WASM module
+
+You need to add \`import "jazz-tools/load-edge-wasm";\` on top 
+of your entry module to make Jazz work with this runtime 
+
+A native crypto module is required for Jazz to work. 
+See https://jazz.tools/docs/react/reference/performance#use-the-best-crypto-implementation-for-your-platform 
+for possible alternatives.
+```
+</CodeGroup>
+
+Before 0.20.0, you would get a warning like this:
+<CodeGroup>
+```
+Warning: WASM crypto is not available. Falling back to JavaScript crypto.
+```
+</CodeGroup>
+
+### Expo
+
+If you had previously installed QuickCrypto, then you should follow the steps below. Otherwise, no action is needed to take advantage of RNCrypto.
+
+1) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
+
+- Remove `react-native-quick-crypto` (and any associated config you added for it).
+- Remove any `SODIUM_ENABLED` / `sodiumEnabled` settings you added specifically for QuickCrypto.
+
+2) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
+
+You have to remove the `CryptoProvider` option, it is no longer supported:
+
+<CodeGroup>
+```tsx
+import { JazzExpoProvider } from "jazz-tools/expo";
+import { MyAppAccount } from "./schema";
+
+const apiKey = "you@example.com";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzExpoProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzExpoProvider>
+  );
+}
+```
+</CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
+</Alert>
+
+### React Native (non-Expo)
+
+If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native, 
+and it is **required** for React Native applications.
+
+1) **Install `cojson-core-rn` (required)** and make sure the version matches `jazz-tools`:
+
+<CodeGroup className="mb-4">
+```bash
+npm install cojson-core-rn
+```
+</CodeGroup>
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
+</Alert>
+
+See also: [React Native setup](/docs/react-native/project-setup).
+
+2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
+
+- Remove `react-native-quick-crypto` (and any associated config you added for it).
+- Remove any `SODIUM_ENABLED` / `sodiumEnabled` settings you added specifically for QuickCrypto.
+
+3) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
+
+After installing `cojson-core-rn`, you have to remove the `CryptoProvider` option, it is no longer supported:
+
+<CodeGroup>
+```tsx
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
+import { MyAppAccount } from "./schema";
+
+const apiKey = "you@example.com";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactNativeProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzReactNativeProvider>
+  );
+}
+```
+</CodeGroup>
+
+### A more strict `unique` param
+
+Jazz uses [uniqueness](/docs/react/core-concepts/covalues/comaps#uniqueness) to help identify CoValues. 
+
+Occasionally, you may wish to produce a deterministic ID for the CoValue. To do so, you can manually define the uniqueness using the [`unique`](/docs/react/core-concepts/covalues/comaps#uniqueness) parameter.
+Before 0.20.0, you could pass any `JsonValue` as unique param. This was not stable across languages and could lead to unexpected behavior.
+
+The `unique` property now enforces strict type validation, limiting inputs to specific primitives rather than generic `JsonValue` types.
+Accepted types are `string`, `boolean`, `null`, `undefined`, or objects containing `string` values.
+
+Providing any other type will throw an error, with the following distinction for numbers:
+- Floating-point numbers (e.g., `1.5`) will throw an error.
+- Integers (e.g., `1`) are accepted and will not throw an error, though their usage is deprecated and not supported in the type system anymore.
+
+We expect that this change **will not impact** any projects in our hosted Cloud based on our analysis.
+However, since we do **not have visibility into self-hosted sync server deployments**, we cannot rule out the possibility that your code may rely on the previously allowed unique value types.
+
+If you are migrating from an earlier version and your project passes type-checks, you are almost certainly unaffected.  
+If you do encounter issues (for example, errors about unsupported `unique` value types), 
+the recommended upgrade path is to convert your uniqueness constraint to a string (as shown below), or, if necessary, to an object containing only string properties.
+
+**If you are affected by this change and cannot migrate to a supported unique type, please [reach us on Discord](https://discord.gg/ANm5jY6Y) for help or guidance.**
+
+### New `deleted` loading state
+
+With the introduction of [CoValue deletion](/docs/react/core-concepts/deleting), there's a new `deleted` loading state. If you're handling loading states explicitly, you should add a case for `deleted`:
+
+<CodeGroup>
+```tsx
+if (!project.$isLoaded) {
+  switch (project.$jazz.loadingState) {
+    case "loading":
+      return "Loading project...";
+    case "unavailable":
+      return "Project not found";
+    case "unauthorized":
+      return "Project not accessible";
+    case "deleted":
+      return "Project deleted";
+  }
+}
+```
+</CodeGroup>
+
+### React context/provider changes
+
+The React context API in `jazz-tools/react-core` changed to prevent nested providers and clarify context access:
+
+- `JazzContextManagerContext` was removed.
+- `useJazzContext` was renamed to `useJazzContextValue` for accessing the context value.
+- `useJazzContext` now returns the context manager instead of the value.
+- Nesting `JazzProvider` components now throws an error.
+
+If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
+
+<CodeGroup>
+```ts
+// [!code --:1]
+- import { useJazzContext } from "jazz-tools/react-core";
+// [!code ++:1]
++ import { useJazzContextValue } from "jazz-tools/react-core";
+
+// [!code --:1]
+- const context = useJazzContext();
+// [!code ++:1]
++ const context = useJazzContextValue();
+```
+</CodeGroup>
+
+If you need to provide context to children without creating a new context (e.g., for components that don't propagate React context), use:
+
+<CodeGroup>
+```tsx
+<JazzContext.Provider value={useJazzContext()}>
+  {children}
+</JazzContext.Provider>
+```
+</CodeGroup>

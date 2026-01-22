@@ -843,7 +843,7 @@ describe("setDefaultSchemaPermissions", () => {
     expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("reader");
   });
 
-  test("does not modify permissions for existing schemas", () => {
+  test("modifies default permissions for existing schemas", () => {
     const ExistingMap = co.map({
       name: co.plainText(),
     });
@@ -852,8 +852,31 @@ describe("setDefaultSchemaPermissions", () => {
     });
 
     const map = ExistingMap.create({ name: "Hello" });
-    expect(
-      map.name.$jazz.owner.getParentGroups().map((group) => group.$jazz.id),
-    ).toContain(map.$jazz.owner.$jazz.id);
+    expect(map.name.$jazz.owner.$jazz.id).toContain(map.$jazz.owner.$jazz.id);
+  });
+
+  test("modifies default permissions for copied schemas", async () => {
+    const anotherAccount = await createJazzTestAccount();
+
+    const ExistingMap = co.map({
+      name: co.plainText(),
+    });
+    setDefaultSchemaPermissions({
+      onCreate() {
+        // Do nothing
+      },
+    });
+    const CopiedMap = ExistingMap.resolved({ name: true });
+    setDefaultSchemaPermissions({
+      onCreate(newGroup) {
+        newGroup.addMember(anotherAccount, "reader");
+      },
+    });
+
+    const map = CopiedMap.create({ name: "Hello" });
+    await map.$jazz.waitForSync();
+
+    const mapOwner = map.$jazz.owner;
+    expect(mapOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("reader");
   });
 });

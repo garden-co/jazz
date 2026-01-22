@@ -8,7 +8,7 @@ Jazz 0.11.0 brings several improvements to member handling, roles, and permissio
 Here is what's changed in this release:
 - [New permissions check APIs](#new-permissions-check-apis): New methods like `canRead`, `canWrite`, `canAdmin`, and `getRoleOf` to simplify permission checks.
 - [Group.revokeExtend](#grouprevokeextend): New method to revoke group extension permissions.
-- [Group.getParentGroups](#accountgetparentgroups): New method to get all the parent groups of an account.
+- [Group.getParentGroups](#groupgetparentgroups): New method to get all the parent groups of an account.
 - [Account Profile & Migrations](#account-profile--migrations): Fixed issues with custom account profile migrations for a more consistent experience
 - [Dropped support for Accounts owning Profiles](#dropped-support-for-accounts-owning-profiles): Profiles can now only be owned by Groups.
 - [Group.members now includes inherited members](#member-inheritance-changes): Updated behavior for the `members` getter method to include inherited members and have a more intuitive type definition.
@@ -200,7 +200,7 @@ if (group.getRoleOf("everyone")) {
 #### Migration Steps
 
 1. Review your member querying logic to account for inherited members.
-2. Update your permission checking code to utilize the new [`hasPermissions` and `getRoleOf`](#enhanced-permission-management) methods.
+2. Update your permission checking code to utilize the new `hasPermissions` and `getRoleOf` methods.
 3. Consider implementing `"everyone"` role checks where appropriate.
 
 ### Removed auto-update of `profile.name` in `usePasskeyAuth`

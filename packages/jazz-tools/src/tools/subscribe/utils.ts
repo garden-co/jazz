@@ -24,7 +24,7 @@ export function myRoleForRawValue(raw: RawCoValue): Role | undefined {
 }
 
 export function createCoValue<D extends CoValue>(
-  ref: RefEncoded<D>,
+  ref: RefEncoded<CoValue>,
   raw: RawCoValue,
   subscriptionScope: SubscriptionScope<D>,
 ) {
@@ -39,7 +39,7 @@ export function createCoValue<D extends CoValue>(
 
   return {
     type: CoValueLoadingState.LOADED,
-    value: freshValueInstance,
+    value: freshValueInstance as unknown as D,
     id: subscriptionScope.id,
   };
 }

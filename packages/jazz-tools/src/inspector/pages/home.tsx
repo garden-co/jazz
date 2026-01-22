@@ -5,8 +5,13 @@ import { Button, Input } from "../ui";
 import { useState } from "react";
 import { CoID, RawCoValue } from "cojson";
 import { useRouter } from "../router";
+import { DeleteLocalData } from "../viewer/delete-local-data.js";
 
-export function HomePage() {
+export interface HomePageProps {
+  showDeleteLocalData?: boolean;
+}
+
+export function HomePage({ showDeleteLocalData }: HomePageProps) {
   const { localNode, accountID } = useNode();
   const { path, setPage } = useRouter();
   const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
@@ -24,7 +29,7 @@ export function HomePage() {
   };
 
   return (
-    <>
+    <PageContainer>
       <CenteredForm
         onSubmit={handleCoValueIdSubmit}
         aria-hidden={path.length !== 0}
@@ -55,9 +60,21 @@ export function HomePage() {
           Inspect my account
         </Button>
       </CenteredForm>
-    </>
+
+      {showDeleteLocalData && (
+        <BottomRight>
+          <DeleteLocalData />
+        </BottomRight>
+      )}
+    </PageContainer>
   );
 }
+
+const PageContainer = styled("div")`
+  position: relative;
+  height: 100%;
+  width: 100%;
+`;
 
 const CenteredForm = styled("form")`
   display: flex;
@@ -74,4 +91,10 @@ const CenteredForm = styled("form")`
 
 const OrText = styled("p")`
   text-align: center;
+`;
+
+const BottomRight = styled("div")`
+  position: absolute;
+  bottom: 0.75rem;
+  right: 0;
 `;

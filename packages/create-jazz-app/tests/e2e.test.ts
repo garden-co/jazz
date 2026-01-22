@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -5,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 
 describe("End-to-End CLI Tests", () => {
-  const testDir = path.join(__dirname, "..", "test-temp");
+  const testBaseDir = path.join(__dirname, "..", "test-temp");
+  let testDir: string;
   let originalUserAgent: string | undefined;
   let originalCwd: string;
 
@@ -13,10 +15,8 @@ describe("End-to-End CLI Tests", () => {
     originalUserAgent = process.env.npm_config_user_agent;
     originalCwd = process.cwd();
 
-    // Create test directory
-    if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true, force: true });
-    }
+    // Create unique test directory per test to avoid race conditions
+    testDir = path.join(testBaseDir, crypto.randomUUID());
     fs.mkdirSync(testDir, { recursive: true });
   });
 
@@ -136,7 +136,7 @@ describe("End-to-End CLI Tests", () => {
       });
 
       // Create package.json with catalog dependencies
-      const packageJsonPath = createMockPackageJson(
+      createMockPackageJson(
         { "some-regular-dep": "^1.0.0" },
         {
           typescript: "catalog:",
@@ -144,24 +144,12 @@ describe("End-to-End CLI Tests", () => {
         },
       );
 
-      // Test the catalog resolution logic by verifying the workspace structure
+      // Verify the workspace file was created correctly with expected catalog values
       const workspaceContent = fs.readFileSync(
         path.join(mockWorkspaceRoot, "pnpm-workspace.yaml"),
         "utf8",
       );
       const workspaceConfig = YAML.parse(workspaceContent);
-      const catalogs = workspaceConfig.catalogs || {};
-
-      // Test catalog resolution logic
-      const typescriptVersion = catalogs.default?.typescript;
-      const viteVersion = catalogs.default?.vite;
-
-      expect(typescriptVersion).toBe("5.6.2");
-      expect(viteVersion).toBe("6.3.5");
-
-      // Verify the workspace file was created correctly
-      const workspaceFile = path.join(mockWorkspaceRoot, "pnpm-workspace.yaml");
-      expect(fs.existsSync(workspaceFile)).toBe(true);
 
       expect(workspaceConfig.catalogs.default.typescript).toBe("5.6.2");
       expect(workspaceConfig.catalogs.default.vite).toBe("6.3.5");

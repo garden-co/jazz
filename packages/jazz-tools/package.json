@@ -52,11 +52,6 @@
       "types": "./dist/expo/index.d.ts",
       "default": "./dist/expo/index.js"
     },
-    "./expo/crypto": {
-      "@jazz-tools/source": "./src/expo/crypto.ts",
-      "types": "./dist/expo/crypto.d.ts",
-      "default": "./dist/expo/crypto.js"
-    },
     "./expo/testing": {
       "@jazz-tools/source": "./src/expo/testing.tsx",
       "types": "./dist/expo/testing.d.ts",
@@ -116,11 +111,6 @@
       "types": "./dist/react-native/index.d.ts",
       "default": "./dist/react-native/index.js"
     },
-    "./react-native/crypto": {
-      "@jazz-tools/source": "./src/react-native/crypto.ts",
-      "types": "./dist/react-native/crypto.d.ts",
-      "default": "./dist/react-native/crypto.js"
-    },
     "./react-native/testing": {
       "@jazz-tools/source": "./src/react-native/testing.tsx",
       "types": "./dist/react-native/testing.d.ts",
@@ -134,11 +124,6 @@
       "@jazz-tools/source": "./src/react-native-core/index.ts",
       "types": "./dist/react-native-core/index.d.ts",
       "default": "./dist/react-native-core/index.js"
-    },
-    "./react-native-core/crypto": {
-      "@jazz-tools/source": "./src/react-native-core/crypto/index.ts",
-      "types": "./dist/react-native-core/crypto.d.ts",
-      "default": "./dist/react-native-core/crypto.js"
     },
     "./react-native-core/testing": {
       "@jazz-tools/source": "./src/react-native-core/testing.tsx",
@@ -198,20 +183,20 @@
       "types": "./dist/worker/edge-wasm.d.ts",
       "default": "./dist/worker/edge-wasm.js"
     },
+    "./wasm": {
+      "@jazz-tools/source": "./src/worker/wasm.ts",
+      "types": "./dist/worker/wasm.d.ts",
+      "default": "./dist/worker/wasm.js"
+    },
     "./napi": {
       "@jazz-tools/source": "./src/worker/napi-crypto.ts",
       "types": "./dist/worker/napi-crypto.d.ts",
       "default": "./dist/worker/napi-crypto.js"
-    },
-    "./react-native-core/crypto/RNCrypto": {
-      "@jazz-tools/source": "./src/react-native-core/crypto/RNCrypto.ts",
-      "types": "./dist/react-native-core/crypto/RNCrypto.d.ts",
-      "default": "./dist/react-native-core/crypto/RNCrypto.js"
     }
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.19.21",
+  "version": "0.20.1",
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
@@ -283,7 +268,6 @@
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "^0.26.4",
     "react-native-passkey": "^3.0.0",
-    "react-native-quick-crypto": "^1.0.0-beta.21",
     "sharp": "^0.33.5",
     "svelte": "^5.0.0"
   },
@@ -331,9 +315,6 @@
       "optional": true
     },
     "react-native-passkey": {
-      "optional": true
-    },
-    "react-native-quick-crypto": {
       "optional": true
     },
     "sharp": {

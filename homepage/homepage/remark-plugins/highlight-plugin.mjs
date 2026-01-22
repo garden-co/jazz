@@ -20,6 +20,7 @@ const highlighterPromise = createHighlighter({
     "groovy",
     "svelte",
     "vue",
+    "diff",
   ],
   themes: [jazzLight, jazzDark],
 });

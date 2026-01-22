@@ -19,7 +19,6 @@ import {
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
-  JazzContextType,
   Loaded,
   MaybeLoaded,
   NotLoaded,
@@ -32,13 +31,13 @@ import {
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
-import { JazzContext, JazzContextManagerContext } from "./provider.js";
+import { JazzContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
 import { CoValueSubscription } from "./types.js";
 import { use } from "./use.js";
 
 export function useJazzContext<Acc extends Account>() {
-  const value = useContext(JazzContext) as JazzContextType<Acc>;
+  const value = useContext(JazzContext) as JazzContextManager<Acc, {}>;
 
   if (!value) {
     throw new Error(
@@ -49,31 +48,31 @@ export function useJazzContext<Acc extends Account>() {
   return value;
 }
 
-export function useJazzContextManager<Acc extends Account>() {
-  const value = useContext(JazzContextManagerContext) as JazzContextManager<
-    Acc,
-    {}
-  >;
+export function useJazzContextValue<Acc extends Account>() {
+  const contextManager = useJazzContext<Acc>();
 
-  if (!value) {
+  const context = useSyncExternalStore(
+    useCallback(
+      (callback) => {
+        return contextManager.subscribe(callback);
+      },
+      [contextManager],
+    ),
+    () => contextManager.getCurrentValue(),
+    () => contextManager.getCurrentValue(),
+  );
+
+  if (!context) {
     throw new Error(
-      "You need to set up a JazzProvider on top of your app to use this hook.",
+      "The JazzProvider is not initialized yet. This looks like a bug, please report it.",
     );
   }
 
-  return value;
+  return context;
 }
 
 export function useAuthSecretStorage() {
-  const value = useContext(JazzContextManagerContext);
-
-  if (!value) {
-    throw new Error(
-      "You need to set up a JazzProvider on top of your app to use this useAuthSecretStorage.",
-    );
-  }
-
-  return value.getAuthSecretStorage();
+  return useJazzContext().getAuthSecretStorage();
 }
 
 export function useIsAuthenticated() {
@@ -102,6 +101,7 @@ export function useCoValueSubscription<
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
   },
+  source?: string,
 ): CoValueSubscription<S, R> | null {
   const resolve = getResolveQuery(Schema, options?.resolve);
   const subscriptions = useCoValueSubscriptions(
@@ -109,6 +109,7 @@ export function useCoValueSubscription<
     [id],
     resolve,
     options?.unstable_branch,
+    source,
   );
   return (subscriptions[0] ?? null) as CoValueSubscription<S, R> | null;
 }
@@ -122,7 +123,7 @@ interface SubscriptionsState {
   schema: CoValueClassOrSchema;
   ids: readonly (string | undefined | null)[];
   resolve: ResolveQuery<any>;
-  contextManager: ReturnType<typeof useJazzContextManager>;
+  contextManager: ReturnType<typeof useJazzContext>;
   agent: AnonymousJazzAgent | Loaded<any, true>;
   branchName?: string;
   branchOwnerId?: string;
@@ -141,8 +142,9 @@ function useCoValueSubscriptions(
   ids: readonly (string | undefined | null)[],
   resolve: ResolveQuery<any>,
   branch?: BranchDefinition,
+  source?: string,
 ): (SubscriptionScope<CoValue> | null)[] {
-  const contextManager = useJazzContextManager();
+  const contextManager = useJazzContext();
   const agent = useAgent();
 
   const callerStack = useMemo(() => captureStack(), []);
@@ -169,6 +171,9 @@ function useCoValueSubscriptions(
       if (callerStack) {
         subscription.callerStack = callerStack;
       }
+
+      // Track performance for root subscriptions
+      subscription.trackLoadingPerformance(source ?? "unknown");
 
       return subscription;
     });
@@ -429,7 +434,12 @@ export function useCoState<
   },
 ): TSelectorReturn {
   useImportCoValueContent(id, options?.preloaded);
-  const subscription = useCoValueSubscription(Schema, id, options);
+  const subscription = useCoValueSubscription(
+    Schema,
+    id,
+    options,
+    `useCoState`,
+  );
   return useSubscriptionSelector(subscription, options);
 }
 
@@ -472,7 +482,12 @@ export function useSuspenseCoState<
 ): TSelectorReturn {
   useImportCoValueContent(id, options?.preloaded);
 
-  const subscription = useCoValueSubscription(Schema, id, options);
+  const subscription = useCoValueSubscription(
+    Schema,
+    id,
+    options,
+    "useSuspenseCoState",
+  );
 
   if (!subscription) {
     throw new Error("Subscription not found");
@@ -535,8 +550,9 @@ export function useAccountSubscription<
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
   },
+  source?: string,
 ) {
-  const contextManager = useJazzContextManager();
+  const contextManager = useJazzContext();
 
   // Capture stack trace at hook call time
   const callerStack = useMemo(() => captureStack(), []);
@@ -570,6 +586,9 @@ export function useAccountSubscription<
     if (callerStack) {
       subscription.callerStack = callerStack;
     }
+
+    // Track performance for root subscriptions
+    subscription.trackLoadingPerformance(source ?? "unknown");
 
     return {
       subscription,
@@ -728,7 +747,11 @@ export function useAccount<
     unstable_branch?: BranchDefinition;
   },
 ): TSelectorReturn {
-  const subscription = useAccountSubscription(AccountSchema, options);
+  const subscription = useAccountSubscription(
+    AccountSchema,
+    options,
+    "useAccount",
+  );
   return useSubscriptionSelector(subscription, options);
 }
 
@@ -766,7 +789,11 @@ export function useSuspenseAccount<
     unstable_branch?: BranchDefinition;
   },
 ): TSelectorReturn {
-  const subscription = useAccountSubscription(AccountSchema, options);
+  const subscription = useAccountSubscription(
+    AccountSchema,
+    options,
+    "useSuspenseAccount",
+  );
 
   if (!subscription) {
     throw new Error(
@@ -783,7 +810,7 @@ export function useSuspenseAccount<
  * Returns a function for logging out of the current account.
  */
 export function useLogOut(): () => void {
-  const contextManager = useJazzContextManager();
+  const contextManager = useJazzContext();
   return contextManager.logOut;
 }
 
@@ -798,7 +825,7 @@ export function useLogOut(): () => void {
 export function useAgent<
   A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
 >(): AnonymousJazzAgent | Loaded<A, true> {
-  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
+  const contextManager = useJazzContext<InstanceOfSchema<A>>();
 
   const getCurrentValue = () =>
     getCurrentAccountFromContextManager(contextManager) as
@@ -821,7 +848,7 @@ export function experimental_useInboxSender<
   I extends CoValue,
   O extends CoValue | undefined,
 >(inboxOwnerID: string | undefined) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
 
   if (!("me" in context)) {
     throw new Error(
@@ -868,7 +895,7 @@ export function experimental_useInboxSender<
  * after 5 seconds of not receiving a ping from the server.
  */
 export function useSyncConnectionStatus() {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
 
   const connected = useSyncExternalStore(
     useCallback(
@@ -1055,6 +1082,7 @@ export function useSuspenseCoStates<
     ids,
     resolve,
     options?.unstable_branch,
+    "useSuspenseCoStates",
   ) as SubscriptionScope<CoValue>[];
   useSuspendUntilLoaded(subscriptionScopes);
   return useSubscriptionsSelector(subscriptionScopes, options);
@@ -1124,6 +1152,7 @@ export function useCoStates<
     ids,
     resolve,
     options?.unstable_branch,
+    "useCoStates",
   ) as SubscriptionScope<CoValue>[];
   return useSubscriptionsSelector(subscriptionScopes, options);
 }

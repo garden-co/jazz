@@ -77,6 +77,7 @@ import { emptyKnownState } from "./knownState.js";
 import {
   getContentMessageSize,
   getTransactionSize,
+  knownStateFromContent,
 } from "./coValueContentMessage.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
@@ -87,8 +88,8 @@ import {
   setCoValueLoadingRetryDelay,
   setCoValueLoadingTimeout,
   setIncomingMessagesTimeBudget,
+  setMaxInFlightLoadsPerPeer,
   setMaxOutgoingMessagesChunkBytes,
-  setOutgoingMessagesChunkDelay,
   setMaxRecommendedTxSize,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
@@ -102,6 +103,7 @@ type Value = JsonValue | AnyRawCoValue;
 export { PriorityBasedMessageQueue } from "./queue/PriorityBasedMessageQueue.js";
 /** @hidden */
 export const cojsonInternals = {
+  knownStateFromContent,
   connectedPeers,
   rawCoIDtoBytes,
   rawCoIDfromBytes,
@@ -140,7 +142,7 @@ export const cojsonInternals = {
   canBeBranched,
   WEBSOCKET_CONFIG,
   setMaxOutgoingMessagesChunkBytes,
-  setOutgoingMessagesChunkDelay,
+  setMaxInFlightLoadsPerPeer,
 };
 
 export {
@@ -206,6 +208,7 @@ export type {
 };
 
 export * from "./storage/index.js";
+export * from "./CojsonMessageChannel/index.js";
 
 // biome-ignore format: off
 // eslint-disable-next-line @typescript-eslint/no-namespace

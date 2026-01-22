@@ -36,10 +36,14 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   readonly builtin = "CoVector" as const;
   readonly resolveQuery = true as const;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
+   * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(
     public dimensions: number,
@@ -119,7 +123,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   withPermissions(permissions: SchemaPermissions): CoVectorSchema {
     const copy = new CoVectorSchema(this.dimensions, this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }

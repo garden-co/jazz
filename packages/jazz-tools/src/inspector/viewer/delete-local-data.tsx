@@ -2,17 +2,37 @@ import { Button } from "../ui/button.js";
 import { Modal } from "../ui/modal.js";
 import { Input } from "../ui/input.js";
 import { useState } from "react";
+import { useJazzContext } from "jazz-tools/react-core";
 
 const DELETE_LOCAL_DATA_STRING = "delete my local data";
 
 export function DeleteLocalData() {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [confirmDeleteString, setConfirmDeleteString] = useState("");
+  const jazzContext = useJazzContext();
 
   return (
     <>
-      <Button variant="destructive" onClick={() => setShowDeleteModal(true)}>
-        Delete my local data
+      <Button
+        variant="destructive"
+        onClick={() => setShowDeleteModal(true)}
+        title="Delete my local data"
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M2 4h12M5.333 4V2.667a1.333 1.333 0 011.334-1.334h2.666a1.333 1.333 0 011.334 1.334V4m2 0v9.333a1.333 1.333 0 01-1.334 1.334H4.667a1.333 1.333 0 01-1.334-1.334V4h9.334z"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
       </Button>
       <Modal
         isOpen={showDeleteModal}
@@ -83,10 +103,9 @@ export function DeleteLocalData() {
             variant="destructive"
             disabled={confirmDeleteString !== DELETE_LOCAL_DATA_STRING}
             onClick={() => {
-              const jazzKeys = Object.keys(localStorage).filter(
-                (key) => key.startsWith("jazz-") || key.startsWith("co_z"),
+              localStorage.removeItem(
+                jazzContext.getAuthSecretStorage().getStorageKey(),
               );
-              jazzKeys.forEach((key) => localStorage.removeItem(key));
               indexedDB.deleteDatabase("jazz-storage");
               window.location.reload();
               setShowDeleteModal(false);

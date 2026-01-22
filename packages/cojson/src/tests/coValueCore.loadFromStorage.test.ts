@@ -45,10 +45,17 @@ function createMockStorage(
       callback: (unsyncedCoValueIDs: RawCoID[]) => void,
     ) => void;
     stopTrackingSyncState?: (id: RawCoID) => void;
+    onCoValueUnmounted?: (id: RawCoID) => void;
     close?: () => Promise<unknown> | undefined;
+    markDeleteAsValid?: (id: RawCoID) => void;
+    enableDeletedCoValuesErasure?: () => void;
+    eraseAllDeletedCoValues?: () => Promise<void>;
   } = {},
 ): StorageAPI {
   return {
+    markDeleteAsValid: opts.markDeleteAsValid || vi.fn(),
+    enableDeletedCoValuesErasure: opts.enableDeletedCoValuesErasure || vi.fn(),
+    eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
     load: opts.load || vi.fn(),
     store: opts.store || vi.fn(),
     getKnownState: opts.getKnownState || vi.fn(),
@@ -58,6 +65,7 @@ function createMockStorage(
     trackCoValuesSyncState: opts.trackCoValuesSyncState || vi.fn(),
     getUnsyncedCoValueIDs: opts.getUnsyncedCoValueIDs || vi.fn(),
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
+    onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -459,6 +467,114 @@ describe("CoValueCore.loadFromStorage", () => {
       expect(done1).not.toHaveBeenCalled();
       expect(done2).not.toHaveBeenCalled();
       expect(done3).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("when state is garbageCollected", () => {
+    test("should load from storage even if storage state is not unknown", () => {
+      const { state, node, header, id } = setup();
+      const loadSpy = vi.fn();
+      const storage = createMockStorage({ load: loadSpy });
+      node.setStorage(storage);
+
+      // First, simulate that storage was previously accessed and marked available
+      state.markFoundInPeer("storage", state.loadingState);
+
+      // Then set the CoValue to garbageCollected state (simulating GC)
+      // This is what happens when a GC'd CoValueCore shell is created
+      state.setGarbageCollectedState({
+        id,
+        header: true,
+        sessions: {},
+      });
+
+      // Verify we're in garbageCollected state
+      expect(state.loadingState).toBe("garbageCollected");
+
+      // Now call loadFromStorage - it should proceed to load
+      state.loadFromStorage();
+
+      // Should have called storage.load because we need full content
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test("should load from storage when garbageCollected and storage state is unknown", () => {
+      const { state, node, id } = setup();
+      const loadSpy = vi.fn();
+      const storage = createMockStorage({ load: loadSpy });
+      node.setStorage(storage);
+
+      // Set the CoValue to garbageCollected state
+      state.setGarbageCollectedState({
+        id,
+        header: true,
+        sessions: {},
+      });
+
+      expect(state.loadingState).toBe("garbageCollected");
+      expect(state.getLoadingStateForPeer("storage")).toBe("unknown");
+
+      state.loadFromStorage();
+
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("when state is onlyKnownState", () => {
+    test("should load from storage to get full content", () => {
+      const { state, node, id } = setup();
+      const loadSpy = vi.fn();
+      const storage = createMockStorage({
+        load: loadSpy,
+        loadKnownState: (id, callback) => {
+          // Simulate storage finding knownState
+          callback({
+            id,
+            header: true,
+            sessions: { session1: 5 },
+          });
+        },
+      });
+      node.setStorage(storage);
+
+      // First, call getKnownStateFromStorage to set onlyKnownState
+      state.getKnownStateFromStorage((knownState) => {
+        expect(knownState).toBeDefined();
+      });
+
+      // Verify we're in onlyKnownState
+      expect(state.loadingState).toBe("onlyKnownState");
+
+      // Now call loadFromStorage - it should proceed to load full content
+      state.loadFromStorage();
+
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+    });
+
+    test("should load from storage when onlyKnownState and storage state is unknown", () => {
+      const { state, node, id } = setup();
+      const loadSpy = vi.fn();
+      const storage = createMockStorage({
+        load: loadSpy,
+        loadKnownState: (id, callback) => {
+          callback({
+            id,
+            header: true,
+            sessions: {},
+          });
+        },
+      });
+      node.setStorage(storage);
+
+      // Set onlyKnownState via getKnownStateFromStorage
+      state.getKnownStateFromStorage(() => {});
+
+      expect(state.loadingState).toBe("onlyKnownState");
+      expect(state.getLoadingStateForPeer("storage")).toBe("unknown");
+
+      state.loadFromStorage();
+
+      expect(loadSpy).toHaveBeenCalledTimes(1);
     });
   });
 

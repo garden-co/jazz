@@ -34,11 +34,14 @@ export class PlainTextSchema implements CorePlainTextSchema {
   readonly builtin = "CoPlainText" as const;
   readonly resolveQuery = true as const;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(private coValueClass: typeof CoPlainText) {}
 
@@ -111,7 +114,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
    */
   withPermissions(permissions: SchemaPermissions): PlainTextSchema {
     const copy = new PlainTextSchema(this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }
