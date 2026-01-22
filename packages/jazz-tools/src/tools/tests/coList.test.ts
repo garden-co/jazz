@@ -480,6 +480,40 @@ describe("Simple CoList operations", async () => {
         list.$jazz.unshift("lettuce");
         expect(list[0]?.toString()).toBe("lettuce");
       });
+
+      test("unshift with validation errors", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.unshift(2),
+          [
+            expect.objectContaining({
+              message: "Invalid input: expected string, received number",
+            }),
+          ],
+        );
+
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.unshift("test", 2),
+        );
+      });
+
+      test("unshift with validation errors with loose validation", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.unshiftLoose(2);
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.unshiftLoose("test", 2);
+
+        expect(list).toEqual([2, "test", 2, "bread", "butter", "onion"]);
+      });
     });
 
     test("pop", () => {
@@ -572,6 +606,26 @@ describe("Simple CoList operations", async () => {
         const list = Schema.create(["bread", "butter", "onion"]);
         list.$jazz.splice(1, 0, "lettuce");
         expect(list[1]?.toString()).toBe("lettuce");
+      });
+
+      test("splice with validation errors", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.splice(1, 0, 2),
+          [
+            expect.objectContaining({
+              message: "Invalid input: expected string, received number",
+            }),
+          ],
+        );
+
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => list.$jazz.splice(1, 0, "test", 2),
+        );
       });
     });
 

@@ -639,6 +639,24 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   unshift(...items: CoFieldInit<CoListItem<L>>[]): number {
+    const validationMode = resolveValidationMode();
+    if (validationMode !== "loose" && this.coListSchema) {
+      const schema = z.array(this.getItemSchema());
+      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+        CoListItem<L>
+      >[];
+    }
+    return this.unshiftLoose(...items);
+  }
+
+  /**
+   * Inserts new elements at the start of an array, and returns the new length of the array.
+   * Schema validation is not applied to the items.
+   * @param items Elements to insert at the start of the array.
+   *
+   * @category Content
+   */
+  unshiftLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
     for (const item of toRawItems(
       items as CoFieldInit<CoListItem<L>>[],
       this.schema[ItemsSym],
@@ -700,6 +718,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       idxToDelete--
     ) {
       this.raw.delete(idxToDelete);
+    }
+
+    const validationMode = resolveValidationMode();
+    if (validationMode !== "loose" && this.coListSchema) {
+      const schema = z.array(this.getItemSchema());
+      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+        CoListItem<L>
+      >[];
     }
 
     const rawItems = toRawItems(
