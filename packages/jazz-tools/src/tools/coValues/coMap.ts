@@ -36,14 +36,12 @@ import {
   Account,
   CoValueBase,
   CoValueJazzApi,
-  CoValueLoadingState,
   ItemsSym,
   Ref,
   RegisteredSchemas,
   SchemaInit,
   accessChildById,
   accessChildByKey,
-  activeAccountContext,
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
@@ -248,11 +246,13 @@ export class CoMap extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          firstComesWins?: boolean;
         }
       | Account
       | Group,
   ): M {
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
+    const { owner, uniqueness, firstComesWins } =
+      parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
       $jazz: {
@@ -261,7 +261,13 @@ export class CoMap extends CoValueBase implements CoValue {
       },
     });
 
-    const raw = CoMap.rawFromInit(instance, init, owner, uniqueness);
+    const raw = CoMap.rawFromInit(
+      instance,
+      init,
+      owner,
+      firstComesWins,
+      uniqueness,
+    );
 
     return instance;
   }
@@ -274,6 +280,7 @@ export class CoMap extends CoValueBase implements CoValue {
     instance: M,
     init: Simplify<CoMapInit_DEPRECATED<Fields>> | undefined,
     owner: Group,
+    firstComesWins: boolean,
     uniqueness?: CoValueUniqueness,
   ) {
     const rawOwner = owner.$jazz.raw;
@@ -307,6 +314,13 @@ export class CoMap extends CoValueBase implements CoValue {
                 owner,
                 newOwnerStrategy,
                 onCreate,
+                uniqueness
+                  ? {
+                      uniqueness: uniqueness.uniqueness,
+                      fieldName: key as string,
+                      firstComesWins,
+                    }
+                  : undefined,
               );
               refId = coValue.$jazz.id;
             }
@@ -320,7 +334,8 @@ export class CoMap extends CoValueBase implements CoValue {
         }
       }
 
-    return rawOwner.createMap(rawInit, null, "private", uniqueness);
+    const initMeta = uniqueness ? { init: true } : undefined;
+    return rawOwner.createMap(rawInit, null, "private", uniqueness, initMeta);
   }
 
   /**
@@ -464,6 +479,57 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 
   /**
+   * Get an existing unique CoMap or create a new one if it doesn't exist.
+   *
+   * Unlike `upsertUnique`, this method does NOT update existing values with the provided value.
+   * The provided value is only used when creating a new CoMap.
+   *
+   * @example
+   * ```ts
+   * const settings = await UserSettings.getOrCreateUnique({
+   *   value: { theme: "dark", language: "en" },
+   *   unique: ["user-settings", me.id],
+   *   owner: me,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoMap.
+   * @returns Either an existing CoMap (unchanged), or a new initialised CoMap if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    M extends CoMap,
+    const R extends RefsToResolve<M> = true,
+  >(
+    this: CoValueClass<M>,
+    options: {
+      value: Simplify<CoMapInit_DEPRECATED<M>>;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<M, R>;
+    },
+  ): Promise<Settled<Resolved<M, R>>> {
+    const header = CoMap._getUniqueHeader(
+      options.unique,
+      options.owner.$jazz.id,
+    );
+
+    return internalLoadUnique(this, {
+      header,
+      owner: options.owner,
+      resolve: options.resolve,
+      onCreateWhenMissing: () => {
+        (this as any).create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+          firstComesWins: true,
+        });
+      },
+      // No onUpdateWhenFound - key difference from upsertUnique
+    });
+  }
+
+  /**
    * Given some data, updates an existing CoMap or initialises a new one if none exists.
    *
    * Note: This method respects resolve options, and thus can return a not-loaded value if the references cannot be resolved.
@@ -486,7 +552,8 @@ export class CoMap extends CoValueBase implements CoValue {
    * @returns Either an existing & modified CoMap, or a new initialised CoMap if none exists.
    * @category Subscription & Loading
    *
-   * @deprecated Use `co.map(...).upsertUnique` instead.
+   * @deprecated Use `getOrCreateUnique` instead. Note: getOrCreateUnique does not update existing values.
+   * If you need to update, use getOrCreateUnique followed by direct property assignment.
    */
   static async upsertUnique<
     M extends CoMap,
@@ -528,7 +595,7 @@ export class CoMap extends CoValueBase implements CoValue {
    * @param options Additional options for loading the CoMap.
    * @returns The loaded CoMap, or an not-loaded value if unavailable.
    *
-   * @deprecated Use `co.map(...).loadUnique` instead.
+   * @category Subscription & Loading
    */
   static async loadUnique<
     M extends CoMap,

@@ -563,6 +563,7 @@ export class RawCoList<
     items: Item[],
     after?: number,
     privacy: "private" | "trusting" = "private",
+    meta?: JsonObject,
   ) {
     const entries = this.entries();
     after =
@@ -597,7 +598,7 @@ export class RawCoList<
       changes.reverse();
     }
 
-    this.core.makeTransaction(changes, privacy);
+    this.core.makeTransaction(changes, privacy, meta);
     this.processNewTransactions();
   }
 
