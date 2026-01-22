@@ -137,13 +137,13 @@ export class VerifiedTransaction {
   changes: JsonValue[] | undefined;
   // The decoded meta information of the transaction
   meta: JsonObject | undefined;
-  isValidated: boolean = false;
   // Whether the transaction is valid, as per membership rules
   isValid: boolean = false;
   // The error message that caused the transaction to be invalid
   validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
+  stage: "to-vaildate" | "validated" | "processed" = "to-vaildate";
 
   constructor(
     coValueId: RawCoID,
@@ -215,17 +215,22 @@ export class VerifiedTransaction {
   }
 
   markValid() {
+    const validityChanged = this.isValid === false;
     this.isValid = true;
     this.validationErrorMessage = undefined;
 
-    if (!this.isValidated) {
-      this.isValidated = true;
+    if (this.stage === "to-vaildate") {
+      this.stage = "validated";
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "processed" && validityChanged) {
       this.dispatchTransaction(this);
     }
   }
 
   markInvalid(errorMessage: string, attributes?: Record<string, JsonValue>) {
-    this.isValidated = true;
+    const validityChanged = this.isValid === true;
     this.isValid = false;
 
     this.validationErrorMessage = errorMessage;
@@ -237,6 +242,22 @@ export class VerifiedTransaction {
         ...attributes,
       });
     }
+
+    if (this.stage === "processed" && validityChanged) {
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "to-vaildate") {
+      this.stage = "validated";
+    }
+  }
+
+  markAsProcessed() {
+    this.stage = "processed";
+  }
+
+  markAsToValidate() {
+    this.stage = "to-vaildate";
   }
 }
 
@@ -1051,6 +1072,20 @@ export class CoValueCore {
     }
   }
 
+  #isContentRebuildScheduled = false;
+  scheduleContentRebuild() {
+    if (!this._cachedContent || this.#isContentRebuildScheduled) {
+      return;
+    }
+
+    this.#isContentRebuildScheduled = true;
+
+    queueMicrotask(() => {
+      this.#isContentRebuildScheduled = false;
+      this._cachedContent?.rebuildFromCore();
+    });
+  }
+
   #isNotifyUpdatePaused = false;
   pauseNotifyUpdate() {
     this.#isNotifyUpdatePaused = true;
@@ -1319,7 +1354,7 @@ export class CoValueCore {
     // Store the validity of the transactions before resetting the parsed transactions
     const validityBeforeReset = new Array<boolean>(verifiedTransactions.length);
     this.verifiedTransactions.forEach((transaction, index) => {
-      transaction.isValidated = false;
+      transaction.markAsToValidate();
       validityBeforeReset[index] = transaction.isValidTransactionWithChanges();
     });
 
@@ -1427,8 +1462,13 @@ export class CoValueCore {
   }
 
   dispatchTransaction = (transaction: VerifiedTransaction) => {
-    if (!transaction.isValidated) {
+    if (transaction.stage === "to-vaildate") {
       this.toValidateTransactions.push(transaction);
+      return;
+    }
+
+    if (transaction.stage === "processed") {
+      this.scheduleContentRebuild();
       return;
     }
 
@@ -1450,6 +1490,8 @@ export class CoValueCore {
     determineValidTransactions(this);
     this.toValidateTransactions = [];
   }
+
+  #firstInitTransaction: VerifiedTransaction | undefined;
 
   /**
    * Parses the meta information of a transaction, and set the branchStart and mergeCommits.
@@ -1487,6 +1529,28 @@ export class CoValueCore {
     if ("merged" in transaction.meta) {
       const mergeCommit = transaction.meta as MergeCommit;
       this.mergeCommits.push(mergeCommit);
+    }
+
+    if ("init" in transaction.meta) {
+      const firstInitTransaction = this.#firstInitTransaction;
+      // First-init-wins: keep the transaction with the smallest madeAt
+      // compareInitTransactions returns < 0 if transaction is earlier than firstInitTransaction
+      if (
+        !firstInitTransaction ||
+        this.compareInitTransactions(transaction, firstInitTransaction) < 0
+      ) {
+        if (firstInitTransaction) {
+          firstInitTransaction.markInvalid(
+            "Transaction is not the first init transaction",
+          );
+        }
+
+        this.#firstInitTransaction = transaction;
+      } else {
+        transaction.markInvalid(
+          "Transaction is not the first init transaction",
+        );
+      }
     }
 
     // Check if the transaction has been merged from a branch
@@ -1613,6 +1677,7 @@ export class CoValueCore {
         continue;
       }
 
+      transaction.markAsProcessed();
       matchingTransactions.push(transaction);
     }
 
@@ -1802,6 +1867,28 @@ export class CoValueCore {
     }
 
     return 0;
+  }
+
+  /**
+   * Compare two transactions for init transaction conflict resolution.
+   * Uses sessionID as a tiebreaker for deterministic ordering when timestamps are equal.
+   */
+  private compareInitTransactions(
+    a: Pick<VerifiedTransaction, "madeAt" | "txID">,
+    b: Pick<VerifiedTransaction, "madeAt" | "txID">,
+  ) {
+    // 1. Compare by timestamp
+    if (a.madeAt !== b.madeAt) {
+      return a.madeAt - b.madeAt;
+    }
+
+    // 2. Same session: compare by txIndex
+    if (a.txID.sessionID === b.txID.sessionID) {
+      return a.txID.txIndex - b.txID.txIndex;
+    }
+
+    // 3. Same timestamp, different sessions: use sessionID for determinism
+    return a.txID.sessionID.localeCompare(b.txID.sessionID);
   }
 
   getCurrentReadKey(): {

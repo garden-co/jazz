@@ -1,5 +1,4 @@
 import type { CoValueUniqueness, JsonValue, RawCoID, RawCoList } from "cojson";
-import { cojsonInternals } from "cojson";
 import { calcPatch } from "fast-myers-diff";
 import {
   Account,
@@ -12,7 +11,6 @@ import {
   ID,
   AsLoaded,
   Settled,
-  unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -25,13 +23,11 @@ import {
   BranchDefinition,
   getIdFromHeader,
   internalLoadUnique,
-  CoValueLoadingState,
   AnonymousJazzAgent,
   ItemsSym,
   Ref,
   SchemaInit,
   accessChildByKey,
-  activeAccountContext,
   coField,
   ensureCoValueLoaded,
   inspect,
@@ -166,12 +162,14 @@ export class CoList<out Item = any>
       | {
           owner: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          firstComesWins?: boolean;
         }
       | Account
       | Group,
   ) {
     const instance = new this();
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
+    const { owner, uniqueness, firstComesWins } =
+      parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
       $jazz: {
@@ -181,11 +179,19 @@ export class CoList<out Item = any>
       $isLoaded: { value: true, enumerable: false },
     });
 
+    const initMeta = firstComesWins ? { init: true } : undefined;
     const raw = owner.$jazz.raw.createList(
-      toRawItems(items, instance.$jazz.schema[ItemsSym], owner),
+      toRawItems(
+        items,
+        instance.$jazz.schema[ItemsSym],
+        owner,
+        firstComesWins,
+        uniqueness?.uniqueness,
+      ),
       null,
       "private",
       uniqueness,
+      initMeta,
     );
 
     return instance;
@@ -348,6 +354,57 @@ export class CoList<out Item = any>
   }
 
   /**
+   * Get an existing unique CoList or create a new one if it doesn't exist.
+   *
+   * Unlike `upsertUnique`, this method does NOT update existing values with the provided value.
+   * The provided value is only used when creating a new CoList.
+   *
+   * @example
+   * ```ts
+   * const items = await ItemList.getOrCreateUnique({
+   *   value: [item1, item2, item3],
+   *   unique: ["user-items", me.id],
+   *   owner: me,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoList.
+   * @returns Either an existing CoList (unchanged), or a new initialised CoList if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    L extends CoList,
+    const R extends RefsToResolve<L> = true,
+  >(
+    this: CoValueClass<L>,
+    options: {
+      value: L[number][];
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<L, R>;
+    },
+  ): Promise<Settled<Resolved<L, R>>> {
+    const header = CoList._getUniqueHeader(
+      options.unique,
+      options.owner.$jazz.id,
+    );
+
+    return internalLoadUnique(this, {
+      header,
+      owner: options.owner,
+      resolve: options.resolve,
+      onCreateWhenMissing: () => {
+        (this as any).create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+          firstComesWins: true,
+        });
+      },
+      // No onUpdateWhenFound - key difference from upsertUnique
+    });
+  }
+
+  /**
    * Given some data, updates an existing CoList or initialises a new one if none exists.
    *
    * Note: This method respects resolve options, and thus can return a not-loaded value if the references cannot be resolved.
@@ -366,6 +423,9 @@ export class CoList<out Item = any>
    * @param options The options for creating or loading the CoList. This includes the intended state of the CoList, its unique identifier, its owner, and the references to resolve.
    * @returns Either an existing & modified CoList, or a new initialised CoList if none exists.
    * @category Subscription & Loading
+   *
+   * @deprecated Use `getOrCreateUnique` instead. Note: getOrCreateUnique does not update existing values.
+   * If you need to update, use getOrCreateUnique followed by `$jazz.applyDiff`.
    */
   static async upsertUnique<
     L extends CoList,
@@ -406,6 +466,8 @@ export class CoList<out Item = any>
    * @param ownerID The ID of the owner of the CoList.
    * @param options Additional options for loading the CoList.
    * @returns The loaded CoList, or an not-loaded value if unavailable.
+   *
+   * @category Subscription & Loading
    */
   static async loadUnique<
     L extends CoList,
@@ -903,6 +965,8 @@ function toRawItems<Item>(
   items: Item[],
   itemDescriptor: Schema,
   owner: Group,
+  firstComesWins = false,
+  uniqueness?: CoValueUniqueness["uniqueness"],
 ): JsonValue[] {
   let rawItems: JsonValue[] = [];
   if (itemDescriptor === "json") {
@@ -910,7 +974,7 @@ function toRawItems<Item>(
   } else if ("encoded" in itemDescriptor) {
     rawItems = items?.map((e) => itemDescriptor.encoded.encode(e));
   } else if (isRefEncoded(itemDescriptor)) {
-    rawItems = items?.map((value) => {
+    rawItems = items?.map((value, index) => {
       if (value == null) {
         return null;
       }
@@ -925,6 +989,9 @@ function toRawItems<Item>(
           owner,
           newOwnerStrategy,
           onCreate,
+          uniqueness
+            ? { uniqueness: uniqueness, fieldName: `${index}`, firstComesWins }
+            : undefined,
         );
         refId = coValue.$jazz.id;
       }

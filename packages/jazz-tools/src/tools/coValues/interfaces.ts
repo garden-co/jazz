@@ -30,7 +30,10 @@ import {
   coValueClassFromCoValueClassOrSchema,
   inspect,
 } from "../internal.js";
-import type { BranchDefinition } from "../subscribe/types.js";
+import type {
+  BranchDefinition,
+  CoValueErrorState,
+} from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
 import { JazzError } from "../subscribe/JazzError.js";
 
@@ -124,6 +127,16 @@ export function getUnloadedCoValueWithoutId<T extends CoValue>(
   const newValue = createUnloadedCoValue("", loadingState);
   unloadedCoValueStates.set(loadingState, newValue);
   return newValue;
+}
+
+export function createSettledCoValue<T extends CoValue>(
+  id: ID<T>,
+  loadingState: CoValueErrorState,
+): Settled<T> {
+  return {
+    $jazz: { id, loadingState },
+    $isLoaded: false,
+  };
 }
 
 export function createUnloadedCoValue<T extends CoValue>(
@@ -457,6 +470,7 @@ export function parseCoValueCreateOptions(
         owner?: Account | Group;
         unique?: CoValueUniqueness["uniqueness"];
         onCreate?: OnCreateCallback;
+        firstComesWins?: boolean;
       }
     | Account
     | Group
@@ -464,6 +478,7 @@ export function parseCoValueCreateOptions(
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;
+  firstComesWins: boolean;
 } {
   const onCreate =
     options && "onCreate" in options ? options.onCreate : undefined;
@@ -471,19 +486,21 @@ export function parseCoValueCreateOptions(
   if (!options) {
     const owner = Group.create();
     onCreate?.(owner);
-    return { owner, uniqueness: undefined };
+    return { owner, uniqueness: undefined, firstComesWins: false };
   }
 
   if (TypeSym in options) {
     if (options[TypeSym] === "Account") {
       const owner = accountOrGroupToGroup(options);
       onCreate?.(owner);
-      return { owner, uniqueness: undefined };
+      return { owner, uniqueness: undefined, firstComesWins: false };
     } else if (options[TypeSym] === "Group") {
       onCreate?.(options);
-      return { owner: options, uniqueness: undefined };
+      return { owner: options, uniqueness: undefined, firstComesWins: false };
     }
   }
+
+  const firstComesWins = options.firstComesWins ?? false;
 
   const uniqueness = options.unique
     ? { uniqueness: options.unique }
@@ -498,6 +515,7 @@ export function parseCoValueCreateOptions(
   const opts = {
     owner,
     uniqueness,
+    firstComesWins,
   };
   return opts;
 }
@@ -607,6 +625,13 @@ export async function internalLoadUnique<
   // to ward against race conditions that would happen when
   // running the same upsert unique concurrently
   if (options.onCreateWhenMissing && !isAvailable) {
+    if (!loadAs.canWrite(options.owner)) {
+      return createSettledCoValue<Resolved<V, R>>(
+        id,
+        CoValueLoadingState.UNAUTHORIZED,
+      );
+    }
+
     options.onCreateWhenMissing();
 
     return loadCoValueWithoutMe(cls, id, {
@@ -628,7 +653,7 @@ export async function internalLoadUnique<
       resolve: options.resolve,
     });
 
-    if (loaded.$isLoaded) {
+    if (loaded.$isLoaded && loadAs.canWrite(options.owner)) {
       // we don't return the update result because
       // we want to run another load to backfill any possible partially loaded
       // values that have been set in the update

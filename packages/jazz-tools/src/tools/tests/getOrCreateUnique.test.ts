@@ -1,0 +1,929 @@
+import { cojsonInternals } from "cojson";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  assertLoaded,
+  setupJazzTestSync,
+  linkAccounts,
+  createJazzTestAccount,
+  runWithoutActiveAccount,
+} from "../testing";
+import {
+  CoValueLoadingState,
+  Group,
+  co,
+  activeAccountContext,
+} from "../internal";
+import { z } from "../exports";
+import { waitFor } from "./utils";
+
+beforeEach(async () => {
+  cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
+
+  await setupJazzTestSync({
+    asyncPeers: true,
+  });
+
+  await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+    creationProps: { name: "Hermes Puggington" },
+  });
+});
+
+describe("CoMap.getOrCreateUnique", () => {
+  test("creates a new CoMap when none exists", async () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+    const group = Group.create();
+
+    const person = await Person.getOrCreateUnique({
+      value: { name: "Alice", age: 30 },
+      unique: "alice-unique",
+      owner: group,
+    });
+
+    assertLoaded(person);
+    expect(person.name).toBe("Alice");
+    expect(person.age).toBe(30);
+  });
+
+  test("returns existing CoMap without modification", async () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+    const group = Group.create();
+
+    // Create initial value
+    const original = Person.create(
+      { name: "Alice", age: 30 },
+      { owner: group, unique: "alice-no-update" },
+    );
+
+    // Try to getOrCreate with different data
+    const result = await Person.getOrCreateUnique({
+      value: { name: "Bob", age: 25 },
+      unique: "alice-no-update",
+      owner: group,
+    });
+
+    assertLoaded(result);
+    // Should return the original, NOT updated with new values
+    expect(result.$jazz.id).toBe(original.$jazz.id);
+    expect(result.name).toBe("Alice"); // NOT "Bob"
+    expect(result.age).toBe(30); // NOT 25
+  });
+
+  test("works with resolve options", async () => {
+    const Project = co.map({
+      name: z.string(),
+    });
+    const Organisation = co.map({
+      name: z.string(),
+      projects: co.list(Project),
+    });
+    const group = Group.create();
+
+    const projectList = co
+      .list(Project)
+      .create([Project.create({ name: "My project" }, group)], group);
+
+    const org = await Organisation.getOrCreateUnique({
+      value: {
+        name: "My organisation",
+        projects: projectList,
+      },
+      unique: { name: "My organisation" },
+      owner: group,
+      resolve: {
+        projects: {
+          $each: true,
+        },
+      },
+    });
+
+    assertLoaded(org);
+    expect(org.name).toBe("My organisation");
+    expect(org.projects.length).toBe(1);
+    expect(org.projects[0]?.name).toBe("My project");
+  });
+
+  test("works without an active account", async () => {
+    const account = activeAccountContext.get();
+
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+    });
+
+    const event = await runWithoutActiveAccount(() => {
+      return Event.getOrCreateUnique({
+        value: {
+          title: "Test Event",
+          identifier: "test-id",
+        },
+        unique: "no-active-account-test",
+        owner: account,
+      });
+    });
+
+    assertLoaded(event);
+    expect(event.title).toBe("Test Event");
+    expect(event.$jazz.owner).toEqual(account);
+  });
+
+  test("concurrent getOrCreateUnique returns same instance", async () => {
+    const Counter = co.map({
+      value: z.number(),
+    });
+    const group = Group.create().makePublic("writer");
+
+    const bob = await createJazzTestAccount();
+    const alice = await createJazzTestAccount();
+
+    const bobGroup = await Group.load(group.$jazz.id, {
+      loadAs: bob,
+    });
+    const aliceGroup = await Group.load(group.$jazz.id, {
+      loadAs: alice,
+    });
+
+    assertLoaded(bobGroup);
+    assertLoaded(aliceGroup);
+
+    const [bobCounter, aliceCounter] = await Promise.all([
+      Counter.getOrCreateUnique({
+        value: { value: 0 },
+        unique: "concurrent-counter",
+        owner: bobGroup,
+      }),
+      Counter.getOrCreateUnique({
+        value: { value: 0 },
+        unique: "concurrent-counter",
+        owner: aliceGroup,
+      }),
+    ]);
+
+    assertLoaded(bobCounter);
+    assertLoaded(aliceCounter);
+
+    expect(bobCounter.$jazz.id).toBe(aliceCounter.$jazz.id);
+    expect(bobCounter.value).toBe(0);
+    expect(aliceCounter.value).toBe(0);
+  });
+
+  test("handles unauthorized access gracefully", async () => {
+    const Secret = co.map({
+      data: z.string(),
+    });
+    const group = Group.create();
+
+    // Create initial value
+    await Secret.getOrCreateUnique({
+      value: { data: "secret" },
+      unique: "secret-data",
+      owner: group,
+    });
+
+    // Create another account without access
+    const alice = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const aliceGroup = await Group.load(group.$jazz.id, {
+      loadAs: alice,
+    });
+    assertLoaded(aliceGroup);
+
+    const result = await Secret.getOrCreateUnique({
+      value: { data: "alice-secret" },
+      unique: "secret-data",
+      owner: aliceGroup,
+    });
+
+    expect(result.$isLoaded).toBe(false);
+    expect(result.$jazz.loadingState).toBe(CoValueLoadingState.UNAUTHORIZED);
+  });
+
+  test("reader permission can load but not create", async () => {
+    const Document = co.map({
+      title: z.string(),
+      content: z.string(),
+    });
+    const group = Group.create();
+
+    // Create initial document as owner
+    const original = await Document.getOrCreateUnique({
+      value: { title: "Original", content: "Original content" },
+      unique: "reader-test-doc",
+      owner: group,
+    });
+    assertLoaded(original);
+
+    // Create another account with reader access only
+    const reader = await createJazzTestAccount();
+    group.addMember(reader, "reader");
+
+    const readerGroup = await Group.load(group.$jazz.id, {
+      loadAs: reader,
+    });
+    assertLoaded(readerGroup);
+
+    // Reader should be able to load the existing document
+    const loadedByReader = await Document.getOrCreateUnique({
+      value: { title: "Reader Attempt", content: "Reader content" },
+      unique: "reader-test-doc",
+      owner: readerGroup,
+    });
+
+    assertLoaded(loadedByReader);
+    // Should return the original document, not create a new one
+    expect(loadedByReader.$jazz.id).toBe(original.$jazz.id);
+    expect(loadedByReader.title).toBe("Original");
+    expect(loadedByReader.content).toBe("Original content");
+
+    // Reader should not be able to create a new document with a new unique key
+    const attemptCreate = await Document.getOrCreateUnique({
+      value: { title: "New Doc", content: "New content" },
+      unique: "reader-new-doc",
+      owner: readerGroup,
+    });
+
+    // Should fail because reader cannot create in the group
+    expect(attemptCreate.$isLoaded).toBe(false);
+    expect(attemptCreate.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+  });
+
+  test("concurrent getOrCreateUnique with nested map returns same nested values", async () => {
+    const Address = co.map({
+      street: z.string(),
+      city: z.string(),
+    });
+    const Person = co.map({
+      name: z.string(),
+      address: Address,
+    });
+    const group = Group.create().makePublic("writer");
+
+    const bob = await createJazzTestAccount();
+    const alice = await createJazzTestAccount();
+
+    const bobGroup = await Group.load(group.$jazz.id, {
+      loadAs: bob,
+    });
+    const aliceGroup = await Group.load(group.$jazz.id, {
+      loadAs: alice,
+    });
+
+    assertLoaded(bobGroup);
+    assertLoaded(aliceGroup);
+
+    // Both users concurrently try to create a Person with a nested Address
+    const [bobPerson, alicePerson] = await Promise.all([
+      Person.getOrCreateUnique({
+        value: {
+          name: "Shared Person",
+          address: Address.create(
+            { street: "Bob Street", city: "Bob City" },
+            bobGroup,
+          ),
+        },
+        unique: "concurrent-nested-person",
+        owner: bobGroup,
+        resolve: { address: true },
+      }),
+      Person.getOrCreateUnique({
+        value: {
+          name: "Shared Person",
+          address: Address.create(
+            { street: "Alice Street", city: "Alice City" },
+            aliceGroup,
+          ),
+        },
+        unique: "concurrent-nested-person",
+        owner: aliceGroup,
+        resolve: { address: true },
+      }),
+    ]);
+
+    assertLoaded(bobPerson);
+    assertLoaded(alicePerson);
+
+    // Both should have the same Person ID
+    expect(bobPerson.$jazz.id).toBe(alicePerson.$jazz.id);
+
+    // Wait for sync
+    await waitFor(() => {
+      expect(bobPerson.$jazz.raw.core.knownState()).toEqual(
+        alicePerson.$jazz.raw.core.knownState(),
+      );
+    });
+
+    // Both users should end up with the same address values (one wins)
+    expect(bobPerson.address.$jazz.id).toBe(alicePerson.address.$jazz.id);
+  });
+});
+
+describe("CoList.getOrCreateUnique", () => {
+  test("creates a new CoList when none exists", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create();
+
+    const list = await ItemList.getOrCreateUnique({
+      value: ["item1", "item2", "item3"],
+      unique: "new-list",
+      owner: group,
+    });
+
+    assertLoaded(list);
+    expect(list.length).toBe(3);
+    expect(list[0]).toBe("item1");
+    expect(list[1]).toBe("item2");
+    expect(list[2]).toBe("item3");
+  });
+
+  test("returns existing CoList without modification", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create();
+
+    // Create initial list
+    const original = ItemList.create(["original1", "original2"], {
+      owner: group,
+      unique: "list-no-update",
+    });
+
+    // Try to getOrCreate with different data
+    const result = await ItemList.getOrCreateUnique({
+      value: ["new1", "new2", "new3"],
+      unique: "list-no-update",
+      owner: group,
+    });
+
+    assertLoaded(result);
+    // Should return the original, NOT updated
+    expect(result.$jazz.id).toBe(original.$jazz.id);
+    expect(result.length).toBe(2); // NOT 3
+    expect(result[0]).toBe("original1"); // NOT "new1"
+    expect(result[1]).toBe("original2"); // NOT "new2"
+  });
+
+  test("works with CoValue items and resolve", async () => {
+    const Item = co.map({
+      name: z.string(),
+      value: z.number(),
+    });
+    const ItemList = co.list(Item);
+    const group = Group.create();
+
+    const items = [
+      Item.create({ name: "First", value: 1 }, group),
+      Item.create({ name: "Second", value: 2 }, group),
+    ];
+
+    const result = await ItemList.getOrCreateUnique({
+      value: items,
+      unique: "item-list",
+      owner: group,
+      resolve: { $each: true },
+    });
+
+    assertLoaded(result);
+    expect(result.length).toBe(2);
+    expect(result[0]?.name).toBe("First");
+    expect(result[1]?.name).toBe("Second");
+  });
+
+  test("works without an active account", async () => {
+    const account = activeAccountContext.get();
+    const ItemList = co.list(z.string());
+
+    const list = await runWithoutActiveAccount(() => {
+      return ItemList.getOrCreateUnique({
+        value: ["item1", "item2"],
+        unique: "no-active-account-list",
+        owner: account,
+      });
+    });
+
+    assertLoaded(list);
+    expect(list.length).toBe(2);
+    expect(list.$jazz.owner).toEqual(account);
+  });
+
+  test("concurrent getOrCreateUnique returns same instance", async () => {
+    const ItemList = co.list(z.number());
+    const group = Group.create().makePublic("writer");
+
+    const bob = await createJazzTestAccount();
+    const alice = await createJazzTestAccount();
+
+    const bobGroup = await Group.load(group.$jazz.id, {
+      loadAs: bob,
+    });
+    const aliceGroup = await Group.load(group.$jazz.id, {
+      loadAs: alice,
+    });
+
+    assertLoaded(bobGroup);
+    assertLoaded(aliceGroup);
+
+    const [bobList, aliceList] = await Promise.all([
+      ItemList.getOrCreateUnique({
+        value: [1],
+        unique: "concurrent-list",
+        owner: bobGroup,
+      }),
+      ItemList.getOrCreateUnique({
+        value: [1],
+        unique: "concurrent-list",
+        owner: aliceGroup,
+      }),
+    ]);
+
+    assertLoaded(bobList);
+    assertLoaded(aliceList);
+
+    expect(bobList.$jazz.id).toBe(aliceList.$jazz.id);
+
+    await waitFor(() => {
+      expect(bobList.$jazz.raw.core.knownState()).toEqual(
+        aliceList.$jazz.raw.core.knownState(),
+      );
+    });
+
+    expect(bobList).toEqual([1]);
+    expect(aliceList).toEqual([1]);
+  });
+
+  test("concurrent getOrCreateUnique with nested map results in list with one of the maps", async () => {
+    const Item = co.map({
+      name: z.string(),
+      createdBy: z.string(),
+    });
+    const ItemList = co.list(Item);
+    const group = Group.create().makePublic("writer");
+
+    const bob = await createJazzTestAccount();
+    const alice = await createJazzTestAccount();
+
+    const bobGroup = await Group.load(group.$jazz.id, {
+      loadAs: bob,
+    });
+    const aliceGroup = await Group.load(group.$jazz.id, {
+      loadAs: alice,
+    });
+
+    assertLoaded(bobGroup);
+    assertLoaded(aliceGroup);
+
+    // Both users concurrently try to create a list with a nested Item
+    const [bobList, aliceList] = await Promise.all([
+      ItemList.getOrCreateUnique({
+        value: [
+          Item.create({ name: "Bob's Item", createdBy: "bob" }, bobGroup),
+        ],
+        unique: "concurrent-nested-list",
+        owner: bobGroup,
+        resolve: { $each: true },
+      }),
+      ItemList.getOrCreateUnique({
+        value: [
+          Item.create({ name: "Alice's Item", createdBy: "alice" }, aliceGroup),
+        ],
+        unique: "concurrent-nested-list",
+        owner: aliceGroup,
+        resolve: { $each: true },
+      }),
+    ]);
+
+    assertLoaded(bobList);
+    assertLoaded(aliceList);
+
+    // Both should have the same list ID
+    expect(bobList.$jazz.id).toBe(aliceList.$jazz.id);
+
+    // Wait for sync
+    await waitFor(() => {
+      expect(bobList.$jazz.raw.core.knownState()).toEqual(
+        aliceList.$jazz.raw.core.knownState(),
+      );
+    });
+
+    // The list should contain both items (one from each user)
+    expect(bobList.length).toBe(1);
+    expect(aliceList.length).toBe(1);
+
+    // Verify that the items are the same
+    await waitFor(() => {
+      expect(bobList[0]?.name).toEqual(aliceList[0]?.name);
+    });
+  });
+});
+
+describe("CoFeed.getOrCreateUnique", () => {
+  test("creates a new CoFeed when none exists", async () => {
+    const MessageFeed = co.feed(z.string());
+    const group = Group.create();
+
+    const feed = await MessageFeed.getOrCreateUnique({
+      value: ["message1", "message2"],
+      unique: "new-feed",
+      owner: group,
+    });
+
+    assertLoaded(feed);
+    // CoFeed stores items, verify it was created
+    expect(feed.$jazz.id).toBeDefined();
+  });
+
+  test("returns existing CoFeed without modification", async () => {
+    const MessageFeed = co.feed(z.string());
+    const group = Group.create();
+
+    // Create initial feed
+    const original = MessageFeed.create(["original"], {
+      owner: group,
+      unique: "feed-no-update",
+    });
+    const originalId = original.$jazz.id;
+
+    // Try to getOrCreate with different data
+    const result = await MessageFeed.getOrCreateUnique({
+      value: ["new1", "new2", "new3"],
+      unique: "feed-no-update",
+      owner: group,
+    });
+
+    assertLoaded(result);
+    // Should return the original, NOT updated
+    expect(result.$jazz.id).toBe(originalId);
+  });
+
+  test("works without an active account", async () => {
+    const account = activeAccountContext.get();
+    const MessageFeed = co.feed(z.string());
+
+    const feed = await runWithoutActiveAccount(() => {
+      return MessageFeed.getOrCreateUnique({
+        value: ["message"],
+        unique: "no-active-account-feed",
+        owner: account,
+      });
+    });
+
+    assertLoaded(feed);
+    expect(feed.$jazz.owner).toEqual(account);
+  });
+
+  test("concurrent getOrCreateUnique returns same instance", async () => {
+    const MessageFeed = co.feed(z.string());
+    const group = Group.create().makePublic("writer");
+
+    const bob = await createJazzTestAccount();
+    const alice = await createJazzTestAccount();
+
+    const bobGroup = await Group.load(group.$jazz.id, {
+      loadAs: bob,
+    });
+    const aliceGroup = await Group.load(group.$jazz.id, {
+      loadAs: alice,
+    });
+
+    assertLoaded(bobGroup);
+    assertLoaded(aliceGroup);
+
+    const [bobFeed, aliceFeed] = await Promise.all([
+      MessageFeed.getOrCreateUnique({
+        value: ["bob"],
+        unique: "concurrent-feed",
+        owner: bobGroup,
+      }),
+      MessageFeed.getOrCreateUnique({
+        value: ["alice"],
+        unique: "concurrent-feed",
+        owner: aliceGroup,
+      }),
+    ]);
+
+    assertLoaded(bobFeed);
+    assertLoaded(aliceFeed);
+
+    expect(bobFeed.$jazz.id).toBe(aliceFeed.$jazz.id);
+
+    await waitFor(() => {
+      expect(bobFeed.$jazz.raw.core.knownState()).toEqual(
+        aliceFeed.$jazz.raw.core.knownState(),
+      );
+    });
+
+    expect(bobFeed.perAccount[alice.$jazz.id]?.value).toEqual("alice");
+    expect(bobFeed.perAccount[bob.$jazz.id]?.value).toEqual("bob");
+    expect(aliceFeed.perAccount[alice.$jazz.id]?.value).toEqual("alice");
+    expect(aliceFeed.perAccount[bob.$jazz.id]?.value).toEqual("bob");
+  });
+});
+
+describe("getOrCreateUnique offline scenarios", () => {
+  // Helper to disconnect an account from sync server (simulate going offline)
+  function goOffline(
+    account: InstanceType<typeof import("../internal").Account>,
+  ) {
+    Object.values(account.$jazz.localNode.syncManager.peers).forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+  }
+
+  test("two accounts offline create unique values with nested children - all values have same IDs", async () => {
+    const Address = co.map({
+      street: z.string(),
+      city: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      address: Address.withPermissions({
+        onInlineCreate: "sameAsContainer",
+      }),
+    });
+
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique Person with nested Address while offline
+    const alicePerson = await Person.getOrCreateUnique({
+      value: {
+        name: "Shared Person",
+        address: { street: "Alice Street", city: "Alice City" },
+      },
+      unique: "offline-nested-person",
+      owner: aliceGroup,
+      resolve: { address: true },
+    });
+
+    const bobPerson = await Person.getOrCreateUnique({
+      value: {
+        name: "Shared Person",
+        address: { street: "Bob Street", city: "Bob City" },
+      },
+      unique: "offline-nested-person",
+      owner: bobGroup,
+      resolve: { address: true },
+    });
+
+    assertLoaded(alicePerson);
+    assertLoaded(bobPerson);
+
+    // Both should have the same Person ID (derived from uniqueness)
+    expect(alicePerson.$jazz.id).toBe(bobPerson.$jazz.id);
+
+    // Both should have the same Address ID (derived from parent uniqueness + field name)
+    expect(alicePerson.address.$jazz.id).toBe(bobPerson.address.$jazz.id);
+  });
+
+  test("two accounts offline create unique values with nested children, set different fields, updates merge after sync", async () => {
+    const Settings = co.map({
+      theme: z.string(),
+      languages: co.list(z.string()).withPermissions({
+        onInlineCreate: "sameAsContainer",
+      }),
+      fontSize: z.number().optional(),
+      fontFamily: z.string().optional(),
+    });
+
+    const UserProfile = co.map({
+      name: z.string(),
+      settings: Settings.withPermissions({
+        onInlineCreate: "sameAsContainer",
+      }),
+    });
+
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Alice creates the profile with initial settings
+    const aliceProfile = await UserProfile.getOrCreateUnique({
+      value: {
+        name: "Shared User",
+        settings: { theme: "light", languages: ["en"] },
+      },
+      unique: "offline-nested-merge",
+      owner: aliceGroup,
+      resolve: { settings: { languages: true } },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Bob creates the same profile (will have same IDs)
+    const bobProfile = await UserProfile.getOrCreateUnique({
+      value: {
+        name: "Shared User",
+        settings: { theme: "dark", languages: ["it"] },
+      },
+      unique: "offline-nested-merge",
+      owner: bobGroup,
+      resolve: { settings: { languages: true } },
+    });
+
+    assertLoaded(aliceProfile);
+    assertLoaded(bobProfile);
+
+    // Verify same IDs
+    expect(aliceProfile.$jazz.id).toBe(bobProfile.$jazz.id);
+    expect(aliceProfile.settings.$jazz.id).toBe(bobProfile.settings.$jazz.id);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Alice sets fontSize on the nested settings
+    aliceProfile.settings.$jazz.set("fontSize", 16);
+
+    // Bob sets fontFamily on the nested settings
+    bobProfile.settings.$jazz.set("fontFamily", "Arial");
+    bobProfile.settings.languages.$jazz.push("es");
+
+    // Simulate reconnection by linking accounts directly
+    await linkAccounts(alice, bob);
+
+    // First init should win, and updates should merge
+    expect(aliceProfile.settings.languages).toEqual(["en", "es"]);
+    expect(bobProfile.settings.languages).toEqual(["en", "es"]);
+    expect(aliceProfile.settings.theme).toBe("light");
+    expect(bobProfile.settings.theme).toBe("light");
+
+    // Both should see the merged updates
+    expect(aliceProfile.settings.fontSize).toBe(16);
+    expect(aliceProfile.settings.fontFamily).toBe("Arial");
+    expect(bobProfile.settings.fontSize).toBe(16);
+    expect(bobProfile.settings.fontFamily).toBe("Arial");
+  });
+
+  test("two accounts offline create unique values and do updates, updates merge after sync", async () => {
+    const Counter = co.map({
+      value: z.number(),
+      lastUpdatedBy: z.string().optional(),
+      notes: z.string().optional(),
+    });
+
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Alice creates the counter while offline
+    const aliceCounter = await Counter.getOrCreateUnique({
+      value: { value: 0 },
+      unique: "offline-counter-merge",
+      owner: aliceGroup,
+    });
+
+    // Bob creates the same counter while offline
+    const bobCounter = await Counter.getOrCreateUnique({
+      value: { value: 0 },
+      unique: "offline-counter-merge",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceCounter);
+    assertLoaded(bobCounter);
+
+    // Verify same IDs
+    expect(aliceCounter.$jazz.id).toBe(bobCounter.$jazz.id);
+
+    // Alice updates the counter with non-conflicting field
+    aliceCounter.$jazz.set("lastUpdatedBy", "alice");
+
+    // Bob updates a different non-conflicting field
+    bobCounter.$jazz.set("notes", "Bob's note");
+
+    // Simulate reconnection by linking accounts directly
+    await linkAccounts(alice, bob);
+
+    // Non-conflicting fields should be merged on both sides
+    expect(aliceCounter.lastUpdatedBy).toBe("alice");
+    expect(aliceCounter.notes).toBe("Bob's note");
+    expect(bobCounter.lastUpdatedBy).toBe("alice");
+    expect(bobCounter.notes).toBe("Bob's note");
+  });
+
+  test("inline CoValue without sameAsContainer permission logs warning", async () => {
+    const InlineSettings = co.map({
+      theme: z.string(),
+    });
+
+    // Use a custom ref with specific owner (not sameAsContainer)
+    const Profile = co.map({
+      name: z.string(),
+      settings: InlineSettings.withPermissions({
+        onInlineCreate: "extendsContainer",
+      }),
+    });
+
+    const ownerGroup = Group.create();
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      // Create with unique - this should trigger a warning because settings uses a different owner
+      await Profile.getOrCreateUnique({
+        value: {
+          name: "Test",
+          settings: { theme: "dark" },
+        },
+        unique: "profile-different-owner",
+        owner: ownerGroup,
+      });
+
+      // Verify warning was logged
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Inline CoValue at field "settings" has a different owner than its unique parent',
+        ),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Consider using "sameAsContainer" permission'),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("getOrCreateUnique vs upsertUnique behavior comparison", () => {
+  test("upsertUnique updates existing values, getOrCreateUnique does not", async () => {
+    const Settings = co.map({
+      theme: z.string(),
+      language: z.string(),
+    });
+    const group = Group.create();
+
+    // Create initial settings for upsertUnique test
+    Settings.create(
+      { theme: "light", language: "en" },
+      { owner: group, unique: "settings-upsert" },
+    );
+
+    // upsertUnique should update the values
+    const upserted = await Settings.upsertUnique({
+      value: { theme: "dark", language: "fr" },
+      unique: "settings-upsert",
+      owner: group,
+    });
+
+    assertLoaded(upserted);
+    expect(upserted.theme).toBe("dark"); // Updated
+    expect(upserted.language).toBe("fr"); // Updated
+
+    // Create separate initial settings for getOrCreateUnique test
+    Settings.create(
+      { theme: "light", language: "en" },
+      { owner: group, unique: "settings-getorcreate" },
+    );
+
+    // getOrCreateUnique should NOT update the values
+    const gotOrCreated = await Settings.getOrCreateUnique({
+      value: { theme: "dark", language: "fr" },
+      unique: "settings-getorcreate",
+      owner: group,
+    });
+
+    assertLoaded(gotOrCreated);
+    expect(gotOrCreated.theme).toBe("light"); // NOT updated
+    expect(gotOrCreated.language).toBe("en"); // NOT updated
+  });
+});
