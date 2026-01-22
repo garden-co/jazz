@@ -13,7 +13,7 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { useState, useSyncExternalStore } from "react";
+import { useState } from "react";
 import WaveformCanvas from "./WaveformCanvas";
 import { Button } from "./ui/button";
 import {
@@ -23,8 +23,6 @@ import {
   DrawerTitle,
   DrawerTrigger,
 } from "./ui/drawer";
-
-const noopSubscribe = () => () => {};
 
 export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
