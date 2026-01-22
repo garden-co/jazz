@@ -545,7 +545,6 @@ export class CoMap extends CoValueBase implements CoValue {
         (this as any).create(options.value, {
           owner: options.owner,
           unique: options.unique,
-          coMapSchema: this,
           validation: options.validation,
         });
       },
