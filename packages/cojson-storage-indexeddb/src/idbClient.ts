@@ -42,18 +42,6 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     return this.tx.handleRequest<T>(handler);
   }
 
-  async getSingleCoValueSession(
-    coValueRowId: number,
-    sessionID: SessionID,
-  ): Promise<StoredSessionRow | undefined> {
-    return this.run((tx) =>
-      tx
-        .getObjectStore("sessions")
-        .index("uniqueSessions")
-        .get([coValueRowId, sessionID]),
-    );
-  }
-
   async upsertCoValueRow(
     coValueRow: NewCoValueRow,
   ): Promise<StoredNewCoValueRow> {
@@ -66,19 +54,6 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     };
   }
 
-  async upsertCoValue(
-    id: RawCoID,
-    header?: CojsonInternalTypes.CoValueHeader,
-  ): Promise<number | undefined> {
-    const idbKey = await this.run((tx) =>
-      tx.getObjectStore("coValues").put({
-        id,
-        header,
-      }),
-    );
-    return idbKey ? Number(idbKey) : undefined;
-  }
-
   async markCoValueAsDeleted(id: RawCoID): Promise<void> {
     await this.run((tx) =>
       tx.getObjectStore("deletedCoValues").put({
@@ -88,31 +63,22 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     );
   }
 
-  async deleteCoValueContent(coValue: StoredCoValueRow): Promise<void> {
-    const coValueRowID = coValue.rowID;
-
-    const sessions = await this.run((tx) =>
-      tx
-        .getObjectStore("sessions")
-        .index("sessionsByCoValue")
-        .getAll(coValueRowID),
-    );
-
-    const sessionsToDelete = (
-      sessions as { rowID: number; sessionID: string }[]
-    )
-      .filter((s) => !s.sessionID.endsWith("$"))
-      .map((s) => s.rowID);
+  async deleteCoValueContent(coValue: StoredNewCoValueRow): Promise<void> {
+    const sessionsToDelete: string[] = [];
+    for (const session of Object.values(coValue.sessions)) {
+      if (!session.sessionID.endsWith("$")) {
+        sessionsToDelete.push(coValue.id + session.sessionID);
+        delete coValue.sessions[session.sessionID];
+      }
+    }
 
     const ops: Promise<unknown>[] = [];
 
-    for (const sessionRowID of sessionsToDelete) {
-      ops.push(
-        this.#deleteAllBySesPrefix("transactions", sessionRowID),
-        this.#deleteAllBySesPrefix("signatureAfter", sessionRowID),
-        this.run((tx) => tx.getObjectStore("sessions").delete(sessionRowID)),
-      );
+    for (const ses of sessionsToDelete) {
+      ops.push(this.#deleteAllTransactionsBySesPrefix(ses));
     }
+
+    ops.push(this.upsertCoValueRow(coValue));
 
     ops.push(
       this.run((tx) =>
@@ -126,41 +92,15 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     await Promise.all(ops);
   }
 
-  async #deleteAllBySesPrefix(
-    storeName: "transactions" | "signatureAfter",
-    sesRowID: number,
-  ) {
-    const range = IDBKeyRange.bound(
-      [sesRowID, 0],
-      [sesRowID, Number.POSITIVE_INFINITY],
-    );
+  async #deleteAllTransactionsBySesPrefix(ses: string) {
+    const range = IDBKeyRange.bound([ses, 0], [ses, Number.POSITIVE_INFINITY]);
     const keys = await this.run((tx) =>
-      tx.getObjectStore(storeName).getAllKeys(range),
+      tx.getObjectStore("transactions").getAllKeys(range),
     );
 
     for (const key of keys as IDBValidKey[]) {
-      await this.run((tx) => tx.getObjectStore(storeName).delete(key));
+      await this.run((tx) => tx.getObjectStore("transactions").delete(key));
     }
-  }
-
-  async addSessionUpdate({
-    sessionUpdate,
-    sessionRow,
-  }: {
-    sessionUpdate: SessionRow;
-    sessionRow?: StoredSessionRow;
-  }): Promise<number> {
-    return this.run<number>(
-      (tx) =>
-        tx.getObjectStore("sessions").put(
-          sessionRow?.rowID
-            ? {
-                rowID: sessionRow.rowID,
-                ...sessionUpdate,
-              }
-            : sessionUpdate,
-        ) as IDBRequest<number>,
-    );
   }
 
   async addTransaction(
@@ -174,24 +114,6 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
         idx,
         tx: newTransaction,
       } satisfies TransactionRow),
-    );
-  }
-
-  async addSignatureAfter({
-    sessionRowID,
-    idx,
-    signature,
-  }: {
-    sessionRowID: number;
-    idx: number;
-    signature: CojsonInternalTypes.Signature;
-  }) {
-    return this.run((tx) =>
-      tx.getObjectStore("signatureAfter").put({
-        ses: sessionRowID,
-        idx,
-        signature,
-      }),
     );
   }
 
@@ -263,22 +185,6 @@ export class IDBClient implements DBClientInterfaceAsync {
     );
   }
 
-  async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
-    return queryIndexedDbStore(this.db, "coValues", (store) =>
-      store.index("coValuesById").get(coValueId),
-    );
-  }
-
-  async getCoValueRowID(coValueId: RawCoID): Promise<number | undefined> {
-    return this.getCoValue(coValueId).then((row) => row?.rowID);
-  }
-
-  async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
-    return queryIndexedDbStore(this.db, "sessions", (store) =>
-      store.index("sessionsByCoValue").getAll(coValueRowId),
-    );
-  }
-
   async getNewTransactionInSession(
     sessionRowId: number | string,
     fromIdx: number,
@@ -289,34 +195,6 @@ export class IDBClient implements DBClientInterfaceAsync {
         IDBKeyRange.bound([sessionRowId, fromIdx], [sessionRowId, toIdx]),
       ),
     );
-  }
-
-  async getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]> {
-    return queryIndexedDbStore(this.db, "signatureAfter", (store) =>
-      store.getAll(
-        IDBKeyRange.bound(
-          [sessionRowId, firstNewTxIdx],
-          [sessionRowId, Number.POSITIVE_INFINITY],
-        ),
-      ),
-    );
-  }
-
-  async upsertCoValue(
-    id: RawCoID,
-    header?: CojsonInternalTypes.CoValueHeader,
-  ): Promise<number | undefined> {
-    if (!header) {
-      return this.getCoValueRowID(id);
-    }
-
-    return putIndexedDbStore<CoValueRow, number>(this.db, "coValues", {
-      id,
-      header,
-    }).catch(() => this.getCoValueRowID(id));
   }
 
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
@@ -388,7 +266,7 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<void> {
-    const coValue = await this.getCoValue(coValueID);
+    const coValue = await this.getCoValueRow(coValueID);
 
     if (!coValue) {
       console.warn(`CoValue ${coValueID} not found, skipping deletion`);
@@ -427,15 +305,11 @@ export class IDBClient implements DBClientInterfaceAsync {
   async getCoValueKnownState(
     coValueId: string,
   ): Promise<CojsonInternalTypes.CoValueKnownState | undefined> {
-    // First check if the CoValue exists
-    const coValueRow = await this.getCoValue(coValueId as RawCoID);
+    const coValueRow = await this.getCoValueRow(coValueId as RawCoID);
 
     if (!coValueRow) {
       return undefined;
     }
-
-    // Get all session counters without loading transactions
-    const sessions = await this.getCoValueSessions(coValueRow.rowID);
 
     const knownState: CojsonInternalTypes.CoValueKnownState = {
       id: coValueId as RawCoID,
@@ -443,7 +317,7 @@ export class IDBClient implements DBClientInterfaceAsync {
       sessions: {},
     };
 
-    for (const session of sessions) {
+    for (const session of Object.values(coValueRow.sessions)) {
       knownState.sessions[session.sessionID] = session.lastIdx;
     }
 
