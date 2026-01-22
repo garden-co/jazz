@@ -177,39 +177,6 @@ const Post = co.map({
 
 Jazz stores referenced ID. Use resolve queries to control reference traversal depth.
 
-### Inverse Relationships (Two-Way)
-
-**One-to-One:**
-
-```ts
-const Author = co.map({
-  name: z.string(),
-  post: Post
-});
-
-const Post = co.map({
-  title: z.string(),
-  author: Author
-});
-```
-
-**One-to-Many:**
-
-```ts
-const Author = co.map({
-  name: z.string(),
-  posts: co.list(Post)
-});
-
-const Post = co.map({
-  author: Author
-});
-```
-
-**Many-to-Many:**
-
-Use `co.list()` at both ends. Jazz doesn't maintain consistency - manage in application code.
-
 ### Recursive/Forward References
 
 Use getters to defer schema evaluation:
@@ -229,6 +196,43 @@ const Post = co.map({
 ```
 
 **Important:** Jazz doesn't create inferred inverse relationships. Explicitly add both sides for bidirectional traversal.
+
+### Inverse Relationships (Two-Way)
+
+**One-to-One:**
+
+```ts
+const Author = co.map({
+  name: z.string(),
+  get post() {
+    return Post;
+  }
+});
+
+const Post = co.map({
+  title: z.string(),
+  author: Author
+});
+```
+
+**One-to-Many:**
+
+```ts
+const Author = co.map({
+  name: z.string(),
+  get posts() {
+    return co.list(Post);
+  }
+});
+
+const Post = co.map({
+  author: Author
+});
+```
+
+**Many-to-Many:**
+
+Use `co.list()` at both ends. Jazz doesn't maintain consistency - manage in application code.
 
 ### Set-Like Collections (Unique Constraint)
 
