@@ -11,7 +11,7 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
 use crate::query_manager::encoding::{decode_row, encode_row};
-use crate::query_manager::index::IndexState;
+use crate::query_manager::index::BTreeIndex;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, Tuple, TupleDelta, TupleDescriptor,
     TupleElement, Value,
@@ -139,7 +139,7 @@ impl ArraySubqueryNode {
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        indices: &HashMap<(String, String), IndexState>,
+        indices: &HashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -247,7 +247,7 @@ impl ArraySubqueryNode {
     fn evaluate_subgraph(
         &self,
         correlation_value: &Value,
-        indices: &HashMap<(String, String), IndexState>,
+        indices: &HashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> Value {
@@ -307,7 +307,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(
         &mut self,
-        indices: &HashMap<(String, String), IndexState>,
+        indices: &HashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta

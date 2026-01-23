@@ -784,6 +784,15 @@ impl ObjectManager {
                 StorageResponse::SetBranchTails { .. } => {
                     // Already updated in-memory during truncate_branch
                 }
+
+                // Index page storage responses - handled by QueryManager, not ObjectManager
+                StorageResponse::LoadIndexPage { .. }
+                | StorageResponse::StoreIndexPage { .. }
+                | StorageResponse::DeleteIndexPage { .. }
+                | StorageResponse::LoadIndexMeta { .. }
+                | StorageResponse::StoreIndexMeta { .. } => {
+                    // Index storage is managed separately by QueryManager
+                }
             }
         }
     }
@@ -1435,6 +1444,51 @@ impl ObjectManager {
                 branch_name,
                 result: Ok(()),
             },
+
+            // Index page storage (no-op returns "not found" for loads, success for stores)
+            StorageRequest::LoadIndexPage {
+                table,
+                column,
+                page_id,
+            } => StorageResponse::LoadIndexPage {
+                table,
+                column,
+                page_id,
+                result: Ok(None), // Page doesn't exist in "storage"
+            },
+            StorageRequest::StoreIndexPage {
+                table,
+                column,
+                page_id,
+                ..
+            } => StorageResponse::StoreIndexPage {
+                table,
+                column,
+                page_id,
+                result: Ok(()),
+            },
+            StorageRequest::DeleteIndexPage {
+                table,
+                column,
+                page_id,
+            } => StorageResponse::DeleteIndexPage {
+                table,
+                column,
+                page_id,
+                result: Ok(()),
+            },
+            StorageRequest::LoadIndexMeta { table, column } => StorageResponse::LoadIndexMeta {
+                table,
+                column,
+                result: Ok(None), // Meta doesn't exist in "storage"
+            },
+            StorageRequest::StoreIndexMeta { table, column, .. } => {
+                StorageResponse::StoreIndexMeta {
+                    table,
+                    column,
+                    result: Ok(()),
+                }
+            }
         }
     }
 

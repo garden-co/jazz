@@ -80,10 +80,10 @@ impl SourceNode for IndexScanNode {
         let key = (self.table.clone(), self.column.clone());
         let new_ids: HashSet<ObjectId> = if let Some(index) = ctx.indices.get(&key) {
             match &self.condition {
-                ScanCondition::All => index.scan_all(ctx.om).into_iter().collect(),
-                ScanCondition::Eq(k) => index.lookup_exact(k, ctx.om).into_iter().collect(),
+                ScanCondition::All => index.scan_all().into_iter().collect(),
+                ScanCondition::Eq(k) => index.lookup_exact(k).into_iter().collect(),
                 ScanCondition::Range { min, max } => {
-                    index.range_scan(min, max, ctx.om).into_iter().collect()
+                    index.range_scan(min, max).into_iter().collect()
                 }
             }
         } else {
@@ -134,16 +134,12 @@ impl SourceNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_manager::ObjectManager;
-    use crate::query_manager::index::IndexState;
+    use crate::query_manager::index::BTreeIndex;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
     use std::collections::HashMap;
 
-    fn make_ctx<'a>(
-        indices: &'a HashMap<(String, String), IndexState>,
-        om: &'a ObjectManager,
-    ) -> SourceContext<'a> {
-        SourceContext { indices, om }
+    fn make_ctx(indices: &HashMap<(String, String), BTreeIndex>) -> SourceContext<'_> {
+        SourceContext { indices }
     }
 
     fn test_descriptor() -> RowDescriptor {
@@ -160,21 +156,21 @@ mod tests {
 
     #[test]
     fn scan_all_returns_all_rows() {
-        let mut om = ObjectManager::new();
-        let mut index = IndexState::new("users", "_id");
+        let mut index = BTreeIndex::new("users", "_id");
+        index.process_meta_load(None); // Initialize empty index
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1, &mut om).unwrap();
-        index.insert(row2.0.as_bytes(), row2, &mut om).unwrap();
-        index.insert(row3.0.as_bytes(), row3, &mut om).unwrap();
+        index.insert(row1.0.as_bytes(), row1).unwrap();
+        index.insert(row2.0.as_bytes(), row2).unwrap();
+        index.insert(row3.0.as_bytes(), row3).unwrap();
 
         let mut indices = HashMap::new();
         indices.insert(("users".to_string(), "_id".to_string()), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&indices, &om);
+        let ctx = make_ctx(&indices);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 3);
@@ -186,13 +182,13 @@ mod tests {
 
     #[test]
     fn scan_eq_returns_matching_rows() {
-        let mut om = ObjectManager::new();
-        let mut index = IndexState::new("users", "email");
+        let mut index = BTreeIndex::new("users", "email");
+        index.process_meta_load(None);
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(b"alice@example.com", row1, &mut om).unwrap();
-        index.insert(b"bob@example.com", row2, &mut om).unwrap();
+        index.insert(b"alice@example.com", row1).unwrap();
+        index.insert(b"bob@example.com", row2).unwrap();
 
         let mut indices = HashMap::new();
         indices.insert(("users".to_string(), "email".to_string()), index);
@@ -203,7 +199,7 @@ mod tests {
             ScanCondition::Eq(b"alice@example.com".to_vec()),
             test_descriptor(),
         );
-        let ctx = make_ctx(&indices, &om);
+        let ctx = make_ctx(&indices);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
@@ -212,15 +208,15 @@ mod tests {
 
     #[test]
     fn scan_range_returns_rows_in_range() {
-        let mut om = ObjectManager::new();
-        let mut index = IndexState::new("users", "score");
+        let mut index = BTreeIndex::new("users", "score");
+        index.process_meta_load(None);
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(&10i32.to_le_bytes(), row1, &mut om).unwrap();
-        index.insert(&20i32.to_le_bytes(), row2, &mut om).unwrap();
-        index.insert(&30i32.to_le_bytes(), row3, &mut om).unwrap();
+        index.insert(&10i32.to_le_bytes(), row1).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3).unwrap();
 
         let mut indices = HashMap::new();
         indices.insert(("users".to_string(), "score".to_string()), index);
@@ -234,7 +230,7 @@ mod tests {
             },
             test_descriptor(),
         );
-        let ctx = make_ctx(&indices, &om);
+        let ctx = make_ctx(&indices);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
@@ -243,18 +239,18 @@ mod tests {
 
     #[test]
     fn rescan_detects_changes() {
-        let mut om = ObjectManager::new();
-        let mut index = IndexState::new("users", "_id");
+        let mut index = BTreeIndex::new("users", "_id");
+        index.process_meta_load(None);
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1, &mut om).unwrap();
+        index.insert(row1.0.as_bytes(), row1).unwrap();
 
         let mut indices = HashMap::new();
         indices.insert(("users".to_string(), "_id".to_string()), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&indices, &om);
+        let ctx = make_ctx(&indices);
         let delta1 = node.scan(&ctx);
         assert_eq!(delta1.added.len(), 1);
         assert!(contains_id(&delta1.added, row1));
@@ -263,9 +259,9 @@ mod tests {
         indices
             .get_mut(&("users".to_string(), "_id".to_string()))
             .unwrap()
-            .insert(row2.0.as_bytes(), row2, &mut om)
+            .insert(row2.0.as_bytes(), row2)
             .unwrap();
-        let ctx = make_ctx(&indices, &om);
+        let ctx = make_ctx(&indices);
         let delta2 = node.scan(&ctx);
         assert_eq!(delta2.added.len(), 1);
         assert!(contains_id(&delta2.added, row2));
@@ -275,9 +271,9 @@ mod tests {
         indices
             .get_mut(&("users".to_string(), "_id".to_string()))
             .unwrap()
-            .remove(row1.0.as_bytes(), row1, &mut om)
+            .remove(row1.0.as_bytes(), row1)
             .unwrap();
-        let ctx = make_ctx(&indices, &om);
+        let ctx = make_ctx(&indices);
         let delta3 = node.scan(&ctx);
         assert!(delta3.added.is_empty());
         assert_eq!(delta3.removed.len(), 1);

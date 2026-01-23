@@ -9,7 +9,7 @@ use crate::sync_manager::{PendingPermissionCheck, PendingUpdateId, SyncManager};
 use super::encoding::{decode_row, encode_row};
 use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::index::{IndexError, IndexState};
+use super::index::{BTreeIndex, IndexError};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts, resolve_session_value};
 use super::policy_graph::PolicyGraph;
 use super::query::{Query, QueryBuilder};
@@ -157,8 +157,8 @@ pub struct QueryManager {
     sync_manager: SyncManager,
     schema: Arc<Schema>,
 
-    /// Indices: (table, column) -> IndexState
-    indices: HashMap<(String, String), IndexState>,
+    /// Indices: (table, column) -> BTreeIndex
+    indices: HashMap<(String, String), BTreeIndex>,
 
     /// Active query subscriptions
     subscriptions: HashMap<QuerySubscriptionId, QuerySubscription>,
@@ -174,8 +174,8 @@ pub struct QueryManager {
 impl QueryManager {
     /// Create a new QueryManager with the given schema.
     ///
-    /// Indices are created lazily when data is inserted. Existing data in
-    /// ObjectManager is discovered via index scans (zero-copy reads).
+    /// Indices are initialized immediately for use. In a real storage scenario,
+    /// metadata would be loaded from storage; here we initialize with empty state.
     ///
     /// Row-level security is evaluated via `process()` which handles pending
     /// permission checks from SyncManager.
@@ -184,23 +184,23 @@ impl QueryManager {
         let mut indices = HashMap::new();
         for (table_name, table_schema) in &schema {
             // Primary "_id" index (for live rows)
-            indices.insert(
-                (table_name.0.clone(), "_id".to_string()),
-                IndexState::new(&table_name.0, "_id"),
-            );
+            let mut id_index = BTreeIndex::new(&table_name.0, "_id");
+            id_index.process_meta_load(None); // Initialize empty
+            indices.insert((table_name.0.clone(), "_id".to_string()), id_index);
 
             // Soft-deleted rows index
+            let mut deleted_index = BTreeIndex::new(&table_name.0, "_id_deleted");
+            deleted_index.process_meta_load(None);
             indices.insert(
                 (table_name.0.clone(), "_id_deleted".to_string()),
-                IndexState::new(&table_name.0, "_id_deleted"),
+                deleted_index,
             );
 
             // Index for each column
             for col in &table_schema.descriptor.columns {
-                indices.insert(
-                    (table_name.0.clone(), col.name.clone()),
-                    IndexState::new(&table_name.0, &col.name),
-                );
+                let mut col_index = BTreeIndex::new(&table_name.0, &col.name);
+                col_index.process_meta_load(None);
+                indices.insert((table_name.0.clone(), col.name.clone()), col_index);
             }
         }
 
@@ -229,7 +229,7 @@ impl QueryManager {
     pub fn row_is_indexed(&self, table: &str, row_id: ObjectId) -> bool {
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get(&id_key) {
-            index.contains_row(row_id, &self.sync_manager.object_manager)
+            index.contains_row(row_id)
         } else {
             false
         }
@@ -239,7 +239,7 @@ impl QueryManager {
     pub fn row_is_deleted(&self, table: &str, row_id: ObjectId) -> bool {
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get(&deleted_key) {
-            index.contains_row(row_id, &self.sync_manager.object_manager)
+            index.contains_row(row_id)
         } else {
             false
         }
@@ -1132,8 +1132,8 @@ impl QueryManager {
             self.handle_object_update(update);
         }
 
-        // 5. Flush pending index updates for indices that became ready
-        self.flush_pending_index_updates();
+        // 5. Process index storage (handles pending page loads in noop mode)
+        self.process_index_storage();
 
         // 6. Mark subscriptions dirty if they have pending IDs that might now be available
         // This ensures settle() will be called to check pending rows
@@ -1607,23 +1607,45 @@ impl QueryManager {
         }
     }
 
-    /// Flush pending index updates for indices that became ready.
-    fn flush_pending_index_updates(&mut self) {
-        // Collect indices that have pending updates and are now ready
-        let ready_indices: Vec<(String, String)> = self
-            .indices
-            .iter()
-            .filter(|(_, index)| {
-                index.has_pending_updates() && index.root_exists(&self.sync_manager.object_manager)
-            })
-            .map(|(key, _)| key.clone())
-            .collect();
+    /// Process index storage - collects requests from indices and handles noop responses.
+    ///
+    /// For real storage backends, this would forward requests to storage and
+    /// process responses. For now (tests), we use noop responses.
+    fn process_index_storage(&mut self) {
+        use super::index::PageId;
+        use crate::storage::StorageRequest;
 
-        // Flush pending updates for each ready index
-        for key in ready_indices {
-            if let Some(index) = self.indices.get_mut(&key) {
-                // Ignore errors - pending updates will be retried next process()
-                let _ = index.flush_pending(&mut self.sync_manager.object_manager);
+        // Collect storage requests from all indices
+        let mut all_requests = Vec::new();
+        for index in self.indices.values_mut() {
+            all_requests.extend(index.take_storage_requests());
+        }
+
+        // Generate noop responses and route them back to indices
+        for request in all_requests {
+            match request {
+                StorageRequest::LoadIndexMeta { table, column } => {
+                    // New index - return None (index will initialize empty)
+                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                        index.process_meta_load(None);
+                    }
+                }
+                StorageRequest::LoadIndexPage {
+                    table,
+                    column,
+                    page_id,
+                } => {
+                    // Page doesn't exist - return None (index will create new page)
+                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                        index.process_page_load(PageId(page_id), None);
+                    }
+                }
+                StorageRequest::StoreIndexMeta { .. }
+                | StorageRequest::StoreIndexPage { .. }
+                | StorageRequest::DeleteIndexPage { .. } => {
+                    // Store/delete requests are fire-and-forget in noop mode
+                }
+                _ => {}
             }
         }
     }
@@ -1696,19 +1718,11 @@ impl QueryManager {
                 // No old content - just remove from _id and add to _id_deleted
                 let id_key = (table.to_string(), "_id".to_string());
                 if let Some(index) = self.indices.get_mut(&id_key) {
-                    let _ = index.remove(
-                        update.object_id.0.as_bytes(),
-                        update.object_id,
-                        &mut self.sync_manager.object_manager,
-                    );
+                    let _ = index.remove(update.object_id.0.as_bytes(), update.object_id);
                 }
                 let deleted_key = (table.to_string(), "_id_deleted".to_string());
                 if let Some(index) = self.indices.get_mut(&deleted_key) {
-                    let _ = index.insert(
-                        update.object_id.0.as_bytes(),
-                        update.object_id,
-                        &mut self.sync_manager.object_manager,
-                    );
+                    let _ = index.insert(update.object_id.0.as_bytes(), update.object_id);
                 }
             }
             self.mark_subscriptions_dirty(&table);
@@ -1791,28 +1805,20 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Update "_id" index (persists immediately or queues)
+        // Update "_id" index
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            index.insert(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            )?;
+            index.insert(object_id.0.as_bytes(), object_id)?;
         }
 
-        // Update column indices (persists immediately or queues)
+        // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             let col_key = (table.to_string(), col.name.clone());
             if let Some(index) = self.indices.get_mut(&col_key)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, data, col_idx)
             {
-                index.insert(
-                    value_bytes,
-                    object_id,
-                    &mut self.sync_manager.object_manager,
-                )?;
+                index.insert(value_bytes, object_id)?;
             }
         }
 
@@ -1830,7 +1836,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         // "_id" index doesn't change on update
 
-        // Update column indices (remove old value, add new value - persists immediately)
+        // Update column indices (remove old value, add new value)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             let col_key = (table.to_string(), col.name.clone());
             if let Some(index) = self.indices.get_mut(&col_key) {
@@ -1838,13 +1844,13 @@ impl QueryManager {
                 if let Ok(Some(old_bytes)) =
                     super::encoding::column_bytes(descriptor, old_data, col_idx)
                 {
-                    index.remove(old_bytes, object_id, &mut self.sync_manager.object_manager)?;
+                    index.remove(old_bytes, object_id)?;
                 }
                 // Add new value
                 if let Ok(Some(new_bytes)) =
                     super::encoding::column_bytes(descriptor, new_data, col_idx)
                 {
-                    index.insert(new_bytes, object_id, &mut self.sync_manager.object_manager)?;
+                    index.insert(new_bytes, object_id)?;
                 }
             }
         }
@@ -1863,11 +1869,7 @@ impl QueryManager {
         // Remove from "_id" index
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            index.remove(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            )?;
+            index.remove(object_id.0.as_bytes(), object_id)?;
         }
 
         // Remove from all column indices
@@ -1877,22 +1879,14 @@ impl QueryManager {
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, old_data, col_idx)
             {
-                index.remove(
-                    value_bytes,
-                    object_id,
-                    &mut self.sync_manager.object_manager,
-                )?;
+                index.remove(value_bytes, object_id)?;
             }
         }
 
         // Add to "_id_deleted" index
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get_mut(&deleted_key) {
-            index.insert(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            )?;
+            index.insert(object_id.0.as_bytes(), object_id)?;
         }
 
         Ok(())
@@ -1910,11 +1904,7 @@ impl QueryManager {
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
             // Ignore errors - row may not be in _id if already soft-deleted
-            let _ = index.remove(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            );
+            let _ = index.remove(object_id.0.as_bytes(), object_id);
         }
 
         // Remove from all column indices (if we have old data)
@@ -1926,11 +1916,7 @@ impl QueryManager {
                         super::encoding::column_bytes(descriptor, data, col_idx)
                 {
                     // Ignore errors - row may not be in column index if already soft-deleted
-                    let _ = index.remove(
-                        value_bytes,
-                        object_id,
-                        &mut self.sync_manager.object_manager,
-                    );
+                    let _ = index.remove(value_bytes, object_id);
                 }
             }
         }
@@ -1939,11 +1925,7 @@ impl QueryManager {
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get_mut(&deleted_key) {
             // Ignore errors - row may not be in _id_deleted if it was never soft-deleted
-            let _ = index.remove(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            );
+            let _ = index.remove(object_id.0.as_bytes(), object_id);
         }
 
         Ok(())
@@ -1960,21 +1942,13 @@ impl QueryManager {
         // Remove from "_id_deleted" index
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get_mut(&deleted_key) {
-            index.remove(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            )?;
+            index.remove(object_id.0.as_bytes(), object_id)?;
         }
 
         // Add to "_id" index
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            index.insert(
-                object_id.0.as_bytes(),
-                object_id,
-                &mut self.sync_manager.object_manager,
-            )?;
+            index.insert(object_id.0.as_bytes(), object_id)?;
         }
 
         // Add to all column indices
@@ -1984,11 +1958,7 @@ impl QueryManager {
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, new_data, col_idx)
             {
-                index.insert(
-                    value_bytes,
-                    object_id,
-                    &mut self.sync_manager.object_manager,
-                )?;
+                index.insert(value_bytes, object_id)?;
             }
         }
 
@@ -2044,6 +2014,94 @@ impl QueryManager {
         self.sync_manager.drain_storage_noop();
     }
 
+    /// Reset all indices to unloaded state for cold start scenarios.
+    ///
+    /// Call this on a new QueryManager created with an existing SyncManager
+    /// to allow indices to load their data from storage rather than starting empty.
+    pub fn reset_indices_for_cold_start(&mut self) {
+        for index in self.indices.values_mut() {
+            index.reset_for_cold_start();
+        }
+    }
+
+    /// Load indices from storage using a real driver.
+    ///
+    /// This is a convenience method that calls `reset_indices_for_cold_start()` and then
+    /// processes storage in a loop until all indices are loaded. Use this after creating
+    /// a new QueryManager with an existing SyncManager (cold start scenario).
+    pub fn load_indices_from_driver(&mut self, driver: &mut impl crate::driver::Driver) {
+        self.reset_indices_for_cold_start();
+        // Loop until no more pending requests
+        for _ in 0..10 {
+            self.process_storage_with_driver(driver);
+        }
+    }
+
+    /// Process storage requests through a real driver.
+    ///
+    /// This handles both ObjectManager requests and index storage requests.
+    /// Use this for tests that need actual persistence (e.g., cold_start tests).
+    /// Note: May need to be called multiple times when loading indices (meta first, then pages).
+    pub fn process_storage_with_driver(&mut self, driver: &mut impl crate::driver::Driver) {
+        use super::index::PageId;
+        use crate::storage::StorageResponse;
+
+        // Collect all storage requests: ObjectManager + indices
+        let mut all_requests = self.sync_manager.object_manager.take_requests();
+        for index in self.indices.values_mut() {
+            all_requests.extend(index.take_storage_requests());
+        }
+
+        if all_requests.is_empty() {
+            return;
+        }
+
+        // Process through driver
+        let responses = driver.process(all_requests);
+
+        // Route responses to appropriate handlers
+        for response in responses {
+            match &response {
+                // Index responses - route to indices
+                StorageResponse::LoadIndexMeta {
+                    table,
+                    column,
+                    result,
+                } => {
+                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                        index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
+                    }
+                }
+                StorageResponse::LoadIndexPage {
+                    table,
+                    column,
+                    page_id,
+                    result,
+                } => {
+                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                        index.process_page_load(
+                            PageId(*page_id),
+                            result.as_ref().ok().and_then(|o| o.clone()),
+                        );
+                    }
+                }
+                StorageResponse::StoreIndexMeta { .. }
+                | StorageResponse::StoreIndexPage { .. }
+                | StorageResponse::DeleteIndexPage { .. } => {
+                    // Store/delete responses don't need routing
+                }
+
+                // Object/blob responses - route to ObjectManager
+                _ => {
+                    self.sync_manager.object_manager.push_response(response);
+                }
+            }
+        }
+
+        // Process ObjectManager responses
+        self.sync_manager.object_manager.process_storage_responses();
+    }
+
     // ========================================================================
     // Memory profiling
     // ========================================================================
@@ -2086,6 +2144,7 @@ impl QueryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::TestDriver;
     use crate::query_manager::types::ColumnDescriptor;
     use crate::query_manager::types::ColumnType;
 
@@ -2341,6 +2400,9 @@ mod tests {
 
     #[test]
     fn cold_start_loads_persisted_indices_and_rows() {
+        // Shared driver persists index pages across QM instances
+        let mut driver = TestDriver::new();
+
         // Phase 1: Create QM, insert rows, persist indices
         let sync_manager = SyncManager::new();
         let schema = test_schema();
@@ -2354,19 +2416,19 @@ mod tests {
             .insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
             .unwrap();
 
+        // Persist storage (row objects + index pages)
+        qm1.process_storage_with_driver(&mut driver);
+
         // Rows are indexed
         assert!(h1.is_indexed(&qm1, "users"));
         assert!(h2.is_indexed(&qm1, "users"));
 
         // Phase 2: "Cold start" - create new QM with same underlying ObjectManager
-        // Extract the SyncManager to reuse its ObjectManager
         let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
-
-        // Create new QueryManager - reads indices lazily from ObjectManager
         let mut qm2 = QueryManager::new(sync_manager2, schema);
 
-        // Process to discover rows from indices
-        qm2.process();
+        // Load indices from driver (cold start)
+        qm2.load_indices_from_driver(&mut driver);
 
         // Verify rows are discoverable via get()
         assert!(qm2.test_get_row_if_loaded(h1.row_id).is_some());
@@ -2394,6 +2456,9 @@ mod tests {
         // 2. Queries access ObjectManager directly (no redundant row_cache)
         // 3. Rows not yet in ObjectManager return None gracefully
 
+        // Shared driver persists index pages across QM instances
+        let mut driver = TestDriver::new();
+
         // Phase 1: Create QM, insert multiple rows
         let sync_manager = SyncManager::new();
         let schema = test_schema();
@@ -2412,13 +2477,15 @@ mod tests {
             )
             .unwrap();
 
+        // Persist storage
+        qm1.process_storage_with_driver(&mut driver);
+
         // Phase 2: Simulate cold start with new QM
         let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
         let mut qm2 = QueryManager::new(sync_manager2, schema);
 
-        // Call process() - should NOT eagerly load all row content into a cache
-        // Row data should be read directly from ObjectManager on demand
-        qm2.process();
+        // Load indices from driver (cold start)
+        qm2.load_indices_from_driver(&mut driver);
 
         // Query for specific rows (filter: score >= 75)
         let query = qm2
@@ -2438,6 +2505,9 @@ mod tests {
 
     #[test]
     fn cold_start_with_sorted_query() {
+        // Shared driver persists index pages across QM instances
+        let mut driver = TestDriver::new();
+
         // Phase 1: Insert rows
         let sync_manager = SyncManager::new();
         let schema = test_schema();
@@ -2453,10 +2523,15 @@ mod tests {
         )
         .unwrap();
 
+        // Persist storage
+        qm1.process_storage_with_driver(&mut driver);
+
         // Phase 2: Cold start
         let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
         let mut qm2 = QueryManager::new(sync_manager2, schema);
-        qm2.process();
+
+        // Load indices from driver (cold start)
+        qm2.load_indices_from_driver(&mut driver);
 
         // Sorted query should work
         let query = qm2.query("users").order_by_desc("score").build();
