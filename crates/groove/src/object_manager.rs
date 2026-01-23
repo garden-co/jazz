@@ -1343,6 +1343,227 @@ impl ObjectManager {
 
         ancestors
     }
+
+    // ========================================================================
+    // No-op storage driver (for tests)
+    // ========================================================================
+
+    /// Process all pending storage requests with successful no-op responses.
+    ///
+    /// This is useful for tests and benchmarks that don't have a real storage backend.
+    /// It drains the outbox, generates success responses, and processes them.
+    pub fn drain_storage_noop(&mut self) {
+        let requests = self.take_requests();
+        for request in requests {
+            let response = Self::noop_response_for(request);
+            self.push_response(response);
+        }
+        self.process_storage_responses();
+    }
+
+    /// Generate a successful no-op response for a storage request.
+    fn noop_response_for(request: StorageRequest) -> StorageResponse {
+        match request {
+            StorageRequest::CreateObject { id, .. } => {
+                StorageResponse::CreateObject { id, result: Ok(()) }
+            }
+            StorageRequest::AppendCommit {
+                object_id, commit, ..
+            } => StorageResponse::AppendCommit {
+                object_id,
+                commit_id: commit.id(),
+                result: Ok(()),
+            },
+            StorageRequest::LoadObjectBranch {
+                object_id,
+                branch_name,
+                ..
+            } => {
+                // Return empty branch - object doesn't exist in "storage"
+                StorageResponse::LoadObjectBranch {
+                    object_id,
+                    branch_name,
+                    result: Err(StorageError::NotFound),
+                }
+            }
+            StorageRequest::StoreBlob { content_hash, .. } => StorageResponse::StoreBlob {
+                content_hash,
+                result: Ok(()),
+            },
+            StorageRequest::LoadBlob { content_hash } => StorageResponse::LoadBlob {
+                content_hash,
+                result: Err(StorageError::NotFound),
+            },
+            StorageRequest::AssociateBlob { content_hash, .. } => StorageResponse::AssociateBlob {
+                content_hash,
+                result: Ok(()),
+            },
+            StorageRequest::LoadBlobAssociations { content_hash } => {
+                StorageResponse::LoadBlobAssociations {
+                    content_hash,
+                    result: Ok(vec![]),
+                }
+            }
+            StorageRequest::DeleteCommit {
+                object_id,
+                branch_name,
+                commit_id,
+            } => StorageResponse::DeleteCommit {
+                object_id,
+                branch_name,
+                commit_id,
+                result: Ok(()),
+            },
+            StorageRequest::DissociateAndMaybeDeleteBlob {
+                content_hash,
+                object_id,
+                branch_name,
+                commit_id,
+            } => StorageResponse::DissociateAndMaybeDeleteBlob {
+                content_hash,
+                object_id,
+                branch_name,
+                commit_id,
+                blob_deleted: Ok(true),
+            },
+            StorageRequest::SetBranchTails {
+                object_id,
+                branch_name,
+                ..
+            } => StorageResponse::SetBranchTails {
+                object_id,
+                branch_name,
+                result: Ok(()),
+            },
+        }
+    }
+
+    // ========================================================================
+    // Memory profiling
+    // ========================================================================
+
+    /// Calculate memory usage breakdown for profiling.
+    ///
+    /// Returns a tuple: (row_objects, index_objects, blobs, subscriptions, outbox_inbox, total)
+    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let mut row_objects = 0usize;
+        let mut index_objects = 0usize;
+
+        for state in self.objects.values() {
+            let obj_size = self.estimate_object_state_size(state);
+            let is_index = match state {
+                ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                    obj.metadata.get("type").is_some_and(|t| t == "index")
+                }
+                ObjectState::Loading => false,
+            };
+            // Add HashMap entry overhead: ~48 bytes per entry
+            let entry_overhead = std::mem::size_of::<ObjectId>() + 48;
+            if is_index {
+                index_objects += obj_size + entry_overhead;
+            } else {
+                row_objects += obj_size + entry_overhead;
+            }
+        }
+
+        // Blobs
+        let mut blobs = 0usize;
+        for (hash, state) in &self.blobs {
+            blobs += std::mem::size_of_val(hash);
+            blobs += match state {
+                BlobState::Available { data, .. } => data.len() + 32,
+                BlobState::Loading | BlobState::NotFound | BlobState::PendingDelete => 16,
+            };
+            blobs += 48; // HashMap entry overhead
+        }
+
+        // Subscriptions
+        let subscriptions = self.subscriptions.len() * 80  // ~80 bytes per subscription
+            + self.branch_subscribers.len() * 96  // ~96 bytes per branch subscriber entry
+            + self.all_object_subscriptions.len() * 16
+            + self.subscription_outbox.len() * 128; // SubscriptionUpdate ~128 bytes
+
+        // Outbox/inbox
+        let outbox_inbox = self.outbox.len() * 256  // StorageRequest ~256 bytes avg
+            + self.inbox.len() * 256  // StorageResponse ~256 bytes avg
+            + self.all_objects_outbox.len() * 200; // AllObjectUpdate ~200 bytes
+
+        let total = row_objects + index_objects + blobs + subscriptions + outbox_inbox;
+        (
+            row_objects,
+            index_objects,
+            blobs,
+            subscriptions,
+            outbox_inbox,
+            total,
+        )
+    }
+
+    /// Estimate memory size of an ObjectState.
+    fn estimate_object_state_size(&self, state: &ObjectState) -> usize {
+        match state {
+            ObjectState::Loading => std::mem::size_of::<ObjectState>(),
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                self.estimate_object_size(obj)
+            }
+        }
+    }
+
+    /// Estimate memory size of an Object.
+    fn estimate_object_size(&self, obj: &Object) -> usize {
+        let mut size = std::mem::size_of::<Object>();
+
+        // Metadata HashMap
+        for (k, v) in &obj.metadata {
+            size += k.len() + v.len() + 48; // String overhead + HashMap entry
+        }
+
+        // Branches
+        for (name, branch) in &obj.branches {
+            size += name.0.len() + 24; // BranchName (String) + overhead
+            size += 48; // HashMap entry overhead
+
+            // Branch struct base size
+            size += std::mem::size_of::<Branch>();
+
+            // Commits HashMap
+            for (commit_id, commit) in &branch.commits {
+                size += std::mem::size_of_val(commit_id);
+                size += self.estimate_commit_size(commit);
+                size += 48; // HashMap entry overhead
+            }
+
+            // Tips HashSet
+            size += branch.tips.len() * (32 + 16); // CommitId + HashSet entry overhead
+
+            // Tails Option<HashSet>
+            if let Some(tails) = &branch.tails {
+                size += tails.len() * (32 + 16);
+            }
+        }
+
+        size
+    }
+
+    /// Estimate memory size of a Commit.
+    fn estimate_commit_size(&self, commit: &Commit) -> usize {
+        let mut size = std::mem::size_of::<Commit>();
+
+        // Parents vec
+        size += commit.parents.capacity() * std::mem::size_of::<CommitId>();
+
+        // Content vec (this is often the biggest part)
+        size += commit.content.capacity();
+
+        // Metadata BTreeMap
+        if let Some(meta) = &commit.metadata {
+            for (k, v) in meta {
+                size += k.len() + v.len() + 64; // String overhead + BTreeMap node overhead
+            }
+        }
+
+        size
+    }
 }
 
 #[cfg(test)]

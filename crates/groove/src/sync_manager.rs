@@ -1322,6 +1322,18 @@ impl SyncManager {
             });
         }
     }
+
+    // ========================================================================
+    // No-op storage driver (for tests)
+    // ========================================================================
+
+    /// Process all pending storage requests with successful no-op responses.
+    ///
+    /// This is useful for tests and benchmarks that don't have a real storage backend.
+    /// Delegates to ObjectManager::drain_storage_noop().
+    pub fn drain_storage_noop(&mut self) {
+        self.object_manager.drain_storage_noop();
+    }
 }
 
 // ============================================================================

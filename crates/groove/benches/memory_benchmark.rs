@@ -9,8 +9,9 @@
 mod common;
 
 use common::{
-    TrackingAllocator, create_query_manager, create_session, current_timestamp,
-    document_plaintext_size, format_bytes, get_stats, reset_stats, setup_data,
+    MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator,
+    create_query_manager, create_session, current_timestamp, document_plaintext_size, format_bytes,
+    get_stats, reset_stats, setup_data,
 };
 use groove::query_manager::types::Value;
 
@@ -74,6 +75,10 @@ fn run_memory_benchmark(scale: usize) {
         after_setup.peak as f64 / total_plaintext as f64
     );
 
+    // Print memory breakdown
+    let breakdown = compute_memory_breakdown(&qm);
+    breakdown.print();
+
     // Now measure incremental insert overhead
     let folder_id = data.owned_folders[0];
     let insert_title = "Benchmark Insert Title";
@@ -100,6 +105,7 @@ fn run_memory_benchmark(scale: usize) {
             )
             .expect("insert");
         qm.process();
+        qm.drain_storage_noop();
     }
 
     let after_inserts = get_stats();
@@ -122,6 +128,7 @@ fn run_memory_benchmark(scale: usize) {
         .subscribe_with_session(query, Some(session.clone()))
         .expect("subscribe");
     qm.process();
+    qm.drain_storage_noop();
     let _ = qm.take_updates();
 
     let after_sub = get_stats();
@@ -149,4 +156,43 @@ fn run_memory_benchmark(scale: usize) {
         final_stats.current() as f64 / final_plaintext as f64,
         final_stats.peak as f64 / final_plaintext as f64
     );
+
+    // Final breakdown
+    println!("\nFinal memory breakdown:");
+    let final_breakdown = compute_memory_breakdown(&qm);
+    final_breakdown.print();
+}
+
+/// Compute memory breakdown from QueryManager.
+fn compute_memory_breakdown(qm: &groove::query_manager::QueryManager) -> MemoryBreakdown {
+    // Get ObjectManager memory breakdown via SyncManager
+    let (row_objects, index_objects, blobs, subscriptions, outbox_inbox, om_total) =
+        qm.sync_manager().object_manager.memory_size();
+
+    let object_manager = ObjectManagerMemory {
+        row_objects,
+        index_objects,
+        blobs,
+        subscriptions,
+        outbox_inbox,
+        total: om_total,
+    };
+
+    // Get QueryManager memory breakdown
+    let (indices, qm_subscriptions, policy_checks, qm_total) = qm.memory_size();
+
+    let query_manager = QueryManagerMemory {
+        indices,
+        subscriptions: qm_subscriptions,
+        policy_checks,
+        total: qm_total,
+    };
+
+    let total = om_total + qm_total;
+
+    MemoryBreakdown {
+        object_manager,
+        query_manager,
+        total,
+    }
 }

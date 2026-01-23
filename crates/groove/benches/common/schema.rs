@@ -147,6 +147,7 @@ pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> Benchma
             )
             .expect("insert team");
         qm.process();
+        qm.drain_storage_noop();
 
         if is_owned {
             owned_teams.push(handle.row_id);
@@ -175,6 +176,7 @@ pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> Benchma
             )
             .expect("insert folder");
         qm.process();
+        qm.drain_storage_noop();
 
         if team_idx < owned_team_count {
             owned_folders.push(handle.row_id);
@@ -215,6 +217,7 @@ pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> Benchma
             )
             .expect("insert document");
         qm.process();
+        qm.drain_storage_noop();
 
         all_documents.push(handle.row_id);
         if author == user_id {
