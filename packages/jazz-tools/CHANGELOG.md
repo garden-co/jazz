@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.20.4
+
+### Patch Changes
+
+- 0c749d9: Fixed infinite re-render loop when accessing unresolved nested CoValues in React hooks
+  - cojson@0.20.4
+  - cojson-storage-indexeddb@0.20.4
+  - cojson-transport-ws@0.20.4
+
 ## 0.20.3
 
 ### Patch Changes
