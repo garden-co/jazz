@@ -13,26 +13,17 @@ describe("CoJsonIDBTransaction", () => {
 
       request.onerror = () => reject(request.error);
 
-      request.onupgradeneeded = (event) => {
+      request.onupgradeneeded = () => {
         const db = request.result;
         // Create test stores
-        db.createObjectStore("coValues", { keyPath: "id" });
-        const sessions = db.createObjectStore("sessions", { keyPath: "id" });
-        sessions.createIndex("uniqueSessions", ["coValue", "sessionID"], {
-          unique: true,
-        });
+        db.createObjectStore("coValues2", { keyPath: "id" });
         db.createObjectStore("transactions", { keyPath: "id" });
-        db.createObjectStore("signatureAfter", { keyPath: "id" });
-        const deletedCoValues = db.createObjectStore("deletedCoValues", {
+        db.createObjectStore("deletedCoValues", {
           keyPath: "coValueID",
-        });
-        deletedCoValues.createIndex("deletedCoValuesByStatus", "status", {
-          unique: false,
         });
         const unsyncedCoValues = db.createObjectStore("unsyncedCoValues", {
           keyPath: "rowID",
         });
-        unsyncedCoValues.createIndex("byCoValueId", "coValueId");
         unsyncedCoValues.createIndex(
           "uniqueUnsyncedCoValues",
           ["coValueId", "peerId"],
@@ -64,7 +55,7 @@ describe("CoJsonIDBTransaction", () => {
 
     // Write test
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("coValues").put({
+      tx.getObjectStore("coValues2").put({
         id: "test1",
         value: "hello",
       }),
@@ -73,7 +64,7 @@ describe("CoJsonIDBTransaction", () => {
     // Read test
     const readTx = new CoJsonIDBTransaction(db);
     const result = await readTx.handleRequest((tx) =>
-      tx.getObjectStore("coValues").get("test1"),
+      tx.getObjectStore("coValues2").get("test1"),
     );
 
     expect(result).toEqual({
@@ -88,13 +79,13 @@ describe("CoJsonIDBTransaction", () => {
     // Multiple writes
     await Promise.all([
       tx.handleRequest((tx) =>
-        tx.getObjectStore("coValues").put({
+        tx.getObjectStore("coValues2").put({
           id: "test1",
           value: "hello",
         }),
       ),
       tx.handleRequest((tx) =>
-        tx.getObjectStore("coValues").put({
+        tx.getObjectStore("coValues2").put({
           id: "test2",
           value: "world",
         }),
@@ -104,8 +95,8 @@ describe("CoJsonIDBTransaction", () => {
     // Read results
     const readTx = new CoJsonIDBTransaction(db);
     const [result1, result2] = await Promise.all([
-      readTx.handleRequest((tx) => tx.getObjectStore("coValues").get("test1")),
-      readTx.handleRequest((tx) => tx.getObjectStore("coValues").get("test2")),
+      readTx.handleRequest((tx) => tx.getObjectStore("coValues2").get("test1")),
+      readTx.handleRequest((tx) => tx.getObjectStore("coValues2").get("test2")),
     ]);
 
     expect(result1).toEqual({
@@ -123,24 +114,26 @@ describe("CoJsonIDBTransaction", () => {
 
     await Promise.all([
       tx.handleRequest((tx) =>
-        tx.getObjectStore("coValues").put({
+        tx.getObjectStore("coValues2").put({
           id: "value1",
           data: "value data",
         }),
       ),
       tx.handleRequest((tx) =>
-        tx.getObjectStore("sessions").put({
-          id: "session1",
-          data: "session data",
+        tx.getObjectStore("transactions").put({
+          id: "transaction1",
+          data: "transaction data",
         }),
       ),
     ]);
 
     const readTx = new CoJsonIDBTransaction(db);
     const [valueResult, sessionResult] = await Promise.all([
-      readTx.handleRequest((tx) => tx.getObjectStore("coValues").get("value1")),
       readTx.handleRequest((tx) =>
-        tx.getObjectStore("sessions").get("session1"),
+        tx.getObjectStore("coValues2").get("value1"),
+      ),
+      readTx.handleRequest((tx) =>
+        tx.getObjectStore("transactions").get("transaction1"),
       ),
     ]);
 
@@ -149,35 +142,33 @@ describe("CoJsonIDBTransaction", () => {
       data: "value data",
     });
     expect(sessionResult).toEqual({
-      id: "session1",
-      data: "session data",
+      id: "transaction1",
+      data: "transaction data",
     });
   });
 
   test("handles failed transactions", async () => {
-    const tx = new CoJsonIDBTransaction(db);
+    const tx = new CoJsonIDBTransaction(db, ["unsyncedCoValues"]);
 
     await expect(
       tx.handleRequest((tx) =>
-        tx.getObjectStore("sessions").put({
-          id: 1,
-          coValue: "value1",
-          sessionID: "session1",
-          data: "session data",
+        tx.getObjectStore("unsyncedCoValues").put({
+          rowID: 1,
+          coValueId: "value1",
+          peerId: "peer1",
         }),
       ),
     ).resolves.toBe(1);
 
     expect(tx.failed).toBe(false);
 
-    const badTx = new CoJsonIDBTransaction(db);
+    const badTx = new CoJsonIDBTransaction(db, ["unsyncedCoValues"]);
     await expect(
       badTx.handleRequest((tx) =>
-        tx.getObjectStore("sessions").put({
-          id: 2,
-          coValue: "value1",
-          sessionID: "session1",
-          data: "session data",
+        tx.getObjectStore("unsyncedCoValues").put({
+          rowID: 2,
+          coValueId: "value1",
+          peerId: "peer1",
         }),
       ),
     ).rejects.toThrow();
@@ -186,18 +177,18 @@ describe("CoJsonIDBTransaction", () => {
   });
 
   test("transaction with custom stores only includes specified stores", async () => {
-    const tx = new CoJsonIDBTransaction(db, ["coValues", "sessions"]);
+    const tx = new CoJsonIDBTransaction(db, ["coValues2", "transactions"]);
 
     // Should work with included stores
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("coValues").put({
+      tx.getObjectStore("coValues2").put({
         id: "test1",
         value: "hello",
       }),
     );
 
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("sessions").put({
+      tx.getObjectStore("transactions").put({
         id: "session1",
         data: "session data",
       }),
@@ -206,9 +197,9 @@ describe("CoJsonIDBTransaction", () => {
     // Should fail when trying to access a store not included in transaction
     await expect(
       tx.handleRequest((tx) =>
-        tx.getObjectStore("transactions").put({
-          id: "tx1",
-          data: "tx data",
+        tx.getObjectStore("deletedCoValues").put({
+          id: "test1",
+          status: "pending",
         }),
       ),
     ).rejects.toThrow(
@@ -220,16 +211,9 @@ describe("CoJsonIDBTransaction", () => {
     const tx = new CoJsonIDBTransaction(db);
 
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("coValues").put({
+      tx.getObjectStore("coValues2").put({
         id: "test1",
         value: "hello",
-      }),
-    );
-
-    await tx.handleRequest((tx) =>
-      tx.getObjectStore("sessions").put({
-        id: "session1",
-        data: "session data",
       }),
     );
 
@@ -241,9 +225,9 @@ describe("CoJsonIDBTransaction", () => {
     );
 
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("signatureAfter").put({
-        id: "sig1",
-        data: "sig data",
+      tx.getObjectStore("deletedCoValues").put({
+        coValueID: "test1",
+        status: "pending",
       }),
     );
 
