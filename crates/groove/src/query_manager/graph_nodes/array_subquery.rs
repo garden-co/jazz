@@ -5,8 +5,7 @@
 //! chosen over shared hash indices to explore subgraph patterns and collect
 //! learnings for future optimizations.
 
-use ahash::AHashSet;
-use std::collections::HashMap;
+use ahash::{AHashMap, AHashSet};
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -65,7 +64,7 @@ pub struct ArraySubqueryNode {
     /// Per-outer-row state: outer_id → (correlation_value, array_result).
     /// We store the array result directly rather than SubgraphInstances
     /// since we evaluate synchronously during process().
-    instances: HashMap<ObjectId, (Value, Value)>,
+    instances: AHashMap<ObjectId, (Value, Value)>,
 
     /// Current output tuples.
     current_tuples: AHashSet<Tuple>,
@@ -119,7 +118,7 @@ impl ArraySubqueryNode {
             schema,
             outer_correlation_col,
             array_column_name,
-            instances: HashMap::new(),
+            instances: AHashMap::new(),
             current_tuples: AHashSet::new(),
             dirty: true,
             inner_dirty: false,
@@ -140,7 +139,7 @@ impl ArraySubqueryNode {
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -248,7 +247,7 @@ impl ArraySubqueryNode {
     fn evaluate_subgraph(
         &self,
         correlation_value: &Value,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> Value {
@@ -308,7 +307,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(
         &mut self,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta
@@ -425,7 +424,7 @@ mod tests {
     use crate::query_manager::types::TableName;
 
     fn test_schema() -> Schema {
-        let mut schema = HashMap::new();
+        let mut schema = Schema::new();
         schema.insert(
             TableName::new("users"),
             RowDescriptor::new(vec![

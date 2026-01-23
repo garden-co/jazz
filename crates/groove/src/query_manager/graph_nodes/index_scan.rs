@@ -141,9 +141,9 @@ mod tests {
     use super::*;
     use crate::query_manager::index::BTreeIndex;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
-    use std::collections::HashMap;
+    use ahash::AHashMap;
 
-    fn make_ctx(indices: &HashMap<(String, String), BTreeIndex>) -> SourceContext<'_> {
+    fn make_ctx(indices: &AHashMap<(String, String), BTreeIndex>) -> SourceContext<'_> {
         SourceContext { indices }
     }
 
@@ -171,7 +171,7 @@ mod tests {
         index.insert(row2.uuid().as_bytes(), row2).unwrap();
         index.insert(row3.uuid().as_bytes(), row3).unwrap();
 
-        let mut indices = HashMap::new();
+        let mut indices = AHashMap::new();
         indices.insert(("users".to_string(), "_id".to_string()), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
@@ -195,7 +195,7 @@ mod tests {
         index.insert(b"alice@example.com", row1).unwrap();
         index.insert(b"bob@example.com", row2).unwrap();
 
-        let mut indices = HashMap::new();
+        let mut indices = AHashMap::new();
         indices.insert(("users".to_string(), "email".to_string()), index);
 
         let mut node = IndexScanNode::new(
@@ -223,7 +223,7 @@ mod tests {
         index.insert(&20i32.to_le_bytes(), row2).unwrap();
         index.insert(&30i32.to_le_bytes(), row3).unwrap();
 
-        let mut indices = HashMap::new();
+        let mut indices = AHashMap::new();
         indices.insert(("users".to_string(), "score".to_string()), index);
 
         let mut node = IndexScanNode::new(
@@ -251,7 +251,7 @@ mod tests {
 
         index.insert(row1.uuid().as_bytes(), row1).unwrap();
 
-        let mut indices = HashMap::new();
+        let mut indices = AHashMap::new();
         indices.insert(("users".to_string(), "_id".to_string()), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
