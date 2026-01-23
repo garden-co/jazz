@@ -3,7 +3,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build", "build:generate-docs"],
-      "outputs": [".next/**", "!.next/cache/**"],
+      "outputs": [".next/**", "!.next/cache/**", "content/docs/code-snippets/**/tsconfig.json"],
       "env": ["GRAFANA_SERVICE_ACCOUNT"]
     },
     "build:generate-docs": {
