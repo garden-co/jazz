@@ -1176,6 +1176,14 @@ impl QueryManager {
                 });
             }
         }
+
+        // 8. Clear index deltas after all subscriptions have settled
+        // This increments the epoch so the next process() cycle uses fresh deltas
+        for index in self.indices.values_mut() {
+            if index.has_deltas() {
+                index.clear_deltas();
+            }
+        }
     }
 
     /// Pick up pending permission checks from SyncManager and evaluate them.

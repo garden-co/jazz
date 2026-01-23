@@ -1,26 +1,12 @@
 use ahash::AHashSet;
-use std::ops::Bound;
 
 use crate::object::ObjectId;
+use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
     ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 use super::{SourceContext, SourceNode};
-
-/// Condition for index scan.
-#[derive(Debug, Clone)]
-pub enum ScanCondition {
-    /// No condition - scan all entries (uses "_id" index).
-    All,
-    /// Exact match on key.
-    Eq(Vec<u8>),
-    /// Range scan with bounds (inclusive, exclusive, or unbounded).
-    Range {
-        min: Bound<Vec<u8>>,
-        max: Bound<Vec<u8>>,
-    },
-}
 
 /// Source node that scans an index.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
@@ -41,6 +27,9 @@ pub struct IndexScanNode {
     last_scanned_ids: AHashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
+
+    /// Last delta epoch processed (None = never scanned, uses slow path).
+    last_delta_epoch: Option<u64>,
 }
 
 impl IndexScanNode {
@@ -68,6 +57,7 @@ impl IndexScanNode {
             current_tuples: AHashSet::new(),
             last_scanned_ids: AHashSet::new(),
             dirty: true,
+            last_delta_epoch: None,
         }
     }
 
@@ -83,35 +73,78 @@ impl SourceNode for IndexScanNode {
             self.table.as_str().to_string(),
             self.column.as_str().to_string(),
         );
-        let new_ids: AHashSet<ObjectId> = if let Some(index) = ctx.indices.get(&key) {
-            match &self.condition {
+
+        let Some(index) = ctx.indices.get(&key) else {
+            self.dirty = false;
+            return TupleDelta::new();
+        };
+
+        // Check if we can use the fast path (incremental deltas)
+        // Requirements:
+        // 1. We've done at least one scan (last_delta_epoch is Some)
+        // 2. The epoch matches (no deltas were cleared since our last scan)
+        let can_use_deltas =
+            self.last_delta_epoch == Some(index.delta_epoch()) && self.last_delta_epoch.is_some();
+
+        let (added, removed) = if can_use_deltas {
+            // FAST PATH: Use deltas directly from the index
+            let (delta_added, delta_removed) = index.get_deltas(&self.condition);
+
+            // Filter to only IDs not already tracked (avoid double-counting)
+            let added_ids: Vec<ObjectId> = delta_added
+                .into_iter()
+                .filter(|id| !self.last_scanned_ids.contains(id))
+                .collect();
+            let removed_ids: Vec<ObjectId> = delta_removed
+                .into_iter()
+                .filter(|id| self.last_scanned_ids.contains(id))
+                .collect();
+
+            // Update state incrementally
+            for &id in &added_ids {
+                self.last_scanned_ids.insert(id);
+                self.current_tuples.insert(Tuple::from_id(id));
+            }
+            for &id in &removed_ids {
+                self.last_scanned_ids.remove(&id);
+                self.current_tuples.remove(&Tuple::from_id(id));
+            }
+
+            (added_ids, removed_ids)
+        } else {
+            // SLOW PATH: Full scan (first scan or epoch mismatch)
+            let new_ids: AHashSet<ObjectId> = match &self.condition {
                 ScanCondition::All => index.scan_all().into_iter().collect(),
                 ScanCondition::Eq(k) => index.lookup_exact(k).into_iter().collect(),
                 ScanCondition::Range { min, max } => {
                     index.range_scan(min, max).into_iter().collect()
                 }
-            }
-        } else {
-            AHashSet::new()
+            };
+
+            let added: Vec<ObjectId> = new_ids
+                .difference(&self.last_scanned_ids)
+                .copied()
+                .collect();
+            let removed: Vec<ObjectId> = self
+                .last_scanned_ids
+                .difference(&new_ids)
+                .copied()
+                .collect();
+
+            // Update state
+            self.last_scanned_ids = new_ids;
+            self.current_tuples = self
+                .last_scanned_ids
+                .iter()
+                .map(|&id| Tuple::from_id(id))
+                .collect();
+
+            // Record the epoch so we can use fast path next time
+            self.last_delta_epoch = Some(index.delta_epoch());
+
+            (added, removed)
         };
 
-        let added: AHashSet<ObjectId> = new_ids
-            .difference(&self.last_scanned_ids)
-            .copied()
-            .collect();
-        let removed: AHashSet<ObjectId> = self
-            .last_scanned_ids
-            .difference(&new_ids)
-            .copied()
-            .collect();
-
-        // Update state
-        self.last_scanned_ids = new_ids;
-        self.current_tuples = self
-            .last_scanned_ids
-            .iter()
-            .map(|&id| Tuple::from_id(id))
-            .collect();
         self.dirty = false;
 
         // Return TupleDelta with length-1 tuples
@@ -142,6 +175,7 @@ mod tests {
     use crate::query_manager::index::BTreeIndex;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
     use ahash::AHashMap;
+    use std::ops::Bound;
 
     fn make_ctx(indices: &AHashMap<(String, String), BTreeIndex>) -> SourceContext<'_> {
         SourceContext { indices }
@@ -260,6 +294,12 @@ mod tests {
         assert_eq!(delta1.added.len(), 1);
         assert!(contains_id(&delta1.added, row1));
 
+        // Simulate end of process cycle: clear deltas
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .clear_deltas();
+
         // Add another row
         indices
             .get_mut(&("users".to_string(), "_id".to_string()))
@@ -271,6 +311,12 @@ mod tests {
         assert_eq!(delta2.added.len(), 1);
         assert!(contains_id(&delta2.added, row2));
         assert!(delta2.removed.is_empty());
+
+        // Simulate end of process cycle: clear deltas
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .clear_deltas();
 
         // Remove first row
         indices
@@ -294,5 +340,133 @@ mod tests {
         // Should be single element, unmaterialized
         assert_eq!(output.element_count(), 1);
         assert!(!output.materialization().is_materialized(0));
+    }
+
+    // ========================================================================
+    // Delta/incremental scan tests
+    // ========================================================================
+
+    #[test]
+    fn full_scan_on_first_call() {
+        let mut index = BTreeIndex::new("users", "_id");
+        index.process_meta_load(None);
+        let row1 = ObjectId::new();
+        index.insert(row1.uuid().as_bytes(), row1).unwrap();
+
+        let mut indices = AHashMap::new();
+        indices.insert(("users".to_string(), "_id".to_string()), index);
+
+        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
+
+        // First scan should use slow path (last_delta_epoch is None)
+        assert!(node.last_delta_epoch.is_none());
+
+        let ctx = make_ctx(&indices);
+        let delta = node.scan(&ctx);
+
+        // After first scan, epoch should be recorded
+        assert!(node.last_delta_epoch.is_some());
+        assert_eq!(delta.added.len(), 1);
+        assert!(contains_id(&delta.added, row1));
+    }
+
+    #[test]
+    fn incremental_scan_uses_deltas() {
+        // Test the fast path: multiple inserts within ONE process cycle (before clear_deltas)
+        let mut index = BTreeIndex::new("users", "_id");
+        index.process_meta_load(None);
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        let row3 = ObjectId::new();
+
+        // Insert first row
+        index.insert(row1.uuid().as_bytes(), row1).unwrap();
+
+        let mut indices = AHashMap::new();
+        indices.insert(("users".to_string(), "_id".to_string()), index);
+
+        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
+        let ctx = make_ctx(&indices);
+
+        // First scan (slow path - no prior epoch recorded)
+        let delta1 = node.scan(&ctx);
+        assert_eq!(delta1.added.len(), 1);
+        assert!(contains_id(&delta1.added, row1));
+
+        // Insert more rows WITHOUT clearing deltas (same process cycle)
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .insert(row2.uuid().as_bytes(), row2)
+            .unwrap();
+
+        // Second scan uses fast path: epochs match, deltas available
+        let ctx = make_ctx(&indices);
+        let delta2 = node.scan(&ctx);
+
+        // Fast path sees row1 (still in deltas) AND row2
+        // But row1 is already in last_scanned_ids, so only row2 is "added"
+        assert_eq!(delta2.added.len(), 1);
+        assert!(contains_id(&delta2.added, row2));
+
+        // Insert third row (still same epoch, no clear)
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .insert(row3.uuid().as_bytes(), row3)
+            .unwrap();
+
+        // Third scan also uses fast path
+        let ctx = make_ctx(&indices);
+        let delta3 = node.scan(&ctx);
+
+        // Only row3 is new
+        assert_eq!(delta3.added.len(), 1);
+        assert!(contains_id(&delta3.added, row3));
+    }
+
+    #[test]
+    fn full_scan_on_epoch_mismatch() {
+        let mut index = BTreeIndex::new("users", "_id");
+        index.process_meta_load(None);
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        index.insert(row1.uuid().as_bytes(), row1).unwrap();
+
+        let mut indices = AHashMap::new();
+        indices.insert(("users".to_string(), "_id".to_string()), index);
+
+        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
+        let ctx = make_ctx(&indices);
+
+        // First scan
+        let delta1 = node.scan(&ctx);
+        assert_eq!(delta1.added.len(), 1);
+        let initial_epoch = node.last_delta_epoch;
+        assert_eq!(initial_epoch, Some(0));
+
+        // Clear deltas (simulating end of process cycle) - increments epoch
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .clear_deltas();
+
+        // Insert new row at new epoch
+        indices
+            .get_mut(&("users".to_string(), "_id".to_string()))
+            .unwrap()
+            .insert(row2.uuid().as_bytes(), row2)
+            .unwrap();
+
+        // Scan with mismatched epoch - should fallback to slow path
+        let ctx = make_ctx(&indices);
+        let delta2 = node.scan(&ctx);
+
+        // Node's epoch should be updated to new epoch
+        assert_eq!(node.last_delta_epoch, Some(1));
+
+        // Should detect the new row via full scan
+        assert_eq!(delta2.added.len(), 1);
+        assert!(contains_id(&delta2.added, row2));
     }
 }

@@ -14,6 +14,7 @@ use std::ops::Bound;
 use crate::object::ObjectId;
 use crate::storage::StorageRequest;
 
+use super::ScanCondition;
 use super::btree_page::{BTreePage, IndexMeta, LeafEntry, PageId};
 
 /// Maximum entries per leaf page before splitting.
@@ -73,6 +74,18 @@ pub struct BTreeIndex {
 
     /// Pending storage requests to emit.
     pending_requests: Vec<StorageRequest>,
+
+    // ========================================================================
+    // Delta tracking for push-based notifications
+    // ========================================================================
+    /// Recent inserts since last delta clear: (key, row_id)
+    recent_inserts: Vec<(Vec<u8>, ObjectId)>,
+
+    /// Recent deletes since last delta clear: (key, row_id)
+    recent_deletes: Vec<(Vec<u8>, ObjectId)>,
+
+    /// Epoch counter - incremented when deltas cleared
+    delta_epoch: u64,
 }
 
 impl BTreeIndex {
@@ -88,6 +101,9 @@ impl BTreeIndex {
             dirty_pages: HashSet::new(),
             deleted_pages: HashSet::new(),
             pending_requests: Vec::new(),
+            recent_inserts: Vec::new(),
+            recent_deletes: Vec::new(),
+            delta_epoch: 0,
         }
     }
 
@@ -258,6 +274,8 @@ impl BTreeIndex {
             Ok(()) => {
                 self.meta.entry_count += 1;
                 self.meta_dirty = true;
+                // Record delta for push-based notifications
+                self.recent_inserts.push((key.to_vec(), row_id));
                 Ok(true)
             }
             Err(IndexError::PageNotLoaded(page_id)) => {
@@ -278,9 +296,13 @@ impl BTreeIndex {
 
         match self.remove_from_tree(key, row_id) {
             Ok(removed) => {
-                if removed && self.meta.entry_count > 0 {
-                    self.meta.entry_count -= 1;
-                    self.meta_dirty = true;
+                if removed {
+                    if self.meta.entry_count > 0 {
+                        self.meta.entry_count -= 1;
+                        self.meta_dirty = true;
+                    }
+                    // Record delta for push-based notifications
+                    self.recent_deletes.push((key.to_vec(), row_id));
                 }
                 Ok(())
             }
@@ -392,6 +414,10 @@ impl BTreeIndex {
         self.dirty_pages.clear();
         self.deleted_pages.clear();
         self.pending_requests.clear();
+        // Reset delta tracking
+        self.recent_inserts.clear();
+        self.recent_deletes.clear();
+        self.delta_epoch = 0;
         // Queue a meta load request
         self.ensure_meta_loading();
     }
@@ -417,6 +443,70 @@ impl BTreeIndex {
         size += self.deleted_pages.capacity() * std::mem::size_of::<PageId>();
 
         size
+    }
+
+    // ========================================================================
+    // Delta tracking for push-based notifications
+    // ========================================================================
+
+    /// Get deltas filtered by scan condition.
+    ///
+    /// Returns (added_ids, removed_ids) for entries matching the condition.
+    pub fn get_deltas(&self, condition: &ScanCondition) -> (Vec<ObjectId>, Vec<ObjectId>) {
+        let filter = |key: &[u8]| -> bool {
+            match condition {
+                ScanCondition::All => true,
+                ScanCondition::Eq(eq_key) => key == eq_key.as_slice(),
+                ScanCondition::Range { min, max } => {
+                    let min_ok = match min {
+                        Bound::Included(min_key) => key >= min_key.as_slice(),
+                        Bound::Excluded(min_key) => key > min_key.as_slice(),
+                        Bound::Unbounded => true,
+                    };
+                    let max_ok = match max {
+                        Bound::Included(max_key) => key <= max_key.as_slice(),
+                        Bound::Excluded(max_key) => key < max_key.as_slice(),
+                        Bound::Unbounded => true,
+                    };
+                    min_ok && max_ok
+                }
+            }
+        };
+
+        let added: Vec<ObjectId> = self
+            .recent_inserts
+            .iter()
+            .filter(|(key, _)| filter(key))
+            .map(|(_, id)| *id)
+            .collect();
+
+        let removed: Vec<ObjectId> = self
+            .recent_deletes
+            .iter()
+            .filter(|(key, _)| filter(key))
+            .map(|(_, id)| *id)
+            .collect();
+
+        (added, removed)
+    }
+
+    /// Check if any deltas exist.
+    pub fn has_deltas(&self) -> bool {
+        !self.recent_inserts.is_empty() || !self.recent_deletes.is_empty()
+    }
+
+    /// Get current delta epoch.
+    pub fn delta_epoch(&self) -> u64 {
+        self.delta_epoch
+    }
+
+    /// Clear deltas and increment epoch.
+    ///
+    /// Called after all subscriptions have settled in a process() cycle.
+    pub fn clear_deltas(&mut self) {
+        self.recent_inserts.clear();
+        self.recent_deletes.clear();
+        self.delta_epoch += 1;
     }
 
     // ========================================================================
@@ -853,5 +943,117 @@ mod tests {
         // Scan all should return them all
         let all = index.scan_all();
         assert_eq!(all.len(), 100);
+    }
+
+    // ========================================================================
+    // Delta tracking tests
+    // ========================================================================
+
+    #[test]
+    fn delta_tracking_on_insert() {
+        let mut index = BTreeIndex::new("users", "email");
+        index.process_meta_load(None);
+
+        assert!(!index.has_deltas());
+        assert_eq!(index.delta_epoch(), 0);
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        index.insert(b"alice@example.com", row1).unwrap();
+        index.insert(b"bob@example.com", row2).unwrap();
+
+        assert!(index.has_deltas());
+        let (added, removed) = index.get_deltas(&ScanCondition::All);
+        assert_eq!(added.len(), 2);
+        assert!(added.contains(&row1));
+        assert!(added.contains(&row2));
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn delta_tracking_on_remove() {
+        let mut index = BTreeIndex::new("users", "email");
+        index.process_meta_load(None);
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        index.insert(b"alice@example.com", row1).unwrap();
+        index.insert(b"bob@example.com", row2).unwrap();
+
+        // Clear the insert deltas
+        index.clear_deltas();
+        assert!(!index.has_deltas());
+
+        // Now remove one row
+        index.remove(b"alice@example.com", row1).unwrap();
+
+        assert!(index.has_deltas());
+        let (added, removed) = index.get_deltas(&ScanCondition::All);
+        assert!(added.is_empty());
+        assert_eq!(removed.len(), 1);
+        assert!(removed.contains(&row1));
+    }
+
+    #[test]
+    fn delta_filtering_by_eq() {
+        let mut index = BTreeIndex::new("users", "email");
+        index.process_meta_load(None);
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        index.insert(b"alice@example.com", row1).unwrap();
+        index.insert(b"bob@example.com", row2).unwrap();
+
+        // Filter by exact match
+        let (added, _) = index.get_deltas(&ScanCondition::Eq(b"alice@example.com".to_vec()));
+        assert_eq!(added.len(), 1);
+        assert!(added.contains(&row1));
+
+        // Different key - no matches
+        let (added, _) = index.get_deltas(&ScanCondition::Eq(b"charlie@example.com".to_vec()));
+        assert!(added.is_empty());
+    }
+
+    #[test]
+    fn delta_filtering_by_range() {
+        let mut index = BTreeIndex::new("users", "score");
+        index.process_meta_load(None);
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        let row3 = ObjectId::new();
+        index.insert(&10i32.to_le_bytes(), row1).unwrap();
+        index.insert(&20i32.to_le_bytes(), row2).unwrap();
+        index.insert(&30i32.to_le_bytes(), row3).unwrap();
+
+        // Range [15, 25] should only include row2 (score=20)
+        let (added, _) = index.get_deltas(&ScanCondition::Range {
+            min: Bound::Included(15i32.to_le_bytes().to_vec()),
+            max: Bound::Included(25i32.to_le_bytes().to_vec()),
+        });
+        assert_eq!(added.len(), 1);
+        assert!(added.contains(&row2));
+    }
+
+    #[test]
+    fn clear_deltas_increments_epoch() {
+        let mut index = BTreeIndex::new("users", "email");
+        index.process_meta_load(None);
+
+        assert_eq!(index.delta_epoch(), 0);
+
+        let row = ObjectId::new();
+        index.insert(b"test@example.com", row).unwrap();
+
+        assert!(index.has_deltas());
+        index.clear_deltas();
+
+        assert!(!index.has_deltas());
+        assert_eq!(index.delta_epoch(), 1);
+
+        // Insert more and clear again
+        index.insert(b"test2@example.com", ObjectId::new()).unwrap();
+        index.clear_deltas();
+        assert_eq!(index.delta_epoch(), 2);
     }
 }
