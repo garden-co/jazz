@@ -1229,3 +1229,48 @@ Self-referential INHERITS (e.g., folders with `parent_id` referencing the same `
 - `rebac_inherits_self_reference_allowed` - Basic self-referential INHERITS
 - `rebac_inherits_deep_hierarchy` - Deep folder hierarchy (depth limit)
 - `rebac_inherits_runtime_cycle` - Data cycle (A→B→A in parent_id)
+
+#### Followup 15: UPDATE with INHERITS Policy Chain (High Priority)
+
+**Problem:** UPDATE operations fail with `PolicyDenied` even when the INHERITS chain should grant access.
+
+**Reproduction scenario:**
+- User has access to a folder via INHERITS (folder → team → user membership)
+- Documents in that folder are authored by a different user
+- UPDATE policy: `USING: author_id = @user_id OR INHERITS SELECT VIA folder_id`
+- Expected: User can update documents in accessible folders (via INHERITS)
+- Actual: `PolicyDenied` error
+
+**Root cause (likely):**
+The UPDATE USING policy evaluation for INHERITS may not be properly wiring up the policy graph evaluation, or the INHERITS chain traversal isn't correctly checking the folder→team→user path during UPDATE operations.
+
+**Discovered in:** `update_benchmark.rs::update_team_documents` benchmark
+
+**To investigate:**
+1. Trace the INHERITS evaluation path in `evaluate_update_permission()`
+2. Verify PolicyGraph is correctly instantiated for UPDATE USING with INHERITS
+3. Check if the issue is specific to UPDATE or also affects DELETE with INHERITS
+
+#### Followup 16: ORDER BY + LIMIT Subscriptions Not Receiving Updates (High Priority)
+
+**Problem:** Subscriptions with `ORDER BY ... LIMIT N` do not receive incremental updates when new rows are inserted that should appear in the top N results.
+
+**Reproduction scenario:**
+- Subscribe to `documents ORDER BY created_at DESC LIMIT 50`
+- Insert a document with a timestamp that would place it in the top 50
+- Expected: Subscription receives update delta with the new row (and possibly removal of row #51)
+- Actual: No subscription update received
+
+**Root cause (likely):**
+The LimitOffsetNode may not be correctly handling deltas where:
+1. A new row is added that displaces an existing row from the window
+2. The node needs to emit both an addition (new row in window) and removal (row pushed out of window)
+
+The current implementation may only track absolute position rather than relative ordering, causing it to miss updates that affect the bounded result set.
+
+**Discovered in:** `subscription_benchmark.rs::complex_query_latency` benchmark
+
+**To investigate:**
+1. Check `LimitOffsetNode::process()` logic for handling additions to sorted, limited sets
+2. Verify SortNode upstream is emitting correct deltas
+3. Consider if a dedicated "TopN" node is needed for efficient bounded result tracking
