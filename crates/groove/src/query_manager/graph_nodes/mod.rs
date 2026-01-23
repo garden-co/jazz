@@ -18,13 +18,20 @@ use ahash::{AHashMap, AHashSet};
 use super::index::BTreeIndex;
 use super::types::{RowDescriptor, Tuple, TupleDelta};
 
+/// Index key type: (table, column, branch).
+/// Each branch maintains its own set of indices.
+pub type IndexKey = (String, String, String);
+
+/// Type alias for the indices map.
+pub type IndicesMap = AHashMap<IndexKey, BTreeIndex>;
+
 /// Unique identifier for a node in the query graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
 
 /// Context for source nodes that need external data.
 pub struct SourceContext<'a> {
-    pub indices: &'a AHashMap<(String, String), BTreeIndex>,
+    pub indices: &'a IndicesMap,
 }
 
 // ============================================================================

@@ -23,8 +23,7 @@ use super::graph_nodes::project::ProjectNode;
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
-use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
-use super::index::BTreeIndex;
+use super::graph_nodes::{IndicesMap, NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::query::{Condition, Query};
 use super::session::Session;
@@ -192,52 +191,64 @@ impl QueryGraph {
         let select_policy = table_schema.policies.select.using.clone();
         let mut graph = QueryGraph::new(query.table, descriptor.clone());
 
-        // Phase 1: Build IndexScan nodes (one per disjunct)
+        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
+        // For multi-branch queries, we create scans for each branch and union them
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
         let mut index_columns: Vec<String> = Vec::new();
 
-        for disjunct in &query.disjuncts {
-            // Find best index condition for this disjunct
-            let (scan_column, scan_condition) = if let Some(cond) = disjunct.best_index_condition()
-            {
-                let column = cond.column().to_string();
-                let scan_cond = condition_to_scan(cond);
-                (column, scan_cond)
-            } else {
-                // No index condition, use "_id" for full scan
-                ("_id".to_string(), ScanCondition::All)
-            };
+        // Get branches (default to "main" if not specified)
+        let branches: &[String] = if query.branches.is_empty() {
+            &["main".to_string()]
+        } else {
+            &query.branches
+        };
 
-            index_columns.push(scan_column.clone());
-            let scan_column_name = ColumnName::new(&scan_column);
+        for branch in branches {
+            for disjunct in &query.disjuncts {
+                // Find best index condition for this disjunct
+                let (scan_column, scan_condition) =
+                    if let Some(cond) = disjunct.best_index_condition() {
+                        let column = cond.column().to_string();
+                        let scan_cond = condition_to_scan(cond);
+                        (column, scan_cond)
+                    } else {
+                        // No index condition, use "_id" for full scan
+                        ("_id".to_string(), ScanCondition::All)
+                    };
 
-            let scan_node = IndexScanNode::new(
-                query.table,
-                scan_column_name,
-                scan_condition,
-                descriptor.clone(),
-            );
-            let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
-            graph
-                .index_scan_nodes
-                .push((scan_id, query.table, scan_column_name));
-            phase1_outputs.push(scan_id);
-        }
+                index_columns.push(scan_column.clone());
+                let scan_column_name = ColumnName::new(&scan_column);
 
-        // If include_deleted is set, also scan _id_deleted index
-        if query.include_deleted {
-            let deleted_column = ColumnName::new("_id_deleted");
-            let deleted_scan_node = IndexScanNode::new(
-                query.table,
-                deleted_column,
-                ScanCondition::All,
-                descriptor.clone(),
-            );
-            let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
-            graph
-                .index_scan_nodes
-                .push((deleted_scan_id, query.table, deleted_column));
-            phase1_outputs.push(deleted_scan_id);
+                let scan_node = IndexScanNode::new_with_branch(
+                    query.table,
+                    scan_column_name,
+                    branch,
+                    scan_condition,
+                    descriptor.clone(),
+                );
+                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((scan_id, query.table, scan_column_name));
+                phase1_outputs.push(scan_id);
+            }
+
+            // If include_deleted is set, also scan _id_deleted index for this branch
+            if query.include_deleted {
+                let deleted_column = ColumnName::new("_id_deleted");
+                let deleted_scan_node = IndexScanNode::new_with_branch(
+                    query.table,
+                    deleted_column,
+                    branch,
+                    ScanCondition::All,
+                    descriptor.clone(),
+                );
+                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((deleted_scan_id, query.table, deleted_column));
+                phase1_outputs.push(deleted_scan_id);
+            }
         }
 
         // If multiple disjuncts (or include_deleted), add Union node
@@ -287,7 +298,7 @@ impl QueryGraph {
         // Array subqueries: insert ArraySubqueryNode for each array subquery
         for subquery_spec in &query.array_subqueries {
             if let Some((node, new_descriptor)) =
-                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema)
+                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, branches)
             {
                 let node_id = graph.add_node(GraphNode::ArraySubquery(node));
                 graph.add_edge(node_id, phase2_input);
@@ -356,6 +367,7 @@ impl QueryGraph {
         spec: &crate::query_manager::query::ArraySubquerySpec,
         outer_descriptor: &RowDescriptor,
         schema: &Schema,
+        branches: &[String],
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
         let inner_descriptor = schema.get(&spec.table)?.descriptor.clone();
@@ -369,8 +381,9 @@ impl QueryGraph {
             .unwrap_or(&spec.outer_column);
         let outer_correlation_col = outer_descriptor.column_index(outer_col_name)?;
 
-        // Build base query for subgraph
+        // Build base query for subgraph, inheriting branches from outer query
         let mut base_query = Query::new(spec.table);
+        base_query.branches = branches.to_vec();
         base_query.joins = spec.joins.clone();
         for condition in &spec.filters {
             base_query.disjuncts[0].conditions.push(condition.clone());
@@ -493,15 +506,21 @@ impl QueryGraph {
         let base_descriptor = base_table_schema.descriptor.clone();
         let mut graph = QueryGraph::new(query.table, base_descriptor.clone());
 
+        // Get branches (default to "main" if not specified)
+        // For joins, we use the first branch only for now
+        // TODO: Support multi-branch joins with LWW merge
+        let branch = query.branches.first().map(|s| s.as_str()).unwrap_or("main");
+
         // Track all table names and descriptors for TupleDescriptor
         let mut table_names = vec![query.table.as_str().to_string()];
         let mut table_descriptors = vec![base_descriptor.clone()];
 
         // Build pipeline for base table: IndexScan → Materialize
         let id_column = ColumnName::new("_id");
-        let base_scan = IndexScanNode::new(
+        let base_scan = IndexScanNode::new_with_branch(
             query.table,
             id_column,
+            branch,
             ScanCondition::All,
             base_descriptor.clone(),
         );
@@ -524,10 +543,11 @@ impl QueryGraph {
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.descriptor.clone();
 
-            // Build pipeline for right table: IndexScan → Materialize
-            let right_scan = IndexScanNode::new(
+            // Build pipeline for right table: IndexScan → Materialize (same branch)
+            let right_scan = IndexScanNode::new_with_branch(
                 join_spec.table,
                 id_column,
+                branch,
                 ScanCondition::All,
                 right_descriptor.clone(),
             );
@@ -868,7 +888,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(
         &mut self,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> RowDelta

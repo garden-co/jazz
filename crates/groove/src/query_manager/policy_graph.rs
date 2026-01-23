@@ -3,20 +3,17 @@
 //! Creates minimal query graphs to evaluate policy conditions like USING and INHERITS.
 //! These graphs are throwaway - created, settled until complete, then discarded.
 
-use ahash::AHashMap;
-
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
 
 use super::encoding::encode_value;
 use super::graph::{GraphNode, QueryGraph};
-use super::graph_nodes::NodeId;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::PolicyFilterNode;
-use super::index::BTreeIndex;
+use super::graph_nodes::{IndicesMap, NodeId};
 use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
@@ -174,7 +171,7 @@ impl PolicyGraph {
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -332,7 +329,7 @@ mod tests {
 
         // With no actual data in the indices/om, the scan will return no rows
         let om = ObjectManager::new();
-        let indices: AHashMap<(String, String), BTreeIndex> = AHashMap::new();
+        let indices: IndicesMap = IndicesMap::default();
 
         // Row loader returns None for all IDs (no data)
         let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };
