@@ -10,7 +10,7 @@ import {
   logger,
 } from "../exports.js";
 import { StoreQueue } from "../queue/StoreQueue.js";
-import { NewContentMessage, SessionNewContent, type PeerID } from "../sync.js";
+import { NewContentMessage, type PeerID } from "../sync.js";
 import {
   CoValueKnownState,
   emptyKnownState,
@@ -338,7 +338,7 @@ export class StorageApiAsync implements StorageAPI {
 
     const id = msg.id;
     const storedCoValueRow = await this.dbClient.getCoValueRow(id);
-    const coValueRow = getUpdatedCoValueRow(storedCoValueRow, msg);
+    const coValueRow = applyNewContent(storedCoValueRow, msg);
 
     if (!coValueRow) {
       const knownState = emptyKnownState(id as RawCoID);
@@ -450,7 +450,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 }
 
-function getUpdatedCoValueRow(
+function applyNewContent(
   storedCoValueRow: StoredNewCoValueRow | undefined,
   msg: NewContentMessage,
 ): CoValueUpdate | undefined {

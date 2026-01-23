@@ -408,9 +408,6 @@ test("should recover from data loss", async () => {
 
   await new Promise((resolve) => setTimeout(resolve, 200));
 
-  const knownState = storage.getKnownState(map.id);
-  Object.assign(knownState, map.core.knownState());
-
   mock.mockReset();
 
   map.set("3", 3);
