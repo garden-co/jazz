@@ -45,10 +45,10 @@ impl ProjectNode {
             if let Some(src_idx) = input_descriptor.column_index(col_name) {
                 let col = &input_descriptor.columns[src_idx];
                 output_columns.push(ColumnDescriptor {
-                    name: col.name.clone(),
+                    name: col.name,
                     column_type: col.column_type.clone(),
                     nullable: col.nullable,
-                    references: col.references.clone(),
+                    references: col.references,
                 });
                 column_mapping.push((src_idx, dst_idx));
             }
@@ -84,10 +84,10 @@ impl ProjectNode {
             if let Some(src_idx) = input_descriptor.column_index(col_name) {
                 let col = &input_descriptor.columns[src_idx];
                 output_columns.push(ColumnDescriptor {
-                    name: col.name.clone(),
+                    name: col.name,
                     column_type: col.column_type.clone(),
                     nullable: col.nullable,
-                    references: col.references.clone(),
+                    references: col.references,
                 });
                 column_mapping.push((src_idx, dst_idx));
             }

@@ -183,24 +183,27 @@ impl QueryManager {
         // Initialize indices for all tables
         let mut indices = HashMap::new();
         for (table_name, table_schema) in &schema {
+            let table_str = table_name.as_str();
+
             // Primary "_id" index (for live rows)
-            let mut id_index = BTreeIndex::new(&table_name.0, "_id");
+            let mut id_index = BTreeIndex::new(table_str, "_id");
             id_index.process_meta_load(None); // Initialize empty
-            indices.insert((table_name.0.clone(), "_id".to_string()), id_index);
+            indices.insert((table_str.to_string(), "_id".to_string()), id_index);
 
             // Soft-deleted rows index
-            let mut deleted_index = BTreeIndex::new(&table_name.0, "_id_deleted");
+            let mut deleted_index = BTreeIndex::new(table_str, "_id_deleted");
             deleted_index.process_meta_load(None);
             indices.insert(
-                (table_name.0.clone(), "_id_deleted".to_string()),
+                (table_str.to_string(), "_id_deleted".to_string()),
                 deleted_index,
             );
 
             // Index for each column
             for col in &table_schema.descriptor.columns {
-                let mut col_index = BTreeIndex::new(&table_name.0, &col.name);
+                let col_str = col.name.as_str();
+                let mut col_index = BTreeIndex::new(table_str, col_str);
                 col_index.process_meta_load(None);
-                indices.insert((table_name.0.clone(), col.name.clone()), col_index);
+                indices.insert((table_str.to_string(), col_str.to_string()), col_index);
             }
         }
 
@@ -343,7 +346,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
         let insert_policy = table_schema.policies.insert.with_check.clone();
 
@@ -558,7 +561,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
         let using_policy = table_schema.policies.update.using.clone();
         let check_policy = table_schema.policies.update.with_check.clone();
@@ -679,7 +682,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
 
         // Get parent commit
@@ -762,7 +765,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
 
         // Check DELETE USING policy (falls back to UPDATE's USING)
@@ -848,7 +851,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
 
         if values.len() != descriptor.columns.len() {
@@ -924,7 +927,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&table_name)
-            .ok_or_else(|| QueryError::TableNotFound(table_name.clone()))?;
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
 
         // Get parent commit
@@ -1039,7 +1042,7 @@ impl QueryManager {
         let table_schema = self
             .schema
             .get(&query.table)
-            .ok_or_else(|| QueryError::TableNotFound(query.table.clone()))?;
+            .ok_or(QueryError::TableNotFound(query.table))?;
         let descriptor = table_schema.descriptor.clone();
 
         let mut graph = QueryGraph::compile(&query, &self.schema)
@@ -1462,7 +1465,7 @@ impl QueryManager {
 
                     // Get the referenced table
                     let parent_table = match &descriptor.columns[col_idx].references {
-                        Some(t) => t.clone(),
+                        Some(t) => *t,
                         None => continue, // No FK reference
                     };
 
@@ -1595,8 +1598,8 @@ impl QueryManager {
     fn mark_subscriptions_with_pending_dirty(&mut self) {
         for subscription in self.subscriptions.values_mut() {
             // Check if the MaterializeNode has any pending IDs
-            for node in subscription.graph.nodes.values() {
-                if let super::graph::GraphNode::Materialize(mat_node) = node
+            for compact in &subscription.graph.nodes {
+                if let super::graph::GraphNode::Materialize(mat_node) = &compact.node
                     && mat_node.has_pending()
                 {
                     // Mark the graph dirty so settle() will be called
@@ -1718,11 +1721,11 @@ impl QueryManager {
                 // No old content - just remove from _id and add to _id_deleted
                 let id_key = (table.to_string(), "_id".to_string());
                 if let Some(index) = self.indices.get_mut(&id_key) {
-                    let _ = index.remove(update.object_id.0.as_bytes(), update.object_id);
+                    let _ = index.remove(update.object_id.uuid().as_bytes(), update.object_id);
                 }
                 let deleted_key = (table.to_string(), "_id_deleted".to_string());
                 if let Some(index) = self.indices.get_mut(&deleted_key) {
-                    let _ = index.insert(update.object_id.0.as_bytes(), update.object_id);
+                    let _ = index.insert(update.object_id.uuid().as_bytes(), update.object_id);
                 }
             }
             self.mark_subscriptions_dirty(&table);
@@ -1808,12 +1811,12 @@ impl QueryManager {
         // Update "_id" index
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            index.insert(object_id.0.as_bytes(), object_id)?;
+            index.insert(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.clone());
+            let col_key = (table.to_string(), col.name.to_string());
             if let Some(index) = self.indices.get_mut(&col_key)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, data, col_idx)
@@ -1838,7 +1841,7 @@ impl QueryManager {
 
         // Update column indices (remove old value, add new value)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.clone());
+            let col_key = (table.to_string(), col.name.to_string());
             if let Some(index) = self.indices.get_mut(&col_key) {
                 // Remove old value
                 if let Ok(Some(old_bytes)) =
@@ -1869,12 +1872,12 @@ impl QueryManager {
         // Remove from "_id" index
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            index.remove(object_id.0.as_bytes(), object_id)?;
+            index.remove(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.clone());
+            let col_key = (table.to_string(), col.name.to_string());
             if let Some(index) = self.indices.get_mut(&col_key)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, old_data, col_idx)
@@ -1886,7 +1889,7 @@ impl QueryManager {
         // Add to "_id_deleted" index
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get_mut(&deleted_key) {
-            index.insert(object_id.0.as_bytes(), object_id)?;
+            index.insert(object_id.uuid().as_bytes(), object_id)?;
         }
 
         Ok(())
@@ -1904,13 +1907,13 @@ impl QueryManager {
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
             // Ignore errors - row may not be in _id if already soft-deleted
-            let _ = index.remove(object_id.0.as_bytes(), object_id);
+            let _ = index.remove(object_id.uuid().as_bytes(), object_id);
         }
 
         // Remove from all column indices (if we have old data)
         if let Some(data) = old_data {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
-                let col_key = (table.to_string(), col.name.clone());
+                let col_key = (table.to_string(), col.name.to_string());
                 if let Some(index) = self.indices.get_mut(&col_key)
                     && let Ok(Some(value_bytes)) =
                         super::encoding::column_bytes(descriptor, data, col_idx)
@@ -1925,7 +1928,7 @@ impl QueryManager {
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get_mut(&deleted_key) {
             // Ignore errors - row may not be in _id_deleted if it was never soft-deleted
-            let _ = index.remove(object_id.0.as_bytes(), object_id);
+            let _ = index.remove(object_id.uuid().as_bytes(), object_id);
         }
 
         Ok(())
@@ -1942,18 +1945,18 @@ impl QueryManager {
         // Remove from "_id_deleted" index
         let deleted_key = (table.to_string(), "_id_deleted".to_string());
         if let Some(index) = self.indices.get_mut(&deleted_key) {
-            index.remove(object_id.0.as_bytes(), object_id)?;
+            index.remove(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Add to "_id" index
         let id_key = (table.to_string(), "_id".to_string());
         if let Some(index) = self.indices.get_mut(&id_key) {
-            index.insert(object_id.0.as_bytes(), object_id)?;
+            index.insert(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Add to all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.clone());
+            let col_key = (table.to_string(), col.name.to_string());
             if let Some(index) = self.indices.get_mut(&col_key)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, new_data, col_idx)
@@ -2147,6 +2150,7 @@ mod tests {
     use crate::driver::TestDriver;
     use crate::query_manager::types::ColumnDescriptor;
     use crate::query_manager::types::ColumnType;
+    use smallvec::smallvec;
 
     fn test_schema() -> Schema {
         let mut schema = Schema::new();
@@ -2661,7 +2665,7 @@ mod tests {
 
         // Receive the first commit (insert)
         let commit1 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: initial_data.clone(),
             timestamp: 1000,
             author,
@@ -2710,7 +2714,7 @@ mod tests {
 
         // Receive the second commit (update)
         let commit2 = Commit {
-            parents: vec![commit1_id],
+            parents: smallvec![commit1_id],
             content: updated_data.clone(),
             timestamp: 2000,
             author,
@@ -2818,7 +2822,7 @@ mod tests {
 
         // Receive the commit (insert)
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: row_data,
             timestamp: 1000,
             author,
@@ -2903,7 +2907,7 @@ mod tests {
 
         let author = row_id; // Self-authored for simplicity
         let update_commit = Commit {
-            parents: vec![first_commit_id],
+            parents: smallvec![first_commit_id],
             content: updated_data,
             timestamp: 2000,
             author,
@@ -2992,7 +2996,7 @@ mod tests {
         .unwrap();
 
         let commit_1 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: data_1,
             timestamp: 1000,
             author: author_1,
@@ -3043,7 +3047,7 @@ mod tests {
         .unwrap();
 
         let commit_2 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: data_2,
             timestamp: 2000,
             author: author_2,
@@ -3183,7 +3187,7 @@ mod tests {
 
         let author = row_id;
         let update_commit = Commit {
-            parents: vec![first_commit_id],
+            parents: smallvec![first_commit_id],
             content: updated_data,
             timestamp: 2000,
             author,
@@ -3544,7 +3548,7 @@ mod tests {
         .unwrap();
 
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: row_data,
             timestamp: 1000,
             author,
@@ -3636,7 +3640,7 @@ mod tests {
         .unwrap();
 
         let update_commit = Commit {
-            parents: vec![first_commit_id],
+            parents: smallvec![first_commit_id],
             content: updated_data,
             timestamp: 2000,
             author: row_id,
@@ -3736,7 +3740,7 @@ mod tests {
 
         // Construct the sync payload as it would appear on the wire
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: row_data,
             timestamp: 1000,
             author: row_id,
@@ -3932,7 +3936,7 @@ mod tests {
         .unwrap();
         let commit_a = Commit {
             author: handle.row_id,
-            parents: vec![parent],
+            parents: smallvec![parent],
             content: content_a,
             timestamp: 1000, // Lower timestamp
             metadata: None,
@@ -3947,7 +3951,7 @@ mod tests {
         .unwrap();
         let commit_b = Commit {
             author: handle.row_id,
-            parents: vec![parent],
+            parents: smallvec![parent],
             content: content_b.clone(),
             timestamp: 2000, // Higher timestamp - LWW winner
             metadata: None,
@@ -4567,7 +4571,7 @@ mod tests {
 
         assert!(query.is_join());
         assert_eq!(query.alias, Some("e".to_string()));
-        assert_eq!(query.joins[0].table.0, "employees");
+        assert_eq!(query.joins[0].table.as_str(), "employees");
         assert_eq!(query.joins[0].alias, Some("m".to_string()));
     }
 
@@ -4614,8 +4618,8 @@ mod tests {
 
         assert!(query.is_join());
         assert_eq!(query.joins.len(), 2);
-        assert_eq!(query.joins[0].table.0, "customers");
-        assert_eq!(query.joins[1].table.0, "products");
+        assert_eq!(query.joins[0].table.as_str(), "customers");
+        assert_eq!(query.joins[1].table.as_str(), "products");
     }
 
     #[test]
@@ -4644,18 +4648,18 @@ mod tests {
 
         // Verify the subscription has index scan nodes for BOTH tables
         let subscription = qm.subscriptions.get(&sub_id).unwrap();
-        let tables_in_subscription: Vec<&String> = subscription
+        let tables_in_subscription: Vec<&str> = subscription
             .graph
             .index_scan_nodes
             .iter()
-            .map(|(_, table, _)| table)
+            .map(|(_, table, _)| table.as_str())
             .collect();
         assert!(
-            tables_in_subscription.contains(&&"users".to_string()),
+            tables_in_subscription.contains(&"users"),
             "Subscription should have index scan for users"
         );
         assert!(
-            tables_in_subscription.contains(&&"posts".to_string()),
+            tables_in_subscription.contains(&"posts"),
             "Subscription should have index scan for posts"
         );
 
@@ -4664,8 +4668,7 @@ mod tests {
             .get_mut(&sub_id)
             .unwrap()
             .graph
-            .dirty_nodes
-            .clear();
+            .clear_dirty();
 
         // Insert into the JOINED table (posts), not the base table (users)
         qm.insert(
@@ -4682,7 +4685,7 @@ mod tests {
         // but the base table is "users", so the subscription won't be marked dirty.
         let subscription = qm.subscriptions.get(&sub_id).unwrap();
         assert!(
-            !subscription.graph.dirty_nodes.is_empty(),
+            subscription.graph.has_dirty_nodes(),
             "Join subscription should be marked dirty when joined table is modified"
         );
     }

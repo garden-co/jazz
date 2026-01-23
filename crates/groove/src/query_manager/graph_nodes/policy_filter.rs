@@ -274,7 +274,7 @@ impl PolicyFilterNode {
         };
 
         // Self-INHERITS check: disallow for now
-        if parent_table.0 == self.table_name {
+        if parent_table.as_str() == self.table_name {
             // Self-referential INHERITS not yet supported
             return false;
         }
@@ -286,7 +286,7 @@ impl PolicyFilterNode {
         };
 
         // Get the parent table's schema
-        let parent_table_name = parent_table.clone();
+        let parent_table_name = *parent_table;
         let parent_schema = match self.schema.get(&parent_table_name) {
             Some(schema) => schema,
             None => return false,
@@ -420,7 +420,7 @@ fn collect_inherits_tables_recursive(
             if let Some(col_index) = descriptor.column_index(via_column)
                 && let Some(ref references) = descriptor.columns[col_index].references
             {
-                tables.insert(references.0.clone());
+                tables.insert(references.as_str().to_string());
             }
         }
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {

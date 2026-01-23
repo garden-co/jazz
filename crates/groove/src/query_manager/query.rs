@@ -18,7 +18,7 @@ pub struct JoinSpec {
 impl JoinSpec {
     /// Get the effective name (alias if set, otherwise table name).
     pub fn effective_name(&self) -> &str {
-        self.alias.as_deref().unwrap_or(&self.table.0)
+        self.alias.as_deref().unwrap_or(self.table.as_str())
     }
 }
 
@@ -307,7 +307,7 @@ impl Query {
 
     /// Get the effective table name (alias if set, otherwise table name).
     pub fn effective_name(&self) -> &str {
-        self.alias.as_deref().unwrap_or(&self.table.0)
+        self.alias.as_deref().unwrap_or(self.table.as_str())
     }
 
     /// Get the full predicate for this query.
@@ -747,7 +747,7 @@ mod tests {
             .filter_eq("name", Value::Text("Alice".into()))
             .build();
 
-        assert_eq!(query.table.0, "users");
+        assert_eq!(query.table.as_str(), "users");
         assert_eq!(query.disjuncts.len(), 1);
         assert_eq!(query.disjuncts[0].conditions.len(), 1);
         assert!(matches!(
@@ -861,7 +861,7 @@ mod tests {
     fn query_alias() {
         let query = QueryBuilder::new("users").alias("u1").build();
 
-        assert_eq!(query.table.0, "users");
+        assert_eq!(query.table.as_str(), "users");
         assert_eq!(query.alias, Some("u1".to_string()));
         assert_eq!(query.effective_name(), "u1");
     }
@@ -902,7 +902,7 @@ mod tests {
 
         assert!(query.is_join());
         assert_eq!(query.joins.len(), 1);
-        assert_eq!(query.joins[0].table.0, "posts");
+        assert_eq!(query.joins[0].table.as_str(), "posts");
         assert_eq!(
             query.joins[0].on,
             Some(("users.id".to_string(), "posts.author_id".to_string()))
@@ -934,11 +934,11 @@ mod tests {
             .on("e.manager_id", "m.id")
             .build();
 
-        assert_eq!(query.table.0, "employees");
+        assert_eq!(query.table.as_str(), "employees");
         assert_eq!(query.alias, Some("e".to_string()));
 
         assert_eq!(query.joins.len(), 1);
-        assert_eq!(query.joins[0].table.0, "employees");
+        assert_eq!(query.joins[0].table.as_str(), "employees");
         assert_eq!(query.joins[0].alias, Some("m".to_string()));
     }
 
@@ -952,8 +952,8 @@ mod tests {
             .build();
 
         assert_eq!(query.joins.len(), 2);
-        assert_eq!(query.joins[0].table.0, "customers");
-        assert_eq!(query.joins[1].table.0, "products");
+        assert_eq!(query.joins[0].table.as_str(), "customers");
+        assert_eq!(query.joins[1].table.as_str(), "products");
     }
 
     #[test]
@@ -981,7 +981,7 @@ mod tests {
         assert!(query.has_array_subqueries());
         assert_eq!(query.array_subqueries.len(), 1);
         assert_eq!(query.array_subqueries[0].column_name, "posts");
-        assert_eq!(query.array_subqueries[0].table.0, "posts");
+        assert_eq!(query.array_subqueries[0].table.as_str(), "posts");
         assert_eq!(query.array_subqueries[0].inner_column, "author_id");
         assert_eq!(query.array_subqueries[0].outer_column, "users.id");
     }
@@ -1021,7 +1021,7 @@ mod tests {
         let posts_subquery = &query.array_subqueries[0];
         assert_eq!(posts_subquery.nested_arrays.len(), 1);
         assert_eq!(posts_subquery.nested_arrays[0].column_name, "comments");
-        assert_eq!(posts_subquery.nested_arrays[0].table.0, "comments");
+        assert_eq!(posts_subquery.nested_arrays[0].table.as_str(), "comments");
     }
 
     #[test]

@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::ops::Bound;
 
 use crate::object::ObjectId;
-use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
+use crate::query_manager::types::{
+    ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
+};
 
 use super::{SourceContext, SourceNode};
 
@@ -26,8 +28,8 @@ pub enum ScanCondition {
 pub struct IndexScanNode {
     /// Reference to the index state (borrowed from QueryManager).
     /// For now, we store the table/column info and access index externally.
-    pub table: String,
-    pub column: String,
+    pub table: TableName,
+    pub column: ColumnName,
     pub condition: ScanCondition,
 
     /// Output tuple descriptor (single element, unmaterialized).
@@ -50,14 +52,14 @@ impl IndexScanNode {
     /// * `condition` - Scan condition
     /// * `row_descriptor` - Row descriptor for the table
     pub fn new(
-        table: impl Into<String>,
-        column: impl Into<String>,
+        table: impl Into<TableName>,
+        column: impl Into<ColumnName>,
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
         let table = table.into();
         // Output is a single-element tuple, unmaterialized (ID-only)
-        let output_descriptor = TupleDescriptor::single(&table, row_descriptor);
+        let output_descriptor = TupleDescriptor::single(table.as_str(), row_descriptor);
         Self {
             table,
             column: column.into(),
@@ -77,7 +79,10 @@ impl IndexScanNode {
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
-        let key = (self.table.clone(), self.column.clone());
+        let key = (
+            self.table.as_str().to_string(),
+            self.column.as_str().to_string(),
+        );
         let new_ids: HashSet<ObjectId> = if let Some(index) = ctx.indices.get(&key) {
             match &self.condition {
                 ScanCondition::All => index.scan_all().into_iter().collect(),
@@ -162,9 +167,9 @@ mod tests {
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1).unwrap();
-        index.insert(row2.0.as_bytes(), row2).unwrap();
-        index.insert(row3.0.as_bytes(), row3).unwrap();
+        index.insert(row1.uuid().as_bytes(), row1).unwrap();
+        index.insert(row2.uuid().as_bytes(), row2).unwrap();
+        index.insert(row3.uuid().as_bytes(), row3).unwrap();
 
         let mut indices = HashMap::new();
         indices.insert(("users".to_string(), "_id".to_string()), index);
@@ -244,7 +249,7 @@ mod tests {
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1).unwrap();
+        index.insert(row1.uuid().as_bytes(), row1).unwrap();
 
         let mut indices = HashMap::new();
         indices.insert(("users".to_string(), "_id".to_string()), index);
@@ -259,7 +264,7 @@ mod tests {
         indices
             .get_mut(&("users".to_string(), "_id".to_string()))
             .unwrap()
-            .insert(row2.0.as_bytes(), row2)
+            .insert(row2.uuid().as_bytes(), row2)
             .unwrap();
         let ctx = make_ctx(&indices);
         let delta2 = node.scan(&ctx);
@@ -271,7 +276,7 @@ mod tests {
         indices
             .get_mut(&("users".to_string(), "_id".to_string()))
             .unwrap()
-            .remove(row1.0.as_bytes(), row1)
+            .remove(row1.uuid().as_bytes(), row1)
             .unwrap();
         let ctx = make_ctx(&indices);
         let delta3 = node.scan(&ctx);

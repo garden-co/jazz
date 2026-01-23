@@ -58,11 +58,11 @@ impl SubgraphTemplate {
         schema: &Schema,
     ) -> Option<SubgraphInstance> {
         // Build query with correlation filter
-        let mut query_builder = QueryBuilder::new(self.base_query.table.clone());
+        let mut query_builder = QueryBuilder::new(self.base_query.table);
 
         // Add joins from base query
         for join_spec in &self.base_query.joins {
-            query_builder = query_builder.join(join_spec.table.clone());
+            query_builder = query_builder.join(join_spec.table);
             if let Some(ref alias) = join_spec.alias {
                 query_builder = query_builder.alias(alias);
             }
