@@ -6,7 +6,6 @@ export const Location = co.map({
 });
 export type Location = co.loaded<typeof Location>;
 
-// co.ref can be used within CoMap fields to point to other CoValues
 const Actor = co.map({
   name: z.string,
   imageURL: z.string,
@@ -22,7 +21,7 @@ const Movie = co.map({
 });
 export type Movie = co.loaded<typeof Movie>;
 
-// A User CoMap can maintain a CoFeed of co.ref(Movie) to track their favorite movies
+// A User CoMap can maintain a CoFeed of Movie to track their favorite movies
 const User = co.map({
   username: z.string,
   favoriteMovies: co.feed(Movie), // append-only
