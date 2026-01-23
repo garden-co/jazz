@@ -3,12 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 const COMMENT_STYLES = {
-  jsStyle: (pattern) => `//\\s*${pattern}`,
-  htmlStyle: (pattern) => `<!--\\s*${pattern}\\s*-->`,
-  jsxStyle: (pattern) => `\\{\\s*\\/\\*\\s*${pattern}\\s*\\*\\/\\s*\\}`,
+  jsStyle: (/** @type {string} */ pattern) => `//\\s*${pattern}`,
+  htmlStyle: (/** @type {string} */ pattern) => `<!--\\s*${pattern}\\s*-->`,
+  jsxStyle: (/** @type {string} */ pattern) =>
+    `\\{\\s*\\/\\*\\s*${pattern}\\s*\\*\\/\\s*\\}`,
 };
 
-function createMultiStylePattern(pattern, flags = "") {
+function createMultiStylePattern(/** @type {string} */ pattern, flags = "") {
   return [
     new RegExp(`^\\s*${COMMENT_STYLES.jsStyle(pattern)}`, flags),
     new RegExp(`^\\s*${COMMENT_STYLES.htmlStyle(pattern)}`, flags),
@@ -16,7 +17,10 @@ function createMultiStylePattern(pattern, flags = "") {
   ];
 }
 
-function matchesAnyPattern(line, patterns) {
+function matchesAnyPattern(
+  /** @type {string} */ line,
+  /** @type {string} */ patterns,
+) {
   for (const pattern of patterns) {
     const match = line.match(pattern);
     if (match) return match;
@@ -37,7 +41,7 @@ function parseMeta(meta) {
   meta = meta.replace(/\btwoslash\b/g, "").trim();
 
   // Compact form without snippet= prefix: examples/foo.ts#Bar or test/example.tsx#Region
-  const direct = meta.match(/^([^#\s]+?\.\w+)(?:#([\w\-]+))?$/);
+  const direct = meta.match(/^([^#\s]+?\.\w+)(?:#([\w-]+))?$/);
   if (direct) {
     result.snippet = direct[1];
     if (direct[2]) result.region = direct[2];
@@ -216,22 +220,29 @@ function processAnnotations(source) {
  * @returns {string} The MDX source with code snippets replaced
  */
 export function replaceCodeSnippets(source, filePath) {
-  const snippetsBaseDir = path.join(process.cwd(), "content/docs/code-snippets");
-  
+  const snippetsBaseDir = path.join(
+    process.cwd(),
+    "content/docs/code-snippets",
+  );
+
   // Regex to match code fences with snippet syntax
   // Matches: ```ts snippet=path/to/file.ts or ```tsx path/to/file.ts#Region
   const codeFenceRegex = /^([ \t]*)```(\w+)\s+([^\n]+)\n([\s\S]*?)^[ \t]*```/gm;
 
   return source.replace(codeFenceRegex, (match, indent, lang, meta, content) => {
     const params = parseMeta(meta);
-    
+
     // If no snippet parameter, leave it unchanged
     if (!params.snippet) {
       return match;
     }
 
     try {
-      const snippetPath = resolveSnippetPath(params.snippet, snippetsBaseDir, filePath);
+      const snippetPath = resolveSnippetPath(
+        params.snippet,
+        snippetsBaseDir,
+        filePath,
+      );
 
       if (!fs.existsSync(snippetPath)) {
         console.warn(`Snippet not found: ${snippetPath}`);
@@ -259,4 +270,3 @@ export function replaceCodeSnippets(source, filePath) {
     }
   });
 }
-

@@ -1,0 +1,36 @@
+{
+  "files": {
+    "ignoreUnknown": false,
+    "includes": [
+      "**",
+      "!.next/**",
+      "!node_modules/**",
+      "!content/docs/code-snippets/**",
+      "!out/**",
+      "!build/**",
+      "!.turbo/**",
+      "!coverage/**",
+      "!test-results/**"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space"
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  "linter": {
+    "enabled": false,
+    "rules": {
+      "recommended": true,
+      "correctness": {
+        "useExhaustiveDependencies": "off"
+      }
+    }
+  }
+}

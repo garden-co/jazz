@@ -209,7 +209,7 @@ const config: Config = {
         md: "960px",
         lg: "1276px",
       },
-      typography: (theme: any) => ({
+      typography: () => ({
         DEFAULT: {
           css: {
             "--tw-prose-body": "oklch(0.523438 0.002 75)",

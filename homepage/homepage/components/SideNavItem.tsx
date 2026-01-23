@@ -27,7 +27,12 @@ export function SideNavItem({
 
   // Scroll sidebar container to show active item (only on real navigation, not framework change)
   useEffect(() => {
-    if (isActive && shouldScrollToActive && itemRef.current && scrollContainerRef?.current) {
+    if (
+      isActive &&
+      shouldScrollToActive &&
+      itemRef.current &&
+      scrollContainerRef?.current
+    ) {
       // Wait for parent details elements to expand and DOM to update
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -40,12 +45,14 @@ export function SideNavItem({
           const itemRect = item.getBoundingClientRect();
 
           // Calculate the item's position relative to the container's scroll position
-          const itemTopRelativeToContainer = itemRect.top - containerRect.top + container.scrollTop;
+          const itemTopRelativeToContainer =
+            itemRect.top - containerRect.top + container.scrollTop;
 
           // Calculate desired scroll position to center the item
           const containerHeight = container.clientHeight;
           const itemHeight = itemRect.height;
-          const desiredScrollTop = itemTopRelativeToContainer - (containerHeight / 2) + (itemHeight / 2);
+          const desiredScrollTop =
+            itemTopRelativeToContainer - containerHeight / 2 + itemHeight / 2;
 
           // Scroll the container smoothly (not the window)
           container.scrollTo({
@@ -82,5 +89,12 @@ export function SideNavItem({
     );
   }
 
-  return <p ref={itemRef as React.RefObject<HTMLParagraphElement>} className={classes}>{children}</p>;
+  return (
+    <p
+      ref={itemRef as React.RefObject<HTMLParagraphElement>}
+      className={classes}
+    >
+      {children}
+    </p>
+  );
 }

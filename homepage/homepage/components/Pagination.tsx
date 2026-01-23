@@ -47,10 +47,11 @@ const Pagination = ({
       <button
         onClick={() => goToPage(page - 1)}
         disabled={page === 0}
-        className={`px-3 py-1 rounded ${page === 0
-          ? "bg-stone-100 text-stone-400 cursor-not-allowed"
-          : "bg-stone-200 hover:bg-stone-300"
-          }`}
+        className={`px-3 py-1 rounded ${
+          page === 0
+            ? "bg-stone-100 text-stone-400 cursor-not-allowed"
+            : "bg-stone-200 hover:bg-stone-300"
+        }`}
       >
         Previous
       </button>
@@ -60,10 +61,11 @@ const Pagination = ({
           <button
             key={i}
             onClick={() => goToPage(p)}
-            className={`px-3 py-1 rounded ${p === page
-              ? "bg-primary text-white"
-              : "bg-stone-200 hover:bg-stone-300"
-              }`}
+            className={`px-3 py-1 rounded ${
+              p === page
+                ? "bg-primary text-white"
+                : "bg-stone-200 hover:bg-stone-300"
+            }`}
           >
             {p + 1}
           </button>
@@ -71,16 +73,17 @@ const Pagination = ({
           <span key={i} className="px-2 text-stone-500">
             {p}
           </span>
-        )
+        ),
       )}
 
       <button
         onClick={() => goToPage(page + 1)}
         disabled={page === pages - 1}
-        className={`px-3 py-1 rounded ${page === pages - 1
-          ? "bg-stone-100 text-stone-400 cursor-not-allowed"
-          : "bg-stone-200 hover:bg-stone-300"
-          }`}
+        className={`px-3 py-1 rounded ${
+          page === pages - 1
+            ? "bg-stone-100 text-stone-400 cursor-not-allowed"
+            : "bg-stone-200 hover:bg-stone-300"
+        }`}
       >
         Next
       </button>

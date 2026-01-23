@@ -1,7 +1,6 @@
 import React from "react";
-import type { SVGProps } from "react";
 
-export function VercelLogo(props: SVGProps<SVGSVGElement>) {
+export function VercelLogo() {
   return (
     <svg
       width="1.5em"

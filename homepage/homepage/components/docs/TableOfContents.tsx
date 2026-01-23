@@ -9,7 +9,11 @@ const TocList = ({
   items,
   level,
   currentId,
-}: { items: Toc; level: number; currentId: string }) => {
+}: {
+  items: Toc;
+  level: number;
+  currentId: string;
+}) => {
   const isActive = (item: TocEntry) => {
     if (!item.id) return false;
     if (item.id === currentId) return true;
@@ -101,7 +105,7 @@ export function TableOfContents({
         }
       }
 
-      current && setCurrentId(current);
+      if (current) setCurrentId(current);
     };
 
     window.addEventListener("scroll", onScroll, { passive: true });

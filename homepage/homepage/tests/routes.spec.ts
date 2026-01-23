@@ -33,18 +33,14 @@ test.describe("Docs pages load", () => {
     expect(response?.ok()).toBeTruthy();
   });
 
-  [
-    "react",
-    "react-native",
-    "react-native-expo",
-    "svelte",
-    "vanilla",
-  ].forEach((framework) => {
-    test(`docs for ${framework} loads`, async ({ page }) => {
-      const response = await page.goto(`/docs/${framework}`);
-      expect(response?.ok()).toBeTruthy();
-    });
-  });
+  ["react", "react-native", "react-native-expo", "svelte", "vanilla"].forEach(
+    (framework) => {
+      test(`docs for ${framework} loads`, async ({ page }) => {
+        const response = await page.goto(`/docs/${framework}`);
+        expect(response?.ok()).toBeTruthy();
+      });
+    },
+  );
 
   test("/docs redirects to /docs/react", async ({ page }) => {
     await page.goto("/docs");

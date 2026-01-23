@@ -31,8 +31,16 @@ function hasMatchingPath(
   if (item.prefix) {
     let prefixToCheck = item.prefix;
     // If prefix starts with /docs but doesn't already have a framework segment, add it
-    if (prefixToCheck.startsWith("/docs/") && !prefixToCheck.match(/^\/docs\/(react|svelte|vue|react-native|react-native-expo|vanilla)\//)) {
-      prefixToCheck = prefixToCheck.replace("/docs/", "/docs/" + framework + "/");
+    if (
+      prefixToCheck.startsWith("/docs/") &&
+      !prefixToCheck.match(
+        /^\/docs\/(react|svelte|vue|react-native|react-native-expo|vanilla)\//,
+      )
+    ) {
+      prefixToCheck = prefixToCheck.replace(
+        "/docs/",
+        "/docs/" + framework + "/",
+      );
     }
     if (currentPath.startsWith(prefixToCheck)) {
       return true;
@@ -51,12 +59,14 @@ function hasMatchingPath(
 
 export function SideNavSection({
   item: { name, href, collapse, items, prefix, startClosed },
-}: { item: SideNavItem }) {
+}: {
+  item: SideNavItem;
+}) {
   const path = usePathname();
   const { framework } = useFramework();
 
   const sectionId = useMemo(() => {
-    return `${name}-${prefix || href || ''}`;
+    return `${name}-${prefix || href || ""}`;
   }, [name, prefix, href]);
 
   const pathMatches = useMemo(() => {
@@ -69,15 +79,25 @@ export function SideNavSection({
     if (prefix) {
       let prefixToCheck = prefix;
       // If prefix starts with /docs but doesn't already have a framework segment, add it
-      if (prefixToCheck.startsWith("/docs/") && !prefixToCheck.match(/^\/docs\/(react|svelte|vue|react-native|react-native-expo|vanilla)\//)) {
-        prefixToCheck = prefixToCheck.replace("/docs/", "/docs/" + framework + "/");
+      if (
+        prefixToCheck.startsWith("/docs/") &&
+        !prefixToCheck.match(
+          /^\/docs\/(react|svelte|vue|react-native|react-native-expo|vanilla)\//,
+        )
+      ) {
+        prefixToCheck = prefixToCheck.replace(
+          "/docs/",
+          "/docs/" + framework + "/",
+        );
       }
       if (path.startsWith(prefixToCheck)) return true;
     }
 
     // Recursively check if any child item matches the current path
     if (items && items.length > 0) {
-      if (items.some((childItem) => hasMatchingPath(childItem, path, framework))) {
+      if (
+        items.some((childItem) => hasMatchingPath(childItem, path, framework))
+      ) {
         return true;
       }
     }

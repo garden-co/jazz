@@ -1,9 +1,8 @@
+import fs from "fs/promises";
+import crypto from "crypto";
+import path from "path";
 
-import fs from 'fs/promises';
-import crypto from 'crypto';
-import path from 'path';
-
-const CACHE_DIR = '.next/highlight-cache';
+const CACHE_DIR = ".next/highlight-cache";
 
 /**
  * Get a cached result from the cache directory
@@ -13,7 +12,7 @@ const CACHE_DIR = '.next/highlight-cache';
 export async function getCachedResult(cacheKey) {
   try {
     const cacheFile = path.join(CACHE_DIR, `${cacheKey}.json`);
-    const cached = await fs.readFile(cacheFile, 'utf8');
+    const cached = await fs.readFile(cacheFile, "utf8");
     return JSON.parse(cached);
   } catch {
     return null;
@@ -43,6 +42,6 @@ export async function setCachedResult(cacheKey, result) {
  * @returns {string} The cache key
  */
 export function createCacheKey(code, lang, meta) {
-  const content = `${code}|${lang || ''}|${meta || ''}`;
-  return crypto.createHash('md5').update(content).digest('hex');
-} 
+  const content = `${code}|${lang || ""}|${meta || ""}`;
+  return crypto.createHash("md5").update(content).digest("hex");
+}
