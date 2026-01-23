@@ -21,4 +21,6 @@ pub use session::*;
 pub use types::*;
 
 #[cfg(test)]
+mod manager_tests;
+#[cfg(test)]
 mod rebac_tests;
