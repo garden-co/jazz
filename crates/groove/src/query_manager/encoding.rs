@@ -830,22 +830,101 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
 
 /// Project columns from a source row to create a new row (for projections).
 /// column_mapping: (src_col_index, dst_col_index)
+///
+/// Uses direct byte copying (memcpy) instead of decode/encode for efficiency.
 pub fn project_row(
     src_descriptor: &RowDescriptor,
     src_data: &[u8],
     dst_descriptor: &RowDescriptor,
     column_mapping: &[(usize, usize)],
 ) -> Result<Vec<u8>, EncodingError> {
-    // Decode source values for mapped columns
-    let mut dst_values = vec![Value::Null; dst_descriptor.columns.len()];
-
+    // Build reverse lookup: dst_col -> src_col
+    let mut dst_to_src: Vec<Option<usize>> = vec![None; dst_descriptor.columns.len()];
     for &(src_col, dst_col) in column_mapping {
-        let value = decode_column(src_descriptor, src_data, src_col)?;
-        dst_values[dst_col] = value;
+        dst_to_src[dst_col] = Some(src_col);
     }
 
-    // Encode to destination format
-    encode_row(dst_descriptor, &dst_values)
+    let mut fixed_data = Vec::new();
+    let mut var_data = Vec::new();
+    let mut var_offsets: Vec<u32> = Vec::new();
+
+    // 1. Copy fixed columns (in destination column order)
+    for (dst_col, dst_col_desc) in dst_descriptor.columns.iter().enumerate() {
+        if dst_col_desc.column_type.is_variable() {
+            continue; // Handle variable columns separately
+        }
+
+        let value_size = dst_col_desc.column_type.fixed_size().unwrap();
+
+        if let Some(src_col) = dst_to_src[dst_col] {
+            let (bytes, is_null) = column_bytes_internal(src_descriptor, src_data, src_col)?;
+
+            if dst_col_desc.nullable {
+                if is_null {
+                    fixed_data.push(0); // null marker
+                    fixed_data.extend(std::iter::repeat_n(0, value_size));
+                } else {
+                    fixed_data.push(1); // present marker
+                    fixed_data.extend_from_slice(bytes);
+                }
+            } else {
+                // Destination is non-nullable, source must have a value
+                fixed_data.extend_from_slice(bytes);
+            }
+        } else {
+            // No mapping for this column - write null/zeros
+            if dst_col_desc.nullable {
+                fixed_data.push(0); // null marker
+                fixed_data.extend(std::iter::repeat_n(0, value_size));
+            } else {
+                // Non-nullable with no source - this should be an error in practice
+                // but we'll write zeros for compatibility
+                fixed_data.extend(std::iter::repeat_n(0, value_size));
+            }
+        }
+    }
+
+    // 2. Copy variable columns (in destination column order)
+    for (dst_col, dst_col_desc) in dst_descriptor.columns.iter().enumerate() {
+        if !dst_col_desc.column_type.is_variable() {
+            continue;
+        }
+
+        var_offsets.push(var_data.len() as u32);
+
+        if let Some(src_col) = dst_to_src[dst_col] {
+            let (bytes, is_null) = column_bytes_internal(src_descriptor, src_data, src_col)?;
+
+            if dst_col_desc.nullable {
+                if is_null {
+                    var_data.push(0); // null marker only
+                } else {
+                    var_data.push(1); // present marker
+                    var_data.extend_from_slice(bytes);
+                }
+            } else {
+                var_data.extend_from_slice(bytes);
+            }
+        } else {
+            // No mapping - write null marker if nullable, empty if not
+            if dst_col_desc.nullable {
+                var_data.push(0); // null marker
+            }
+            // Non-nullable variable with no source: empty (0 length)
+        }
+    }
+
+    // 3. Build result: fixed_data + offset_table (skip first) + var_data
+    let mut result = fixed_data;
+
+    // Write offsets (skip first, as it's implicitly 0)
+    for offset in var_offsets.iter().skip(1) {
+        result.extend_from_slice(&offset.to_le_bytes());
+    }
+
+    result.extend(var_data);
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1328,5 +1407,423 @@ mod tests {
         let encoded = encode_array(&elements, &array_type);
         let decoded = decode_array(&encoded, &row_type).unwrap();
         assert_eq!(decoded, elements);
+    }
+
+    // ========================================================================
+    // project_row tests (for memcpy optimization validation)
+    // ========================================================================
+
+    #[test]
+    fn project_all_fixed_columns() {
+        // Integer, BigInt, Boolean, Timestamp, Uuid - all fixed-size types
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer),
+            ColumnDescriptor::new("b", ColumnType::BigInt),
+            ColumnDescriptor::new("c", ColumnType::Boolean),
+            ColumnDescriptor::new("d", ColumnType::Timestamp),
+            ColumnDescriptor::new("e", ColumnType::Uuid),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("x", ColumnType::Integer),
+            ColumnDescriptor::new("y", ColumnType::BigInt),
+            ColumnDescriptor::new("z", ColumnType::Boolean),
+            ColumnDescriptor::new("w", ColumnType::Timestamp),
+            ColumnDescriptor::new("v", ColumnType::Uuid),
+        ]);
+
+        let src_values = vec![
+            Value::Integer(42),
+            Value::BigInt(1234567890123),
+            Value::Boolean(true),
+            Value::Timestamp(9999999999),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(0xDEADBEEF))),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping: Vec<(usize, usize)> = (0..5).map(|i| (i, i)).collect();
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_all_variable_columns() {
+        // Multiple Text columns
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Text),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::Text),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("x", ColumnType::Text),
+            ColumnDescriptor::new("y", ColumnType::Text),
+            ColumnDescriptor::new("z", ColumnType::Text),
+        ]);
+
+        let src_values = vec![
+            Value::Text("hello".into()),
+            Value::Text("world".into()),
+            Value::Text("rust".into()),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping: Vec<(usize, usize)> = (0..3).map(|i| (i, i)).collect();
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_mixed_columns() {
+        // Fixed + variable interleaved
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("active", ColumnType::Boolean),
+            ColumnDescriptor::new("bio", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::BigInt),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id2", ColumnType::Integer),
+            ColumnDescriptor::new("name2", ColumnType::Text),
+            ColumnDescriptor::new("active2", ColumnType::Boolean),
+            ColumnDescriptor::new("bio2", ColumnType::Text),
+            ColumnDescriptor::new("score2", ColumnType::BigInt),
+        ]);
+
+        let src_values = vec![
+            Value::Integer(100),
+            Value::Text("Alice".into()),
+            Value::Boolean(false),
+            Value::Text("Developer from NYC".into()),
+            Value::BigInt(9999),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping: Vec<(usize, usize)> = (0..5).map(|i| (i, i)).collect();
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_with_nullable_present() {
+        // Nullable columns that have values
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("score", ColumnType::Integer).nullable(),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("x", ColumnType::Integer),
+            ColumnDescriptor::new("y", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("z", ColumnType::Integer).nullable(),
+        ]);
+
+        let src_values = vec![
+            Value::Integer(1),
+            Value::Text("Bob".into()),
+            Value::Integer(95),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping: Vec<(usize, usize)> = (0..3).map(|i| (i, i)).collect();
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_with_nullable_null() {
+        // Nullable columns that are null
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("score", ColumnType::Integer).nullable(),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("x", ColumnType::Integer),
+            ColumnDescriptor::new("y", ColumnType::Text).nullable(),
+            ColumnDescriptor::new("z", ColumnType::Integer).nullable(),
+        ]);
+
+        let src_values = vec![Value::Integer(1), Value::Null, Value::Null];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping: Vec<(usize, usize)> = (0..3).map(|i| (i, i)).collect();
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_single_column_fixed() {
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::BigInt),
+        ]);
+
+        let dst_desc =
+            RowDescriptor::new(vec![ColumnDescriptor::new("only_c", ColumnType::BigInt)]);
+
+        let src_values = vec![
+            Value::Integer(1),
+            Value::Text("ignored".into()),
+            Value::BigInt(12345),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping = [(2, 0)]; // src col 2 -> dst col 0
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, vec![Value::BigInt(12345)]);
+    }
+
+    #[test]
+    fn project_single_column_variable() {
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::Text),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![ColumnDescriptor::new("only_b", ColumnType::Text)]);
+
+        let src_values = vec![
+            Value::Integer(1),
+            Value::Text("selected".into()),
+            Value::Text("ignored".into()),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping = [(1, 0)]; // src col 1 -> dst col 0
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, vec![Value::Text("selected".into())]);
+    }
+
+    #[test]
+    fn project_reorder_columns() {
+        // Destination order different from source
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::Boolean),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("c_first", ColumnType::Boolean),
+            ColumnDescriptor::new("a_second", ColumnType::Integer),
+            ColumnDescriptor::new("b_third", ColumnType::Text),
+        ]);
+
+        let src_values = vec![
+            Value::Integer(42),
+            Value::Text("hello".into()),
+            Value::Boolean(true),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        // Reorder: src c(2) -> dst 0, src a(0) -> dst 1, src b(1) -> dst 2
+        let mapping = [(2, 0), (0, 1), (1, 2)];
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(
+            decoded,
+            vec![
+                Value::Boolean(true),
+                Value::Integer(42),
+                Value::Text("hello".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn project_subset_of_columns() {
+        // Skip some columns
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::Boolean),
+            ColumnDescriptor::new("d", ColumnType::Text),
+            ColumnDescriptor::new("e", ColumnType::BigInt),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("b_only", ColumnType::Text),
+            ColumnDescriptor::new("e_only", ColumnType::BigInt),
+        ]);
+
+        let src_values = vec![
+            Value::Integer(1),
+            Value::Text("pick_me".into()),
+            Value::Boolean(false),
+            Value::Text("skip_me".into()),
+            Value::BigInt(999),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        // Pick b(1) and e(4) only
+        let mapping = [(1, 0), (4, 1)];
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(
+            decoded,
+            vec![Value::Text("pick_me".into()), Value::BigInt(999)]
+        );
+    }
+
+    #[test]
+    fn project_with_empty_text() {
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer),
+            ColumnDescriptor::new("b", ColumnType::Text),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("x", ColumnType::Integer),
+            ColumnDescriptor::new("y", ColumnType::Text),
+        ]);
+
+        let src_values = vec![Value::Integer(1), Value::Text("".into())];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping = [(0, 0), (1, 1)];
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_with_large_text() {
+        // 10KB+ text
+        let large_text = "x".repeat(15_000);
+
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("content", ColumnType::Text),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id2", ColumnType::Integer),
+            ColumnDescriptor::new("content2", ColumnType::Text),
+        ]);
+
+        let src_values = vec![Value::Integer(1), Value::Text(large_text.clone())];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping = [(0, 0), (1, 1)];
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
+    }
+
+    #[test]
+    fn project_identity_all_columns() {
+        // Full row copy (all columns in order)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Uuid),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::Integer),
+            ColumnDescriptor::new("d", ColumnType::Boolean),
+            ColumnDescriptor::new("e", ColumnType::Text),
+        ]);
+
+        let values = vec![
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(12345))),
+            Value::Text("Alice".into()),
+            Value::Integer(30),
+            Value::Boolean(true),
+            Value::Text("extra".into()),
+        ];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+
+        // Identity projection
+        let mapping: Vec<(usize, usize)> = (0..5).map(|i| (i, i)).collect();
+        let projected = project_row(&descriptor, &encoded, &descriptor, &mapping).unwrap();
+
+        let decoded = decode_row(&descriptor, &projected).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn project_only_variable_columns_reordered() {
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("first", ColumnType::Text),
+            ColumnDescriptor::new("second", ColumnType::Text),
+            ColumnDescriptor::new("third", ColumnType::Text),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("was_third", ColumnType::Text),
+            ColumnDescriptor::new("was_first", ColumnType::Text),
+        ]);
+
+        let src_values = vec![
+            Value::Text("AAA".into()),
+            Value::Text("BBB".into()),
+            Value::Text("CCC".into()),
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        // Pick third(2) -> 0, first(0) -> 1
+        let mapping = [(2, 0), (0, 1)];
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(
+            decoded,
+            vec![Value::Text("CCC".into()), Value::Text("AAA".into())]
+        );
+    }
+
+    #[test]
+    fn project_mixed_nullable() {
+        // Mix of nullable and non-nullable, some null some not
+        let src_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("a", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("b", ColumnType::Text),
+            ColumnDescriptor::new("c", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("d", ColumnType::Text).nullable(),
+        ]);
+
+        let dst_desc = RowDescriptor::new(vec![
+            ColumnDescriptor::new("w", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("x", ColumnType::Text),
+            ColumnDescriptor::new("y", ColumnType::Integer).nullable(),
+            ColumnDescriptor::new("z", ColumnType::Text).nullable(),
+        ]);
+
+        let src_values = vec![
+            Value::Null,                    // nullable, is null
+            Value::Text("required".into()), // non-nullable
+            Value::Integer(42),             // nullable, has value
+            Value::Null,                    // nullable, is null
+        ];
+
+        let src_encoded = encode_row(&src_desc, &src_values).unwrap();
+        let mapping: Vec<(usize, usize)> = (0..4).map(|i| (i, i)).collect();
+        let dst_encoded = project_row(&src_desc, &src_encoded, &dst_desc, &mapping).unwrap();
+
+        let decoded = decode_row(&dst_desc, &dst_encoded).unwrap();
+        assert_eq!(decoded, src_values);
     }
 }
