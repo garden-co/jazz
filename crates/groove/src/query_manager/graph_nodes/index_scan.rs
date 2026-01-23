@@ -13,9 +13,10 @@ use super::{SourceContext, SourceNode};
 #[derive(Debug)]
 pub struct IndexScanNode {
     /// Reference to the index state (borrowed from QueryManager).
-    /// For now, we store the table/column info and access index externally.
+    /// For now, we store the table/column/branch info and access index externally.
     pub table: TableName,
     pub column: ColumnName,
+    pub branch: String,
     pub condition: ScanCondition,
 
     /// Output tuple descriptor (single element, unmaterialized).
@@ -38,11 +39,13 @@ impl IndexScanNode {
     /// # Arguments
     /// * `table` - Table name
     /// * `column` - Column to scan on
+    /// * `branch` - Branch to scan on
     /// * `condition` - Scan condition
     /// * `row_descriptor` - Row descriptor for the table
-    pub fn new(
+    pub fn new_with_branch(
         table: impl Into<TableName>,
         column: impl Into<ColumnName>,
+        branch: impl Into<String>,
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
@@ -52,6 +55,7 @@ impl IndexScanNode {
         Self {
             table,
             column: column.into(),
+            branch: branch.into(),
             condition,
             output_descriptor,
             current_tuples: AHashSet::new(),
@@ -59,6 +63,22 @@ impl IndexScanNode {
             dirty: true,
             last_delta_epoch: None,
         }
+    }
+
+    /// Create a new index scan node on the default "main" branch.
+    ///
+    /// # Arguments
+    /// * `table` - Table name
+    /// * `column` - Column to scan on
+    /// * `condition` - Scan condition
+    /// * `row_descriptor` - Row descriptor for the table
+    pub fn new(
+        table: impl Into<TableName>,
+        column: impl Into<ColumnName>,
+        condition: ScanCondition,
+        row_descriptor: RowDescriptor,
+    ) -> Self {
+        Self::new_with_branch(table, column, "main", condition, row_descriptor)
     }
 
     /// Get the output tuple descriptor.
@@ -72,6 +92,7 @@ impl SourceNode for IndexScanNode {
         let key = (
             self.table.as_str().to_string(),
             self.column.as_str().to_string(),
+            self.branch.clone(),
         );
 
         let Some(index) = ctx.indices.get(&key) else {
@@ -172,13 +193,18 @@ impl SourceNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::graph_nodes::IndicesMap;
     use crate::query_manager::index::BTreeIndex;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
-    use ahash::AHashMap;
     use std::ops::Bound;
 
-    fn make_ctx(indices: &AHashMap<(String, String), BTreeIndex>) -> SourceContext<'_> {
+    fn make_ctx(indices: &IndicesMap) -> SourceContext<'_> {
         SourceContext { indices }
+    }
+
+    /// Helper to create a 3-tuple index key for the "main" branch.
+    fn index_key(table: &str, column: &str) -> (String, String, String) {
+        (table.to_string(), column.to_string(), "main".to_string())
     }
 
     fn test_descriptor() -> RowDescriptor {
@@ -205,8 +231,8 @@ mod tests {
         index.insert(row2.uuid().as_bytes(), row2).unwrap();
         index.insert(row3.uuid().as_bytes(), row3).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "_id".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "_id"), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
         let ctx = make_ctx(&indices);
@@ -229,8 +255,8 @@ mod tests {
         index.insert(b"alice@example.com", row1).unwrap();
         index.insert(b"bob@example.com", row2).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "email".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "email"), index);
 
         let mut node = IndexScanNode::new(
             "users",
@@ -257,8 +283,8 @@ mod tests {
         index.insert(&20i32.to_le_bytes(), row2).unwrap();
         index.insert(&30i32.to_le_bytes(), row3).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "score".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "score"), index);
 
         let mut node = IndexScanNode::new(
             "users",
@@ -285,8 +311,8 @@ mod tests {
 
         index.insert(row1.uuid().as_bytes(), row1).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "_id".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "_id"), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
         let ctx = make_ctx(&indices);
@@ -296,13 +322,13 @@ mod tests {
 
         // Simulate end of process cycle: clear deltas
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .clear_deltas();
 
         // Add another row
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .insert(row2.uuid().as_bytes(), row2)
             .unwrap();
@@ -314,13 +340,13 @@ mod tests {
 
         // Simulate end of process cycle: clear deltas
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .clear_deltas();
 
         // Remove first row
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .remove(row1.uuid().as_bytes(), row1)
             .unwrap();
@@ -353,8 +379,8 @@ mod tests {
         let row1 = ObjectId::new();
         index.insert(row1.uuid().as_bytes(), row1).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "_id".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "_id"), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
 
@@ -382,8 +408,8 @@ mod tests {
         // Insert first row
         index.insert(row1.uuid().as_bytes(), row1).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "_id".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "_id"), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
         let ctx = make_ctx(&indices);
@@ -395,7 +421,7 @@ mod tests {
 
         // Insert more rows WITHOUT clearing deltas (same process cycle)
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .insert(row2.uuid().as_bytes(), row2)
             .unwrap();
@@ -411,7 +437,7 @@ mod tests {
 
         // Insert third row (still same epoch, no clear)
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .insert(row3.uuid().as_bytes(), row3)
             .unwrap();
@@ -433,8 +459,8 @@ mod tests {
         let row2 = ObjectId::new();
         index.insert(row1.uuid().as_bytes(), row1).unwrap();
 
-        let mut indices = AHashMap::new();
-        indices.insert(("users".to_string(), "_id".to_string()), index);
+        let mut indices = IndicesMap::default();
+        indices.insert(index_key("users", "_id"), index);
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
         let ctx = make_ctx(&indices);
@@ -447,13 +473,13 @@ mod tests {
 
         // Clear deltas (simulating end of process cycle) - increments epoch
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .clear_deltas();
 
         // Insert new row at new epoch
         indices
-            .get_mut(&("users".to_string(), "_id".to_string()))
+            .get_mut(&index_key("users", "_id"))
             .unwrap()
             .insert(row2.uuid().as_bytes(), row2)
             .unwrap();

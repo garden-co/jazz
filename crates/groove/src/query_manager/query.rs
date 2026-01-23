@@ -260,6 +260,9 @@ pub struct Query {
     pub table: TableName,
     /// Optional table alias (for self-joins).
     pub alias: Option<String>,
+    /// Branches to query (required - at least one must be specified).
+    /// For multi-branch queries, results are combined with LWW merge for same ObjectId.
+    pub branches: Vec<String>,
     /// Joined tables.
     pub joins: Vec<JoinSpec>,
     /// OR groups (disjunction of conjunctions).
@@ -279,11 +282,12 @@ pub struct Query {
 }
 
 impl Query {
-    /// Create a new query for a table.
-    pub fn new(table: impl Into<TableName>) -> Self {
+    /// Create a new query for a table (internal use - branches not set).
+    fn new_internal(table: impl Into<TableName>) -> Self {
         Self {
             table: table.into(),
             alias: None,
+            branches: Vec::new(),
             joins: Vec::new(),
             disjuncts: vec![Conjunction::new()],
             order_by: Vec::new(),
@@ -293,6 +297,18 @@ impl Query {
             select_columns: None,
             array_subqueries: Vec::new(),
         }
+    }
+
+    /// Create a new query for a table on the default "main" branch.
+    pub fn new(table: impl Into<TableName>) -> Self {
+        let mut q = Self::new_internal(table);
+        q.branches = vec!["main".to_string()];
+        q
+    }
+
+    /// Check if this is a multi-branch query.
+    pub fn is_multi_branch(&self) -> bool {
+        self.branches.len() > 1
     }
 
     /// Check if this query has array subqueries.
@@ -360,10 +376,39 @@ pub struct QueryBuilder {
 
 impl QueryBuilder {
     /// Start building a query for a table.
+    ///
+    /// Note: Branch must be explicitly specified via `.branch()` or `.branches()`.
+    /// Using `build()` without specifying a branch will default to "main" for
+    /// backward compatibility, but this behavior may change in the future.
     pub fn new(table: impl Into<TableName>) -> Self {
         Self {
-            query: Query::new(table),
+            // Use new_internal which doesn't set default branch
+            // The branch will be set via .branch() or .branches()
+            query: Query::new_internal(table),
         }
+    }
+
+    /// Query a single branch (required).
+    ///
+    /// # Example
+    /// ```ignore
+    /// QueryBuilder::new("users").branch("main").build()
+    /// QueryBuilder::new("users").branch("draft").build()
+    /// ```
+    pub fn branch(mut self, branch: impl Into<String>) -> Self {
+        self.query.branches = vec![branch.into()];
+        self
+    }
+
+    /// Query multiple branches (results merged with LWW for same ObjectId).
+    ///
+    /// # Example
+    /// ```ignore
+    /// QueryBuilder::new("users").branches(&["main", "draft"]).build()
+    /// ```
+    pub fn branches(mut self, branches: &[&str]) -> Self {
+        self.query.branches = branches.iter().map(|s| s.to_string()).collect();
+        self
     }
 
     /// Add an equals filter condition.
@@ -576,7 +621,26 @@ impl QueryBuilder {
     }
 
     /// Build the query.
-    pub fn build(self) -> Query {
+    ///
+    /// If no branch was specified via `.branch()` or `.branches()`,
+    /// defaults to "main" for backward compatibility.
+    pub fn build(mut self) -> Query {
+        // Default to "main" if no branch specified (backward compatibility)
+        if self.query.branches.is_empty() {
+            self.query.branches = vec!["main".to_string()];
+        }
+        self.query
+    }
+
+    /// Build the query, requiring at least one branch to be specified.
+    ///
+    /// # Panics
+    /// Panics if no branch was specified via `.branch()` or `.branches()`.
+    pub fn build_strict(self) -> Query {
+        assert!(
+            !self.query.branches.is_empty(),
+            "branch required: use .branch(\"name\") or .branches(&[\"a\", \"b\"])"
+        );
         self.query
     }
 }
@@ -1046,5 +1110,87 @@ mod tests {
         assert_eq!(query.array_subqueries.len(), 2);
         assert_eq!(query.array_subqueries[0].column_name, "posts");
         assert_eq!(query.array_subqueries[1].column_name, "comments");
+    }
+
+    // ========================================================================
+    // Branch tests
+    // ========================================================================
+
+    #[test]
+    fn query_builder_single_branch() {
+        let query = QueryBuilder::new("users").branch("draft").build();
+
+        assert_eq!(query.branches, vec!["draft".to_string()]);
+        assert!(!query.is_multi_branch());
+    }
+
+    #[test]
+    fn query_builder_multiple_branches() {
+        let query = QueryBuilder::new("users")
+            .branches(&["main", "draft"])
+            .build();
+
+        assert_eq!(
+            query.branches,
+            vec!["main".to_string(), "draft".to_string()]
+        );
+        assert!(query.is_multi_branch());
+    }
+
+    #[test]
+    fn query_builder_default_branch() {
+        // Without calling .branch(), build() defaults to "main"
+        let query = QueryBuilder::new("users").build();
+
+        assert_eq!(query.branches, vec!["main".to_string()]);
+        assert!(!query.is_multi_branch());
+    }
+
+    #[test]
+    fn query_builder_branch_overrides_previous() {
+        // Calling .branch() multiple times should override
+        let query = QueryBuilder::new("users")
+            .branch("draft")
+            .branch("staging")
+            .build();
+
+        assert_eq!(query.branches, vec!["staging".to_string()]);
+    }
+
+    #[test]
+    fn query_builder_branches_overrides_branch() {
+        // Calling .branches() after .branch() should override
+        let query = QueryBuilder::new("users")
+            .branch("draft")
+            .branches(&["main", "staging"])
+            .build();
+
+        assert_eq!(
+            query.branches,
+            vec!["main".to_string(), "staging".to_string()]
+        );
+    }
+
+    #[test]
+    fn query_builder_strict_with_branch() {
+        // build_strict should work when branch is specified
+        let query = QueryBuilder::new("users").branch("main").build_strict();
+
+        assert_eq!(query.branches, vec!["main".to_string()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "branch required")]
+    fn query_builder_strict_without_branch() {
+        // build_strict should panic when no branch is specified
+        let _ = QueryBuilder::new("users").build_strict();
+    }
+
+    #[test]
+    fn query_new_has_main_branch() {
+        // Query::new() should set "main" as default branch
+        let query = Query::new("users");
+
+        assert_eq!(query.branches, vec!["main".to_string()]);
     }
 }

@@ -3,14 +3,13 @@
 //! Evaluates policy expressions against rows, filtering based on session context.
 //! SELECT policies silently filter rows; write policies are handled separately.
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use std::collections::HashSet;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
 use crate::query_manager::encoding::{column_is_null, decode_column};
-use crate::query_manager::index::BTreeIndex;
 use crate::query_manager::policy::{Operation, PolicyExpr, evaluate_expr_recursive};
 use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::session::Session;
@@ -18,7 +17,7 @@ use crate::query_manager::types::{
     Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement, Value,
 };
 
-use super::RowNode;
+use super::{IndicesMap, RowNode};
 
 /// Policy filter node that evaluates row-level security policies.
 ///
@@ -90,7 +89,7 @@ impl PolicyFilterNode {
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -167,7 +166,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(
         &mut self,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta
@@ -195,7 +194,7 @@ impl PolicyFilterNode {
     fn evaluate_with_context(
         &self,
         row: &Row,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -208,7 +207,7 @@ impl PolicyFilterNode {
         &self,
         expr: &PolicyExpr,
         row: &Row,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
@@ -246,7 +245,7 @@ impl PolicyFilterNode {
         operation: Operation,
         via_column: &str,
         row: &Row,
-        indices: &AHashMap<(String, String), BTreeIndex>,
+        indices: &IndicesMap,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,

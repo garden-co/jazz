@@ -1,4 +1,3 @@
-use ahash::AHashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -10,6 +9,7 @@ use crate::sync_manager::{PendingPermissionCheck, PendingUpdateId, SyncManager};
 use super::encoding::{decode_row, encode_row};
 use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
+use super::graph_nodes::{IndexKey, IndicesMap};
 use super::index::{BTreeIndex, IndexError};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts, resolve_session_value};
 use super::policy_graph::PolicyGraph;
@@ -17,8 +17,9 @@ use super::query::{Query, QueryBuilder};
 use super::session::Session;
 use super::types::{Row, RowDelta, RowDescriptor, Schema, TableName, TableSchema, Value};
 
-/// Row branch name (all row data goes on "main" branch).
-const ROW_BRANCH: &str = "main";
+/// Default row branch name for backward compatibility during migration.
+/// TODO: Remove once all APIs explicitly specify branch.
+const DEFAULT_ROW_BRANCH: &str = "main";
 
 /// Error types for QueryManager operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +121,8 @@ struct QuerySubscription {
     graph: QueryGraph,
     #[allow(dead_code)]
     mode: SubscriptionMode,
+    /// Branches to read from (inherited from query at subscription time).
+    branches: Vec<String>,
 }
 
 /// Subscription mode.
@@ -158,8 +161,9 @@ pub struct QueryManager {
     sync_manager: SyncManager,
     schema: Arc<Schema>,
 
-    /// Indices: (table, column) -> BTreeIndex
-    indices: AHashMap<(String, String), BTreeIndex>,
+    /// Indices: (table, column, branch) -> BTreeIndex
+    /// Each branch maintains its own set of indices.
+    indices: IndicesMap,
 
     /// Active query subscriptions
     subscriptions: HashMap<QuerySubscriptionId, QuerySubscription>,
@@ -181,31 +185,15 @@ impl QueryManager {
     /// Row-level security is evaluated via `process()` which handles pending
     /// permission checks from SyncManager.
     pub fn new(sync_manager: SyncManager, schema: Schema) -> Self {
-        // Initialize indices for all tables
-        let mut indices = AHashMap::new();
+        // Initialize indices for all tables on the default branch
+        let mut indices = IndicesMap::default();
         for (table_name, table_schema) in &schema {
-            let table_str = table_name.as_str();
-
-            // Primary "_id" index (for live rows)
-            let mut id_index = BTreeIndex::new(table_str, "_id");
-            id_index.process_meta_load(None); // Initialize empty
-            indices.insert((table_str.to_string(), "_id".to_string()), id_index);
-
-            // Soft-deleted rows index
-            let mut deleted_index = BTreeIndex::new(table_str, "_id_deleted");
-            deleted_index.process_meta_load(None);
-            indices.insert(
-                (table_str.to_string(), "_id_deleted".to_string()),
-                deleted_index,
+            Self::ensure_table_indices_for_branch(
+                &mut indices,
+                table_name.as_str(),
+                DEFAULT_ROW_BRANCH,
+                table_schema,
             );
-
-            // Index for each column
-            for col in &table_schema.descriptor.columns {
-                let col_str = col.name.as_str();
-                let mut col_index = BTreeIndex::new(table_str, col_str);
-                col_index.process_meta_load(None);
-                indices.insert((table_str.to_string(), col_str.to_string()), col_index);
-            }
         }
 
         Self {
@@ -219,6 +207,58 @@ impl QueryManager {
         }
     }
 
+    /// Ensure indices exist for a table on a specific branch.
+    fn ensure_table_indices_for_branch(
+        indices: &mut IndicesMap,
+        table: &str,
+        branch: &str,
+        table_schema: &TableSchema,
+    ) {
+        let key =
+            |col: &str| -> IndexKey { (table.to_string(), col.to_string(), branch.to_string()) };
+
+        // Primary "_id" index (for live rows)
+        if !indices.contains_key(&key("_id")) {
+            let mut id_index = BTreeIndex::new(table, "_id");
+            id_index.process_meta_load(None);
+            indices.insert(key("_id"), id_index);
+        }
+
+        // Soft-deleted rows index
+        if !indices.contains_key(&key("_id_deleted")) {
+            let mut deleted_index = BTreeIndex::new(table, "_id_deleted");
+            deleted_index.process_meta_load(None);
+            indices.insert(key("_id_deleted"), deleted_index);
+        }
+
+        // Index for each column
+        for col in &table_schema.descriptor.columns {
+            let col_str = col.name.as_str();
+            if !indices.contains_key(&key(col_str)) {
+                let mut col_index = BTreeIndex::new(table, col_str);
+                col_index.process_meta_load(None);
+                indices.insert(key(col_str), col_index);
+            }
+        }
+    }
+
+    /// Get a reference to an index by (table, column, branch).
+    fn get_index(&self, table: &str, column: &str, branch: &str) -> Option<&BTreeIndex> {
+        let key: IndexKey = (table.to_string(), column.to_string(), branch.to_string());
+        self.indices.get(&key)
+    }
+
+    /// Get a mutable reference to an index by (table, column, branch).
+    fn get_index_mut(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+    ) -> Option<&mut BTreeIndex> {
+        let key: IndexKey = (table.to_string(), column.to_string(), branch.to_string());
+        self.indices.get_mut(&key)
+    }
+
     /// Get the underlying SyncManager.
     pub fn sync_manager(&self) -> &SyncManager {
         &self.sync_manager
@@ -229,24 +269,26 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
-    /// Check if a row is indexed (appears in the _id index for its table).
+    /// Check if a row is indexed on a specific branch (appears in the _id index).
+    pub fn row_is_indexed_on_branch(&self, table: &str, branch: &str, row_id: ObjectId) -> bool {
+        self.get_index(table, "_id", branch)
+            .is_some_and(|index| index.contains_row(row_id))
+    }
+
+    /// Check if a row is indexed on the default branch (appears in the _id index).
     pub fn row_is_indexed(&self, table: &str, row_id: ObjectId) -> bool {
-        let id_key = (table.to_string(), "_id".to_string());
-        if let Some(index) = self.indices.get(&id_key) {
-            index.contains_row(row_id)
-        } else {
-            false
-        }
+        self.row_is_indexed_on_branch(table, DEFAULT_ROW_BRANCH, row_id)
+    }
+
+    /// Check if a row is soft-deleted on a specific branch.
+    pub fn row_is_deleted_on_branch(&self, table: &str, branch: &str, row_id: ObjectId) -> bool {
+        self.get_index(table, "_id_deleted", branch)
+            .is_some_and(|index| index.contains_row(row_id))
     }
 
     /// Check if a row is soft-deleted (appears in _id_deleted but not _id).
     pub fn row_is_deleted(&self, table: &str, row_id: ObjectId) -> bool {
-        let deleted_key = (table.to_string(), "_id_deleted".to_string());
-        if let Some(index) = self.indices.get(&deleted_key) {
-            index.contains_row(row_id)
-        } else {
-            false
-        }
+        self.row_is_deleted_on_branch(table, DEFAULT_ROW_BRANCH, row_id)
     }
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
@@ -258,7 +300,7 @@ impl QueryManager {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
             ObjectState::Loading => return false,
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(ROW_BRANCH)) else {
+        let Some(branch) = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH)) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -286,7 +328,7 @@ impl QueryManager {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
             ObjectState::Loading => return false,
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(ROW_BRANCH)) else {
+        let Some(branch) = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH)) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -383,7 +425,14 @@ impl QueryManager {
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(object_id, ROW_BRANCH, vec![], data.clone(), author, None)
+            .add_commit(
+                object_id,
+                DEFAULT_ROW_BRANCH,
+                vec![],
+                data.clone(),
+                author,
+                None,
+            )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Update indices immediately and persist
@@ -603,7 +652,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, ROW_BRANCH)
+            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -614,7 +663,14 @@ impl QueryManager {
         let _commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(id, ROW_BRANCH, parents, new_data.clone(), author, None)
+            .add_commit(
+                id,
+                DEFAULT_ROW_BRANCH,
+                parents,
+                new_data.clone(),
+                author,
+                None,
+            )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices and persist modified nodes
@@ -690,7 +746,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, ROW_BRANCH)
+            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -708,7 +764,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                ROW_BRANCH,
+                DEFAULT_ROW_BRANCH,
                 parents,
                 old_data.clone(), // Preserve content for soft deletes
                 author,
@@ -785,7 +841,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, ROW_BRANCH)
+            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -803,7 +859,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                ROW_BRANCH,
+                DEFAULT_ROW_BRANCH,
                 parents,
                 old_data.clone(), // Preserve content for soft deletes
                 author,
@@ -870,7 +926,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, ROW_BRANCH)
+            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -881,7 +937,14 @@ impl QueryManager {
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(id, ROW_BRANCH, parents, new_data.clone(), author, None)
+            .add_commit(
+                id,
+                DEFAULT_ROW_BRANCH,
+                parents,
+                new_data.clone(),
+                author,
+                None,
+            )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from _id_deleted, add to _id and column indices
@@ -935,7 +998,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, ROW_BRANCH)
+            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -952,7 +1015,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                ROW_BRANCH,
+                DEFAULT_ROW_BRANCH,
                 parents,
                 vec![], // Empty content for tombstone
                 author,
@@ -971,7 +1034,7 @@ impl QueryManager {
         let _ = self
             .sync_manager
             .object_manager
-            .truncate_branch(id, ROW_BRANCH, tail_ids);
+            .truncate_branch(id, DEFAULT_ROW_BRANCH, tail_ids);
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1046,15 +1109,27 @@ impl QueryManager {
             .ok_or(QueryError::TableNotFound(query.table))?;
         let descriptor = table_schema.descriptor.clone();
 
+        // Get branches from query (default to "main" for backward compatibility)
+        let branches = if query.branches.is_empty() {
+            vec!["main".to_string()]
+        } else {
+            query.branches.clone()
+        };
+
         let mut graph = QueryGraph::compile(&query, &self.schema)
             .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
-        // Settle the graph - row_loader reads directly from ObjectManager
+        // Settle the graph - row_loader reads from the query's branches
+        // For multi-branch queries, uses LWW to pick the winning branch
         // Returns None for empty content (hard delete tombstones) so they're not materialized
         // Soft deletes have preserved content and can be materialized normally
         let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-            self.load_row_from_object(id)
-                .filter(|(data, _)| !data.is_empty())
+            if branches.len() == 1 {
+                self.load_row_from_object_on_branch(id, &branches[0])
+            } else {
+                self.load_row_from_object_multi_branch(id, &branches)
+            }
+            .filter(|(data, _)| !data.is_empty())
         };
 
         graph.settle(&self.indices, &self.sync_manager.object_manager, row_loader);
@@ -1083,6 +1158,13 @@ impl QueryManager {
         query: Query,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        // Get branches from query (default to "main" for backward compatibility)
+        let branches = if query.branches.is_empty() {
+            vec!["main".to_string()]
+        } else {
+            query.branches.clone()
+        };
+
         let graph = QueryGraph::compile_with_session(&query, &self.schema, session)
             .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
@@ -1094,6 +1176,7 @@ impl QueryManager {
             QuerySubscription {
                 graph,
                 mode: SubscriptionMode::Delta,
+                branches,
             },
         );
 
@@ -1143,26 +1226,56 @@ impl QueryManager {
         // This ensures settle() will be called to check pending rows
         self.mark_subscriptions_with_pending_dirty();
 
-        // 7. Settle all subscriptions - row_loader reads directly from ObjectManager
+        // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
         let indices = &self.indices;
 
         for (sub_id, subscription) in &mut self.subscriptions {
+            let branches = &subscription.branches;
+
             // Row loader returns None for empty content (hard delete tombstones)
             // Soft deletes have preserved content and can be materialized normally
+            // For single-branch subscriptions, reads from that branch
+            // For multi-branch subscriptions, uses LWW across branches
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
                 let state = om.get_state(id)?;
                 match state {
                     ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
-                        let tip_id = branch.tips.iter().next()?;
-                        let commit = branch.commits.get(tip_id)?;
-                        // Filter out empty content (hard delete tombstones only)
-                        if commit.content.is_empty() {
-                            return None;
+                        // Find the newest commit across all subscription branches (LWW)
+                        let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+
+                        for branch_name in branches {
+                            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                                for &tip_id in &branch.tips {
+                                    if let Some(commit) = branch.commits.get(&tip_id) {
+                                        match &best {
+                                            None => {
+                                                best = Some((
+                                                    commit.timestamp,
+                                                    commit.content.clone(),
+                                                    tip_id,
+                                                ));
+                                            }
+                                            Some((best_ts, _, _))
+                                                if commit.timestamp > *best_ts =>
+                                            {
+                                                best = Some((
+                                                    commit.timestamp,
+                                                    commit.content.clone(),
+                                                    tip_id,
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        Some((commit.content.clone(), *tip_id))
+
+                        // Filter out empty content (hard delete tombstones only)
+                        best.filter(|(_, content, _)| !content.is_empty())
+                            .map(|(_, content, commit_id)| (content, commit_id))
                     }
                     ObjectState::Loading => None,
                 }
@@ -1552,7 +1665,7 @@ impl QueryManager {
                 let obj_state = om.get_state(id)?;
                 match obj_state {
                     ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
+                        let branch = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH))?;
                         let tip_id = branch.tips.iter().next()?;
                         let commit = branch.commits.get(tip_id)?;
                         if commit.content.is_empty() {
@@ -1623,6 +1736,8 @@ impl QueryManager {
     ///
     /// For real storage backends, this would forward requests to storage and
     /// process responses. For now (tests), we use noop responses.
+    ///
+    /// TODO: Storage requests need branch awareness - currently uses default branch.
     fn process_index_storage(&mut self) {
         use super::index::PageId;
         use crate::storage::StorageRequest;
@@ -1634,11 +1749,18 @@ impl QueryManager {
         }
 
         // Generate noop responses and route them back to indices
+        // TODO: Add branch to StorageRequest for proper branch-aware storage
         for request in all_requests {
             match request {
                 StorageRequest::LoadIndexMeta { table, column } => {
                     // New index - return None (index will initialize empty)
-                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                    // Try default branch first
+                    let key: IndexKey = (
+                        table.clone(),
+                        column.clone(),
+                        DEFAULT_ROW_BRANCH.to_string(),
+                    );
+                    if let Some(index) = self.indices.get_mut(&key) {
                         index.process_meta_load(None);
                     }
                 }
@@ -1648,7 +1770,12 @@ impl QueryManager {
                     page_id,
                 } => {
                     // Page doesn't exist - return None (index will create new page)
-                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                    let key: IndexKey = (
+                        table.clone(),
+                        column.clone(),
+                        DEFAULT_ROW_BRANCH.to_string(),
+                    );
+                    if let Some(index) = self.indices.get_mut(&key) {
                         index.process_page_load(PageId(page_id), None);
                     }
                 }
@@ -1662,13 +1789,17 @@ impl QueryManager {
         }
     }
 
-    /// Load a row's data from ObjectManager using LWW (last-writer-wins by timestamp).
+    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
     /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
-    fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
+    fn load_row_from_object_on_branch(
+        &self,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<(Vec<u8>, CommitId)> {
         let state = self.sync_manager.object_manager.get_state(row_id)?;
         match state {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                let branch = obj.branches.get(&BranchName::new(ROW_BRANCH))?;
+                let branch = obj.branches.get(&BranchName::new(branch_name))?;
                 // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
                 let mut tips: Vec<_> = branch.tips.iter().copied().collect();
                 tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
@@ -1678,6 +1809,51 @@ impl QueryManager {
             }
             ObjectState::Loading => None,
         }
+    }
+
+    /// Load a row's data from ObjectManager using the default branch.
+    fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
+        self.load_row_from_object_on_branch(row_id, DEFAULT_ROW_BRANCH)
+    }
+
+    /// Load a row's data from multiple branches, using LWW (last-writer-wins) to select
+    /// the branch with the highest timestamp when the same ObjectId exists on multiple branches.
+    ///
+    /// Returns the content and commit ID from the branch with the newest commit.
+    fn load_row_from_object_multi_branch(
+        &self,
+        row_id: ObjectId,
+        branches: &[String],
+    ) -> Option<(Vec<u8>, CommitId)> {
+        let state = self.sync_manager.object_manager.get_state(row_id)?;
+        let obj = match state {
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
+            ObjectState::Loading => return None,
+        };
+
+        // Collect the newest tip from each branch
+        let mut best: Option<(u64, Vec<u8>, CommitId)> = None; // (timestamp, content, commit_id)
+
+        for branch_name in branches {
+            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                // Find the tip with the highest timestamp on this branch
+                for &tip_id in &branch.tips {
+                    if let Some(commit) = branch.commits.get(&tip_id) {
+                        match &best {
+                            None => {
+                                best = Some((commit.timestamp, commit.content.clone(), tip_id));
+                            }
+                            Some((best_ts, _, _)) if commit.timestamp > *best_ts => {
+                                best = Some((commit.timestamp, commit.content.clone(), tip_id));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, content, commit_id)| (content, commit_id))
     }
 
     /// Handle an object update from the global subscription.
@@ -1690,10 +1866,14 @@ impl QueryManager {
 
         let table_name = TableName::new(&table);
         let table_schema = match self.schema.get(&table_name) {
-            Some(schema) => schema,
+            Some(schema) => schema.clone(),
             None => return,
         };
         let descriptor = table_schema.descriptor.clone();
+        let branch = update.branch_name.as_str();
+
+        // Ensure indices exist for this branch
+        Self::ensure_table_indices_for_branch(&mut self.indices, &table, branch, &table_schema);
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
         if self.is_hard_deleted(update.object_id) {
@@ -1705,8 +1885,9 @@ impl QueryManager {
         if self.is_incoming_hard_delete(update.object_id) {
             // Apply hard delete unconditionally
             let old_data = update.old_content.as_deref();
-            let _ = self.update_indices_for_hard_delete(
+            let _ = self.update_indices_for_hard_delete_on_branch(
                 &table,
+                branch,
                 update.object_id,
                 old_data,
                 &descriptor,
@@ -1720,20 +1901,19 @@ impl QueryManager {
         if self.is_soft_delete_commit(update.object_id) {
             // Apply soft delete - remove from _id and column indices, add to _id_deleted
             if let Some(old_data) = &update.old_content {
-                let _ = self.update_indices_for_soft_delete(
+                let _ = self.update_indices_for_soft_delete_on_branch(
                     &table,
+                    branch,
                     update.object_id,
                     old_data,
                     &descriptor,
                 );
             } else {
                 // No old content - just remove from _id and add to _id_deleted
-                let id_key = (table.to_string(), "_id".to_string());
-                if let Some(index) = self.indices.get_mut(&id_key) {
+                if let Some(index) = self.get_index_mut(&table, "_id", branch) {
                     let _ = index.remove(update.object_id.uuid().as_bytes(), update.object_id);
                 }
-                let deleted_key = (table.to_string(), "_id_deleted".to_string());
-                if let Some(index) = self.indices.get_mut(&deleted_key) {
+                if let Some(index) = self.get_index_mut(&table, "_id_deleted", branch) {
                     let _ = index.insert(update.object_id.uuid().as_bytes(), update.object_id);
                 }
             }
@@ -1743,18 +1923,23 @@ impl QueryManager {
         }
 
         // Check if this is an undelete (non-empty content for previously soft-deleted row)
-        let was_soft_deleted = self.row_is_deleted(&table, update.object_id);
+        let was_soft_deleted = self.row_is_deleted_on_branch(&table, branch, update.object_id);
 
-        // Extract current (new) data from the object
-        let new_data = match self.load_row_from_object(update.object_id) {
+        // Extract current (new) data from the object on this branch
+        let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
             Some((data, _)) => data,
             None => return,
         };
 
         if was_soft_deleted {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
-            let _ =
-                self.update_indices_for_undelete(&table, update.object_id, &new_data, &descriptor);
+            let _ = self.update_indices_for_undelete_on_branch(
+                &table,
+                branch,
+                update.object_id,
+                &new_data,
+                &descriptor,
+            );
             self.mark_subscriptions_dirty(&table);
             return;
         }
@@ -1762,13 +1947,19 @@ impl QueryManager {
         // Normal update handling
         if update.is_new_object || update.previous_commit_ids.is_empty() {
             // First commit on branch (new object or synced first commit) - insert into all indices
-            let _ =
-                self.update_indices_for_insert(&table, update.object_id, &new_data, &descriptor);
+            let _ = self.update_indices_for_insert_on_branch(
+                &table,
+                branch,
+                update.object_id,
+                &new_data,
+                &descriptor,
+            );
         } else if let Some(old_data) = update.old_content {
             // Synced update - compute index delta using old_content
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
-            let _ = self.update_indices_for_update(
+            let _ = self.update_indices_for_update_on_branch(
                 &table,
+                branch,
                 update.object_id,
                 &old_data,
                 &new_data,
@@ -1790,7 +1981,7 @@ impl QueryManager {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
             ObjectState::Loading => return false,
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(ROW_BRANCH)) else {
+        let Some(branch) = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH)) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -1809,24 +2000,23 @@ impl QueryManager {
                 .unwrap_or(false)
     }
 
-    /// Update indices when a row is inserted.
-    fn update_indices_for_insert(
+    /// Update indices when a row is inserted on a specific branch.
+    fn update_indices_for_insert_on_branch(
         &mut self,
         table: &str,
+        branch: &str,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Update "_id" index
-        let id_key = (table.to_string(), "_id".to_string());
-        if let Some(index) = self.indices.get_mut(&id_key) {
+        if let Some(index) = self.get_index_mut(table, "_id", branch) {
             index.insert(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.to_string());
-            if let Some(index) = self.indices.get_mut(&col_key)
+            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, data, col_idx)
             {
@@ -1837,10 +2027,28 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Update indices when a row is updated.
-    fn update_indices_for_update(
+    /// Update indices when a row is inserted (on the default branch).
+    fn update_indices_for_insert(
         &mut self,
         table: &str,
+        object_id: ObjectId,
+        data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        self.update_indices_for_insert_on_branch(
+            table,
+            DEFAULT_ROW_BRANCH,
+            object_id,
+            data,
+            descriptor,
+        )
+    }
+
+    /// Update indices when a row is updated on a specific branch.
+    fn update_indices_for_update_on_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
@@ -1850,8 +2058,7 @@ impl QueryManager {
 
         // Update column indices (remove old value, add new value)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.to_string());
-            if let Some(index) = self.indices.get_mut(&col_key) {
+            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch) {
                 // Remove old value
                 if let Ok(Some(old_bytes)) =
                     super::encoding::column_bytes(descriptor, old_data, col_idx)
@@ -1870,24 +2077,42 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Update indices for soft delete: remove from _id and column indices, add to _id_deleted.
-    fn update_indices_for_soft_delete(
+    /// Update indices when a row is updated (on the default branch).
+    fn update_indices_for_update(
         &mut self,
         table: &str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        new_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        self.update_indices_for_update_on_branch(
+            table,
+            DEFAULT_ROW_BRANCH,
+            object_id,
+            old_data,
+            new_data,
+            descriptor,
+        )
+    }
+
+    /// Update indices for soft delete on a specific branch.
+    fn update_indices_for_soft_delete_on_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
         object_id: ObjectId,
         old_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id" index
-        let id_key = (table.to_string(), "_id".to_string());
-        if let Some(index) = self.indices.get_mut(&id_key) {
+        if let Some(index) = self.get_index_mut(table, "_id", branch) {
             index.remove(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.to_string());
-            if let Some(index) = self.indices.get_mut(&col_key)
+            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, old_data, col_idx)
             {
@@ -1896,25 +2121,41 @@ impl QueryManager {
         }
 
         // Add to "_id_deleted" index
-        let deleted_key = (table.to_string(), "_id_deleted".to_string());
-        if let Some(index) = self.indices.get_mut(&deleted_key) {
+        if let Some(index) = self.get_index_mut(table, "_id_deleted", branch) {
             index.insert(object_id.uuid().as_bytes(), object_id)?;
         }
 
         Ok(())
     }
 
-    /// Update indices for hard delete: remove from ALL indices including _id_deleted.
-    fn update_indices_for_hard_delete(
+    /// Update indices for soft delete (on the default branch).
+    fn update_indices_for_soft_delete(
         &mut self,
         table: &str,
+        object_id: ObjectId,
+        old_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        self.update_indices_for_soft_delete_on_branch(
+            table,
+            DEFAULT_ROW_BRANCH,
+            object_id,
+            old_data,
+            descriptor,
+        )
+    }
+
+    /// Update indices for hard delete on a specific branch.
+    fn update_indices_for_hard_delete_on_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
         object_id: ObjectId,
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id" index (may not be present if already soft-deleted)
-        let id_key = (table.to_string(), "_id".to_string());
-        if let Some(index) = self.indices.get_mut(&id_key) {
+        if let Some(index) = self.get_index_mut(table, "_id", branch) {
             // Ignore errors - row may not be in _id if already soft-deleted
             let _ = index.remove(object_id.uuid().as_bytes(), object_id);
         }
@@ -1922,8 +2163,7 @@ impl QueryManager {
         // Remove from all column indices (if we have old data)
         if let Some(data) = old_data {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
-                let col_key = (table.to_string(), col.name.to_string());
-                if let Some(index) = self.indices.get_mut(&col_key)
+                if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
                     && let Ok(Some(value_bytes)) =
                         super::encoding::column_bytes(descriptor, data, col_idx)
                 {
@@ -1934,8 +2174,7 @@ impl QueryManager {
         }
 
         // Remove from "_id_deleted" index (handles soft→hard upgrade)
-        let deleted_key = (table.to_string(), "_id_deleted".to_string());
-        if let Some(index) = self.indices.get_mut(&deleted_key) {
+        if let Some(index) = self.get_index_mut(table, "_id_deleted", branch) {
             // Ignore errors - row may not be in _id_deleted if it was never soft-deleted
             let _ = index.remove(object_id.uuid().as_bytes(), object_id);
         }
@@ -1943,30 +2182,45 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Update indices for undelete: remove from _id_deleted, add to _id and column indices.
-    fn update_indices_for_undelete(
+    /// Update indices for hard delete (on the default branch).
+    fn update_indices_for_hard_delete(
         &mut self,
         table: &str,
+        object_id: ObjectId,
+        old_data: Option<&[u8]>,
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        self.update_indices_for_hard_delete_on_branch(
+            table,
+            DEFAULT_ROW_BRANCH,
+            object_id,
+            old_data,
+            descriptor,
+        )
+    }
+
+    /// Update indices for undelete on a specific branch.
+    fn update_indices_for_undelete_on_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
         object_id: ObjectId,
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id_deleted" index
-        let deleted_key = (table.to_string(), "_id_deleted".to_string());
-        if let Some(index) = self.indices.get_mut(&deleted_key) {
+        if let Some(index) = self.get_index_mut(table, "_id_deleted", branch) {
             index.remove(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Add to "_id" index
-        let id_key = (table.to_string(), "_id".to_string());
-        if let Some(index) = self.indices.get_mut(&id_key) {
+        if let Some(index) = self.get_index_mut(table, "_id", branch) {
             index.insert(object_id.uuid().as_bytes(), object_id)?;
         }
 
         // Add to all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            let col_key = (table.to_string(), col.name.to_string());
-            if let Some(index) = self.indices.get_mut(&col_key)
+            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
                 && let Ok(Some(value_bytes)) =
                     super::encoding::column_bytes(descriptor, new_data, col_idx)
             {
@@ -1975,6 +2229,23 @@ impl QueryManager {
         }
 
         Ok(())
+    }
+
+    /// Update indices for undelete (on the default branch).
+    fn update_indices_for_undelete(
+        &mut self,
+        table: &str,
+        object_id: ObjectId,
+        new_data: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        self.update_indices_for_undelete_on_branch(
+            table,
+            DEFAULT_ROW_BRANCH,
+            object_id,
+            new_data,
+            descriptor,
+        )
     }
 
     /// Mark subscriptions dirty for a table.
@@ -2072,15 +2343,21 @@ impl QueryManager {
         let responses = driver.process(all_requests);
 
         // Route responses to appropriate handlers
+        // TODO: Add branch to StorageResponse for proper branch-aware storage
         for response in responses {
             match &response {
-                // Index responses - route to indices
+                // Index responses - route to indices (using default branch for now)
                 StorageResponse::LoadIndexMeta {
                     table,
                     column,
                     result,
                 } => {
-                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                    let key: IndexKey = (
+                        table.clone(),
+                        column.clone(),
+                        DEFAULT_ROW_BRANCH.to_string(),
+                    );
+                    if let Some(index) = self.indices.get_mut(&key) {
                         index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
                     }
                 }
@@ -2090,7 +2367,12 @@ impl QueryManager {
                     page_id,
                     result,
                 } => {
-                    if let Some(index) = self.indices.get_mut(&(table.clone(), column.clone())) {
+                    let key: IndexKey = (
+                        table.clone(),
+                        column.clone(),
+                        DEFAULT_ROW_BRANCH.to_string(),
+                    );
+                    if let Some(index) = self.indices.get_mut(&key) {
                         index.process_page_load(
                             PageId(*page_id),
                             result.as_ref().ok().and_then(|o| o.clone()),
@@ -2124,8 +2406,8 @@ impl QueryManager {
     pub fn memory_size(&self) -> (usize, usize, usize, usize) {
         // Indices state (mostly just the pending_index_updates queue)
         let mut indices = 0usize;
-        for ((table, col), index) in &self.indices {
-            indices += table.len() + col.len() + 48; // Key size + HashMap entry
+        for ((table, col, branch), index) in &self.indices {
+            indices += table.len() + col.len() + branch.len() + 64; // Key size + HashMap entry
             indices += index.memory_size();
         }
 
@@ -2684,7 +2966,7 @@ mod tests {
         let commit1_id = qm
             .sync_manager_mut()
             .object_manager
-            .receive_commit(row_id, ROW_BRANCH, commit1)
+            .receive_commit(row_id, DEFAULT_ROW_BRANCH, commit1)
             .unwrap();
 
         // Process to handle the AllObjectUpdate
@@ -2732,7 +3014,7 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(row_id, ROW_BRANCH, commit2)
+            .receive_commit(row_id, DEFAULT_ROW_BRANCH, commit2)
             .unwrap();
 
         // Process to handle the AllObjectUpdate with old_content
@@ -2840,7 +3122,7 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(row_id, ROW_BRANCH, commit)
+            .receive_commit(row_id, DEFAULT_ROW_BRANCH, commit)
             .unwrap();
 
         // Process to handle the AllObjectUpdate
@@ -2925,7 +3207,7 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(row_id, ROW_BRANCH, update_commit)
+            .receive_commit(row_id, DEFAULT_ROW_BRANCH, update_commit)
             .unwrap();
 
         // Process to handle the synced update
@@ -3014,7 +3296,7 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(row_id_1, ROW_BRANCH, commit_1)
+            .receive_commit(row_id_1, DEFAULT_ROW_BRANCH, commit_1)
             .unwrap();
 
         qm.process();
@@ -3065,7 +3347,7 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(row_id_2, ROW_BRANCH, commit_2)
+            .receive_commit(row_id_2, DEFAULT_ROW_BRANCH, commit_2)
             .unwrap();
 
         qm.process();
@@ -3205,7 +3487,7 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(row_id, ROW_BRANCH, update_commit)
+            .receive_commit(row_id, DEFAULT_ROW_BRANCH, update_commit)
             .unwrap();
 
         // Process
@@ -3578,7 +3860,7 @@ mod tests {
                     id: row_id,
                     metadata: obj_metadata,
                 }),
-                branch_name: ROW_BRANCH.into(),
+                branch_name: DEFAULT_ROW_BRANCH.into(),
                 commits: vec![commit],
             },
         });
@@ -3663,7 +3945,7 @@ mod tests {
             payload: SyncPayload::ObjectUpdated {
                 object_id: row_id,
                 metadata: None, // No metadata needed for existing object
-                branch_name: ROW_BRANCH.into(),
+                branch_name: DEFAULT_ROW_BRANCH.into(),
                 commits: vec![update_commit],
             },
         });
@@ -3738,7 +4020,10 @@ mod tests {
                 .unwrap();
             match state {
                 ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                    let branch = obj.branches.get(&BranchName::new(ROW_BRANCH)).unwrap();
+                    let branch = obj
+                        .branches
+                        .get(&BranchName::new(DEFAULT_ROW_BRANCH))
+                        .unwrap();
                     let tip_id = branch.tips.iter().next().unwrap();
                     let commit = branch.commits.get(tip_id).unwrap();
                     (commit.content.clone(), obj.metadata.clone())
@@ -3766,7 +4051,7 @@ mod tests {
                     id: row_id,
                     metadata,
                 }),
-                branch_name: ROW_BRANCH.into(),
+                branch_name: DEFAULT_ROW_BRANCH.into(),
                 commits: vec![commit],
             },
         });
@@ -3916,11 +4201,11 @@ mod tests {
         qm.process();
 
         // Get the initial commit as the common parent
-        let branch_name = BranchName::new(ROW_BRANCH);
+        let branch_name = BranchName::new(DEFAULT_ROW_BRANCH);
         let initial_tips: Vec<_> = qm
             .sync_manager
             .object_manager
-            .get_tip_ids(handle.row_id, ROW_BRANCH)
+            .get_tip_ids(handle.row_id, DEFAULT_ROW_BRANCH)
             .unwrap()
             .iter()
             .copied()
@@ -3972,19 +4257,19 @@ mod tests {
         let commit_a_id = qm
             .sync_manager
             .object_manager
-            .receive_commit(handle.row_id, ROW_BRANCH, commit_a)
+            .receive_commit(handle.row_id, DEFAULT_ROW_BRANCH, commit_a)
             .unwrap();
         let commit_b_id = qm
             .sync_manager
             .object_manager
-            .receive_commit(handle.row_id, ROW_BRANCH, commit_b)
+            .receive_commit(handle.row_id, DEFAULT_ROW_BRANCH, commit_b)
             .unwrap();
 
         // Verify we now have concurrent tips
         let tips: Vec<_> = qm
             .sync_manager
             .object_manager
-            .get_tip_ids(handle.row_id, ROW_BRANCH)
+            .get_tip_ids(handle.row_id, DEFAULT_ROW_BRANCH)
             .unwrap()
             .iter()
             .copied()
@@ -6181,6 +6466,168 @@ mod tests {
             update.delta.added.len(),
             2,
             "Table without policy should return all rows"
+        );
+    }
+
+    // ========================================================================
+    // Branch-aware query tests
+    // ========================================================================
+
+    #[test]
+    fn index_key_includes_branch() {
+        // Verify that indices are keyed by (table, column, branch)
+        // IndexKey is a type alias for (String, String, String) = (table, column, branch)
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        // Check that the default "main" branch indices exist
+        let main_id_key = ("users".to_string(), "_id".to_string(), "main".to_string());
+        assert!(
+            qm.indices.contains_key(&main_id_key),
+            "Should have index for (users, _id, main)"
+        );
+
+        // Verify index key format includes branch
+        let main_name_key = ("users".to_string(), "name".to_string(), "main".to_string());
+        assert!(
+            qm.indices.contains_key(&main_name_key),
+            "Should have index for (users, name, main)"
+        );
+    }
+
+    #[test]
+    fn query_builder_single_branch_uses_correct_index() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Insert on default "main" branch
+        qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+
+        // Query explicitly specifying "main" branch
+        let query = qm.query("users").branch("main").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 1, "Should find row on main branch");
+
+        // Query specifying a different branch should return no results
+        // (since we haven't inserted on that branch)
+        let query = qm.query("users").branch("draft").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(results.len(), 0, "Should not find row on draft branch");
+    }
+
+    #[test]
+    fn query_builder_explicit_main_branch() {
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+            .unwrap();
+        qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+            .unwrap();
+
+        // Explicit .branch("main") should work same as default
+        let query_explicit = qm.query("users").branch("main").build();
+        let query_default = qm.query("users").build();
+
+        let results_explicit = qm.execute(query_explicit).unwrap();
+        let results_default = qm.execute(query_default).unwrap();
+
+        assert_eq!(results_explicit.len(), results_default.len());
+        assert_eq!(results_explicit.len(), 2);
+    }
+
+    #[test]
+    fn query_multi_branch_requires_explicit_branch() {
+        // Verify Query.branches field exists and works
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let qm = QueryManager::new(sync_manager, schema);
+
+        // Multi-branch query
+        let query = qm.query("users").branches(&["main", "draft"]).build();
+        assert_eq!(query.branches.len(), 2);
+        assert!(query.is_multi_branch());
+
+        // Single branch query
+        let query = qm.query("users").branch("main").build();
+        assert_eq!(query.branches.len(), 1);
+        assert!(!query.is_multi_branch());
+
+        // Default branch
+        let query = qm.query("users").build();
+        assert_eq!(query.branches, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn handle_object_update_respects_branch() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+        use std::collections::HashMap;
+
+        // Verify that handle_object_update updates the correct branch's indices
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let mut qm = QueryManager::new(sync_manager, schema);
+
+        // Subscribe to all objects
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("table".to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(row_id, metadata);
+
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let row_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+        // Receive commit on "draft" branch (not "main")
+        let commit = Commit {
+            parents: smallvec![],
+            content: row_data,
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(row_id, "draft", commit)
+            .unwrap();
+
+        qm.process();
+
+        // Query "main" branch - should NOT find the row
+        let query = qm.query("users").branch("main").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Row on draft branch should not appear in main query"
+        );
+
+        // Query "draft" branch - SHOULD find the row
+        let query = qm.query("users").branch("draft").build();
+        let results = qm.execute(query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Row on draft branch should appear in draft query"
         );
     }
 }
