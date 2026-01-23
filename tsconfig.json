@@ -10,5 +10,5 @@
     "outDir": "./dist",
     "baseUrl": "./packages"
   },
-  "exclude": ["node_modules", "target"]
+  "exclude": ["node_modules", "target", ".cursor/skills"]
 }
