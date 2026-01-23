@@ -153,11 +153,13 @@ export function SidePanel() {
       </Sidebar>
 
       {/* Create Playlist Modal */}
-      <CreatePlaylistModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        onPlaylistCreated={handlePlaylistCreated}
-      />
+      {isCreateModalOpen && (
+        <CreatePlaylistModal
+          isOpen={isCreateModalOpen}
+          onClose={() => setIsCreateModalOpen(false)}
+          onPlaylistCreated={handlePlaylistCreated}
+        />
+      )}
     </>
   );
 }

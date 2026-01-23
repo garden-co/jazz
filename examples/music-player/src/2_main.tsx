@@ -4,7 +4,7 @@ import { JazzInspector, enableProfiling } from "jazz-tools/inspector";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { RouterProvider, createHashRouter } from "react-router-dom";
-import { HomePage } from "./3_HomePage";
+import { PlaylistPage } from "./3_PlaylistPage";
 import { useMediaPlayer } from "./5_useMediaPlayer";
 import { InvitePage } from "./6_InvitePage";
 import { SettingsPage } from "./7_SettingsPage";
@@ -56,7 +56,7 @@ function AppContent({
       path: "/",
       element: (
         <ErrorBoundary>
-          <HomePage mediaPlayer={mediaPlayer} />
+          <PlaylistPage mediaPlayer={mediaPlayer} />
         </ErrorBoundary>
       ),
     },
@@ -64,7 +64,7 @@ function AppContent({
       path: "/playlist/:playlistId",
       element: (
         <ErrorBoundary>
-          <HomePage mediaPlayer={mediaPlayer} />
+          <PlaylistPage mediaPlayer={mediaPlayer} />
         </ErrorBoundary>
       ),
     },
@@ -96,11 +96,7 @@ function AppContent({
 function Main() {
   const mediaPlayer = useMediaPlayer();
 
-  return (
-    <SidebarProvider>
-      <AppContent mediaPlayer={mediaPlayer} />
-    </SidebarProvider>
-  );
+  return <AppContent mediaPlayer={mediaPlayer} />;
 }
 
 const peer =
@@ -121,7 +117,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       onAnonymousAccountDiscarded={onAnonymousAccountDiscarded}
     >
       <SidebarProvider>
-        <Main />
+        <ErrorBoundary>
+          <Main />
+        </ErrorBoundary>
         <JazzInspector />
       </SidebarProvider>
     </JazzReactProvider>

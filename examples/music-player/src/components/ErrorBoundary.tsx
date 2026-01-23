@@ -1,127 +1,161 @@
-import { getJazzErrorType } from "jazz-tools";
-import { CoValueErrorState } from "node_modules/jazz-tools/dist/tools/internal";
+import { MusicaAccount } from "@/1_schema";
 import React from "react";
+import { useAccount, useLogOut } from "jazz-tools/react";
+import { getJazzErrorType } from "jazz-tools";
 
-interface ErrorBoundaryState {
-  hasError: boolean;
-  isAuthorizationError?: boolean;
-  error?: Error;
-  errorType?: CoValueErrorState | "unknown";
+function ErrorUI({
+  error,
+  errorType,
+}: {
+  error: Error;
+  errorType: ReturnType<typeof getJazzErrorType>;
+}) {
+  const logOut = useLogOut();
+  const me = useAccount(MusicaAccount, { resolve: { root: true } });
+
+  if (me.$jazz.loadingState === "deleted") {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8">
+        <div className="max-w-2xl space-y-4">
+          <h1 className="text-2xl font-semibold text-red-600">
+            Your account data has been deleted
+          </h1>
+          <p className="text-muted-foreground">
+            The account data associated with your session no longer exists.
+            Please log out and sign in again to continue.
+          </p>
+          <button
+            onClick={logOut}
+            className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+          >
+            Log out
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (errorType === "unauthorized") {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8">
+        <div className="max-w-2xl space-y-4">
+          <h1 className="text-2xl font-semibold text-red-600">
+            You are not authorized to access this page
+          </h1>
+          <button
+            onClick={() => {
+              window.location.href = "/";
+            }}
+            className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+          >
+            Go to home page
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (errorType === "deleted") {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8">
+        <div className="max-w-2xl space-y-4">
+          <h1 className="text-2xl font-semibold text-red-600">
+            The page you are trying to access has been deleted
+          </h1>
+          <button
+            onClick={() => {
+              window.location.href = "/";
+            }}
+            className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+          >
+            Go to home page
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (errorType === "unavailable") {
+    return (
+      <div className="flex min-h-screen items-center justify-center p-8">
+        <div className="max-w-2xl space-y-4">
+          <h1 className="text-2xl font-semibold text-red-600">
+            The page you are trying to access is unavailable
+          </h1>
+          <button
+            onClick={() => {
+              window.location.href = "/";
+            }}
+            className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+          >
+            Go to home page
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center p-8">
+      <div className="max-w-2xl space-y-4">
+        <h1 className="text-2xl font-semibold text-red-600">
+          Something went wrong
+        </h1>
+        <p className="text-muted-foreground">
+          {error.message || "An unexpected error occurred"}
+        </p>
+        {process.env.NODE_ENV === "development" && (
+          <pre className="mt-4 overflow-auto rounded-md bg-muted p-4 text-sm">
+            {error.stack}
+          </pre>
+        )}
+        <button
+          onClick={() => {
+            window.location.reload();
+          }}
+          className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+        >
+          Reload page
+        </button>
+        <button
+          onClick={logOut}
+          className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+        >
+          Log out
+        </button>
+      </div>
+    </div>
+  );
 }
 
-interface ErrorBoundaryProps {
-  children: React.ReactNode;
-  fallback?: (error: Error) => React.ReactNode;
+interface ErrorBoundaryState {
+  error?: Error;
 }
 
 export class ErrorBoundary extends React.Component<
-  ErrorBoundaryProps,
+  { children: React.ReactNode },
   ErrorBoundaryState
 > {
-  constructor(props: ErrorBoundaryProps) {
+  constructor(props: { children: React.ReactNode }) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { error: undefined };
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error, errorType: getJazzErrorType(error) };
+    return { error };
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error("Error caught by boundary:", error, errorInfo);
+    console.error("MainErrorBoundary caught error:", error, errorInfo);
   }
 
   render() {
-    if (this.state.hasError && this.state.error) {
-      if (this.props.fallback) {
-        return this.props.fallback(this.state.error);
-      }
-
-      if (this.state.errorType === "unauthorized") {
-        return (
-          <div className="flex min-h-screen items-center justify-center p-8">
-            <div className="max-w-2xl space-y-4">
-              <h1 className="text-2xl font-semibold text-red-600">
-                You are not authorized to access this page
-              </h1>
-              <button
-                onClick={() => {
-                  window.location.href = "/";
-                }}
-                className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-              >
-                Go to home page
-              </button>
-            </div>
-          </div>
-        );
-      }
-
-      if (this.state.errorType === "deleted") {
-        return (
-          <div className="flex min-h-screen items-center justify-center p-8">
-            <div className="max-w-2xl space-y-4">
-              <h1 className="text-2xl font-semibold text-red-600">
-                The page you are trying to access has been deleted
-              </h1>
-              <button
-                onClick={() => {
-                  window.location.href = "/";
-                }}
-                className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-              >
-                Go to home page
-              </button>
-            </div>
-          </div>
-        );
-      }
-
-      if (this.state.errorType === "unavailable") {
-        return (
-          <div className="flex min-h-screen items-center justify-center p-8">
-            <div className="max-w-2xl space-y-4">
-              <h1 className="text-2xl font-semibold text-red-600">
-                The page you are trying to access is unavailable
-              </h1>
-              <button
-                onClick={() => {
-                  window.location.href = "/";
-                }}
-                className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-              >
-                Go to home page
-              </button>
-            </div>
-          </div>
-        );
-      }
-
+    if (this.state.error) {
       return (
-        <div className="flex min-h-screen items-center justify-center p-8">
-          <div className="max-w-2xl space-y-4">
-            <h1 className="text-2xl font-semibold text-red-600">
-              Something went wrong
-            </h1>
-            <p className="text-muted-foreground">
-              {this.state.error.message || "An unexpected error occurred"}
-            </p>
-            {process.env.NODE_ENV === "development" && (
-              <pre className="mt-4 overflow-auto rounded-md bg-muted p-4 text-sm">
-                {this.state.error.stack}
-              </pre>
-            )}
-            <button
-              onClick={() => {
-                this.setState({ hasError: false, error: undefined });
-                window.location.reload();
-              }}
-              className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
-            >
-              Reload page
-            </button>
-          </div>
-        </div>
+        <ErrorUI
+          error={this.state.error}
+          errorType={getJazzErrorType(this.state.error)}
+        />
       );
     }
 

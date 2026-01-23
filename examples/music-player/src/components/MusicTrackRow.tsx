@@ -16,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { MoreHorizontal, Pause, Play } from "lucide-react";
+import { Loader2, MoreHorizontal, Pause, Play } from "lucide-react";
 import { Fragment, Suspense, useCallback, useState } from "react";
 import { EditTrackDialog } from "./RenameTrackDialog";
 import { Waveform } from "./Waveform";
@@ -30,11 +30,13 @@ function isPartOfThePlaylist(trackId: string, playlist: PlaylistWithTracks) {
 export function MusicTrackRow({
   trackId,
   isPlaying,
+  isLoading,
   onClick,
   index,
 }: {
   trackId: string;
   isPlaying: boolean;
+  isLoading?: boolean;
   onClick: (track: MusicTrack) => void;
   index: number;
 }) {
@@ -101,7 +103,13 @@ export function MusicTrackRow({
         onClick={handleTrackClick}
         aria-label={`${isPlaying ? "Pause" : "Play"} ${track.title}`}
       >
-        {isPlaying ? (
+        {isLoading ? (
+          <Loader2
+            height={16}
+            width={16}
+            className="animate-spin text-blue-600"
+          />
+        ) : isPlaying ? (
           <Pause height={16} width={16} fill="currentColor" />
         ) : (
           <Play height={16} width={16} fill="currentColor" />
