@@ -108,9 +108,9 @@ mod tests {
 
     #[test]
     fn union_of_two_sets() {
-        let id1 = ObjectId(Uuid::from_u128(1));
-        let id2 = ObjectId(Uuid::from_u128(2));
-        let id3 = ObjectId(Uuid::from_u128(3));
+        let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
+        let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
+        let id3 = ObjectId::from_uuid(Uuid::from_u128(3));
 
         let set1: HashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id2)]
             .into_iter()
@@ -131,9 +131,9 @@ mod tests {
 
     #[test]
     fn union_detects_additions() {
-        let id1 = ObjectId(Uuid::from_u128(1));
-        let id2 = ObjectId(Uuid::from_u128(2));
-        let id3 = ObjectId(Uuid::from_u128(3));
+        let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
+        let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
+        let id3 = ObjectId::from_uuid(Uuid::from_u128(3));
 
         let set1: HashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
         let set2: HashSet<Tuple> = [Tuple::from_id(id2)].into_iter().collect();
@@ -154,8 +154,8 @@ mod tests {
 
     #[test]
     fn union_detects_removals() {
-        let id1 = ObjectId(Uuid::from_u128(1));
-        let id2 = ObjectId(Uuid::from_u128(2));
+        let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
+        let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
 
         let set1: HashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id2)]
             .into_iter()
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn union_keeps_id_if_in_any_input() {
-        let id1 = ObjectId(Uuid::from_u128(1));
+        let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
 
         let set1: HashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
         let set2: HashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();

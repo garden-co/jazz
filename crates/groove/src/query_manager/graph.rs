@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
+use bitvec::prelude::*;
+use smallvec::SmallVec;
+
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
@@ -25,8 +28,8 @@ use super::index::BTreeIndex;
 use super::query::{Condition, Query};
 use super::session::Session;
 use super::types::{
-    ColumnDescriptor, ColumnType, Row, RowDelta, RowDescriptor, Schema, TableName, Tuple,
-    TupleDelta, TupleDescriptor,
+    ColumnDescriptor, ColumnName, ColumnType, Row, RowDelta, RowDescriptor, Schema, TableName,
+    Tuple, TupleDelta, TupleDescriptor,
 };
 
 /// A node in the query graph (type-erased).
@@ -47,42 +50,45 @@ pub enum GraphNode {
     ExistsOutput(ExistsOutputNode),
 }
 
+/// Compact node with inline edge storage.
+/// Most nodes have 0-2 inputs/outputs, so inline storage avoids heap allocation.
+#[derive(Debug)]
+pub struct CompactNode {
+    pub node: GraphNode,
+    /// Input edges (children/dependencies). Most nodes have 0-2 inputs.
+    pub inputs: SmallVec<[NodeId; 2]>,
+    /// Output edges (parents/dependents). Most nodes have 0-2 outputs.
+    pub outputs: SmallVec<[NodeId; 2]>,
+}
+
 /// Compiled query graph for a single query.
 #[derive(Debug)]
 pub struct QueryGraph {
-    /// All nodes in the graph.
-    pub nodes: HashMap<NodeId, GraphNode>,
-    /// Edges: node -> its inputs (children).
-    pub edges: HashMap<NodeId, Vec<NodeId>>,
-    /// Reverse edges: node -> nodes that depend on it (parents).
-    pub reverse_edges: HashMap<NodeId, Vec<NodeId>>,
-    /// Dirty nodes that need processing.
-    pub dirty_nodes: HashSet<NodeId>,
+    /// Dense node storage (NodeId.0 is index).
+    pub nodes: Vec<CompactNode>,
+    /// Dirty tracking bitmap (1 bit per node, indexed by NodeId.0).
+    dirty_bitmap: BitVec,
     /// The output node ID.
     pub output_node: NodeId,
     /// Table this query operates on.
     pub table: TableName,
     /// Index scan nodes for this query (for marking dirty on updates).
-    pub index_scan_nodes: Vec<(NodeId, String, String)>, // (node_id, table, column)
+    pub index_scan_nodes: Vec<(NodeId, TableName, ColumnName)>, // (node_id, table, column)
     /// Array subquery nodes and their inner tables (for marking dirty on inner table updates).
-    pub array_subquery_tables: Vec<(NodeId, String)>, // (node_id, inner_table)
+    pub array_subquery_tables: Vec<(NodeId, TableName)>, // (node_id, inner_table)
     /// PolicyFilter nodes and their INHERITS-referenced tables (for marking dirty on table updates).
-    pub policy_filter_tables: Vec<(NodeId, String)>, // (node_id, inherits_table)
+    pub policy_filter_tables: Vec<(NodeId, TableName)>, // (node_id, inherits_table)
     /// Per-table descriptors in join order (for flattening multi-element tuples).
     pub table_descriptors: Vec<RowDescriptor>,
     /// Combined descriptor for output (all columns from all tables).
     pub combined_descriptor: RowDescriptor,
-    /// Next node ID.
-    next_node_id: u64,
 }
 
 impl QueryGraph {
     pub fn new(table: TableName, descriptor: RowDescriptor) -> Self {
         Self {
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
-            reverse_edges: HashMap::new(),
-            dirty_nodes: HashSet::new(),
+            nodes: Vec::new(),
+            dirty_bitmap: BitVec::new(),
             output_node: NodeId(0),
             table,
             index_scan_nodes: Vec::new(),
@@ -90,39 +96,75 @@ impl QueryGraph {
             policy_filter_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
-            next_node_id: 0,
         }
     }
 
-    fn next_id(&mut self) -> NodeId {
-        let id = NodeId(self.next_node_id);
-        self.next_node_id += 1;
-        id
+    /// Mark a node as dirty using the bitmap.
+    pub fn mark_dirty(&mut self, id: NodeId) {
+        let idx = id.0 as usize;
+        if idx >= self.dirty_bitmap.len() {
+            self.dirty_bitmap.resize(idx + 1, false);
+        }
+        self.dirty_bitmap.set(idx, true);
+    }
+
+    /// Check if a node is dirty.
+    fn is_dirty(&self, id: NodeId) -> bool {
+        let idx = id.0 as usize;
+        idx < self.dirty_bitmap.len() && self.dirty_bitmap[idx]
+    }
+
+    /// Check if any nodes are dirty.
+    pub fn has_dirty_nodes(&self) -> bool {
+        self.dirty_bitmap.any()
+    }
+
+    /// Clear all dirty flags.
+    pub fn clear_dirty(&mut self) {
+        self.dirty_bitmap.fill(false);
     }
 
     fn add_node(&mut self, node: GraphNode) -> NodeId {
-        let id = self.next_id();
-        self.nodes.insert(id, node);
-        self.edges.insert(id, Vec::new());
-        self.reverse_edges.insert(id, Vec::new());
-        self.dirty_nodes.insert(id);
+        let id = NodeId(self.nodes.len() as u64);
+        self.nodes.push(CompactNode {
+            node,
+            inputs: SmallVec::new(),
+            outputs: SmallVec::new(),
+        });
+        // Grow dirty bitmap to accommodate new node
+        self.dirty_bitmap.push(true); // New nodes start dirty
         id
     }
 
     /// Add an edge from one node to another.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId) {
-        self.edges.entry(from).or_default().push(to);
-        self.reverse_edges.entry(to).or_default().push(from);
+        self.nodes[from.0 as usize].inputs.push(to);
+        self.nodes[to.0 as usize].outputs.push(from);
     }
 
     /// Add a node and return its ID.
     pub fn add_node_with_id(&mut self, node: GraphNode) -> NodeId {
-        let id = self.next_id();
-        self.nodes.insert(id, node);
-        self.edges.insert(id, Vec::new());
-        self.reverse_edges.insert(id, Vec::new());
-        self.dirty_nodes.insert(id);
-        id
+        self.add_node(node)
+    }
+
+    /// Get a reference to a node by ID.
+    fn get_node(&self, id: NodeId) -> Option<&GraphNode> {
+        self.nodes.get(id.0 as usize).map(|c| &c.node)
+    }
+
+    /// Get a mutable reference to a node by ID.
+    fn get_node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+        self.nodes.get_mut(id.0 as usize).map(|c| &mut c.node)
+    }
+
+    /// Get input edges for a node.
+    fn get_inputs(&self, id: NodeId) -> &[NodeId] {
+        &self.nodes[id.0 as usize].inputs
+    }
+
+    /// Get output edges (reverse edges) for a node.
+    fn get_outputs(&self, id: NodeId) -> Option<&[NodeId]> {
+        self.nodes.get(id.0 as usize).map(|c| c.outputs.as_slice())
     }
 
     /// Compile a query into a graph (without policy filtering).
@@ -147,7 +189,7 @@ impl QueryGraph {
         let table_schema = schema.get(&query.table)?;
         let descriptor = table_schema.descriptor.clone();
         let select_policy = table_schema.policies.select.using.clone();
-        let mut graph = QueryGraph::new(query.table.clone(), descriptor.clone());
+        let mut graph = QueryGraph::new(query.table, descriptor.clone());
 
         // Phase 1: Build IndexScan nodes (one per disjunct)
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
@@ -166,34 +208,34 @@ impl QueryGraph {
             };
 
             index_columns.push(scan_column.clone());
+            let scan_column_name = ColumnName::new(&scan_column);
 
             let scan_node = IndexScanNode::new(
-                query.table.0.clone(),
-                &scan_column,
+                query.table,
+                scan_column_name,
                 scan_condition,
                 descriptor.clone(),
             );
             let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
             graph
                 .index_scan_nodes
-                .push((scan_id, query.table.0.clone(), scan_column));
+                .push((scan_id, query.table, scan_column_name));
             phase1_outputs.push(scan_id);
         }
 
         // If include_deleted is set, also scan _id_deleted index
         if query.include_deleted {
+            let deleted_column = ColumnName::new("_id_deleted");
             let deleted_scan_node = IndexScanNode::new(
-                query.table.0.clone(),
-                "_id_deleted",
+                query.table,
+                deleted_column,
                 ScanCondition::All,
                 descriptor.clone(),
             );
             let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
-            graph.index_scan_nodes.push((
-                deleted_scan_id,
-                query.table.0.clone(),
-                "_id_deleted".to_string(),
-            ));
+            graph
+                .index_scan_nodes
+                .push((deleted_scan_id, query.table, deleted_column));
             phase1_outputs.push(deleted_scan_id);
         }
 
@@ -224,10 +266,14 @@ impl QueryGraph {
                 policy,
                 session.clone(),
                 schema.clone(),
-                query.table.0.clone(),
+                query.table.as_str(),
             );
             // Collect INHERITS tables before moving the node
-            let inherits_tables: Vec<_> = policy_node.inherits_tables().iter().cloned().collect();
+            let inherits_tables: Vec<TableName> = policy_node
+                .inherits_tables()
+                .iter()
+                .map(TableName::new)
+                .collect();
             let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
             graph.add_edge(policy_id, phase2_input);
             // Track INHERITS-referenced tables for dirty marking
@@ -247,7 +293,7 @@ impl QueryGraph {
                 // Track inner table for dirty marking on inner table updates
                 graph
                     .array_subquery_tables
-                    .push((node_id, subquery_spec.table.0.clone()));
+                    .push((node_id, subquery_spec.table));
                 phase2_input = node_id;
                 current_descriptor = new_descriptor;
             }
@@ -323,7 +369,7 @@ impl QueryGraph {
         let outer_correlation_col = outer_descriptor.column_index(outer_col_name)?;
 
         // Build base query for subgraph
-        let mut base_query = Query::new(spec.table.clone());
+        let mut base_query = Query::new(spec.table);
         base_query.joins = spec.joins.clone();
         for condition in &spec.filters {
             base_query.disjuncts[0].conditions.push(condition.clone());
@@ -361,7 +407,7 @@ impl QueryGraph {
                     combined_descriptor
                         .columns
                         .iter()
-                        .find(|c| &c.name == name)
+                        .find(|c| c.name.as_str() == name)
                         .cloned()
                 })
                 .collect();
@@ -426,7 +472,7 @@ impl QueryGraph {
         if let Some(cols) = &spec.select_columns {
             let selected: Vec<_> = cols
                 .iter()
-                .filter_map(|name| columns.iter().find(|c| &c.name == name).cloned())
+                .filter_map(|name| columns.iter().find(|c| c.name.as_str() == name).cloned())
                 .collect();
             Some(RowDescriptor::new(selected))
         } else {
@@ -444,23 +490,24 @@ impl QueryGraph {
     fn compile_join(query: &Query, schema: &Schema) -> Option<Self> {
         let base_table_schema = schema.get(&query.table)?;
         let base_descriptor = base_table_schema.descriptor.clone();
-        let mut graph = QueryGraph::new(query.table.clone(), base_descriptor.clone());
+        let mut graph = QueryGraph::new(query.table, base_descriptor.clone());
 
         // Track all table names and descriptors for TupleDescriptor
-        let mut table_names = vec![query.table.0.clone()];
+        let mut table_names = vec![query.table.as_str().to_string()];
         let mut table_descriptors = vec![base_descriptor.clone()];
 
         // Build pipeline for base table: IndexScan → Materialize
+        let id_column = ColumnName::new("_id");
         let base_scan = IndexScanNode::new(
-            query.table.0.clone(),
-            "_id",
+            query.table,
+            id_column,
             ScanCondition::All,
             base_descriptor.clone(),
         );
         let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
         graph
             .index_scan_nodes
-            .push((base_scan_id, query.table.0.clone(), "_id".to_string()));
+            .push((base_scan_id, query.table, id_column));
 
         let base_mat = MaterializeNode::new(base_descriptor.clone());
         let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
@@ -469,7 +516,7 @@ impl QueryGraph {
         // Track current left side descriptor (accumulates columns from joins)
         let mut left_id = base_mat_id;
         let mut left_descriptor = base_descriptor.clone();
-        let mut left_table_name = query.table.0.clone();
+        let mut left_table_name = query.table.as_str().to_string();
 
         // Process each join
         for join_spec in &query.joins {
@@ -478,17 +525,15 @@ impl QueryGraph {
 
             // Build pipeline for right table: IndexScan → Materialize
             let right_scan = IndexScanNode::new(
-                join_spec.table.0.clone(),
-                "_id",
+                join_spec.table,
+                id_column,
                 ScanCondition::All,
                 right_descriptor.clone(),
             );
             let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
-            graph.index_scan_nodes.push((
-                right_scan_id,
-                join_spec.table.0.clone(),
-                "_id".to_string(),
-            ));
+            graph
+                .index_scan_nodes
+                .push((right_scan_id, join_spec.table, id_column));
 
             let right_mat = MaterializeNode::new(right_descriptor.clone());
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
@@ -503,7 +548,7 @@ impl QueryGraph {
                 let join_node = JoinNode::from_row_descriptors(
                     &left_table_name,
                     left_descriptor.clone(),
-                    &join_spec.table.0,
+                    join_spec.table.as_str(),
                     right_descriptor.clone(),
                     left_col_name,
                     right_col_name,
@@ -519,13 +564,13 @@ impl QueryGraph {
                 left_id = join_id;
 
                 // Track table name and descriptor for TupleDescriptor
-                table_names.push(join_spec.table.0.clone());
+                table_names.push(join_spec.table.as_str().to_string());
                 table_descriptors.push(right_descriptor.clone());
 
                 // Combine descriptors for downstream nodes
                 left_descriptor = RowDescriptor::combine(&[left_descriptor, right_descriptor]);
                 // Use combined table name for multi-way joins
-                left_table_name = format!("{}_{}", left_table_name, join_spec.table.0);
+                left_table_name = format!("{}_{}", left_table_name, join_spec.table.as_str());
             }
         }
 
@@ -596,10 +641,16 @@ impl QueryGraph {
 
     /// Mark index scan nodes dirty for a given table/column.
     pub fn mark_dirty_for_column(&mut self, table: &str, column: &str) {
-        for (node_id, t, c) in &self.index_scan_nodes {
-            if t == table && (c == column || c == "_id") {
-                self.dirty_nodes.insert(*node_id);
-            }
+        let affected: Vec<NodeId> = self
+            .index_scan_nodes
+            .iter()
+            .filter(|(_, t, c)| {
+                t.as_str() == table && (c.as_str() == column || c.as_str() == "_id")
+            })
+            .map(|(node_id, _, _)| *node_id)
+            .collect();
+        for node_id in affected {
+            self.mark_dirty(node_id);
         }
     }
 
@@ -611,15 +662,17 @@ impl QueryGraph {
         let affected_index_scans: Vec<NodeId> = self
             .index_scan_nodes
             .iter()
-            .filter_map(
-                |(node_id, t, _)| {
-                    if t == table { Some(*node_id) } else { None }
-                },
-            )
+            .filter_map(|(node_id, t, _)| {
+                if t.as_str() == table {
+                    Some(*node_id)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         for node_id in affected_index_scans {
-            self.dirty_nodes.insert(node_id);
+            self.mark_dirty(node_id);
             self.mark_downstream_dirty(node_id);
         }
         // Mark array subquery nodes whose inner table changed
@@ -628,7 +681,7 @@ impl QueryGraph {
             .array_subquery_tables
             .iter()
             .filter_map(|(node_id, inner_table)| {
-                if inner_table == table {
+                if inner_table.as_str() == table {
                     Some(*node_id)
                 } else {
                     None
@@ -637,9 +690,9 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_array_subqueries {
-            self.dirty_nodes.insert(node_id);
+            self.mark_dirty(node_id);
             // Mark the node as needing inner re-evaluation
-            if let Some(GraphNode::ArraySubquery(node)) = self.nodes.get_mut(&node_id) {
+            if let Some(GraphNode::ArraySubquery(node)) = self.get_node_mut(node_id) {
                 node.mark_inner_dirty();
             }
             // Propagate dirty marks to downstream nodes (Output, etc.)
@@ -651,7 +704,7 @@ impl QueryGraph {
             .policy_filter_tables
             .iter()
             .filter_map(|(node_id, inherits_table)| {
-                if inherits_table == table {
+                if inherits_table.as_str() == table {
                     Some(*node_id)
                 } else {
                     None
@@ -660,9 +713,9 @@ impl QueryGraph {
             .collect();
 
         for node_id in affected_policy_filters {
-            self.dirty_nodes.insert(node_id);
+            self.mark_dirty(node_id);
             // Mark the node as needing INHERITS re-evaluation
-            if let Some(GraphNode::PolicyFilter(node)) = self.nodes.get_mut(&node_id) {
+            if let Some(GraphNode::PolicyFilter(node)) = self.get_node_mut(node_id) {
                 node.mark_inherits_dirty();
             }
             // Propagate dirty marks to downstream nodes
@@ -672,15 +725,23 @@ impl QueryGraph {
 
     /// Check if this graph involves a table (as index scan, array subquery inner table, or INHERITS reference).
     pub fn involves_table(&self, table: &str) -> bool {
-        self.index_scan_nodes.iter().any(|(_, t, _)| t == table)
-            || self.array_subquery_tables.iter().any(|(_, t)| t == table)
-            || self.policy_filter_tables.iter().any(|(_, t)| t == table)
+        self.index_scan_nodes
+            .iter()
+            .any(|(_, t, _)| t.as_str() == table)
+            || self
+                .array_subquery_tables
+                .iter()
+                .any(|(_, t)| t.as_str() == table)
+            || self
+                .policy_filter_tables
+                .iter()
+                .any(|(_, t)| t.as_str() == table)
     }
 
     /// Check if the MaterializeNode has a specific object ID pending.
     pub fn has_pending_id(&self, object_id: ObjectId) -> bool {
-        for node in self.nodes.values() {
-            if let GraphNode::Materialize(mat_node) = node
+        for compact in &self.nodes {
+            if let GraphNode::Materialize(mat_node) = &compact.node
                 && mat_node.pending_ids().contains(&object_id)
             {
                 return true;
@@ -691,10 +752,15 @@ impl QueryGraph {
 
     /// Mark the materialize node dirty (to re-check pending IDs).
     pub fn mark_materialize_dirty(&mut self) {
-        for (node_id, node) in &self.nodes {
-            if matches!(node, GraphNode::Materialize(_)) {
-                self.dirty_nodes.insert(*node_id);
-            }
+        let materialize_ids: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.node, GraphNode::Materialize(_)))
+            .map(|(idx, _)| NodeId(idx as u64))
+            .collect();
+        for node_id in materialize_ids {
+            self.mark_dirty(node_id);
         }
     }
 
@@ -705,10 +771,11 @@ impl QueryGraph {
         let materialize_node_ids: Vec<NodeId> = self
             .nodes
             .iter_mut()
-            .filter_map(|(node_id, node)| {
-                if let GraphNode::Materialize(mat_node) = node {
+            .enumerate()
+            .filter_map(|(idx, compact)| {
+                if let GraphNode::Materialize(mat_node) = &mut compact.node {
                     mat_node.mark_updated(id);
-                    Some(*node_id)
+                    Some(NodeId(idx as u64))
                 } else {
                     None
                 }
@@ -717,7 +784,7 @@ impl QueryGraph {
 
         // Second pass: mark dirty and propagate downstream
         for node_id in materialize_node_ids {
-            self.dirty_nodes.insert(node_id);
+            self.mark_dirty(node_id);
             self.mark_downstream_dirty(node_id);
         }
     }
@@ -729,10 +796,11 @@ impl QueryGraph {
         let materialize_node_ids: Vec<NodeId> = self
             .nodes
             .iter_mut()
-            .filter_map(|(node_id, node)| {
-                if let GraphNode::Materialize(mat_node) = node {
+            .enumerate()
+            .filter_map(|(idx, compact)| {
+                if let GraphNode::Materialize(mat_node) = &mut compact.node {
                     mat_node.mark_deleted(id);
-                    Some(*node_id)
+                    Some(NodeId(idx as u64))
                 } else {
                     None
                 }
@@ -741,16 +809,19 @@ impl QueryGraph {
 
         // Second pass: mark dirty and propagate downstream
         for node_id in materialize_node_ids {
-            self.dirty_nodes.insert(node_id);
+            self.mark_dirty(node_id);
             self.mark_downstream_dirty(node_id);
         }
     }
 
     /// Mark all nodes that depend on the given node as dirty (propagate forward).
     fn mark_downstream_dirty(&mut self, node_id: NodeId) {
-        if let Some(parents) = self.reverse_edges.get(&node_id).cloned() {
+        if let Some(outputs) = self.get_outputs(node_id) {
+            let parents: SmallVec<[NodeId; 2]> = outputs.iter().copied().collect();
             for parent in parents {
-                if self.dirty_nodes.insert(parent) {
+                // Only recurse if not already dirty (avoid infinite loops)
+                if !self.is_dirty(parent) {
+                    self.mark_dirty(parent);
                     // Recursively mark parents of parent
                     self.mark_downstream_dirty(parent);
                 }
@@ -774,9 +845,9 @@ impl QueryGraph {
             }
             visited.insert(node);
 
-            // Visit dependencies first
-            if let Some(deps) = graph.edges.get(&node) {
-                for dep in deps {
+            // Visit dependencies first (inputs)
+            if let Some(compact) = graph.nodes.get(node.0 as usize) {
+                for dep in &compact.inputs {
                     visit(*dep, graph, visited, result);
                 }
             }
@@ -784,8 +855,9 @@ impl QueryGraph {
             result.push(node);
         }
 
-        for node in &self.dirty_nodes {
-            visit(*node, self, &mut visited, &mut result);
+        // Iterate over dirty nodes using BitVec's iter_ones()
+        for idx in self.dirty_bitmap.iter_ones() {
+            visit(NodeId(idx as u64), self, &mut visited, &mut result);
         }
 
         result
@@ -809,45 +881,46 @@ impl QueryGraph {
         let _ = om; // om is still passed to other nodes that need it
 
         for node_id in order {
-            match self.nodes.get(&node_id) {
+            match self.get_node(node_id) {
                 Some(GraphNode::IndexScan(_)) => {
-                    if let Some(GraphNode::IndexScan(scan_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::IndexScan(scan_node)) = self.get_node_mut(node_id) {
                         let delta = SourceNode::scan(scan_node, &ctx);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Union(_)) => {
                     let inputs = self.collect_tuple_inputs(node_id);
-                    if let Some(GraphNode::Union(union_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Union(union_node)) = self.get_node_mut(node_id) {
                         let input_refs: Vec<_> = inputs.iter().collect();
                         let delta = TransformNode::process(union_node, &input_refs);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Alias(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Alias(alias_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Alias(alias_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(alias_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Join(_)) => {
                     // JoinNode has two inputs: left (index 0) and right (index 1)
-                    let edges = self.edges[&node_id].clone();
-                    let left_delta = edges
+                    let inputs = self.get_inputs(node_id);
+                    let left_delta = inputs
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
-                    let right_delta = edges
+                    let right_delta = inputs
                         .get(1)
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Join(join_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Join(join_node)) = self.get_node_mut(node_id) {
                         // Process left side first, then right side
                         let left_result = join_node.process_left(left_delta);
                         let right_result = join_node.process_right(right_delta);
@@ -864,23 +937,25 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Project(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Project(project_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Project(project_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(project_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::Materialize(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Materialize(mat_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Materialize(mat_node)) = self.get_node_mut(node_id) {
                         let deleted_delta = mat_node.check_deleted_tuples();
                         let pending_delta = mat_node.check_pending_tuples(&mut row_loader);
                         let new_delta = mat_node.materialize_tuples(input_delta, &mut row_loader);
@@ -901,24 +976,25 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Filter(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Filter(filter_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Filter(filter_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(filter_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::PolicyFilter(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::PolicyFilter(policy_node)) = self.nodes.get_mut(&node_id)
-                    {
+                    if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
                             policy_node.process_with_context(input_delta, indices, om, &mut |id| {
@@ -931,35 +1007,38 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Sort(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Sort(sort_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Sort(sort_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(sort_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::LimitOffset(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::LimitOffset(lo_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::LimitOffset(lo_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(lo_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::ArraySubquery(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
                     if let Some(GraphNode::ArraySubquery(subquery_node)) =
-                        self.nodes.get_mut(&node_id)
+                        self.get_node_mut(node_id)
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
@@ -982,24 +1061,25 @@ impl QueryGraph {
                     }
                 }
                 Some(GraphNode::Output(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::Output(output_node)) = self.nodes.get_mut(&node_id) {
+                    if let Some(GraphNode::Output(output_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(output_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
                 Some(GraphNode::ExistsOutput(_)) => {
-                    let input_delta = self.edges[&node_id]
+                    let input_delta = self
+                        .get_inputs(node_id)
                         .first()
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    if let Some(GraphNode::ExistsOutput(exists_node)) = self.nodes.get_mut(&node_id)
-                    {
+                    if let Some(GraphNode::ExistsOutput(exists_node)) = self.get_node_mut(node_id) {
                         let delta = RowNode::process(exists_node, input_delta);
                         tuple_deltas.insert(node_id, delta);
                     }
@@ -1008,7 +1088,7 @@ impl QueryGraph {
             }
         }
 
-        self.dirty_nodes.clear();
+        self.dirty_bitmap.fill(false);
 
         // Convert TupleDelta to RowDelta for output
         // For single-table queries: use simple conversion
@@ -1029,9 +1109,9 @@ impl QueryGraph {
 
     /// Collect tuple sets from input nodes for a transform node.
     fn collect_tuple_inputs(&self, node_id: NodeId) -> Vec<HashSet<Tuple>> {
-        self.edges[&node_id]
+        self.get_inputs(node_id)
             .iter()
-            .filter_map(|dep| match &self.nodes[dep] {
+            .filter_map(|dep| match &self.nodes[dep.0 as usize].node {
                 GraphNode::IndexScan(n) => Some(n.current_tuples().clone()),
                 GraphNode::Union(n) => Some(n.current_tuples().clone()),
                 _ => None,
@@ -1041,7 +1121,7 @@ impl QueryGraph {
 
     /// Get current result from output node.
     pub fn current_result(&self) -> Vec<Row> {
-        match self.nodes.get(&self.output_node) {
+        match self.get_node(self.output_node) {
             Some(GraphNode::Output(node)) => node.current_rows(),
             _ => vec![],
         }
@@ -1055,36 +1135,32 @@ impl QueryGraph {
     pub fn estimate_memory_size(&self) -> usize {
         let mut size = std::mem::size_of::<Self>();
 
-        // Nodes HashMap - estimate 512 bytes per node on average
-        size += self.nodes.len() * (std::mem::size_of::<NodeId>() + 512 + 48);
-
-        // Edges HashMaps
-        for edges in self.edges.values() {
-            size += edges.len() * std::mem::size_of::<NodeId>() + 48;
-        }
-        for edges in self.reverse_edges.values() {
-            size += edges.len() * std::mem::size_of::<NodeId>() + 48;
+        // Nodes Vec with CompactNode (node + inline edges)
+        for compact in &self.nodes {
+            size += std::mem::size_of::<CompactNode>() + 512; // estimate node size
+            size += compact.inputs.len() * std::mem::size_of::<NodeId>();
+            size += compact.outputs.len() * std::mem::size_of::<NodeId>();
         }
 
-        // Dirty nodes HashSet
-        size += self.dirty_nodes.len() * (std::mem::size_of::<NodeId>() + 16);
+        // Dirty bitmap (1 bit per node)
+        size += self.dirty_bitmap.len() / 8 + 1;
 
-        // Table name
-        size += self.table.0.len();
+        // Table name (interned - shared, but count the string length for this ref)
+        size += self.table.as_str().len();
 
-        // Index scan nodes
+        // Index scan nodes (interned - pointer sized, but count string lengths for reference)
         for (_, table, col) in &self.index_scan_nodes {
-            size += std::mem::size_of::<NodeId>() + table.len() + col.len();
+            size += std::mem::size_of::<NodeId>() + table.as_str().len() + col.as_str().len();
         }
 
         // Array subquery tables
         for (_, table) in &self.array_subquery_tables {
-            size += std::mem::size_of::<NodeId>() + table.len();
+            size += std::mem::size_of::<NodeId>() + table.as_str().len();
         }
 
         // Policy filter tables
         for (_, table) in &self.policy_filter_tables {
-            size += std::mem::size_of::<NodeId>() + table.len();
+            size += std::mem::size_of::<NodeId>() + table.as_str().len();
         }
 
         // Table descriptors - estimate 200 bytes per descriptor
@@ -1246,8 +1322,8 @@ mod tests {
     fn has_filter_node(graph: &QueryGraph) -> bool {
         graph
             .nodes
-            .values()
-            .any(|n| matches!(n, GraphNode::Filter(_)))
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::Filter(_)))
     }
 
     #[test]
@@ -1389,15 +1465,15 @@ mod tests {
     fn has_join_node(graph: &QueryGraph) -> bool {
         graph
             .nodes
-            .values()
-            .any(|n| matches!(n, GraphNode::Join(_)))
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::Join(_)))
     }
 
     fn has_project_node(graph: &QueryGraph) -> bool {
         graph
             .nodes
-            .values()
-            .any(|n| matches!(n, GraphNode::Project(_)))
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::Project(_)))
     }
 
     #[test]
@@ -1462,8 +1538,8 @@ mod tests {
     fn has_array_subquery_node(graph: &QueryGraph) -> bool {
         graph
             .nodes
-            .values()
-            .any(|n| matches!(n, GraphNode::ArraySubquery(_)))
+            .iter()
+            .any(|c| matches!(c.node, GraphNode::ArraySubquery(_)))
     }
 
     #[test]
@@ -1529,8 +1605,8 @@ mod tests {
         // Count ArraySubquery nodes
         let array_subquery_count = graph
             .nodes
-            .values()
-            .filter(|n| matches!(n, GraphNode::ArraySubquery(_)))
+            .iter()
+            .filter(|c| matches!(c.node, GraphNode::ArraySubquery(_)))
             .count();
         assert_eq!(
             array_subquery_count, 2,

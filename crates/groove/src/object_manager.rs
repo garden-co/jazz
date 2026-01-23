@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blake3::Hasher;
+use smallvec::smallvec;
+use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId, ObjectState};
@@ -270,7 +272,7 @@ impl ObjectManager {
                 let branch = object
                     .branches
                     .get(&branch_name)
-                    .ok_or_else(|| Error::BranchNotFound(branch_name.clone()))?;
+                    .ok_or(Error::BranchNotFound(branch_name))?;
 
                 for parent in &parents {
                     if !branch.commits.contains_key(parent) {
@@ -306,7 +308,7 @@ impl ObjectManager {
         let timestamp = self.next_timestamp();
 
         let commit = Commit {
-            parents: parents.clone(),
+            parents: parents.clone().into(),
             content,
             timestamp,
             author,
@@ -319,7 +321,7 @@ impl ObjectManager {
         // Queue storage request (before mutable borrow of object)
         self.outbox.push(StorageRequest::AppendCommit {
             object_id,
-            branch_name: branch_name.clone(),
+            branch_name,
             commit: commit.clone(),
         });
 
@@ -331,7 +333,7 @@ impl ObjectManager {
         // Create branch if it doesn't exist (only valid for parentless commits)
         let branch = object
             .branches
-            .entry(branch_name.clone())
+            .entry(branch_name)
             .or_insert_with(|| Branch {
                 loaded_state: BranchLoadedState::AllCommits,
                 ..Default::default()
@@ -346,13 +348,13 @@ impl ObjectManager {
         branch.commits.insert(commit_id, commit);
 
         // Notify subscribers of updated frontier
-        self.notify_subscribers_of_commit(object_id, &branch_name);
+        self.notify_subscribers_of_commit(object_id, branch_name);
 
         // Notify global subscribers
         let is_new = matches!(self.objects.get(&object_id), Some(ObjectState::Creating(_)));
         self.notify_all_object_subscribers(
             object_id,
-            &branch_name,
+            branch_name,
             is_new,
             previous_commit_ids,
             old_content,
@@ -390,7 +392,7 @@ impl ObjectManager {
         let branch = object
             .branches
             .get_mut(&branch_name)
-            .ok_or_else(|| Error::BranchNotFound(branch_name.clone()))?;
+            .ok_or(Error::BranchNotFound(branch_name))?;
 
         // Clear all existing commits and tips
         branch.commits.clear();
@@ -404,7 +406,7 @@ impl ObjectManager {
             .as_micros() as u64;
 
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content,
             timestamp,
             author,
@@ -425,7 +427,7 @@ impl ObjectManager {
         &mut self,
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
-    ) -> Result<&HashSet<CommitId>, Error> {
+    ) -> Result<&SmolSet<[CommitId; 2]>, Error> {
         let branch_name = branch_name.into();
 
         // For Loading state, check if we have sufficient depth
@@ -433,7 +435,7 @@ impl ObjectManager {
             // Queue a load request and return not loaded
             self.outbox.push(StorageRequest::LoadObjectBranch {
                 object_id,
-                branch_name: branch_name.clone(),
+                branch_name,
                 depth: LoadDepth::TipIdsOnly,
             });
             return Err(Error::BranchNotLoaded(branch_name));
@@ -446,7 +448,7 @@ impl ObjectManager {
         let branch = object
             .branches
             .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name.clone()))?;
+            .ok_or(Error::BranchNotFound(branch_name))?;
 
         // For Loading objects, check load depth
         if branch.loaded_state == BranchLoadedState::NotLoaded {
@@ -469,7 +471,7 @@ impl ObjectManager {
         if let Some(ObjectState::Loading) = self.objects.get(&object_id) {
             self.outbox.push(StorageRequest::LoadObjectBranch {
                 object_id,
-                branch_name: branch_name.clone(),
+                branch_name,
                 depth: LoadDepth::TipsOnly,
             });
             return Err(Error::BranchNotLoaded(branch_name));
@@ -482,7 +484,7 @@ impl ObjectManager {
         let branch = object
             .branches
             .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name.clone()))?;
+            .ok_or(Error::BranchNotFound(branch_name))?;
 
         // Check sufficient load depth
         match branch.loaded_state {
@@ -514,7 +516,7 @@ impl ObjectManager {
         if let Some(ObjectState::Loading) = self.objects.get(&object_id) {
             self.outbox.push(StorageRequest::LoadObjectBranch {
                 object_id,
-                branch_name: branch_name.clone(),
+                branch_name,
                 depth: LoadDepth::AllCommits,
             });
             return Err(Error::BranchNotLoaded(branch_name));
@@ -527,7 +529,7 @@ impl ObjectManager {
         let branch = object
             .branches
             .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name.clone()))?;
+            .ok_or(Error::BranchNotFound(branch_name))?;
 
         // Check sufficient load depth
         if branch.loaded_state != BranchLoadedState::AllCommits {
@@ -558,7 +560,7 @@ impl ObjectManager {
         // Create association
         let association = BlobAssociation {
             object_id,
-            branch_name: branch_name.clone(),
+            branch_name,
             commit_id,
         };
 
@@ -659,7 +661,8 @@ impl ObjectManager {
                 } => {
                     if let Ok(loaded_branch) = result {
                         let commits = loaded_branch.commits.clone();
-                        let tips = loaded_branch.tips.clone();
+                        let tips: SmolSet<[CommitId; 2]> =
+                            loaded_branch.tips.iter().copied().collect();
 
                         // If object was Loading, create it as Available
                         if matches!(self.objects.get(&object_id), Some(ObjectState::Loading)) {
@@ -669,11 +672,11 @@ impl ObjectManager {
                                 branches: HashMap::new(),
                             };
                             object.branches.insert(
-                                branch_name.clone(),
+                                branch_name,
                                 Branch {
                                     commits: loaded_branch.commits,
-                                    tips: loaded_branch.tips,
-                                    tails: loaded_branch.tails,
+                                    tips: loaded_branch.tips.into_iter().collect(),
+                                    tails: loaded_branch.tails.map(|t| t.into_iter().collect()),
                                     loaded_state: BranchLoadedState::AllCommits,
                                 },
                             );
@@ -683,16 +686,16 @@ impl ObjectManager {
                             // Merge loaded branch data
                             let branch = object
                                 .branches
-                                .entry(branch_name.clone())
+                                .entry(branch_name)
                                 .or_insert_with(Branch::default);
-                            branch.tips = loaded_branch.tips;
-                            branch.tails = loaded_branch.tails;
+                            branch.tips = loaded_branch.tips.into_iter().collect();
+                            branch.tails = loaded_branch.tails.map(|t| t.into_iter().collect());
                             branch.commits.extend(loaded_branch.commits);
                             branch.loaded_state = BranchLoadedState::AllCommits;
                         }
 
                         // Notify subscribers of loaded commits
-                        self.notify_subscribers_of_load(object_id, &branch_name, &commits, &tips);
+                        self.notify_subscribers_of_load(object_id, branch_name, &commits, &tips);
                     }
                 }
                 StorageResponse::StoreBlob {
@@ -883,7 +886,7 @@ impl ObjectManager {
         // Queue storage request
         self.outbox.push(StorageRequest::AppendCommit {
             object_id,
-            branch_name: branch_name.clone(),
+            branch_name,
             commit: commit.clone(),
         });
 
@@ -893,7 +896,7 @@ impl ObjectManager {
         // Create branch if needed
         let branch = object
             .branches
-            .entry(branch_name.clone())
+            .entry(branch_name)
             .or_insert_with(|| Branch {
                 loaded_state: BranchLoadedState::AllCommits,
                 ..Default::default()
@@ -908,12 +911,12 @@ impl ObjectManager {
         branch.commits.insert(commit_id, commit);
 
         // Notify subscribers
-        self.notify_subscribers_of_commit(object_id, &branch_name);
+        self.notify_subscribers_of_commit(object_id, branch_name);
 
         // Notify global subscribers (received objects are never "new" from our perspective)
         self.notify_all_object_subscribers(
             object_id,
-            &branch_name,
+            branch_name,
             false,
             previous_commit_ids,
             old_content,
@@ -965,12 +968,12 @@ impl ObjectManager {
 
         let subscription = Subscription {
             object_id,
-            branch_name: branch_name.clone(),
+            branch_name,
         };
         self.subscriptions.insert(id, subscription);
 
         self.branch_subscribers
-            .entry((object_id, branch_name.clone()))
+            .entry((object_id, branch_name))
             .or_default()
             .insert(id);
 
@@ -1045,7 +1048,7 @@ impl ObjectManager {
     fn notify_all_object_subscribers(
         &mut self,
         object_id: ObjectId,
-        branch_name: &BranchName,
+        branch_name: BranchName,
         is_new_object: bool,
         previous_commit_ids: Vec<CommitId>,
         old_content: Option<Vec<u8>>,
@@ -1055,7 +1058,7 @@ impl ObjectManager {
         }
 
         let (metadata, commit_ids) = if let Some(object) = self.get(object_id) {
-            let commit_ids = if let Some(branch) = object.branches.get(branch_name) {
+            let commit_ids = if let Some(branch) = object.branches.get(&branch_name) {
                 Self::tips_by_timestamp(&branch.commits, &branch.tips)
             } else {
                 vec![]
@@ -1068,7 +1071,7 @@ impl ObjectManager {
         self.all_objects_outbox.push(AllObjectUpdate {
             object_id,
             metadata,
-            branch_name: branch_name.clone(),
+            branch_name,
             commit_ids,
             is_new_object,
             previous_commit_ids,
@@ -1091,7 +1094,7 @@ impl ObjectManager {
     /// Get the current frontier (tips) sorted by timestamp (oldest first).
     fn tips_by_timestamp(
         commits: &HashMap<CommitId, Commit>,
-        tips: &HashSet<CommitId>,
+        tips: &SmolSet<[CommitId; 2]>,
     ) -> Vec<CommitId> {
         let mut tip_vec: Vec<_> = tips.iter().copied().collect();
         tip_vec.sort_by_key(|id| commits.get(id).map(|c| c.timestamp).unwrap_or(0));
@@ -1099,12 +1102,12 @@ impl ObjectManager {
     }
 
     /// Notify subscribers about a commit change - sends current frontier sorted by timestamp.
-    fn notify_subscribers_of_commit(&mut self, object_id: ObjectId, branch_name: &BranchName) {
-        let key = (object_id, branch_name.clone());
+    fn notify_subscribers_of_commit(&mut self, object_id: ObjectId, branch_name: BranchName) {
+        let key = (object_id, branch_name);
         if let Some(subscriber_ids) = self.branch_subscribers.get(&key).cloned() {
             // Get current tips from the branch
             let commit_ids = if let Some(object) = self.get(object_id) {
-                if let Some(branch) = object.branches.get(branch_name) {
+                if let Some(branch) = object.branches.get(&branch_name) {
                     Self::tips_by_timestamp(&branch.commits, &branch.tips)
                 } else {
                     vec![]
@@ -1117,7 +1120,7 @@ impl ObjectManager {
                 self.subscription_outbox.push(SubscriptionUpdate {
                     subscription_id: sub_id,
                     object_id,
-                    branch_name: branch_name.clone(),
+                    branch_name,
                     commit_ids: commit_ids.clone(),
                 });
             }
@@ -1128,18 +1131,18 @@ impl ObjectManager {
     fn notify_subscribers_of_load(
         &mut self,
         object_id: ObjectId,
-        branch_name: &BranchName,
+        branch_name: BranchName,
         commits: &HashMap<CommitId, Commit>,
-        tips: &HashSet<CommitId>,
+        tips: &SmolSet<[CommitId; 2]>,
     ) {
-        let key = (object_id, branch_name.clone());
+        let key = (object_id, branch_name);
         if let Some(subscriber_ids) = self.branch_subscribers.get(&key).cloned() {
             let commit_ids = Self::tips_by_timestamp(commits, tips);
             for sub_id in subscriber_ids {
                 self.subscription_outbox.push(SubscriptionUpdate {
                     subscription_id: sub_id,
                     object_id,
-                    branch_name: branch_name.clone(),
+                    branch_name,
                     commit_ids: commit_ids.clone(),
                 });
             }
@@ -1175,9 +1178,7 @@ impl ObjectManager {
         let branch = match object.branches.get(&branch_name) {
             Some(b) => b,
             None => {
-                return TruncateResult::PermanentError(TruncateError::BranchNotFound(
-                    branch_name.clone(),
-                ));
+                return TruncateResult::PermanentError(TruncateError::BranchNotFound(branch_name));
             }
         };
 
@@ -1188,9 +1189,12 @@ impl ObjectManager {
             }
         }
 
+        // Convert to SmolSet for use in Branch
+        let tail_smolset: SmolSet<[CommitId; 2]> = tail_ids.iter().copied().collect();
+
         // Check invariant: all tips must be descendants of (or equal to) some tail
         for tip in &branch.tips {
-            if !Self::is_descendant_of_any(&branch.commits, *tip, &tail_ids) {
+            if !Self::is_descendant_of_any(&branch.commits, *tip, &tail_smolset) {
                 return TruncateResult::PermanentError(TruncateError::TipBeforeTail(*tip));
             }
         }
@@ -1199,7 +1203,7 @@ impl ObjectManager {
         let commits_to_delete = Self::find_ancestors(&branch.commits, &tail_ids);
 
         // If nothing to delete and tails already set to same value, return success immediately
-        if commits_to_delete.is_empty() && branch.tails.as_ref() == Some(&tail_ids) {
+        if commits_to_delete.is_empty() && branch.tails.as_ref() == Some(&tail_smolset) {
             return TruncateResult::Success {
                 deleted_commits: 0,
                 deleted_blobs: 0,
@@ -1224,7 +1228,7 @@ impl ObjectManager {
         // Queue SetBranchTails request
         self.outbox.push(StorageRequest::SetBranchTails {
             object_id,
-            branch_name: branch_name.clone(),
+            branch_name,
             tails: Some(tail_ids.clone()),
         });
 
@@ -1234,7 +1238,7 @@ impl ObjectManager {
                 .push(StorageRequest::DissociateAndMaybeDeleteBlob {
                     content_hash: *content_hash,
                     object_id: assoc.object_id,
-                    branch_name: assoc.branch_name.clone(),
+                    branch_name: assoc.branch_name,
                     commit_id: assoc.commit_id,
                 });
         }
@@ -1243,7 +1247,7 @@ impl ObjectManager {
         for commit_id in &commits_to_delete {
             self.outbox.push(StorageRequest::DeleteCommit {
                 object_id,
-                branch_name: branch_name.clone(),
+                branch_name,
                 commit_id: *commit_id,
             });
         }
@@ -1255,7 +1259,7 @@ impl ObjectManager {
         let branch = object.branches.get_mut(&branch_name).unwrap();
 
         // Set tails
-        branch.tails = Some(tail_ids);
+        branch.tails = Some(tail_smolset);
 
         // Mark commits as PendingDelete
         for commit_id in &commits_to_delete {
@@ -1285,7 +1289,7 @@ impl ObjectManager {
     fn is_descendant_of_any(
         commits: &HashMap<CommitId, Commit>,
         commit_id: CommitId,
-        ancestors: &HashSet<CommitId>,
+        ancestors: &SmolSet<[CommitId; 2]>,
     ) -> bool {
         if ancestors.contains(&commit_id) {
             return true;
@@ -1762,7 +1766,7 @@ mod tests {
 
         let commits = manager.get_commits(object_id, "main").unwrap();
         assert!(commits.contains_key(&child_id));
-        assert_eq!(commits[&child_id].parents, vec![parent_id]);
+        assert_eq!(commits[&child_id].parents.as_slice(), &[parent_id]);
     }
 
     // --- tips management tests ---
@@ -2002,7 +2006,9 @@ mod tests {
         let object_id = manager.create(None);
 
         let result = manager.get_commits(object_id, "nonexistent");
-        assert!(matches!(result, Err(Error::BranchNotFound(ref name)) if name.0 == "nonexistent"));
+        assert!(
+            matches!(result, Err(Error::BranchNotFound(ref name)) if name.as_str() == "nonexistent")
+        );
     }
 
     // --- persistence tests ---
@@ -2037,7 +2043,7 @@ mod tests {
         assert!(matches!(
             &requests[0],
             StorageRequest::AppendCommit { object_id: oid, branch_name, commit }
-            if *oid == object_id && branch_name.0 == "main" && commit.id() == commit_id
+            if *oid == object_id && branch_name.as_str() == "main" && commit.id() == commit_id
         ));
     }
 
@@ -2168,7 +2174,7 @@ mod tests {
         assert!(matches!(
             &requests[0],
             StorageRequest::LoadObjectBranch { object_id: oid, branch_name, depth: LoadDepth::AllCommits }
-            if *oid == object_id && branch_name.0 == "main"
+            if *oid == object_id && branch_name.as_str() == "main"
         ));
     }
 
@@ -2186,7 +2192,7 @@ mod tests {
 
         // Create test commits for the loaded branch
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"loaded".to_vec(),
             timestamp: 12345,
             author: ObjectId::new(),
@@ -2861,7 +2867,7 @@ mod tests {
 
         // Verify in-memory state
         let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
-        assert_eq!(branch.tails, Some(HashSet::from([c2])));
+        assert_eq!(branch.tails, Some([c2].into_iter().collect()));
         assert!(matches!(
             branch.commits[&root].stored_state,
             StoredState::PendingDelete
@@ -2938,9 +2944,16 @@ mod tests {
         assert_eq!(delete_requests.len(), 1);
         assert!(delete_requests.contains(&root));
 
-        // Verify in-memory tails
+        // Verify in-memory tails (compare as sets - order doesn't matter)
         let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
-        assert_eq!(branch.tails, Some(HashSet::from([a, b])));
+        let expected_tails: SmolSet<[CommitId; 2]> = [a, b].into_iter().collect();
+        assert!(
+            branch
+                .tails
+                .as_ref()
+                .map_or(false, |t| t.iter().collect::<HashSet<_>>()
+                    == expected_tails.iter().collect::<HashSet<_>>())
+        );
 
         // Process response
         manager.push_response(StorageResponse::DeleteCommit {
@@ -3172,7 +3185,7 @@ mod tests {
         assert!(matches!(result, TruncateResult::Pending));
 
         let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
-        assert_eq!(branch.tails, Some(HashSet::from([c1])));
+        assert_eq!(branch.tails, Some([c1].into_iter().collect()));
         assert!(branch.tips.contains(&c1));
     }
 
@@ -3229,7 +3242,7 @@ mod tests {
         manager.start_loading(object_id);
 
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"loaded".to_vec(),
             timestamp: 12345,
             author: ObjectId::new(),
@@ -3254,7 +3267,8 @@ mod tests {
         manager.process_storage_responses();
 
         let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
-        assert_eq!(branch.tails, tails);
+        let expected_tails: Option<SmolSet<[CommitId; 2]>> = tails.map(|t| t.into_iter().collect());
+        assert_eq!(branch.tails, expected_tails);
     }
 
     #[test]
@@ -3302,7 +3316,15 @@ mod tests {
         assert!(delete_requests.contains(&root));
 
         let branch = &manager.get(object_id).unwrap().branches[&BranchName::new("main")];
-        assert_eq!(branch.tails, Some(HashSet::from([a, b])));
+        // Compare as sets - order doesn't matter for SmolSet
+        let expected_tails: SmolSet<[CommitId; 2]> = [a, b].into_iter().collect();
+        assert!(
+            branch
+                .tails
+                .as_ref()
+                .map_or(false, |t| t.iter().collect::<HashSet<_>>()
+                    == expected_tails.iter().collect::<HashSet<_>>())
+        );
         assert!(branch.tips.contains(&a2));
         assert!(branch.tips.contains(&b2));
     }

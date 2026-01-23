@@ -88,7 +88,7 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
         // Validate type match
         if !val.is_null() && val.column_type().is_some_and(|t| t != col.column_type) {
             return Err(EncodingError::TypeMismatch {
-                column: col.name.clone(),
+                column: col.name.to_string(),
                 expected: col.column_type.clone(),
                 actual: val.column_type(),
             });
@@ -97,7 +97,7 @@ pub fn encode_row(descriptor: &RowDescriptor, values: &[Value]) -> Result<Vec<u8
         // Check null allowed
         if val.is_null() && !col.nullable {
             return Err(EncodingError::NullNotAllowed {
-                column: col.name.clone(),
+                column: col.name.to_string(),
             });
         }
 
@@ -147,7 +147,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::BigInt(n) => buf.extend_from_slice(&n.to_le_bytes()),
         Value::Boolean(b) => buf.push(if *b { 1 } else { 0 }),
         Value::Timestamp(t) => buf.extend_from_slice(&t.to_le_bytes()),
-        Value::Uuid(id) => buf.extend_from_slice(id.0.as_bytes()),
+        Value::Uuid(id) => buf.extend_from_slice(id.uuid().as_bytes()),
         Value::Null => {
             // Should not reach here for non-nullable (validated above)
             let size = col.column_type.fixed_size().unwrap();
@@ -265,7 +265,7 @@ pub fn decode_column(
                 uuid::Uuid::from_slice(&bytes[..16]).map_err(|e| EncodingError::MalformedData {
                     message: format!("invalid uuid: {e}"),
                 })?;
-            Ok(Value::Uuid(ObjectId(uuid)))
+            Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
         ColumnType::Text => {
             let s = std::str::from_utf8(bytes).map_err(|e| EncodingError::MalformedData {
@@ -571,7 +571,7 @@ pub fn encode_value(value: &Value) -> Vec<u8> {
         Value::BigInt(n) => n.to_le_bytes().to_vec(),
         Value::Boolean(b) => vec![if *b { 1 } else { 0 }],
         Value::Timestamp(t) => t.to_le_bytes().to_vec(),
-        Value::Uuid(id) => id.0.as_bytes().to_vec(),
+        Value::Uuid(id) => id.uuid().as_bytes().to_vec(),
         Value::Text(s) => s.as_bytes().to_vec(),
         Value::Array(elements) => encode_array_simple(elements),
         Value::Row(_) => panic!("Row values require a descriptor - use encode_value_with_type"),
@@ -809,7 +809,7 @@ fn decode_array_element(data: &[u8], element_type: &ColumnType) -> Result<Value,
                 uuid::Uuid::from_slice(&data[..16]).map_err(|e| EncodingError::MalformedData {
                     message: format!("invalid uuid: {e}"),
                 })?;
-            Ok(Value::Uuid(ObjectId(uuid)))
+            Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
         }
         ColumnType::Text => {
             let s = std::str::from_utf8(data).map_err(|e| EncodingError::MalformedData {
@@ -866,7 +866,7 @@ mod tests {
     fn encode_decode_roundtrip() {
         let descriptor = test_descriptor();
         let values = vec![
-            Value::Uuid(ObjectId(Uuid::from_u128(12345))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(12345))),
             Value::Text("Alice".into()),
             Value::Integer(30),
             Value::Boolean(true),
@@ -907,7 +907,7 @@ mod tests {
     fn null_not_allowed_for_non_nullable() {
         let descriptor = test_descriptor();
         let values = vec![
-            Value::Uuid(ObjectId(Uuid::from_u128(1))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(1))),
             Value::Null, // name is not nullable
             Value::Integer(30),
             Value::Boolean(true),
@@ -921,7 +921,7 @@ mod tests {
     fn type_mismatch_error() {
         let descriptor = test_descriptor();
         let values = vec![
-            Value::Uuid(ObjectId(Uuid::from_u128(1))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(1))),
             Value::Integer(42), // Should be Text
             Value::Integer(30),
             Value::Boolean(true),
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn column_count_mismatch_error() {
         let descriptor = test_descriptor();
-        let values = vec![Value::Uuid(ObjectId(Uuid::from_u128(1)))];
+        let values = vec![Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(1)))];
 
         let result = encode_row(&descriptor, &values);
         assert!(matches!(
@@ -947,7 +947,7 @@ mod tests {
     fn column_bytes_access() {
         let descriptor = test_descriptor();
         let values = vec![
-            Value::Uuid(ObjectId(Uuid::from_u128(12345))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(12345))),
             Value::Text("Alice".into()),
             Value::Integer(30),
             Value::Boolean(true),
@@ -973,7 +973,7 @@ mod tests {
     fn column_eq_test() {
         let descriptor = test_descriptor();
         let values = vec![
-            Value::Uuid(ObjectId(Uuid::from_u128(12345))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(12345))),
             Value::Text("Alice".into()),
             Value::Integer(30),
             Value::Boolean(true),
@@ -1227,8 +1227,8 @@ mod tests {
     #[test]
     fn array_encode_decode_uuids() {
         let elements = vec![
-            Value::Uuid(ObjectId(Uuid::from_u128(1))),
-            Value::Uuid(ObjectId(Uuid::from_u128(2))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(1))),
+            Value::Uuid(ObjectId::from_uuid(Uuid::from_u128(2))),
         ];
         let array_type = ColumnType::Array(Box::new(ColumnType::Uuid));
         let encoded = encode_array(&elements, &array_type);

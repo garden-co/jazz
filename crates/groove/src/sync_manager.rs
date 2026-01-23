@@ -107,7 +107,7 @@ impl ClientState {
     pub fn is_in_scope(&self, object_id: ObjectId, branch_name: &BranchName) -> bool {
         self.queries
             .values()
-            .any(|scope| scope.contains(&(object_id, branch_name.clone())))
+            .any(|scope| scope.contains(&(object_id, *branch_name)))
     }
 }
 
@@ -401,12 +401,12 @@ impl SyncManager {
                     object_id,
                     branch_name,
                     ..
-                } => (*object_id, branch_name.clone()),
+                } => (*object_id, *branch_name),
                 SyncPayload::ObjectTruncated {
                     object_id,
                     branch_name,
                     ..
-                } => (*object_id, branch_name.clone()),
+                } => (*object_id, *branch_name),
                 _ => return, // Shouldn't happen for pending updates
             };
 
@@ -451,12 +451,12 @@ impl SyncManager {
                 object_id,
                 branch_name,
                 ..
-            } => (*object_id, branch_name.clone()),
+            } => (*object_id, *branch_name),
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
                 ..
-            } => (*object_id, branch_name.clone()),
+            } => (*object_id, *branch_name),
             _ => return,
         };
 
@@ -609,8 +609,8 @@ impl SyncManager {
                     to_sync.push((
                         *object_id,
                         object.metadata.clone(),
-                        branch_name.clone(),
-                        branch.tips.clone(),
+                        *branch_name,
+                        branch.tips.iter().copied().collect(),
                     ));
                 }
             }
@@ -644,7 +644,7 @@ impl SyncManager {
             let include_metadata = !server.sent_metadata.contains(&object_id);
             let already_sent = server
                 .sent_tips
-                .get(&(object_id, branch_name.clone()))
+                .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
             (include_metadata, already_sent)
@@ -662,9 +662,7 @@ impl SyncManager {
         if include_metadata {
             server.sent_metadata.insert(object_id);
         }
-        server
-            .sent_tips
-            .insert((object_id, branch_name.clone()), tips);
+        server.sent_tips.insert((object_id, branch_name), tips);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
@@ -698,7 +696,7 @@ impl SyncManager {
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };
-        let tips = branch.tips.clone();
+        let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
         let metadata = object.metadata.clone();
 
         self.queue_tips_to_client(client_id, object_id, metadata, branch_name, tips);
@@ -731,7 +729,7 @@ impl SyncManager {
 
             let already_sent = client
                 .sent_tips
-                .get(&(object_id, branch_name.clone()))
+                .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
 
@@ -754,9 +752,7 @@ impl SyncManager {
         if include_metadata {
             client.sent_metadata.insert(object_id);
         }
-        client
-            .sent_tips
-            .insert((object_id, branch_name.clone()), tips);
+        client.sent_tips.insert((object_id, branch_name), tips);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
@@ -889,7 +885,7 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
-                self.apply_object_updated(object_id, metadata, branch_name.clone(), commits);
+                self.apply_object_updated(object_id, metadata, branch_name, commits);
 
                 // Forward to clients whose scope includes this object/branch
                 self.forward_update_to_clients(object_id, branch_name);
@@ -900,11 +896,9 @@ impl SyncManager {
                 tails,
             } => {
                 // Apply truncation locally
-                let _ = self.object_manager.truncate_branch(
-                    object_id,
-                    branch_name.clone(),
-                    tails.clone(),
-                );
+                let _ = self
+                    .object_manager
+                    .truncate_branch(object_id, branch_name, tails.clone());
 
                 // Forward to clients
                 self.forward_truncation_to_clients(object_id, branch_name, tails);
@@ -912,7 +906,7 @@ impl SyncManager {
             SyncPayload::BlobResponse { blob_id, data } => {
                 let _ = self.object_manager.put_blob(
                     blob_id.object_id,
-                    blob_id.branch_name.clone(),
+                    blob_id.branch_name,
                     blob_id.commit_id,
                     data.clone(),
                 );
@@ -1115,10 +1109,10 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
-                self.apply_object_updated(object_id, metadata, branch_name.clone(), commits);
+                self.apply_object_updated(object_id, metadata, branch_name, commits);
 
                 // Forward to servers
-                self.forward_update_to_servers(object_id, branch_name.clone());
+                self.forward_update_to_servers(object_id, branch_name);
 
                 // Forward to other clients (not the sender)
                 self.forward_update_to_clients_except(object_id, branch_name, client_id);
@@ -1128,14 +1122,12 @@ impl SyncManager {
                 branch_name,
                 tails,
             } => {
-                let _ = self.object_manager.truncate_branch(
-                    object_id,
-                    branch_name.clone(),
-                    tails.clone(),
-                );
+                let _ = self
+                    .object_manager
+                    .truncate_branch(object_id, branch_name, tails.clone());
 
                 // Forward to servers
-                self.forward_truncation_to_servers(object_id, branch_name.clone(), tails.clone());
+                self.forward_truncation_to_servers(object_id, branch_name, tails.clone());
 
                 // Forward to other clients
                 self.forward_truncation_to_clients_except(object_id, branch_name, tails, client_id);
@@ -1167,7 +1159,7 @@ impl SyncManager {
         for commit in commits {
             let _ = self
                 .object_manager
-                .receive_commit(object_id, branch_name.clone(), commit);
+                .receive_commit(object_id, branch_name, commit);
         }
     }
 
@@ -1181,7 +1173,7 @@ impl SyncManager {
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };
-        let tips = branch.tips.clone();
+        let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
         let metadata = object.metadata.clone();
 
         for server_id in server_ids {
@@ -1189,7 +1181,7 @@ impl SyncManager {
                 server_id,
                 object_id,
                 metadata.clone(),
-                branch_name.clone(),
+                branch_name,
                 tips.clone(),
             );
         }
@@ -1220,7 +1212,7 @@ impl SyncManager {
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };
-        let tips = branch.tips.clone();
+        let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
         let metadata = object.metadata.clone();
 
         for client_id in client_ids {
@@ -1228,7 +1220,7 @@ impl SyncManager {
                 client_id,
                 object_id,
                 metadata.clone(),
-                branch_name.clone(),
+                branch_name,
                 tips.clone(),
             );
         }
@@ -1261,7 +1253,7 @@ impl SyncManager {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::ObjectTruncated {
                     object_id,
-                    branch_name: branch_name.clone(),
+                    branch_name,
                     tails: tails.clone(),
                 },
             });
@@ -1316,7 +1308,7 @@ impl SyncManager {
                 destination: Destination::Client(client_id),
                 payload: SyncPayload::ObjectTruncated {
                     object_id,
-                    branch_name: branch_name.clone(),
+                    branch_name,
                     tails: tails.clone(),
                 },
             });
@@ -1343,6 +1335,7 @@ impl SyncManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     // ========================================================================
     // Phase 1: Foundation Tests
@@ -1387,7 +1380,7 @@ mod tests {
             } => {
                 assert_eq!(*object_id, obj_id);
                 assert!(metadata.is_some()); // First sync includes metadata
-                assert_eq!(branch_name.0, "main");
+                assert_eq!(branch_name.as_str(), "main");
                 assert_eq!(commits.len(), 1);
             }
             _ => panic!("Expected ObjectUpdated"),
@@ -1702,7 +1695,7 @@ mod tests {
 
         // Client pushes update - should be allowed (no callback)
         let commit = Commit {
-            parents: vec![c1],
+            parents: smallvec![c1],
             content: b"update".to_vec(),
             timestamp: 2000,
             author,
@@ -1753,7 +1746,7 @@ mod tests {
 
         // Client tries to push update
         let commit = Commit {
-            parents: vec![c1],
+            parents: smallvec![c1],
             content: b"new_content".to_vec(),
             timestamp: 2000,
             author,
@@ -1812,7 +1805,7 @@ mod tests {
 
         // Client pushes update
         let commit = Commit {
-            parents: vec![c1],
+            parents: smallvec![c1],
             content: b"allowed".to_vec(),
             timestamp: 2000,
             author,
@@ -1870,7 +1863,7 @@ mod tests {
 
         // Client tries to push update
         let commit = Commit {
-            parents: vec![c1],
+            parents: smallvec![c1],
             content: b"denied".to_vec(),
             timestamp: 2000,
             author,
@@ -1935,7 +1928,7 @@ mod tests {
 
         // Client pushes update
         let commit = Commit {
-            parents: vec![c1],
+            parents: smallvec![c1],
             content: b"update".to_vec(),
             timestamp: 2000,
             author,
@@ -1979,7 +1972,7 @@ mod tests {
         let obj_id = ObjectId::new();
         let author = ObjectId::new();
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"new object".to_vec(),
             timestamp: 1000,
             author,
@@ -2017,7 +2010,7 @@ mod tests {
         let obj_id = ObjectId::new();
         let author = ObjectId::new();
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"new object".to_vec(),
             timestamp: 1000,
             author,
@@ -2063,7 +2056,7 @@ mod tests {
         let obj_id = ObjectId::new();
         let author = ObjectId::new();
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"new object".to_vec(),
             timestamp: 1000,
             author,
@@ -2102,7 +2095,7 @@ mod tests {
                 reason,
             }) => {
                 assert_eq!(*object_id, obj_id);
-                assert_eq!(branch_name.0, "main");
+                assert_eq!(branch_name.as_str(), "main");
                 assert_eq!(reason, "Not allowed");
             }
             _ => panic!("Expected PermissionDenied error"),
@@ -2193,7 +2186,7 @@ mod tests {
         // Server sends update
         let author = ObjectId::new();
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"from server".to_vec(),
             timestamp: 1000,
             author,
@@ -2381,7 +2374,7 @@ mod tests {
 
         // Client1 sends update
         let commit = Commit {
-            parents: vec![c1],
+            parents: smallvec![c1],
             content: b"from client1".to_vec(),
             timestamp: 2000,
             author,

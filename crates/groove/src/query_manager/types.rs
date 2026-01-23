@@ -1,30 +1,56 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use internment::Intern;
+
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 
 use super::encoding::{decode_row, encode_row};
 
-/// Name identifying a table in the schema.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TableName(pub String);
+/// Interned name identifying a table in the schema.
+/// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TableName(pub Intern<String>);
 
 impl TableName {
     pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
+        Self(Intern::new(name.into()))
+    }
+
+    /// Get the underlying string reference.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl<T: Into<String>> From<T> for TableName {
     fn from(s: T) -> Self {
-        Self(s.into())
+        Self(Intern::new(s.into()))
     }
 }
 
 impl std::fmt::Display for TableName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl PartialEq<str> for TableName {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for TableName {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for TableName {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
     }
 }
 
@@ -87,10 +113,56 @@ impl ColumnType {
     }
 }
 
+/// Interned column name type.
+/// Pointer-sized (8 bytes), Copy, fast equality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColumnName(pub Intern<String>);
+
+impl ColumnName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(Intern::new(name.into()))
+    }
+
+    /// Get the underlying string reference.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<T: Into<String>> From<T> for ColumnName {
+    fn from(s: T) -> Self {
+        Self(Intern::new(s.into()))
+    }
+}
+
+impl std::fmt::Display for ColumnName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl PartialEq<str> for ColumnName {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for ColumnName {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for ColumnName {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
 /// Descriptor for a single column in a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDescriptor {
-    pub name: String,
+    pub name: ColumnName,
     pub column_type: ColumnType,
     pub nullable: bool,
     /// Optional foreign key reference to another table.
@@ -98,13 +170,18 @@ pub struct ColumnDescriptor {
 }
 
 impl ColumnDescriptor {
-    pub fn new(name: impl Into<String>, column_type: ColumnType) -> Self {
+    pub fn new(name: impl Into<ColumnName>, column_type: ColumnType) -> Self {
         Self {
             name: name.into(),
             column_type,
             nullable: false,
             references: None,
         }
+    }
+
+    /// Get the column name as a string slice.
+    pub fn name_str(&self) -> &str {
+        self.name.as_str()
     }
 
     pub fn nullable(mut self) -> Self {
@@ -131,12 +208,12 @@ impl RowDescriptor {
 
     /// Find column index by name.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == name)
+        self.columns.iter().position(|c| c.name.as_str() == name)
     }
 
     /// Get column descriptor by name.
     pub fn column(&self, name: &str) -> Option<&ColumnDescriptor> {
-        self.columns.iter().find(|c| c.name == name)
+        self.columns.iter().find(|c| c.name.as_str() == name)
     }
 
     /// Count of fixed-size columns.
@@ -311,7 +388,7 @@ pub fn validate_no_inherits_cycles(schema: &Schema) -> Result<(), String> {
         for (policy_opt, _operation) in policies_to_check.iter() {
             if let Some(policy) = policy_opt {
                 let mut visited = HashSet::new();
-                visited.insert(table_name.clone());
+                visited.insert(*table_name);
                 validate_policy_no_cycles(
                     table_name,
                     policy,
@@ -325,7 +402,7 @@ pub fn validate_no_inherits_cycles(schema: &Schema) -> Result<(), String> {
         // Also check DELETE's effective policy (falls back to UPDATE)
         if let Some(policy) = table_schema.policies.effective_delete_using() {
             let mut visited = HashSet::new();
-            visited.insert(table_name.clone());
+            visited.insert(*table_name);
             validate_policy_no_cycles(
                 table_name,
                 policy,
@@ -400,7 +477,7 @@ fn validate_policy_no_cycles(
                     }
                 };
                 if let Some(p) = target_policy {
-                    visited.insert(target_table.clone());
+                    visited.insert(*target_table);
                     validate_policy_no_cycles(
                         target_table,
                         p,
@@ -1261,7 +1338,10 @@ impl CombinedRowDescriptor {
             tables.iter().zip(descriptors.iter()).enumerate()
         {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
-                column_map.insert((table_name.clone(), col.name.clone()), (table_idx, col_idx));
+                column_map.insert(
+                    (table_name.clone(), col.name.to_string()),
+                    (table_idx, col_idx),
+                );
             }
         }
 
@@ -1378,7 +1458,7 @@ mod tests {
             Some(ColumnType::Timestamp)
         );
         assert_eq!(
-            Value::Uuid(ObjectId(Uuid::nil())).column_type(),
+            Value::Uuid(ObjectId::from_uuid(Uuid::nil())).column_type(),
             Some(ColumnType::Uuid)
         );
         assert_eq!(Value::Null.column_type(), None);
@@ -1394,7 +1474,7 @@ mod tests {
 
     #[test]
     fn tuple_element_id() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
         let elem = TupleElement::Id(id);
 
         assert_eq!(elem.id(), id);
@@ -1405,7 +1485,7 @@ mod tests {
 
     #[test]
     fn tuple_element_row() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
         let content = vec![1, 2, 3];
         let commit_id = make_commit_id(1);
         let elem = TupleElement::Row {
@@ -1422,7 +1502,7 @@ mod tests {
 
     #[test]
     fn tuple_element_from_row() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
         let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
         let elem = TupleElement::from_row(&row);
 
@@ -1433,7 +1513,7 @@ mod tests {
 
     #[test]
     fn tuple_from_id() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
         let tuple = Tuple::from_id(id);
 
         assert_eq!(tuple.len(), 1);
@@ -1443,7 +1523,7 @@ mod tests {
 
     #[test]
     fn tuple_from_row() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
         let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
         let tuple = Tuple::from_row(&row);
 
@@ -1454,7 +1534,7 @@ mod tests {
 
     #[test]
     fn tuple_equality_based_on_ids() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
 
         // Two tuples with same ID but different content should be equal
         let tuple1 = Tuple::from_id(id);
@@ -1471,7 +1551,7 @@ mod tests {
     fn tuple_hash_based_on_ids() {
         use std::collections::hash_map::DefaultHasher;
 
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
 
         let tuple1 = Tuple::from_id(id);
         let tuple2 = Tuple::new(vec![TupleElement::Row {
@@ -1490,8 +1570,8 @@ mod tests {
 
     #[test]
     fn tuple_in_hashset() {
-        let id1 = ObjectId(Uuid::from_u128(1));
-        let id2 = ObjectId(Uuid::from_u128(2));
+        let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
+        let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
 
         let mut set = HashSet::new();
         set.insert(Tuple::from_id(id1));
@@ -1508,7 +1588,7 @@ mod tests {
 
     #[test]
     fn tuple_delta_to_row_delta() {
-        let id = ObjectId(Uuid::from_u128(42));
+        let id = ObjectId::from_uuid(Uuid::from_u128(42));
         let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
         let tuple = Tuple::from_row(&row);
 

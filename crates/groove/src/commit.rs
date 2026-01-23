@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use blake3::Hasher;
+use smallvec::SmallVec;
 
 use crate::object::ObjectId;
 
@@ -21,7 +22,8 @@ pub enum StoredState {
 /// A commit in an object's history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
-    pub parents: Vec<CommitId>,
+    /// Parent commit IDs. Inline storage for 0-2 parents (root, regular, merge).
+    pub parents: SmallVec<[CommitId; 2]>,
     pub content: Vec<u8>,
     /// Microseconds since Unix epoch.
     pub timestamp: u64,
@@ -50,7 +52,7 @@ impl Commit {
         hasher.update(&self.timestamp.to_le_bytes());
 
         // Hash author
-        hasher.update(self.author.0.as_bytes());
+        hasher.update(self.author.uuid().as_bytes());
 
         // Hash metadata
         if let Some(meta) = &self.metadata {
@@ -73,15 +75,16 @@ impl Commit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
     use uuid::Uuid;
 
     #[test]
     fn commit_id_is_deterministic() {
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId(Uuid::nil()),
+            author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::default(),
         };
@@ -94,19 +97,19 @@ mod tests {
     #[test]
     fn different_commits_have_different_ids() {
         let commit1 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId(Uuid::nil()),
+            author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::default(),
         };
 
         let commit2 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"world".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId(Uuid::nil()),
+            author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::default(),
         };
@@ -117,19 +120,19 @@ mod tests {
     #[test]
     fn stored_state_does_not_affect_commit_id() {
         let commit1 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId(Uuid::nil()),
+            author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::Pending,
         };
 
         let commit2 = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId(Uuid::nil()),
+            author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::Stored,
         };

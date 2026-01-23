@@ -100,7 +100,7 @@ impl ArraySubqueryNode {
         let element_type = ColumnType::Array(Box::new(ColumnType::Row(Box::new(row_descriptor))));
 
         output_columns.push(ColumnDescriptor {
-            name: array_column_name.clone(),
+            name: array_column_name.clone().into(),
             column_type: element_type,
             nullable: false,
             references: None,

@@ -371,7 +371,7 @@ impl BTreeIndex {
 
     /// Check if a row ID exists in the index.
     pub fn contains_row(&self, row_id: ObjectId) -> bool {
-        let key = row_id.0.as_bytes();
+        let key = row_id.uuid().as_bytes();
         !self.lookup_exact(key).is_empty()
     }
 
@@ -722,9 +722,9 @@ mod tests {
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(row1.0.as_bytes(), row1).unwrap();
-        index.insert(row2.0.as_bytes(), row2).unwrap();
-        index.insert(row3.0.as_bytes(), row3).unwrap();
+        index.insert(row1.uuid().as_bytes(), row1).unwrap();
+        index.insert(row2.uuid().as_bytes(), row2).unwrap();
+        index.insert(row3.uuid().as_bytes(), row3).unwrap();
 
         let all = index.scan_all();
         assert_eq!(all.len(), 3);
@@ -767,7 +767,7 @@ mod tests {
         let row = ObjectId::new();
         assert!(!index.contains_row(row));
 
-        index.insert(row.0.as_bytes(), row).unwrap();
+        index.insert(row.uuid().as_bytes(), row).unwrap();
         assert!(index.contains_row(row));
     }
 

@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 
+use smallvec::smallvec;
+
 use crate::commit::Commit;
 use crate::object::ObjectId;
 use crate::sync_manager::{
@@ -117,7 +119,7 @@ fn rebac_insert_allowed_by_simple_policy() {
 
     // Client sends insert
     let commit = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -184,7 +186,7 @@ fn rebac_insert_denied_by_simple_policy() {
 
     // Client sends insert
     let commit = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -267,7 +269,7 @@ fn rebac_no_session_allows_all_writes() {
 
     // Client sends insert
     let commit = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -342,7 +344,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     // Client sends insert
     let commit = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -403,7 +405,7 @@ fn rebac_non_row_object_allowed() {
 
     // Client sends update
     let commit = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content: b"some data".to_vec(),
         timestamp: 1000,
         author: ObjectId::new(),
@@ -481,7 +483,7 @@ fn rebac_two_clients_different_sessions() {
     // Alice's document
     let content1 = encode_document("alice", "Alice's Doc", None);
     let commit1 = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content: content1,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -492,7 +494,7 @@ fn rebac_two_clients_different_sessions() {
     // Bob's document
     let content2 = encode_document("bob", "Bob's Doc", None);
     let commit2 = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content: content2,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -622,7 +624,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     // Non-admin tries to insert
     let commit = Commit {
-        parents: vec![],
+        parents: smallvec![],
         content,
         timestamp: 1000,
         author: ObjectId::new(),
@@ -758,7 +760,7 @@ fn rebac_update_denied_by_using_policy() {
     .unwrap();
 
     let update_commit = Commit {
-        parents: vec![initial_commit],
+        parents: smallvec![initial_commit],
         content: bob_update_content,
         timestamp: 2000,
         author: ObjectId::new(),
@@ -1022,7 +1024,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     )
     .unwrap();
     let bob_commit = Commit {
-        parents: vec![initial_commit],
+        parents: smallvec![initial_commit],
         content: bob_update_content,
         timestamp: 2000,
         author: ObjectId::new(),
@@ -1096,7 +1098,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     )
     .unwrap();
     let alice_commit = Commit {
-        parents: vec![initial_commit],
+        parents: smallvec![initial_commit],
         content: alice_update_content,
         timestamp: 3000,
         author: ObjectId::new(),

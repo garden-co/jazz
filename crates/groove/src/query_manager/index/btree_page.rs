@@ -143,7 +143,7 @@ impl BTreePage {
                     let row_count = entry.row_ids.len() as u32;
                     buf.extend_from_slice(&row_count.to_le_bytes());
                     for row_id in &entry.row_ids {
-                        buf.extend_from_slice(row_id.0.as_bytes());
+                        buf.extend_from_slice(row_id.uuid().as_bytes());
                     }
                 }
             }
@@ -237,7 +237,7 @@ impl BTreePage {
                             return None;
                         }
                         let uuid = Uuid::from_slice(&data[pos..pos + 16]).ok()?;
-                        row_ids.insert(ObjectId(uuid));
+                        row_ids.insert(ObjectId::from_uuid(uuid));
                         pos += 16;
                     }
 

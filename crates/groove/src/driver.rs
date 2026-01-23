@@ -334,6 +334,7 @@ impl TestDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
     #[test]
     fn test_driver_creates_object() {
@@ -367,7 +368,7 @@ mod tests {
         }]);
 
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"test".to_vec(),
             timestamp: 123,
             author,
@@ -408,7 +409,7 @@ mod tests {
         }]);
 
         let commit = Commit {
-            parents: vec![],
+            parents: smallvec![],
             content: b"test".to_vec(),
             timestamp: 123,
             author,

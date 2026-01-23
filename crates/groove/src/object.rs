@@ -1,12 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+use internment::Intern;
+use smolset::SmolSet;
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
 
-/// UUIDv7 identifying an object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ObjectId(pub Uuid);
+/// Interned UUIDv7 identifying an object.
+/// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectId(pub Intern<Uuid>);
 
 /// How deeply a branch has been loaded from storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,7 +34,17 @@ pub enum ObjectState {
 
 impl ObjectId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7())
+        Self(Intern::new(Uuid::now_v7()))
+    }
+
+    /// Get the underlying UUID reference.
+    pub fn uuid(&self) -> &Uuid {
+        &self.0
+    }
+
+    /// Create an ObjectId from a raw Uuid.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(Intern::new(uuid))
     }
 }
 
@@ -41,19 +54,43 @@ impl Default for ObjectId {
     }
 }
 
-/// Name identifying a branch within an object.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BranchName(pub String);
+impl PartialOrd for ObjectId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ObjectId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.uuid().cmp(other.uuid())
+    }
+}
+
+/// Interned name identifying a branch within an object.
+/// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BranchName(pub Intern<String>);
 
 impl BranchName {
     pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
+        Self(Intern::new(name.into()))
+    }
+
+    /// Get the underlying string reference.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl<T: Into<String>> From<T> for BranchName {
     fn from(s: T) -> Self {
-        Self(s.into())
+        Self(Intern::new(s.into()))
+    }
+}
+
+impl std::fmt::Display for BranchName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
@@ -61,10 +98,11 @@ impl<T: Into<String>> From<T> for BranchName {
 #[derive(Debug, Clone, Default)]
 pub struct Branch {
     pub commits: HashMap<CommitId, Commit>,
-    pub tips: HashSet<CommitId>,
+    /// Current tips (unmerged heads). Inline storage for ≤2 tips.
+    pub tips: SmolSet<[CommitId; 2]>,
     /// Truncation boundary. None = full history from roots.
     /// Some(tails) = history only includes tails and their descendants.
-    pub tails: Option<HashSet<CommitId>>,
+    pub tails: Option<SmolSet<[CommitId; 2]>>,
     pub loaded_state: BranchLoadedState,
 }
 

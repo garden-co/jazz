@@ -19,6 +19,7 @@ use super::graph_nodes::policy_filter::PolicyFilterNode;
 use super::index::BTreeIndex;
 use super::policy::PolicyExpr;
 use super::session::Session;
+use super::types::ColumnName;
 use super::types::{Schema, TableName, Value};
 
 /// A one-shot graph for evaluating a policy condition.
@@ -51,20 +52,19 @@ impl PolicyGraph {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.descriptor.clone();
 
-        let mut graph = QueryGraph::new(table.clone(), descriptor.clone());
+        let mut graph = QueryGraph::new(*table, descriptor.clone());
 
         // IndexScan node: scan _id index for exact match
         let encoded_id = encode_value(&Value::Uuid(object_id));
+        let id_column = ColumnName::new("_id");
         let scan_node = IndexScanNode::new(
-            &table.0,
-            "_id",
+            *table,
+            id_column,
             ScanCondition::Eq(encoded_id),
             descriptor.clone(),
         );
         let scan_id = graph.add_node_with_id(GraphNode::IndexScan(scan_node));
-        graph
-            .index_scan_nodes
-            .push((scan_id, table.0.clone(), "_id".to_string()));
+        graph.index_scan_nodes.push((scan_id, *table, id_column));
 
         // Materialize node: load row content
         let mat_node = MaterializeNode::new(descriptor.clone());
@@ -77,7 +77,7 @@ impl PolicyGraph {
             policy.clone(),
             session.clone(),
             schema.clone(),
-            &table.0,
+            table.as_str(),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -92,7 +92,7 @@ impl PolicyGraph {
         Some(Self {
             graph,
             exists_node: exists_id,
-            table: table.clone(),
+            table: *table,
         })
     }
 
@@ -126,14 +126,14 @@ impl PolicyGraph {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.descriptor.clone();
 
-        let mut graph = QueryGraph::new(table.clone(), descriptor.clone());
+        let mut graph = QueryGraph::new(*table, descriptor.clone());
 
         // IndexScan node: full table scan (check all rows)
-        let scan_node = IndexScanNode::new(&table.0, "_id", ScanCondition::All, descriptor.clone());
+        let id_column = ColumnName::new("_id");
+        let scan_node =
+            IndexScanNode::new(*table, id_column, ScanCondition::All, descriptor.clone());
         let scan_id = graph.add_node_with_id(GraphNode::IndexScan(scan_node));
-        graph
-            .index_scan_nodes
-            .push((scan_id, table.0.clone(), "_id".to_string()));
+        graph.index_scan_nodes.push((scan_id, *table, id_column));
 
         // Materialize node: load row content
         let mat_node = MaterializeNode::new(descriptor.clone());
@@ -146,7 +146,7 @@ impl PolicyGraph {
             condition.clone(),
             session.clone(),
             schema.clone(),
-            &table.0,
+            table.as_str(),
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -161,7 +161,7 @@ impl PolicyGraph {
         Some(Self {
             graph,
             exists_node: exists_id,
-            table: table.clone(),
+            table: *table,
         })
     }
 
@@ -186,7 +186,12 @@ impl PolicyGraph {
 
     /// Returns true if the graph has finished settling (not pending).
     pub fn is_complete(&self) -> bool {
-        match self.graph.nodes.get(&self.exists_node) {
+        match self
+            .graph
+            .nodes
+            .get(self.exists_node.0 as usize)
+            .map(|c| &c.node)
+        {
             Some(GraphNode::ExistsOutput(node)) => node.is_complete(),
             _ => false,
         }
@@ -201,7 +206,12 @@ impl PolicyGraph {
     ///
     /// Returns true if at least one row passed the policy check.
     pub fn result(&self) -> bool {
-        match self.graph.nodes.get(&self.exists_node) {
+        match self
+            .graph
+            .nodes
+            .get(self.exists_node.0 as usize)
+            .map(|c| &c.node)
+        {
             Some(GraphNode::ExistsOutput(node)) => node.exists(),
             _ => false,
         }
@@ -214,8 +224,14 @@ impl PolicyGraph {
 
     /// Mark all scan nodes dirty (for re-evaluation after data changes).
     pub fn mark_dirty(&mut self) {
-        for (node_id, _, _) in &self.graph.index_scan_nodes {
-            self.graph.dirty_nodes.insert(*node_id);
+        let scan_ids: Vec<NodeId> = self
+            .graph
+            .index_scan_nodes
+            .iter()
+            .map(|(node_id, _, _)| *node_id)
+            .collect();
+        for node_id in scan_ids {
+            self.graph.mark_dirty(node_id);
         }
     }
 }
