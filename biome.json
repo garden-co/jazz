@@ -20,6 +20,7 @@
       "!**/starters/**/*svelte*/**",
       "!**/examples/server-worker-inbox/src/routeTree.gen.ts",
       "!**/homepage/homepage/**",
+      "!**/.cursor/skills/**",
       "!**/package.json",
       "!**/*svelte*/**"
     ]

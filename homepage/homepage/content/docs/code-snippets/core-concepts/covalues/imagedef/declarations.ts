@@ -23,6 +23,7 @@ export type ImageProps = Omit<
   width?: number | "original";
   height?: number | "original";
   placeholder?: string;
+  loading?: "lazy" | "eager";
 };
 // #endregion
 
