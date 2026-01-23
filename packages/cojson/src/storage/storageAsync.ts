@@ -338,9 +338,9 @@ export class StorageApiAsync implements StorageAPI {
 
     const id = msg.id;
     const storedCoValueRow = await this.dbClient.getCoValueRow(id);
-    const coValueRow = applyNewContent(storedCoValueRow, msg);
+    const coValueUpdate = applyNewContent(storedCoValueRow, msg);
 
-    if (!coValueRow) {
+    if (!coValueUpdate) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
 
@@ -352,14 +352,14 @@ export class StorageApiAsync implements StorageAPI {
 
     await this.dbClient.transaction(async (tx) => {
       const storedCoValueRow = await tx.upsertCoValueRow(
-        coValueRow.updatedCoValueRow,
+        coValueUpdate.updatedCoValueRow,
       );
 
       for (const sessionID of Object.keys(
-        coValueRow.newTransactions,
+        coValueUpdate.newTransactions,
       ) as SessionID[]) {
         const { transactions, afterIdx } =
-          coValueRow.newTransactions[sessionID]!;
+          coValueUpdate.newTransactions[sessionID]!;
         const sessionRow = storedCoValueRow.sessions[sessionID]!;
 
         if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
@@ -387,7 +387,7 @@ export class StorageApiAsync implements StorageAPI {
 
     this.knownStates.handleUpdate(id, knownState);
 
-    if (coValueRow.hasInvalidAssumptions) {
+    if (coValueUpdate.hasInvalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
     }
 
@@ -509,8 +509,7 @@ function applyNewContent(
         lastSignature: sessionNewContent.lastSignature,
         bytesSinceLastSignature,
         signatures,
-        // TODO remove the `coValue` field from the type
-        coValue: storedCoValueRow?.rowID ?? Infinity,
+        coValue: storedCoValueRow?.rowID,
       };
       sessions[sessionID] = updatedSessionRow;
     }

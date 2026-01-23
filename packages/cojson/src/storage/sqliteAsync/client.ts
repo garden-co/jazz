@@ -11,11 +11,8 @@ import type {
   DBTransactionInterfaceAsync,
   NewCoValueRow,
   SessionRow,
-  SignatureAfterRow,
-  StoredCoValueRow,
   StoredNewCoValueRow,
   StoredNewSessionRow,
-  StoredSessionRow,
   TransactionRow,
 } from "../types.js";
 import { DeletedCoValueDeletionStatus } from "../types.js";
@@ -164,14 +161,12 @@ export class SQLiteClientAsync
     const id = coValueRow.id;
     const coValueRowID = await this.upsertCoValue(id, coValueRow.header);
     if (!coValueRowID) {
-      throw new Error("BOOM: Failed to upsert coValue row");
+      throw new Error("Failed to upsert coValue");
     }
     for (const session of Object.values(coValueRow.sessions)) {
-      if (session.coValue === Infinity) {
+      if (session.coValue === undefined) {
         session.coValue = coValueRowID;
       }
-    }
-    for (const session of Object.values(coValueRow.sessions)) {
       const sessionRowID = await this.addSessionUpdate({
         sessionUpdate: session,
       });
@@ -220,14 +215,10 @@ export class SQLiteClientAsync
     return row?.rowID;
   }
 
-  async upsertCoValue(
+  private async upsertCoValue(
     id: RawCoID,
-    header?: CoValueHeader,
+    header: CoValueHeader,
   ): Promise<number | undefined> {
-    if (!header) {
-      return this.getCoValueRowID(id);
-    }
-
     const result = await this.db.get<{ rowID: number }>(
       `INSERT INTO coValues (id, header) VALUES (?, ?) 
        ON CONFLICT(id) DO NOTHING 
@@ -349,7 +340,7 @@ export class SQLiteClientAsync
     ]);
   }
 
-  async addSignatureAfter({
+  private async addSignatureAfter({
     sessionRowID,
     idx,
     signature,
@@ -358,8 +349,8 @@ export class SQLiteClientAsync
     idx: number;
     signature: Signature;
   }) {
-    this.db.run(
-      "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
+    await this.db.run(
+      "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?) ON CONFLICT(ses, idx) DO NOTHING",
       [sessionRowID, idx, signature],
     );
   }

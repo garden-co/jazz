@@ -115,7 +115,7 @@ export type CoValueRow = {
 export type StoredCoValueRow = CoValueRow & { rowID: number };
 
 export type SessionRow = {
-  coValue: number;
+  coValue?: number;
   sessionID: SessionID;
   lastIdx: number;
   lastSignature: Signature;
