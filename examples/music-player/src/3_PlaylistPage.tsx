@@ -37,10 +37,6 @@ export function PlaylistPage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     select: (me) => me.canManage(playlist),
   });
 
-  const isActivePlaylist = useSuspenseAccount(MusicaAccount, {
-    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
-  });
-
   const isPlaying = usePlayState().value === "play";
   const [currentDialog, setCurrentDialog] = useState<
     | { name: "playlist"; section: "details" | "members" }
