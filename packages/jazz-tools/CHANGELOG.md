@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.20.2
+
+### Patch Changes
+
+- 2df568f: Added a Performance tab in the Jazz tools inspector
+- Updated dependencies [251a89e]
+  - cojson@0.20.2
+  - cojson-storage-indexeddb@0.20.2
+  - cojson-transport-ws@0.20.2
+
 ## 0.20.1
 
 ### Patch Changes

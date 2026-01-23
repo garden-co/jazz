@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.2
+
+### Patch Changes
+
+- 251a89e: Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
+  - cojson-core-wasm@0.20.2
+  - cojson-core-rn@0.20.2
+  - cojson-core-napi@0.20.2
+
 ## 0.20.1
 
 ### Patch Changes
