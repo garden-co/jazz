@@ -30,6 +30,59 @@ beforeEach(async () => {
 cojsonInternals.setCoValueLoadingRetryDelay(300);
 
 describe("useCoState", () => {
+  it("should render without infinite re-renders when accessing unresolved nested co-value", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    // Minimal schema with a nested optional co-value
+    const ServerState = co.map({
+      status: z.string(),
+    });
+
+    const Organization = co.map({
+      name: z.string(),
+      serverState: co.optional(ServerState),
+    });
+
+    const org = Organization.create({
+      name: "Test Org",
+      serverState: ServerState.create({ status: "active" }),
+    });
+
+    let renderCount = 0;
+
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        const orgState = useCoState(Organization, org.$jazz.id, {
+          resolve: {},
+        });
+
+        // Access the unresolved nested co-value
+        if (orgState.$isLoaded) {
+          // This should not cause infinite re-renders
+          const _ = orgState.serverState;
+        }
+
+        return orgState;
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      assertLoaded(result.current);
+      expect(result.current.name).toBe("Test Org");
+    });
+
+    // Wait a bit to ensure no additional re-renders occur
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Should not have excessive re-renders
+    expect(renderCount).toBeLessThan(10);
+  });
   it("should return the correct value", async () => {
     const TestMap = co.map({
       value: z.string(),
