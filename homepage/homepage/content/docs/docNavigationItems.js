@@ -303,6 +303,11 @@ export const docNavigationItems = [
             href: "/docs/key-features/authentication/better-auth-database-adapter",
             done: 100,
           },
+          {
+            name: "Integrating with Existing Auth",
+            href: "/docs/key-features/authentication/integrating-with-existing-auth",
+            done: 100,
+          },
         ],
       },
       {
