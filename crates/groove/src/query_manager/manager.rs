@@ -2031,6 +2031,56 @@ impl QueryManager {
     fn subscription_involves_table(graph: &super::graph::QueryGraph, table: &str) -> bool {
         graph.involves_table(table)
     }
+
+    // ========================================================================
+    // No-op storage driver (for tests)
+    // ========================================================================
+
+    /// Process all pending storage requests with successful no-op responses.
+    ///
+    /// This is useful for tests and benchmarks that don't have a real storage backend.
+    /// Delegates to SyncManager::drain_storage_noop().
+    pub fn drain_storage_noop(&mut self) {
+        self.sync_manager.drain_storage_noop();
+    }
+
+    // ========================================================================
+    // Memory profiling
+    // ========================================================================
+
+    /// Calculate memory usage breakdown for profiling.
+    ///
+    /// Returns a tuple: (indices, subscriptions, policy_checks, total)
+    pub fn memory_size(&self) -> (usize, usize, usize, usize) {
+        // Indices state (mostly just the pending_index_updates queue)
+        let mut indices = 0usize;
+        for ((table, col), index) in &self.indices {
+            indices += table.len() + col.len() + 48; // Key size + HashMap entry
+            indices += index.memory_size();
+        }
+
+        // Subscriptions (QueryGraph can be large)
+        let mut subscriptions = 0usize;
+        for (id, sub) in &self.subscriptions {
+            subscriptions += std::mem::size_of_val(id);
+            subscriptions += std::mem::size_of::<QuerySubscription>();
+            // QueryGraph size estimation - it has maps and sets
+            subscriptions += sub.graph.estimate_memory_size();
+            subscriptions += 48; // HashMap entry overhead
+        }
+        subscriptions += self.update_outbox.len() * 256; // QueryUpdate overhead
+
+        // Active policy checks
+        let mut policy_checks = 0usize;
+        for state in self.active_policy_checks.values() {
+            policy_checks += 48; // HashMap entry
+            policy_checks += state.graphs.len() * 1024; // Rough estimate per PolicyGraph
+            policy_checks += state.table.0.len();
+        }
+
+        let total = indices + subscriptions + policy_checks;
+        (indices, subscriptions, policy_checks, total)
+    }
 }
 
 #[cfg(test)]

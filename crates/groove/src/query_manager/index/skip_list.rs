@@ -859,6 +859,27 @@ impl IndexState {
             0
         }
     }
+
+    // ========================================================================
+    // Memory profiling
+    // ========================================================================
+
+    /// Estimate memory size of this IndexState (not including actual node data in ObjectManager).
+    pub fn memory_size(&self) -> usize {
+        let mut size = std::mem::size_of::<Self>();
+
+        // Table and column strings
+        size += self.table.capacity();
+        size += self.column.capacity();
+
+        // Pending index updates
+        for (key, _row_id) in &self.pending_index_updates {
+            size += key.capacity() + std::mem::size_of::<ObjectId>();
+            size += 24; // Vec entry overhead
+        }
+
+        size
+    }
 }
 
 #[cfg(test)]

@@ -219,3 +219,79 @@ pub fn document_plaintext_size(title: &str, content: &str, author_id: &str) -> u
     author_id.len() +
     8 // timestamp
 }
+
+// ============================================================================
+// Memory Breakdown Structures
+// ============================================================================
+
+/// Detailed memory breakdown for profiling.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryBreakdown {
+    /// ObjectManager breakdown
+    pub object_manager: ObjectManagerMemory,
+    /// QueryManager breakdown
+    pub query_manager: QueryManagerMemory,
+    /// Total calculated
+    pub total: usize,
+}
+
+impl MemoryBreakdown {
+    /// Print a formatted breakdown.
+    pub fn print(&self) {
+        let om = &self.object_manager;
+        let qm = &self.query_manager;
+
+        println!("\nMemory breakdown:");
+        println!(
+            "  ObjectManager: {} ({:.1}%)",
+            format_bytes(om.total),
+            100.0 * om.total as f64 / self.total.max(1) as f64
+        );
+        println!("    - row objects: {}", format_bytes(om.row_objects));
+        println!("    - index objects: {}", format_bytes(om.index_objects));
+        println!("    - blobs: {}", format_bytes(om.blobs));
+        println!("    - subscriptions: {}", format_bytes(om.subscriptions));
+        println!("    - outbox/inbox: {}", format_bytes(om.outbox_inbox));
+
+        println!(
+            "  QueryManager: {} ({:.1}%)",
+            format_bytes(qm.total),
+            100.0 * qm.total as f64 / self.total.max(1) as f64
+        );
+        println!("    - indices state: {}", format_bytes(qm.indices));
+        println!("    - subscriptions: {}", format_bytes(qm.subscriptions));
+        println!("    - policy checks: {}", format_bytes(qm.policy_checks));
+
+        println!("  Total calculated: {}", format_bytes(self.total));
+    }
+}
+
+/// Memory breakdown for ObjectManager.
+#[derive(Debug, Clone, Default)]
+pub struct ObjectManagerMemory {
+    /// Size of row object storage (data objects).
+    pub row_objects: usize,
+    /// Size of index object storage (skip list nodes).
+    pub index_objects: usize,
+    /// Size of blob storage.
+    pub blobs: usize,
+    /// Size of subscription tracking.
+    pub subscriptions: usize,
+    /// Size of outbox/inbox buffers.
+    pub outbox_inbox: usize,
+    /// Total
+    pub total: usize,
+}
+
+/// Memory breakdown for QueryManager.
+#[derive(Debug, Clone, Default)]
+pub struct QueryManagerMemory {
+    /// Size of index state (pending updates, etc.).
+    pub indices: usize,
+    /// Size of query subscriptions.
+    pub subscriptions: usize,
+    /// Size of active policy checks.
+    pub policy_checks: usize,
+    /// Total
+    pub total: usize,
+}

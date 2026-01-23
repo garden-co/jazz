@@ -1045,6 +1045,55 @@ impl QueryGraph {
             _ => vec![],
         }
     }
+
+    // ========================================================================
+    // Memory profiling
+    // ========================================================================
+
+    /// Estimate memory size of this QueryGraph.
+    pub fn estimate_memory_size(&self) -> usize {
+        let mut size = std::mem::size_of::<Self>();
+
+        // Nodes HashMap - estimate 512 bytes per node on average
+        size += self.nodes.len() * (std::mem::size_of::<NodeId>() + 512 + 48);
+
+        // Edges HashMaps
+        for edges in self.edges.values() {
+            size += edges.len() * std::mem::size_of::<NodeId>() + 48;
+        }
+        for edges in self.reverse_edges.values() {
+            size += edges.len() * std::mem::size_of::<NodeId>() + 48;
+        }
+
+        // Dirty nodes HashSet
+        size += self.dirty_nodes.len() * (std::mem::size_of::<NodeId>() + 16);
+
+        // Table name
+        size += self.table.0.len();
+
+        // Index scan nodes
+        for (_, table, col) in &self.index_scan_nodes {
+            size += std::mem::size_of::<NodeId>() + table.len() + col.len();
+        }
+
+        // Array subquery tables
+        for (_, table) in &self.array_subquery_tables {
+            size += std::mem::size_of::<NodeId>() + table.len();
+        }
+
+        // Policy filter tables
+        for (_, table) in &self.policy_filter_tables {
+            size += std::mem::size_of::<NodeId>() + table.len();
+        }
+
+        // Table descriptors - estimate 200 bytes per descriptor
+        size += self.table_descriptors.len() * 200;
+
+        // Combined descriptor
+        size += 200;
+
+        size
+    }
 }
 
 /// Build remaining predicate from conditions not covered by index scans.
