@@ -1,11 +1,11 @@
 export type StoreName =
-  | "coValues2"
+  | "coValuesWithSessions"
   | "transactions"
   | "deletedCoValues"
   | "unsyncedCoValues";
 
 const DEFAULT_TX_STORES: StoreName[] = [
-  "coValues2",
+  "coValuesWithSessions",
   "transactions",
   "deletedCoValues",
 ];

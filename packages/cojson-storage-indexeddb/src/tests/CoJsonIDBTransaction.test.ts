@@ -16,7 +16,7 @@ describe("CoJsonIDBTransaction", () => {
       request.onupgradeneeded = () => {
         const db = request.result;
         // Create test stores
-        db.createObjectStore("coValues2", { keyPath: "id" });
+        db.createObjectStore("coValuesWithSessions", { keyPath: "id" });
         db.createObjectStore("transactions", { keyPath: "id" });
         db.createObjectStore("deletedCoValues", {
           keyPath: "coValueID",
@@ -55,7 +55,7 @@ describe("CoJsonIDBTransaction", () => {
 
     // Write test
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("coValues2").put({
+      tx.getObjectStore("coValuesWithSessions").put({
         id: "test1",
         value: "hello",
       }),
@@ -64,7 +64,7 @@ describe("CoJsonIDBTransaction", () => {
     // Read test
     const readTx = new CoJsonIDBTransaction(db);
     const result = await readTx.handleRequest((tx) =>
-      tx.getObjectStore("coValues2").get("test1"),
+      tx.getObjectStore("coValuesWithSessions").get("test1"),
     );
 
     expect(result).toEqual({
@@ -79,13 +79,13 @@ describe("CoJsonIDBTransaction", () => {
     // Multiple writes
     await Promise.all([
       tx.handleRequest((tx) =>
-        tx.getObjectStore("coValues2").put({
+        tx.getObjectStore("coValuesWithSessions").put({
           id: "test1",
           value: "hello",
         }),
       ),
       tx.handleRequest((tx) =>
-        tx.getObjectStore("coValues2").put({
+        tx.getObjectStore("coValuesWithSessions").put({
           id: "test2",
           value: "world",
         }),
@@ -95,8 +95,12 @@ describe("CoJsonIDBTransaction", () => {
     // Read results
     const readTx = new CoJsonIDBTransaction(db);
     const [result1, result2] = await Promise.all([
-      readTx.handleRequest((tx) => tx.getObjectStore("coValues2").get("test1")),
-      readTx.handleRequest((tx) => tx.getObjectStore("coValues2").get("test2")),
+      readTx.handleRequest((tx) =>
+        tx.getObjectStore("coValuesWithSessions").get("test1"),
+      ),
+      readTx.handleRequest((tx) =>
+        tx.getObjectStore("coValuesWithSessions").get("test2"),
+      ),
     ]);
 
     expect(result1).toEqual({
@@ -114,7 +118,7 @@ describe("CoJsonIDBTransaction", () => {
 
     await Promise.all([
       tx.handleRequest((tx) =>
-        tx.getObjectStore("coValues2").put({
+        tx.getObjectStore("coValuesWithSessions").put({
           id: "value1",
           data: "value data",
         }),
@@ -130,7 +134,7 @@ describe("CoJsonIDBTransaction", () => {
     const readTx = new CoJsonIDBTransaction(db);
     const [valueResult, sessionResult] = await Promise.all([
       readTx.handleRequest((tx) =>
-        tx.getObjectStore("coValues2").get("value1"),
+        tx.getObjectStore("coValuesWithSessions").get("value1"),
       ),
       readTx.handleRequest((tx) =>
         tx.getObjectStore("transactions").get("transaction1"),
@@ -177,11 +181,14 @@ describe("CoJsonIDBTransaction", () => {
   });
 
   test("transaction with custom stores only includes specified stores", async () => {
-    const tx = new CoJsonIDBTransaction(db, ["coValues2", "transactions"]);
+    const tx = new CoJsonIDBTransaction(db, [
+      "coValuesWithSessions",
+      "transactions",
+    ]);
 
     // Should work with included stores
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("coValues2").put({
+      tx.getObjectStore("coValuesWithSessions").put({
         id: "test1",
         value: "hello",
       }),
@@ -211,7 +218,7 @@ describe("CoJsonIDBTransaction", () => {
     const tx = new CoJsonIDBTransaction(db);
 
     await tx.handleRequest((tx) =>
-      tx.getObjectStore("coValues2").put({
+      tx.getObjectStore("coValuesWithSessions").put({
         id: "test1",
         value: "hello",
       }),

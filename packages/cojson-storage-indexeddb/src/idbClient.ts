@@ -2,22 +2,15 @@ import type {
   CojsonInternalTypes,
   NewCoValueRow,
   RawCoID,
-  SessionID,
   DBTransactionInterfaceAsync,
 } from "cojson";
 import type {
-  CoValueRow,
   DBClientInterfaceAsync,
-  SessionRow,
-  SignatureAfterRow,
-  StoredCoValueRow,
   StoredNewCoValueRow,
-  StoredSessionRow,
   TransactionRow,
 } from "cojson";
 import {
   CoJsonIDBTransaction,
-  putIndexedDbStore,
   queryIndexedDbStore,
   StoreName,
 } from "./CoJsonIDBTransaction.js";
@@ -46,7 +39,7 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     coValueRow: NewCoValueRow,
   ): Promise<StoredNewCoValueRow> {
     const rowID = await this.run((tx) =>
-      tx.getObjectStore("coValues2").put(coValueRow),
+      tx.getObjectStore("coValuesWithSessions").put(coValueRow),
     );
     return {
       ...coValueRow,
@@ -180,7 +173,7 @@ export class IDBClient implements DBClientInterfaceAsync {
   async getCoValueRow(
     coValueId: RawCoID,
   ): Promise<StoredNewCoValueRow | undefined> {
-    return queryIndexedDbStore(this.db, "coValues2", (store) =>
+    return queryIndexedDbStore(this.db, "coValuesWithSessions", (store) =>
       store.index("coValuesById").get(coValueId),
     );
   }
