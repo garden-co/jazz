@@ -1,5 +1,4 @@
-use ahash::AHashSet;
-use std::collections::HashMap;
+use ahash::{AHashMap, AHashSet};
 use std::ops::Bound;
 
 use bitvec::prelude::*;
@@ -868,7 +867,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(
         &mut self,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> RowDelta
@@ -876,7 +875,7 @@ impl QueryGraph {
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
         let order = self.topo_sort_dirty();
-        let mut tuple_deltas: HashMap<NodeId, TupleDelta> = HashMap::new();
+        let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
 
         let ctx = SourceContext { indices };
         let _ = om; // om is still passed to other nodes that need it

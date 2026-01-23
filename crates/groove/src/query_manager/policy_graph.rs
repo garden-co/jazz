@@ -3,7 +3,7 @@
 //! Creates minimal query graphs to evaluate policy conditions like USING and INHERITS.
 //! These graphs are throwaway - created, settled until complete, then discarded.
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -173,7 +173,7 @@ impl PolicyGraph {
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -331,7 +331,7 @@ mod tests {
 
         // With no actual data in the indices/om, the scan will return no rows
         let om = ObjectManager::new();
-        let indices: HashMap<(String, String), BTreeIndex> = HashMap::new();
+        let indices: AHashMap<(String, String), BTreeIndex> = AHashMap::new();
 
         // Row loader returns None for all IDs (no data)
         let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };

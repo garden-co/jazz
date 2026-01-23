@@ -13,8 +13,7 @@ pub mod sort;
 pub mod subgraph;
 pub mod union;
 
-use ahash::AHashSet;
-use std::collections::HashMap;
+use ahash::{AHashMap, AHashSet};
 
 use super::index::BTreeIndex;
 use super::types::{RowDescriptor, Tuple, TupleDelta};
@@ -25,7 +24,7 @@ pub struct NodeId(pub u64);
 
 /// Context for source nodes that need external data.
 pub struct SourceContext<'a> {
-    pub indices: &'a HashMap<(String, String), BTreeIndex>,
+    pub indices: &'a AHashMap<(String, String), BTreeIndex>,
 }
 
 // ============================================================================

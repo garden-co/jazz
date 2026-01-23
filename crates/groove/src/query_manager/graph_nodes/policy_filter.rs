@@ -3,8 +3,8 @@
 //! Evaluates policy expressions against rows, filtering based on session context.
 //! SELECT policies silently filter rows; write policies are handled separately.
 
-use ahash::AHashSet;
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap, AHashSet};
+use std::collections::HashSet;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -90,7 +90,7 @@ impl PolicyFilterNode {
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -167,7 +167,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(
         &mut self,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta
@@ -195,7 +195,7 @@ impl PolicyFilterNode {
     fn evaluate_with_context(
         &self,
         row: &Row,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -208,7 +208,7 @@ impl PolicyFilterNode {
         &self,
         expr: &PolicyExpr,
         row: &Row,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
@@ -246,7 +246,7 @@ impl PolicyFilterNode {
         operation: Operation,
         via_column: &str,
         row: &Row,
-        indices: &HashMap<(String, String), BTreeIndex>,
+        indices: &AHashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,

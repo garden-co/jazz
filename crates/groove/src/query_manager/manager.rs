@@ -1,3 +1,4 @@
+use ahash::AHashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -158,7 +159,7 @@ pub struct QueryManager {
     schema: Arc<Schema>,
 
     /// Indices: (table, column) -> BTreeIndex
-    indices: HashMap<(String, String), BTreeIndex>,
+    indices: AHashMap<(String, String), BTreeIndex>,
 
     /// Active query subscriptions
     subscriptions: HashMap<QuerySubscriptionId, QuerySubscription>,
@@ -181,7 +182,7 @@ impl QueryManager {
     /// permission checks from SyncManager.
     pub fn new(sync_manager: SyncManager, schema: Schema) -> Self {
         // Initialize indices for all tables
-        let mut indices = HashMap::new();
+        let mut indices = AHashMap::new();
         for (table_name, table_schema) in &schema {
             let table_str = table_name.as_str();
 
