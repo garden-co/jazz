@@ -45,26 +45,28 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
   }
 }
 
+function deleteDb(dbPath: string) {
+  try {
+    unlinkSync(dbPath);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 export async function createAsyncStorage({ filename }: { filename?: string }) {
+  const dbPath = getDbPath(filename);
   const storage = await getSqliteStorageAsync(
-    new LibSQLSqliteAsyncDriver(getDbPath(filename)),
+    new LibSQLSqliteAsyncDriver(dbPath),
   );
 
   onTestFinished(async () => {
     await storage.close();
+    deleteDb(dbPath);
   });
 
   return storage;
 }
 
 export function getDbPath(defaultDbPath?: string) {
-  const dbPath = defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
-
-  if (!defaultDbPath) {
-    onTestFinished(() => {
-      unlinkSync(dbPath);
-    });
-  }
-
-  return dbPath;
+  return defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
 }
