@@ -2,7 +2,7 @@
 
 ## Overview
 
-The QueryManager layer provides reactive SQL queries over Jazz2's object-based storage. Each row is a Jazz object; indices are local-only skip lists; queries compile to incremental computation graphs that emit row deltas.
+The QueryManager layer provides reactive SQL queries over Jazz2's object-based storage. Each row is a Jazz object; indices are local-only B-trees with page-based storage; queries compile to incremental computation graphs that emit row deltas.
 
 ## Architecture
 
@@ -31,10 +31,10 @@ The QueryManager layer provides reactive SQL queries over Jazz2's object-based s
 - **Row format**: Fixed fields first, then variable offsets, nullable 1-byte prefix
 - **Binary throughout**: `Value` only at API boundary; internally everything is `&[u8]` with `RowDescriptor`
 - **Index-first**: No table scans; every query uses an index as source (including "_id" for unfiltered)
-- **Auto-index all columns**: Every column gets a single-column skip list index (zero-config)
-- **All indices persisted**: Every index (including column indices) is persisted as Jazz objects
+- **Auto-index all columns**: Every column gets a single-column B-tree index (zero-config)
+- **All indices persisted**: Every index is persisted as B-tree pages in storage (not as Jazz objects)
 - **No index rebuild**: Indices are incrementally maintained; if missing on startup, that's an error state
-- **Indices**: Skip lists, node-per-object, `nosync: "true"` metadata, persisted locally only
+- **Indices**: B-trees with page-based storage, local-only (no sync), loaded lazily
 - **Query graph**: Unified `TupleDelta` type with progressive materialization throughout
 
 ## The "_id" Index IS the Row Manifest
@@ -52,130 +52,172 @@ If any index is lost, that's an error state. We do NOT rebuild indices from rows
 2. Load all column indices for each table
 3. Load row objects as needed (lazy, via query - NOT eagerly into a cache)
 
-## Index Storage Model (Node-per-Object)
+## Index Storage Model (B-Tree Pages)
 
-Each skip list node is stored as a separate Jazz object:
-- **Root sentinel**: ObjectId = `index_root_id(table, column)` (deterministic via UUID v5)
-- **Data nodes**: ObjectId = newly generated on creation
-- **Forward pointers**: Stored as `Vec<Option<ObjectId>>` - natural fit for Jazz
-- **Content**: Binary-encoded `SkipListNode`
+Indices are stored as B-tree pages directly in storage (not as Jazz objects). This approach provides:
+- **Much lower overhead**: ~20 bytes per page vs ~530 bytes per Object-wrapped node
+- **Higher fanout**: ~64 entries per leaf page means fewer storage operations
+- **Incremental updates**: Only modified pages are written
+- **Lazy loading**: Pages loaded on demand as queries traverse the tree
 
-### Index Object Metadata
+### Storage Key Format
 
-All index objects have metadata marking them as local-only:
+```
+index:{table}:{column}:meta     → IndexMeta (root page id, entry count)
+index:{table}:{column}:page:{id} → Page data
+```
+
+### Storage Requests
+
 ```rust
-{
-    "type": "index",
-    "nosync": "true",
-    "index_table": "users",
-    "index_column": "email"  // or "_id" for primary index
+pub enum StorageRequest {
+    // ... existing ...
+    LoadIndexPage { table: String, column: String, page_id: u64 },
+    StoreIndexPage { table: String, column: String, page_id: u64, data: Vec<u8> },
+    DeleteIndexPage { table: String, column: String, page_id: u64 },
+    LoadIndexMeta { table: String, column: String },
+    StoreIndexMeta { table: String, column: String, data: Vec<u8> },
 }
 ```
 
-The sync layer filters out objects with `nosync: "true"` when syncing to remotes.
+### Page Format (Binary)
 
-## Zero-Copy Index Architecture
+**Internal node:**
+```
+[type: u8 = 0]
+[key_count: u16]
+[children: PageId × (key_count + 1)]  // PageId = u64
+[keys: (len: u16, data: bytes) × key_count]
+```
+
+**Leaf node:**
+```
+[type: u8 = 1]
+[entry_count: u16]
+[entries × entry_count]:
+  [key_len: u16][key: bytes]
+  [row_count: u32][row_ids: 16 bytes × row_count]
+```
+
+**Per-page overhead:** ~20 bytes (vs ~530 bytes for Object-wrapped skip list node)
+
+## B-Tree Index Architecture
 
 ### Design Principles
 
-1. **Single source of truth**: ObjectManager holds all index node data
-2. **Zero-copy reads**: `SkipListNodeView` reads directly from `commit.content` without allocating
-3. **Immediate persistence**: Mutations persist immediately to ObjectManager (no buffered node state)
-4. **Queue insert intents**: When index not ready, queue `(key, row_id)` for replay later
-5. **No global state machine**: QueryManager has no Setup/Ready states - operations work immediately
-6. **Lazy loading**: Index data is read from ObjectManager on demand
+1. **Page-based storage**: Each B-tree node is a storage page, not a Jazz object
+2. **Lazy loading**: Pages loaded on demand as queries traverse the tree
+3. **Dirty tracking**: Only modified pages are persisted
+4. **Incremental updates**: Insert/remove only touch affected pages
+5. **No ObjectManager involvement**: Indices don't use the object system
 
-### ObjectManager as Source of Truth
-
-ObjectManager is designed to be a fast in-memory store with lazy loading from persistence. This means:
-
-1. **No caches on top**: Components consuming ObjectManager should NOT create their own caches of object content. ObjectManager already handles in-memory storage efficiently.
-
-2. **Handle not-yet-loaded state**: Consumers must handle the case where an object isn't loaded yet (ObjectState::Loading or missing). This is normal operation, not an error.
-
-3. **Listen for load completion**: Use ObjectManager's subscription mechanisms (global subscription, object updates) to react when objects become available. Don't poll or eagerly load.
-
-The row_loader closure passed to MaterializeNode should access ObjectManager directly, returning None for rows not yet loaded. The query graph already handles this gracefully.
-
-### SkipListNodeView (Zero-Copy)
+### BTreeIndex
 
 ```rust
-/// Zero-copy view into a skip list node's encoded data.
-pub struct SkipListNodeView<'a> {
-    data: &'a [u8],
-    key_end: usize,       // Key is at 2..key_end
-    row_count: u32,
-    rows_start: usize,    // Row IDs start here
-    forward_start: usize, // Forward pointers start here
-    level: u8,
-    forward_count: u8,
+pub struct BTreeIndex {
+    table: String,
+    column: String,
+
+    /// Index metadata (root page, next page id, entry count).
+    meta: IndexMeta,
+    meta_loaded: bool,
+    meta_dirty: bool,
+
+    /// Loaded pages (lazy loading).
+    pages: HashMap<PageId, PageState>,
+
+    /// Pages that have been modified and need persistence.
+    dirty_pages: HashSet<PageId>,
+
+    /// Pages to delete on next persist.
+    deleted_pages: HashSet<PageId>,
+
+    /// Pending storage requests to emit.
+    pending_requests: Vec<StorageRequest>,
 }
 
-impl<'a> SkipListNodeView<'a> {
-    /// Zero-copy key access.
-    pub fn key(&self) -> &'a [u8];
+impl BTreeIndex {
+    /// Create a new B-tree index for a table/column.
+    pub fn new(table: &str, column: &str) -> Self;
 
-    /// Iterate row IDs without allocating.
-    pub fn row_ids(&self) -> impl Iterator<Item = ObjectId> + 'a;
-
-    /// Get forward pointer at level (no allocation).
-    pub fn forward(&self, level: usize) -> Option<ObjectId>;
-
-    /// Convert to owned SkipListNode (for mutations).
-    pub fn to_owned(&self) -> SkipListNode;
-}
-```
-
-### IndexState
-
-```rust
-pub struct IndexState {
-    pub root_id: ObjectId,
-    pub table: String,
-    pub column: String,
-    pending_index_updates: Vec<(Vec<u8>, ObjectId)>,  // Queue of insert intents (key, row_id)
-    current_level: usize,
-}
-
-impl IndexState {
-    /// Get node as zero-copy view. Returns None if not in ObjectManager.
-    fn get_node<'a>(&self, node_id: ObjectId, om: &'a ObjectManager) -> Option<SkipListNodeView<'a>>;
-
-    /// Check if the index root exists in ObjectManager.
-    pub fn root_exists(&self, om: &ObjectManager) -> bool;
-
-    /// Take pending index updates (for replay when index becomes ready).
-    pub fn take_pending_updates(&mut self) -> Vec<(Vec<u8>, ObjectId)>;
-
-    /// Check if there are pending updates.
-    pub fn has_pending_updates(&self) -> bool;
-
-    /// Flush pending updates - replay queued inserts when index becomes ready.
-    pub fn flush_pending(&mut self, om: &mut ObjectManager) -> Result<(), IndexError>;
-}
-```
-
-### Mutation Flow
-
-Mutations persist immediately to ObjectManager. If the index isn't ready (sentinel doesn't exist), the insert intent is queued for later replay:
-
-```rust
-impl IndexState {
     /// Insert a row into the index.
-    /// Returns Ok(true) if inserted, Ok(false) if queued (index not ready).
-    pub fn insert(&mut self, key: &[u8], row_id: ObjectId, om: &mut ObjectManager)
-        -> Result<bool, IndexError>;
+    /// Returns Ok(true) if inserted, Ok(false) if pages need loading.
+    pub fn insert(&mut self, key: &[u8], row_id: ObjectId) -> Result<bool, IndexError>;
 
-    /// Remove a row from the index. Persists immediately.
-    pub fn remove(&mut self, key: &[u8], row_id: ObjectId, om: &mut ObjectManager)
-        -> Result<(), IndexError>;
+    /// Remove a row from the index.
+    pub fn remove(&mut self, key: &[u8], row_id: ObjectId) -> Result<(), IndexError>;
+
+    /// Exact lookup - returns row IDs for the given key.
+    pub fn lookup_exact(&self, key: &[u8]) -> Vec<ObjectId>;
+
+    /// Range scan - returns row IDs for keys in range.
+    pub fn range_scan(&self, min: &Bound<Vec<u8>>, max: &Bound<Vec<u8>>) -> Vec<ObjectId>;
+
+    /// Full scan - returns all row IDs.
+    pub fn scan_all(&self) -> Vec<ObjectId>;
+
+    /// Check if a row exists in the index.
+    pub fn contains_row(&self, row_id: ObjectId) -> bool;
+
+    /// Take pending storage requests.
+    pub fn take_storage_requests(&mut self) -> Vec<StorageRequest>;
+
+    /// Process loaded metadata response.
+    pub fn process_meta_load(&mut self, data: Option<Vec<u8>>);
+
+    /// Process loaded page response.
+    pub fn process_page_load(&mut self, page_id: PageId, data: Option<Vec<u8>>);
+
+    /// Reset for cold start - request meta from storage.
+    pub fn reset_for_cold_start(&mut self);
+
+    /// Estimate memory size.
+    pub fn memory_size(&self) -> usize;
 }
 ```
 
-Read-only traversal methods take `&ObjectManager`:
-- `lookup_exact(key, om)` - Exact match lookup
-- `range_scan(min, max, om)` - Range scan
-- `scan_all(om)` - Full index scan
+### Page Types
+
+```rust
+pub struct PageId(pub u64);
+
+pub enum BTreePage {
+    Internal {
+        keys: Vec<Vec<u8>>,
+        children: Vec<PageId>,
+    },
+    Leaf {
+        entries: Vec<LeafEntry>,
+    },
+}
+
+pub struct LeafEntry {
+    pub key: Vec<u8>,
+    pub row_ids: HashSet<ObjectId>,
+}
+
+pub struct IndexMeta {
+    pub root_page_id: PageId,
+    pub next_page_id: u64,
+    pub entry_count: u64,
+}
+```
+
+### Storage Flow
+
+Indices generate `StorageRequest` variants for their pages. QueryManager collects these and routes through the storage layer:
+
+```rust
+impl QueryManager {
+    /// Process storage through a real driver.
+    pub fn process_storage_with_driver(&mut self, driver: &mut impl Driver);
+
+    /// Load indices from storage for cold start.
+    pub fn load_indices_from_driver(&mut self, driver: &mut impl Driver);
+}
+```
+
+For tests without persistence, `drain_storage_noop()` generates success responses without actual storage.
 
 ### InsertHandle
 
@@ -227,7 +269,9 @@ crates/groove/src/query_manager/
 ├── graph.rs              # Graph structure, dirty marking, settling
 ├── index/
 │   ├── mod.rs
-│   └── skip_list.rs
+│   ├── btree_index.rs    # B-tree index with page-based storage
+│   ├── btree_page.rs     # Page types and serialization
+│   └── skip_list.rs      # Legacy skip list (for reference)
 └── graph_nodes/
     ├── mod.rs            # SourceNode, TransformNode, RowNode traits, SourceContext
     ├── index_scan.rs     # Source node (impl SourceNode)
@@ -293,8 +337,7 @@ All nodes expose `output_tuple_descriptor()` for descriptor chaining.
 
 ```rust
 pub struct SourceContext<'a> {
-    pub indices: &'a HashMap<(String, String), IndexState>,
-    pub om: &'a ObjectManager,
+    pub indices: &'a HashMap<(String, String), BTreeIndex>,
 }
 
 pub trait SourceNode {
@@ -535,25 +578,19 @@ pub struct ArraySubquerySpec {
 - [x] types.rs - ColumnType (incl. Array, Row), RowDescriptor, Row, TupleElement, Tuple, TupleDelta, Value (incl. Array, Row)
 - [x] encoding.rs - binary format + operations (incl. Array/Row encoding)
 - [x] Global subscription in object_manager.rs
-- [x] skip_list.rs - index with binary keys
+- [x] B-tree index with page-based storage (btree_index.rs, btree_page.rs)
 - [x] All graph nodes: index_scan, union, materialize, filter, sort, limit_offset, output, alias, project, join, array_subquery, subgraph
 - [x] graph.rs - settling algorithm (single-table and join queries)
 - [x] manager.rs + query.rs - QueryManager with Value boundary
 - [x] Query API: alias(), select(), join(), on(), with_array() methods on QueryBuilder
 - [x] Join graph compilation (multi-table queries with JoinNode)
-- [x] `create_with_id()` in ObjectManager for deterministic root IDs
-- [x] Zero-copy index architecture:
-  - `SkipListNodeView` for zero-copy reads from ObjectManager
-  - Mutations persist immediately to ObjectManager (no `pending_writes` buffer)
-  - `pending_index_updates` queues insert intents when index not ready
-  - `flush_pending()` replays queued inserts when index becomes ready
-  - Removed `NodeRef` enum - only use `SkipListNodeView` directly
-  - Removed `nodes` cache - ObjectManager is single source of truth
-  - Removed `QueryManagerState` - no Setup/Ready state machine
-  - All traversal methods take `&ObjectManager` parameter
-  - Mutation methods take `&mut ObjectManager` and persist immediately
+- [x] B-tree index architecture:
+  - Page-based storage (not Object-wrapped)
+  - Binary serialization (~20 bytes overhead vs ~530 for Object-wrapped)
+  - Lazy loading of pages on demand
+  - Dirty tracking for incremental persistence
+  - Cold start support via `load_indices_from_driver()`
   - `InsertHandle` with `is_complete()` and `is_indexed()` methods
-  - Lazy sentinel creation and persistence on first insert
 - [x] ObjectManager as sole source of truth for row data:
   - Removed `row_cache` - no redundant caching layer
   - `row_loader` closures access ObjectManager directly
@@ -561,18 +598,17 @@ pub struct ArraySubquerySpec {
   - `get()` renamed to `test_get_row_if_loaded()` and gated with `#[cfg(test)]`
   - Production code must use queries to read data
 
-**Zero-Copy Architecture Tests:**
+**B-Tree Index Tests:**
 | Test | Status | Location |
 |------|--------|----------|
-| Node view parses encoded data | ✓ | `skip_list::tests::node_view_parses_encoded_data` |
-| Node view key is zero-copy | ✓ | `skip_list::tests::node_view_key_is_zero_copy` |
-| Node view iterates row IDs | ✓ | `skip_list::tests::node_view_iterates_row_ids` |
-| Node view reads forward pointers | ✓ | `skip_list::tests::node_view_reads_forward_pointers` |
-| Insert creates and persists sentinel | ✓ | `skip_list::tests::insert_creates_and_persists_sentinel` |
-| Insert returns true when inserted | ✓ | `skip_list::tests::insert_returns_true_when_inserted` |
-| Pending updates queue and flush | ✓ | `skip_list::tests::pending_updates_queue_and_flush` |
+| Insert and lookup | ✓ | `btree_index::tests::insert_and_lookup` |
+| Range scan | ✓ | `btree_index::tests::range_scan` |
+| Scan all | ✓ | `btree_index::tests::scan_all` |
+| Page serialization | ✓ | `btree_page::tests::page_serialization_roundtrip` |
+| Meta serialization | ✓ | `btree_page::tests::meta_serialization_roundtrip` |
 | Cold start loads indices | ✓ | `manager::tests::cold_start_loads_persisted_indices_and_rows` |
 | Cold start doesn't eagerly load rows | ✓ | `manager::tests::cold_start_only_loads_queried_rows` |
+| Cold start sorted query | ✓ | `manager::tests::cold_start_with_sorted_query` |
 | Row is indexed after insert | ✓ | `manager::tests::row_is_indexed_after_insert` |
 
 ### Completed Followups
@@ -1274,3 +1310,89 @@ The current implementation may only track absolute position rather than relative
 1. Check `LimitOffsetNode::process()` logic for handling additions to sorted, limited sets
 2. Verify SortNode upstream is emitting correct deltas
 3. Consider if a dedicated "TopN" node is needed for efficient bounded result tracking
+
+#### Followup 17: B-Tree Range Scan Sibling Pointers (Medium Priority)
+
+**Problem:** The B-tree `range_scan()` currently only scans a single leaf page. For queries that span multiple leaf pages, not all matching entries are returned.
+
+**Current behavior:**
+- `scan_all()` works correctly by iterating all loaded pages
+- `range_scan()` finds the starting leaf via `find_leaf_for_key()` but only scans that one leaf
+- Large range queries may miss entries in sibling leaves
+
+**Implementation approach:**
+
+1. **Add sibling pointers to leaf pages:**
+   ```rust
+   pub enum BTreePage {
+       Leaf {
+           entries: Vec<LeafEntry>,
+           next_leaf: Option<PageId>,  // Sibling pointer for range scans
+       },
+       // ...
+   }
+   ```
+
+2. **Update `split_leaf()` to maintain sibling chain:**
+   - When splitting, set `left.next_leaf = Some(right_page_id)`
+   - Preserve existing `next_leaf` on the right page
+
+3. **Update `scan_leaves()` to follow sibling chain:**
+   ```rust
+   fn scan_leaves(&self, start: PageId, min: &Bound, max: &Bound) -> Vec<ObjectId> {
+       let mut current = Some(start);
+       let mut results = Vec::new();
+
+       while let Some(page_id) = current {
+           let page = self.get_page(page_id)?;
+           if let BTreePage::Leaf { entries, next_leaf } = page {
+               for entry in entries {
+                   if past_max_bound(entry, max) { return results; }
+                   if in_range(entry, min, max) { results.extend(&entry.row_ids); }
+               }
+               current = next_leaf;
+           }
+       }
+       results
+   }
+   ```
+
+4. **Lazy loading consideration:**
+   - When `next_leaf` page isn't loaded, generate `LoadIndexPage` request
+   - Return partial results with indication more pages are pending
+
+**Tests to add:**
+- `range_scan_spans_multiple_leaves` - Insert enough entries to cause splits, verify range scan
+- `range_scan_with_lazy_loaded_siblings` - Test partial results when sibling not loaded
+
+#### Followup 18: Cold Start Index Persistence ✓
+
+**Problem solved:** Implemented B-tree index persistence for cold start scenarios.
+
+**Implementation:**
+
+1. **TestDriver now persists index data:**
+   ```rust
+   pub struct TestDriver {
+       // ... existing ...
+       pub index_pages: HashMap<(String, String, u64), Vec<u8>>,
+       pub index_meta: HashMap<(String, String), Vec<u8>>,
+   }
+   ```
+
+2. **QueryManager storage methods:**
+   - `process_storage_with_driver()` - Routes both ObjectManager and index requests through a real driver
+   - `load_indices_from_driver()` - Resets indices and loads from storage (for cold start)
+   - `reset_indices_for_cold_start()` - Clears index state and queues meta load requests
+
+3. **BTreeIndex methods:**
+   - `reset_for_cold_start()` - Clears loaded state, queues LoadIndexMeta request
+   - `process_meta_load()` now queues LoadIndexPage for root when loading persisted meta
+   - Multiple storage rounds: meta load → root page load → ready
+
+**Tests:**
+| Test | Description |
+|------|-------------|
+| `cold_start_loads_persisted_indices_and_rows` | Full cold start with index persistence |
+| `cold_start_only_loads_queried_rows` | Verifies lazy row loading |
+| `cold_start_with_sorted_query` | Sorted queries work after cold start |

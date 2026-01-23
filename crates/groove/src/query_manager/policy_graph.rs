@@ -16,7 +16,7 @@ use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::index_scan::{IndexScanNode, ScanCondition};
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::PolicyFilterNode;
-use super::index::IndexState;
+use super::index::BTreeIndex;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::{Schema, TableName, Value};
@@ -173,7 +173,7 @@ impl PolicyGraph {
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
-        indices: &HashMap<(String, String), IndexState>,
+        indices: &HashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -315,7 +315,7 @@ mod tests {
 
         // With no actual data in the indices/om, the scan will return no rows
         let om = ObjectManager::new();
-        let indices: HashMap<(String, String), IndexState> = HashMap::new();
+        let indices: HashMap<(String, String), BTreeIndex> = HashMap::new();
 
         // Row loader returns None for all IDs (no data)
         let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };

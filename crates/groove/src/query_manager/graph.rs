@@ -21,7 +21,7 @@ use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
-use super::index::IndexState;
+use super::index::BTreeIndex;
 use super::query::{Condition, Query};
 use super::session::Session;
 use super::types::{
@@ -795,7 +795,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(
         &mut self,
-        indices: &HashMap<(String, String), IndexState>,
+        indices: &HashMap<(String, String), BTreeIndex>,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> RowDelta
@@ -805,7 +805,8 @@ impl QueryGraph {
         let order = self.topo_sort_dirty();
         let mut tuple_deltas: HashMap<NodeId, TupleDelta> = HashMap::new();
 
-        let ctx = SourceContext { indices, om };
+        let ctx = SourceContext { indices };
+        let _ = om; // om is still passed to other nodes that need it
 
         for node_id in order {
             match self.nodes.get(&node_id) {

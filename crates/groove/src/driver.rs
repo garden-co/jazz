@@ -20,6 +20,10 @@ pub struct TestDriver {
     pub blobs: HashMap<ContentHash, Vec<u8>>,
     /// Blob associations for GC.
     pub blob_associations: HashMap<ContentHash, Vec<BlobAssociation>>,
+    /// Index pages by (table, column, page_id).
+    pub index_pages: HashMap<(String, String, u64), Vec<u8>>,
+    /// Index metadata by (table, column).
+    pub index_meta: HashMap<(String, String), Vec<u8>>,
 }
 
 /// An object stored by TestDriver.
@@ -250,6 +254,77 @@ impl TestDriver {
                     object_id,
                     branch_name,
                     result,
+                }
+            }
+
+            // Index page storage
+            StorageRequest::LoadIndexPage {
+                table,
+                column,
+                page_id,
+            } => {
+                let data = self
+                    .index_pages
+                    .get(&(table.clone(), column.clone(), page_id))
+                    .cloned();
+                StorageResponse::LoadIndexPage {
+                    table,
+                    column,
+                    page_id,
+                    result: Ok(data),
+                }
+            }
+            StorageRequest::StoreIndexPage {
+                table,
+                column,
+                page_id,
+                data,
+            } => {
+                self.index_pages
+                    .insert((table.clone(), column.clone(), page_id), data);
+                StorageResponse::StoreIndexPage {
+                    table,
+                    column,
+                    page_id,
+                    result: Ok(()),
+                }
+            }
+            StorageRequest::DeleteIndexPage {
+                table,
+                column,
+                page_id,
+            } => {
+                self.index_pages
+                    .remove(&(table.clone(), column.clone(), page_id));
+                StorageResponse::DeleteIndexPage {
+                    table,
+                    column,
+                    page_id,
+                    result: Ok(()),
+                }
+            }
+            StorageRequest::LoadIndexMeta { table, column } => {
+                let data = self
+                    .index_meta
+                    .get(&(table.clone(), column.clone()))
+                    .cloned();
+                StorageResponse::LoadIndexMeta {
+                    table,
+                    column,
+                    result: Ok(data),
+                }
+            }
+            StorageRequest::StoreIndexMeta {
+                table,
+                column,
+                data,
+            } => {
+                self.index_meta
+                    .insert((table.clone(), column.clone()), data);
+                StorageResponse::StoreIndexMeta {
+                    table,
+                    column,
+                    result: Ok(()),
                 }
             }
         }

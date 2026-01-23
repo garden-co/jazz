@@ -16,9 +16,7 @@ pub mod union;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use crate::object_manager::ObjectManager;
-
-use super::index::IndexState;
+use super::index::BTreeIndex;
 use super::types::{RowDescriptor, Tuple, TupleDelta};
 
 /// Unique identifier for a node in the query graph.
@@ -27,8 +25,7 @@ pub struct NodeId(pub u64);
 
 /// Context for source nodes that need external data.
 pub struct SourceContext<'a> {
-    pub indices: &'a HashMap<(String, String), IndexState>,
-    pub om: &'a ObjectManager,
+    pub indices: &'a HashMap<(String, String), BTreeIndex>,
 }
 
 // ============================================================================

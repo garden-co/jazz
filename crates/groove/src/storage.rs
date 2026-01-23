@@ -87,6 +87,44 @@ pub enum StorageRequest {
         branch_name: BranchName,
         tails: Option<HashSet<CommitId>>,
     },
+
+    // ========================================================================
+    // Index page storage (B-tree pages stored outside Object system)
+    // ========================================================================
+    /// Load an index page from storage.
+    LoadIndexPage {
+        table: String,
+        column: String,
+        page_id: u64,
+    },
+
+    /// Store an index page to storage.
+    StoreIndexPage {
+        table: String,
+        column: String,
+        page_id: u64,
+        data: Vec<u8>,
+    },
+
+    /// Delete an index page from storage.
+    DeleteIndexPage {
+        table: String,
+        column: String,
+        page_id: u64,
+    },
+
+    /// Load index metadata (root page id, entry count).
+    LoadIndexMeta {
+        table: String,
+        column: String,
+    },
+
+    /// Store index metadata.
+    StoreIndexMeta {
+        table: String,
+        column: String,
+        data: Vec<u8>,
+    },
 }
 
 /// Branch data loaded from storage.
@@ -149,6 +187,44 @@ pub enum StorageResponse {
     SetBranchTails {
         object_id: ObjectId,
         branch_name: BranchName,
+        result: Result<(), StorageError>,
+    },
+
+    // ========================================================================
+    // Index page storage responses
+    // ========================================================================
+    LoadIndexPage {
+        table: String,
+        column: String,
+        page_id: u64,
+        /// None if page doesn't exist, Some(data) if found.
+        result: Result<Option<Vec<u8>>, StorageError>,
+    },
+
+    StoreIndexPage {
+        table: String,
+        column: String,
+        page_id: u64,
+        result: Result<(), StorageError>,
+    },
+
+    DeleteIndexPage {
+        table: String,
+        column: String,
+        page_id: u64,
+        result: Result<(), StorageError>,
+    },
+
+    LoadIndexMeta {
+        table: String,
+        column: String,
+        /// None if meta doesn't exist (new index), Some(data) if found.
+        result: Result<Option<Vec<u8>>, StorageError>,
+    },
+
+    StoreIndexMeta {
+        table: String,
+        column: String,
         result: Result<(), StorageError>,
     },
 }

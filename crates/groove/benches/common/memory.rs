@@ -271,7 +271,7 @@ impl MemoryBreakdown {
 pub struct ObjectManagerMemory {
     /// Size of row object storage (data objects).
     pub row_objects: usize,
-    /// Size of index object storage (skip list nodes).
+    /// Size of index object storage (legacy, now unused).
     pub index_objects: usize,
     /// Size of blob storage.
     pub blobs: usize,
