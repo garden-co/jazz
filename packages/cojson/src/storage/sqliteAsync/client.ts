@@ -53,30 +53,109 @@ export class SQLiteClientAsync
   async getCoValueRow(
     coValueId: RawCoID,
   ): Promise<StoredNewCoValueRow | undefined> {
-    const storedCoValueRow = await this.getCoValue(coValueId);
-    if (!storedCoValueRow) {
+    const rows = await this.db.query<{
+      coValue_rowID: number;
+      coValue_id: RawCoID;
+      coValue_header: string;
+      session_rowID: number | null;
+      session_coValue: number | null;
+      session_sessionID: SessionID | null;
+      session_lastIdx: number | null;
+      session_lastSignature: string | null;
+      session_bytesSinceLastSignature: number | null;
+      signature_ses: number | null;
+      signature_idx: number | null;
+      signature_signature: string | null;
+    }>(
+      `SELECT 
+        cv.rowID as coValue_rowID,
+        cv.id as coValue_id,
+        cv.header as coValue_header,
+        s.rowID as session_rowID,
+        s.coValue as session_coValue,
+        s.sessionID as session_sessionID,
+        s.lastIdx as session_lastIdx,
+        s.lastSignature as session_lastSignature,
+        s.bytesSinceLastSignature as session_bytesSinceLastSignature,
+        sa.ses as signature_ses,
+        sa.idx as signature_idx,
+        sa.signature as signature_signature
+      FROM coValues cv
+      LEFT JOIN sessions s ON s.coValue = cv.rowID
+      LEFT JOIN signatureAfter sa ON sa.ses = s.rowID
+      WHERE cv.id = ?`,
+      [coValueId],
+    );
+
+    if (rows.length === 0) {
       return undefined;
     }
-    const { rowID, header } = storedCoValueRow;
-    const allCoValueSessions = (await this.getCoValueSessions(
-      rowID,
-    )) as StoredNewSessionRow[];
-    const sessions = Object.fromEntries(
-      allCoValueSessions.map((sessionRow) => [
-        sessionRow.sessionID,
-        sessionRow,
-      ]),
-    );
-    await Promise.all(
-      allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.getSignatures(sessionRow.rowID!, 0);
-        sessionRow.signatures = {};
-        for (const signature of signatures) {
-          sessionRow.signatures[signature.idx] = signature.signature;
-        }
-      }),
-    );
-    return { id: coValueId, rowID, header, sessions };
+
+    // Parse header from first row
+    const firstRow = rows[0];
+    if (!firstRow) {
+      return undefined;
+    }
+
+    let parsedHeader: CoValueHeader;
+    try {
+      parsedHeader = (firstRow.coValue_header &&
+        JSON.parse(firstRow.coValue_header)) as CoValueHeader;
+    } catch (e) {
+      const headerValue = firstRow.coValue_header ?? "";
+      logger.warn(`Invalid JSON in header: ${headerValue}`, {
+        id: coValueId,
+        err: e,
+      });
+      return undefined;
+    }
+
+    const rowID = firstRow.coValue_rowID;
+    const sessions: Record<SessionID, StoredNewSessionRow> = {};
+
+    // Process rows to build sessions and signatures
+    for (const row of rows) {
+      // Skip if no session (coValue exists but has no sessions)
+      if (
+        row.session_rowID === null ||
+        row.session_sessionID === null ||
+        row.session_coValue === null ||
+        row.session_lastIdx === null ||
+        row.session_lastSignature === null
+      ) {
+        continue;
+      }
+
+      const sessionID = row.session_sessionID;
+
+      // Initialize session if not seen before
+      if (!sessions[sessionID]) {
+        sessions[sessionID] = {
+          rowID: row.session_rowID,
+          coValue: row.session_coValue,
+          sessionID: sessionID,
+          lastIdx: row.session_lastIdx,
+          lastSignature: row.session_lastSignature as Signature,
+          bytesSinceLastSignature:
+            row.session_bytesSinceLastSignature ?? undefined,
+          signatures: {},
+        };
+      }
+
+      // Add signature if present
+      const session = sessions[sessionID];
+      if (
+        row.signature_ses !== null &&
+        row.signature_idx !== null &&
+        row.signature_signature !== null &&
+        session
+      ) {
+        session.signatures[row.signature_idx] =
+          row.signature_signature as Signature;
+      }
+    }
+
+    return { id: coValueId, rowID, header: parsedHeader, sessions };
   }
 
   async upsertCoValueRow(
@@ -112,49 +191,6 @@ export class SQLiteClientAsync
     };
   }
 
-  async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
-    const coValueRow = await this.db.get<RawCoValueRow & { rowID: number }>(
-      "SELECT * FROM coValues WHERE id = ?",
-      [coValueId],
-    );
-
-    if (!coValueRow) return;
-
-    try {
-      const parsedHeader = (coValueRow?.header &&
-        JSON.parse(coValueRow.header)) as CoValueHeader;
-
-      return {
-        ...coValueRow,
-        header: parsedHeader,
-      };
-    } catch (e) {
-      const headerValue = coValueRow?.header ?? "";
-      logger.warn(`Invalid JSON in header: ${headerValue}`, {
-        id: coValueId,
-        err: e,
-      });
-      return;
-    }
-  }
-
-  async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
-    return this.db.query<StoredSessionRow>(
-      "SELECT * FROM sessions WHERE coValue = ?",
-      [coValueRowId],
-    );
-  }
-
-  async getSingleCoValueSession(
-    coValueRowId: number,
-    sessionID: SessionID,
-  ): Promise<StoredSessionRow | undefined> {
-    return this.db.get<StoredSessionRow>(
-      "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
-      [coValueRowId, sessionID],
-    );
-  }
-
   async getNewTransactionInSession(
     sessionRowId: number,
     fromIdx: number,
@@ -174,16 +210,6 @@ export class SQLiteClientAsync
       logger.warn("Invalid JSON in transaction", { err: e });
       return [];
     }
-  }
-
-  async getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]> {
-    return this.db.query<SignatureAfterRow>(
-      "SELECT * FROM signatureAfter WHERE ses = ? AND idx >= ?",
-      [sessionRowId, firstNewTxIdx],
-    );
   }
 
   async getCoValueRowID(id: RawCoID): Promise<number | undefined> {
