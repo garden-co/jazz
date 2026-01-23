@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 ///
 /// Contains the authenticated user's identity and claims. Used by policy
 /// expressions to check row access permissions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     /// Required user identifier.
     pub user_id: String,
