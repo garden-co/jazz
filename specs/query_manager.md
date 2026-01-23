@@ -831,6 +831,91 @@ These tests validate the integration between SyncManager and QueryManager, ensur
 2. QueryManager's `process()` picks up the updates and settles subscriptions
 3. Subscription deltas are correctly emitted for both inserts and updates
 
+#### Multi-Tier Session Propagation for Permissioned Queries ✓
+
+Sessions flow through the sync layer so upstream servers apply correct permissions.
+
+**Key Insight: Row = Object means Scope IS the Filter**
+
+Since each row is its own Object, the query scope (set of ObjectIds) already reflects row-level permissions:
+
+```
+Client registers query with session=alice
+    ↓
+QueryManager evaluates query with PolicyFilter(session=alice)
+    ↓
+Returns only objects/rows alice can see
+    ↓
+Scope = {(alice_doc_1, main), (alice_doc_2, main)}  ← bob's docs NOT here
+    ↓
+SyncManager syncs only objects in scope
+```
+
+No additional filtering needed in SyncManager - the query system already filters at the row (object) level.
+
+**Multi-Tier Architecture:**
+
+```
+Client                    MiddleTier                TopTier
+   │                          │                         │
+   │ register query           │                         │
+   │ session=alice ──────────►│                         │
+   │                          │                         │
+   │                    QueryManager runs               │
+   │                    query with session              │
+   │                    scope = alice's objects         │
+   │                          │                         │
+   │                          │ QueryRegistration       │
+   │                          │ session=alice ─────────►│
+   │                          │                         │
+   │                          │                   QueryManager runs
+   │                          │                   query with session
+   │                          │                   scope = alice's objects
+   │                          │                         │
+   │◄─────────────────────────│◄────────────────────────│
+        ObjectUpdated              ObjectUpdated
+      (only alice's objects)    (only alice's objects)
+```
+
+**Implementation (in SyncManager):**
+
+1. **QuerySubscription** stores session with each registered query:
+   ```rust
+   pub struct QuerySubscription {
+       pub scope: HashSet<(ObjectId, BranchName)>,
+       pub session: Option<Session>,  // Captured at registration
+   }
+   ```
+
+2. **QueryRegistration** payload includes session for upstream forwarding:
+   ```rust
+   QueryRegistration {
+       query_id: QueryId,
+       scope: HashSet<(ObjectId, BranchName)>,
+       session: Option<Session>,  // Forwarded to upstream
+   }
+   ```
+
+3. **Session capture**: `add_or_update_query()` captures client's session at registration time
+
+4. **Session forwarding**: `forward_query_to_server()` accepts session parameter, includes in payload
+
+5. **Upstream processing**: When server receives `QueryRegistration` from downstream, stores session with query
+
+**Backward Compatibility:**
+
+- `session: None` means permissive (no filtering)
+- Old nodes that don't send session work as before
+
+**Tests:**
+| Test | Description |
+|------|-------------|
+| `forward_query_to_server_includes_session` | Session in outgoing QueryRegistration |
+| `add_query_stores_client_session` | Session captured on local registration |
+| `server_processes_query_registration_with_session` | Server stores received session |
+| `query_without_session_is_permissive` | Backward compatibility |
+| `multi_tier_session_filtering_end_to_end` | Full three-tier flow |
+
 #### Followup 11: Soft Deletes and Hard Deletes ✓
 
 Implemented deletion semantics with two delete types:

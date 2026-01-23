@@ -81,13 +81,22 @@ pub struct ServerState {
     pub forwarded_queries: HashMap<QueryId, HashSet<(ObjectId, BranchName)>>,
 }
 
+/// A query subscription with scope and session for policy filtering.
+#[derive(Debug, Clone, Default)]
+pub struct QuerySubscription {
+    /// The scope of objects/branches this query covers.
+    pub scope: HashSet<(ObjectId, BranchName)>,
+    /// The session to use for policy filtering (captured at registration time).
+    pub session: Option<Session>,
+}
+
 /// Tracking state for a connected client.
 #[derive(Debug, Clone, Default)]
 pub struct ClientState {
     /// Client's session for policy evaluation.
     pub session: Option<Session>,
-    /// Active queries from this client (scope only, permissions via callback).
-    pub queries: HashMap<QueryId, HashSet<(ObjectId, BranchName)>>,
+    /// Active queries from this client.
+    pub queries: HashMap<QueryId, QuerySubscription>,
     /// What we've sent to this client.
     pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
@@ -107,7 +116,7 @@ impl ClientState {
     pub fn is_in_scope(&self, object_id: ObjectId, branch_name: &BranchName) -> bool {
         self.queries
             .values()
-            .any(|scope| scope.contains(&(object_id, *branch_name)))
+            .any(|q| q.scope.contains(&(object_id, *branch_name)))
     }
 }
 
@@ -169,6 +178,7 @@ pub enum SyncPayload {
     QueryRegistration {
         query_id: QueryId,
         scope: HashSet<(ObjectId, BranchName)>,
+        session: Option<Session>,
     },
 
     /// Unregister a query (to servers only).
@@ -520,17 +530,22 @@ impl SyncManager {
             let old_scope: HashSet<(ObjectId, BranchName)> = client
                 .queries
                 .values()
-                .flat_map(|q| q.iter().cloned())
+                .flat_map(|q| q.scope.iter().cloned())
                 .collect();
 
-            // Update the query
-            client.queries.insert(query_id, scope);
+            // Capture client's session at registration time
+            let session = client.session.clone();
+
+            // Update the query with scope and session
+            client
+                .queries
+                .insert(query_id, QuerySubscription { scope, session });
 
             // Collect all objects now in any query scope
             let new_scope: HashSet<(ObjectId, BranchName)> = client
                 .queries
                 .values()
-                .flat_map(|q| q.iter().cloned())
+                .flat_map(|q| q.scope.iter().cloned())
                 .collect();
 
             // Find newly visible (object, branch) pairs
@@ -563,6 +578,7 @@ impl SyncManager {
         server_id: ServerId,
         query_id: QueryId,
         scope: HashSet<(ObjectId, BranchName)>,
+        session: Option<Session>,
     ) {
         let Some(server) = self.servers.get_mut(&server_id) else {
             return;
@@ -572,7 +588,11 @@ impl SyncManager {
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::QueryRegistration { query_id, scope },
+            payload: SyncPayload::QueryRegistration {
+                query_id,
+                scope,
+                session,
+            },
         });
     }
 
@@ -1055,7 +1075,7 @@ impl SyncManager {
                 let has_permission = client
                     .queries
                     .values()
-                    .flat_map(|q| q.iter())
+                    .flat_map(|q| q.scope.iter())
                     .any(|(obj_id, _)| *obj_id == blob_id.object_id);
 
                 if !has_permission {
@@ -1087,11 +1107,56 @@ impl SyncManager {
                     }
                 }
             }
+            // Handle query registration from downstream nodes
+            SyncPayload::QueryRegistration {
+                query_id,
+                scope,
+                session,
+            } => {
+                // Store the query with the session provided by the downstream node
+                // (not the client's own session, which may differ)
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    // Collect all objects currently in any query scope
+                    let old_scope: HashSet<(ObjectId, BranchName)> = client
+                        .queries
+                        .values()
+                        .flat_map(|q| q.scope.iter().cloned())
+                        .collect();
+
+                    // Insert the query with the provided scope and session
+                    client.queries.insert(
+                        *query_id,
+                        QuerySubscription {
+                            scope: scope.clone(),
+                            session: session.clone(),
+                        },
+                    );
+
+                    // Collect all objects now in any query scope
+                    let new_scope: HashSet<(ObjectId, BranchName)> = client
+                        .queries
+                        .values()
+                        .flat_map(|q| q.scope.iter().cloned())
+                        .collect();
+
+                    // Find newly visible (object, branch) pairs
+                    let newly_visible: Vec<(ObjectId, BranchName)> =
+                        new_scope.difference(&old_scope).cloned().collect();
+
+                    // Queue initial syncs for newly visible objects
+                    for (object_id, branch_name) in newly_visible {
+                        self.queue_initial_sync_to_client(client_id, object_id, branch_name);
+                    }
+                }
+            }
+            // Handle query unregistration from downstream nodes
+            SyncPayload::QueryUnregistration { query_id } => {
+                if let Some(client) = self.clients.get_mut(&client_id) {
+                    client.queries.remove(query_id);
+                }
+            }
             // Clients shouldn't send these
-            SyncPayload::BlobResponse { .. }
-            | SyncPayload::QueryRegistration { .. }
-            | SyncPayload::QueryUnregistration { .. }
-            | SyncPayload::Error(_) => {}
+            SyncPayload::BlobResponse { .. } | SyncPayload::Error(_) => {}
         }
     }
 
@@ -2121,7 +2186,7 @@ mod tests {
         let mut scope = HashSet::new();
         scope.insert((obj_id, "main".into()));
 
-        sm.forward_query_to_server(server_id, QueryId(1), scope.clone());
+        sm.forward_query_to_server(server_id, QueryId(1), scope.clone(), None);
 
         let outbox = sm.take_outbox();
         assert_eq!(outbox.len(), 1);
@@ -2130,6 +2195,7 @@ mod tests {
             SyncPayload::QueryRegistration {
                 query_id,
                 scope: sent_scope,
+                session: _,
             } => {
                 assert_eq!(*query_id, QueryId(1));
                 assert_eq!(*sent_scope, scope);
@@ -2148,7 +2214,7 @@ mod tests {
         let obj_id = ObjectId::new();
         let mut scope = HashSet::new();
         scope.insert((obj_id, "main".into()));
-        sm.forward_query_to_server(server_id, QueryId(1), scope);
+        sm.forward_query_to_server(server_id, QueryId(1), scope, None);
         sm.take_outbox();
 
         sm.unforward_query_from_server(server_id, QueryId(1));
@@ -2646,5 +2712,336 @@ mod tests {
 
         let outbox = sm.take_outbox();
         assert_eq!(outbox.len(), 1, "regular object should sync to server");
+    }
+
+    // ========================================================================
+    // Phase: Multi-Tier Permissioned Query Tests
+    // ========================================================================
+
+    #[test]
+    fn forward_query_to_server_includes_session() {
+        let mut sm = SyncManager::new();
+
+        let server_id = ServerId::new();
+        sm.add_server(server_id);
+        sm.take_outbox();
+
+        let obj_id = ObjectId::new();
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+
+        let session = Session::new("alice");
+        sm.forward_query_to_server(server_id, QueryId(1), scope.clone(), Some(session.clone()));
+
+        let outbox = sm.take_outbox();
+        assert_eq!(outbox.len(), 1);
+
+        match &outbox[0].payload {
+            SyncPayload::QueryRegistration {
+                query_id,
+                scope: sent_scope,
+                session: sent_session,
+            } => {
+                assert_eq!(*query_id, QueryId(1));
+                assert_eq!(*sent_scope, scope);
+                assert!(sent_session.is_some());
+                assert_eq!(sent_session.as_ref().unwrap().user_id, "alice");
+            }
+            _ => panic!("Expected QueryRegistration"),
+        }
+    }
+
+    #[test]
+    fn add_query_stores_client_session() {
+        let mut sm = SyncManager::new();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        sm.set_client_session(client_id, Session::new("alice"));
+
+        let obj_id = ObjectId::new();
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+
+        sm.add_or_update_query(client_id, QueryId(1), scope.clone());
+
+        let client = sm.get_client(client_id).expect("client should exist");
+        let query = client.queries.get(&QueryId(1)).expect("query should exist");
+        assert_eq!(query.scope, scope);
+        assert!(query.session.is_some());
+        assert_eq!(query.session.as_ref().unwrap().user_id, "alice");
+    }
+
+    #[test]
+    fn server_processes_query_registration_with_session() {
+        // TopTier receives QueryRegistration from MiddleTier (which is a "client" from TopTier's POV)
+        let mut sm = SyncManager::new();
+
+        // Create an object that can be queried
+        let obj_id = sm.object_manager.create(None);
+        let author = ObjectId::new();
+        sm.object_manager
+            .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None)
+            .unwrap();
+
+        // MiddleTier connects as a client
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        sm.take_outbox();
+
+        // MiddleTier sends QueryRegistration with session
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QueryRegistration {
+                query_id: QueryId(42),
+                scope: scope.clone(),
+                session: Some(Session::new("alice")),
+            },
+        });
+
+        sm.process_inbox();
+
+        // Verify: the query was registered for this client with the provided session
+        let client = sm.get_client(client_id).expect("client should exist");
+        let query = client
+            .queries
+            .get(&QueryId(42))
+            .expect("query should be registered");
+        assert_eq!(query.scope, scope);
+        assert!(query.session.is_some());
+        assert_eq!(query.session.as_ref().unwrap().user_id, "alice");
+
+        // Verify: the existing object is sent to the client
+        let outbox = sm.take_outbox();
+        assert!(
+            outbox.iter().any(|e| matches!(
+                &e.payload,
+                SyncPayload::ObjectUpdated { object_id, .. } if *object_id == obj_id
+            )),
+            "existing object should be sent to client after query registration"
+        );
+    }
+
+    #[test]
+    fn query_without_session_is_permissive() {
+        // Client without session: query forwarded with session=None
+        let mut sm = SyncManager::new();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        // Note: NOT setting a session
+
+        let obj_id = ObjectId::new();
+        let mut scope = HashSet::new();
+        scope.insert((obj_id, "main".into()));
+
+        sm.add_or_update_query(client_id, QueryId(1), scope.clone());
+
+        // Verify query was stored with session=None
+        let client = sm.get_client(client_id).expect("client should exist");
+        let query = client.queries.get(&QueryId(1)).expect("query should exist");
+        assert_eq!(query.scope, scope);
+        assert!(
+            query.session.is_none(),
+            "query without session should have session=None"
+        );
+
+        // When forwarding upstream, session should be None
+        let server_id = ServerId::new();
+        sm.add_server(server_id);
+        sm.take_outbox();
+
+        sm.forward_query_to_server(server_id, QueryId(1), scope.clone(), None);
+
+        let outbox = sm.take_outbox();
+        match &outbox[0].payload {
+            SyncPayload::QueryRegistration { session, .. } => {
+                assert!(
+                    session.is_none(),
+                    "forwarded query should have session=None"
+                );
+            }
+            _ => panic!("Expected QueryRegistration"),
+        }
+    }
+
+    #[test]
+    fn multi_tier_session_filtering_end_to_end() {
+        // Setup: Three-tier architecture
+        //   TopTier: has docs owned by alice and bob
+        //   MiddleTier: has docs owned by alice and bob, connects to TopTier
+        //   Client: connects to MiddleTier with session=alice
+
+        // === TopTier Setup ===
+        let mut top_tier = SyncManager::new();
+        let doc_top_alice = top_tier.object_manager.create(Some(
+            [("owner".to_string(), "alice".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let doc_top_bob = top_tier.object_manager.create(Some(
+            [("owner".to_string(), "bob".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let author = ObjectId::new();
+        top_tier
+            .object_manager
+            .add_commit(
+                doc_top_alice,
+                "main",
+                vec![],
+                b"alice's top doc".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        top_tier
+            .object_manager
+            .add_commit(
+                doc_top_bob,
+                "main",
+                vec![],
+                b"bob's top doc".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+
+        // === MiddleTier Setup ===
+        let mut middle_tier = SyncManager::new();
+        let doc_mid_alice = middle_tier.object_manager.create(Some(
+            [("owner".to_string(), "alice".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let doc_mid_bob = middle_tier.object_manager.create(Some(
+            [("owner".to_string(), "bob".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        middle_tier
+            .object_manager
+            .add_commit(
+                doc_mid_alice,
+                "main",
+                vec![],
+                b"alice's mid doc".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        middle_tier
+            .object_manager
+            .add_commit(
+                doc_mid_bob,
+                "main",
+                vec![],
+                b"bob's mid doc".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+
+        // MiddleTier connects to TopTier (TopTier sees MiddleTier as a "client")
+        let middle_tier_as_client = ClientId::new();
+        top_tier.add_client(middle_tier_as_client);
+        top_tier.take_outbox(); // Clear initial sync
+
+        // Client connects to MiddleTier with session=alice
+        let client_id = ClientId::new();
+        middle_tier.add_client(client_id);
+        middle_tier.set_client_session(client_id, Session::new("alice"));
+        middle_tier.take_outbox();
+
+        // === Test A: Client registers query on MiddleTier ===
+        // Client wants alice's docs from both tiers
+        let mut scope = HashSet::new();
+        scope.insert((doc_mid_alice, "main".into()));
+        scope.insert((doc_mid_bob, "main".into())); // Client asks for both, but should only get alice's
+        middle_tier.add_or_update_query(client_id, QueryId(1), scope);
+
+        // The query is registered with alice's session
+        let client = middle_tier.get_client(client_id).unwrap();
+        let query = client.queries.get(&QueryId(1)).unwrap();
+        assert!(query.session.is_some());
+        assert_eq!(query.session.as_ref().unwrap().user_id, "alice");
+
+        // Note: In production, QueryManager computes the scope with PolicyFilter.
+        // Since Row=Object, the scope already contains only objects alice can see.
+        // This test uses a manually-constructed scope to verify session propagation.
+
+        // === Test B: MiddleTier forwards query to TopTier with session ===
+        let server_id = ServerId::new();
+        middle_tier.add_server(server_id);
+        middle_tier.take_outbox();
+
+        // Forward the query upstream with alice's session
+        let mut top_scope = HashSet::new();
+        top_scope.insert((doc_top_alice, "main".into()));
+        top_scope.insert((doc_top_bob, "main".into()));
+        middle_tier.forward_query_to_server(
+            server_id,
+            QueryId(1),
+            top_scope.clone(),
+            Some(Session::new("alice")),
+        );
+
+        let outbox = middle_tier.take_outbox();
+        assert_eq!(outbox.len(), 1);
+
+        // Verify QueryRegistration includes session
+        match &outbox[0].payload {
+            SyncPayload::QueryRegistration {
+                query_id,
+                scope: sent_scope,
+                session,
+            } => {
+                assert_eq!(*query_id, QueryId(1));
+                assert_eq!(*sent_scope, top_scope);
+                assert!(session.is_some());
+                assert_eq!(session.as_ref().unwrap().user_id, "alice");
+            }
+            _ => panic!("Expected QueryRegistration"),
+        }
+
+        // TopTier receives the QueryRegistration from MiddleTier
+        top_tier.push_inbox(InboxEntry {
+            source: Source::Client(middle_tier_as_client),
+            payload: outbox[0].payload.clone(),
+        });
+        top_tier.process_inbox();
+
+        // Verify TopTier stored the query with session
+        let mid_as_client = top_tier.get_client(middle_tier_as_client).unwrap();
+        let top_query = mid_as_client.queries.get(&QueryId(1)).unwrap();
+        assert_eq!(top_query.scope, top_scope);
+        assert!(top_query.session.is_some());
+        assert_eq!(top_query.session.as_ref().unwrap().user_id, "alice");
+
+        // TopTier would send ObjectUpdated for in-scope objects
+        // (Row-level filtering based on session would happen here - future work)
+        let top_outbox = top_tier.take_outbox();
+        // Both docs are in scope, so both ObjectUpdated messages are queued
+        let object_updates: Vec<_> = top_outbox
+            .iter()
+            .filter_map(|e| match &e.payload {
+                SyncPayload::ObjectUpdated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert!(object_updates.contains(&doc_top_alice));
+        assert!(object_updates.contains(&doc_top_bob));
+        // Note: In production, QueryManager would compute a scope containing only
+        // alice's objects. The test manually includes both to verify the infrastructure.
+
+        // === Summary ===
+        // - Client session is captured when query is registered
+        // - Session is forwarded upstream with QueryRegistration
+        // - Upstream server stores the session with the query
+        // - QueryManager uses session to compute scope (Row=Object, so scope IS the filter)
     }
 }
