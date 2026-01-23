@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 use std::ops::Bound;
 
 use crate::object::ObjectId;
@@ -36,9 +36,9 @@ pub struct IndexScanNode {
     output_descriptor: TupleDescriptor,
 
     /// Current set of tuples (length-1) matching the condition.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     /// Last scanned IDs (for computing deltas).
-    last_scanned_ids: HashSet<ObjectId>,
+    last_scanned_ids: AHashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -65,8 +65,8 @@ impl IndexScanNode {
             column: column.into(),
             condition,
             output_descriptor,
-            current_tuples: HashSet::new(),
-            last_scanned_ids: HashSet::new(),
+            current_tuples: AHashSet::new(),
+            last_scanned_ids: AHashSet::new(),
             dirty: true,
         }
     }
@@ -83,7 +83,7 @@ impl SourceNode for IndexScanNode {
             self.table.as_str().to_string(),
             self.column.as_str().to_string(),
         );
-        let new_ids: HashSet<ObjectId> = if let Some(index) = ctx.indices.get(&key) {
+        let new_ids: AHashSet<ObjectId> = if let Some(index) = ctx.indices.get(&key) {
             match &self.condition {
                 ScanCondition::All => index.scan_all().into_iter().collect(),
                 ScanCondition::Eq(k) => index.lookup_exact(k).into_iter().collect(),
@@ -92,14 +92,14 @@ impl SourceNode for IndexScanNode {
                 }
             }
         } else {
-            HashSet::new()
+            AHashSet::new()
         };
 
-        let added: HashSet<ObjectId> = new_ids
+        let added: AHashSet<ObjectId> = new_ids
             .difference(&self.last_scanned_ids)
             .copied()
             .collect();
-        let removed: HashSet<ObjectId> = self
+        let removed: AHashSet<ObjectId> = self
             .last_scanned_ids
             .difference(&new_ids)
             .copied()
@@ -123,7 +123,7 @@ impl SourceNode for IndexScanNode {
         }
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use ahash::AHashSet;
+use std::collections::HashMap;
 use std::ops::Bound;
 
 use bitvec::prelude::*;
@@ -832,12 +833,12 @@ impl QueryGraph {
     /// Topological sort of dirty nodes (dependencies first).
     fn topo_sort_dirty(&self) -> Vec<NodeId> {
         let mut result = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited = AHashSet::new();
 
         fn visit(
             node: NodeId,
             graph: &QueryGraph,
-            visited: &mut HashSet<NodeId>,
+            visited: &mut AHashSet<NodeId>,
             result: &mut Vec<NodeId>,
         ) {
             if visited.contains(&node) {
@@ -1108,7 +1109,7 @@ impl QueryGraph {
     }
 
     /// Collect tuple sets from input nodes for a transform node.
-    fn collect_tuple_inputs(&self, node_id: NodeId) -> Vec<HashSet<Tuple>> {
+    fn collect_tuple_inputs(&self, node_id: NodeId) -> Vec<AHashSet<Tuple>> {
         self.get_inputs(node_id)
             .iter()
             .filter_map(|dep| match &self.nodes[dep.0 as usize].node {

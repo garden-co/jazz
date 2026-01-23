@@ -3,7 +3,7 @@
 //! Used by policy evaluation graphs to determine if any rows match a condition.
 //! Returns true if at least one row has been added (and not all removed).
 
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta};
 
@@ -22,7 +22,7 @@ pub struct ExistsOutputNode {
     /// True if we're still waiting for upstream data.
     pending: bool,
     /// Current tuples (for RowNode trait compliance).
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -34,7 +34,7 @@ impl ExistsOutputNode {
             descriptor,
             count: 0,
             pending: true, // Start pending until first process
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -92,7 +92,7 @@ impl RowNode for ExistsOutputNode {
         input
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

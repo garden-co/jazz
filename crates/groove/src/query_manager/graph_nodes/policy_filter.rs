@@ -3,6 +3,7 @@
 //! Evaluates policy expressions against rows, filtering based on session context.
 //! SELECT policies silently filter rows; write policies are handled separately.
 
+use ahash::AHashSet;
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
@@ -33,7 +34,7 @@ pub struct PolicyFilterNode {
     /// Table name for this node (for INHERITS resolution).
     table_name: String,
     /// Current tuples that pass the policy.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     dirty: bool,
     /// Whether the policy contains INHERITS clauses that need context for evaluation.
     has_inherits: bool,
@@ -61,7 +62,7 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
             has_inherits,
             inherits_tables,
@@ -503,7 +504,7 @@ impl RowNode for PolicyFilterNode {
         result
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
