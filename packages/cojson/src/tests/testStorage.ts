@@ -92,6 +92,14 @@ class LibSQLSqliteSyncDriver implements SQLiteDatabaseDriver {
   }
 }
 
+function deleteDb(dbPath: string) {
+  try {
+    unlinkSync(dbPath);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 export async function createAsyncStorage({
   filename,
   nodeName = "client",
@@ -101,12 +109,14 @@ export async function createAsyncStorage({
   nodeName: string;
   storageName: string;
 }) {
+  const dbPath = getDbPath(filename);
   const storage = await getSqliteStorageAsync(
-    new LibSQLSqliteAsyncDriver(getDbPath(filename)),
+    new LibSQLSqliteAsyncDriver(dbPath),
   );
 
   onTestFinished(async () => {
     await storage.close();
+    deleteDb(dbPath);
   });
 
   trackStorageMessages(storage, nodeName, storageName);
@@ -123,9 +133,15 @@ export function createSyncStorage({
   nodeName: string;
   storageName: string;
 }) {
+  const dbPath = getDbPath(filename);
   const storage = getSqliteStorage(
     new LibSQLSqliteSyncDriver(getDbPath(filename)),
   );
+
+  onTestFinished(() => {
+    storage.close();
+    deleteDb(dbPath);
+  });
 
   trackStorageMessages(storage, nodeName, storageName);
 
@@ -159,17 +175,7 @@ export async function getCoValueStoredSessions(
 }
 
 export function getDbPath(defaultDbPath?: string) {
-  const dbPath = defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
-
-  if (!defaultDbPath) {
-    onTestFinished(() => {
-      setTimeout(() => {
-        unlinkSync(dbPath);
-      }, 100);
-    });
-  }
-
-  return dbPath;
+  return defaultDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
 }
 
 function trackStorageMessages(

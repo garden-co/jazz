@@ -12,6 +12,5 @@ export default defineConfig({
       "crates/cojson-core-napi",
       "crates/cojson-core-wasm",
     ],
-    maxWorkers: 5,
   },
 });
