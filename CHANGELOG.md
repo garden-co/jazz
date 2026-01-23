@@ -1,3 +1,9 @@
+Released Jazz 0.20.3:
+- Added caching for groups when accessing a readKey
+
+Released Jazz 0.20.2:
+- Added a Performance tab in the Jazz tools inspector
+- Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
 
 Released Jazz 0.20.1:
 - Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently. When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.

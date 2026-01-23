@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue.js";
 import { ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
@@ -13,6 +13,8 @@ import {
   loadCoValueOrFail,
   newGroup,
   newGroupHighLevel,
+  setupTestAccount,
+  setupTestNode,
   waitFor,
 } from "./testUtils.js";
 import { Role } from "../permissions.js";
@@ -2726,4 +2728,119 @@ test("Can revoke read permission from 'everyone'", async () => {
 
   // Verify the new account cannot read after revocation
   expect(childContent2.get("foo")).toEqual("bar");
+});
+
+describe("Private transactions in groups", () => {
+  beforeEach(async () => {
+    setupTestNode({ isSyncServer: true });
+  });
+
+  test("Admins can make private transactions directly in accounts", async () => {
+    const alice = await setupTestAccount();
+
+    const group = alice.node.createGroup();
+    const map = group.createMap();
+
+    // Count valid transactions before attempting private transaction
+    const validTransactionsBefore = alice.account.core.getValidTransactions();
+    const countBefore = validTransactionsBefore.length;
+
+    alice.account.set("root", map.id, "private");
+
+    const validTransactions = alice.account.core.getValidTransactions();
+    expect(validTransactions).toHaveLength(countBefore + 1);
+
+    expect(alice.account.get("root")).toEqual(map.id);
+    expect(alice.account.core.getCurrentReadKey()).not.toBeUndefined();
+  });
+
+  test("Admins cannot make private transactions directly in groups", async () => {
+    const alice = await setupTestAccount();
+
+    const group = alice.node.createGroup();
+    const map = group.createMap();
+
+    // Count valid transactions before attempting private transaction
+    const validTransactionsBefore = group.core.getValidTransactions();
+    const countBefore = validTransactionsBefore.length;
+
+    // Attempt to make a private transaction directly on the group
+    group.set("root", map.id, "private");
+
+    // Verify the transaction is marked invalid (count should not increase)
+    const validTransactions = group.core.getValidTransactions();
+    expect(validTransactions).toHaveLength(countBefore);
+
+    // Verify the change didn't take effect
+    expect(group.get("root")).toBeUndefined();
+  });
+
+  test("Writers cannot make private transactions directly in groups", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    const map = group.createMap();
+
+    group.addMember(bob.account, "writer");
+
+    // Count valid transactions before attempting private transaction
+    const validTransactionsBefore = group.core.getValidTransactions();
+    const countBefore = validTransactionsBefore.length;
+
+    const groupAsBob = await loadCoValueOrFail(bob.node, group.id);
+
+    // Attempt to make a private transaction directly on the group
+    groupAsBob.set("root", map.id, "private");
+
+    // Verify the transaction is marked invalid (count should not increase)
+    const validTransactions = groupAsBob.core.getValidTransactions();
+    expect(validTransactions).toHaveLength(countBefore);
+
+    // Verify the change didn't take effect
+    expect(groupAsBob.get("root")).toBeUndefined();
+  });
+
+  test("Managers cannot make private transactions directly in groups", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    const map = group.createMap();
+
+    group.addMember(bob.account, "manager");
+
+    // Count valid transactions before attempting private transaction
+    const validTransactionsBefore = group.core.getValidTransactions();
+    const countBefore = validTransactionsBefore.length;
+
+    const groupAsBob = await loadCoValueOrFail(bob.node, group.id);
+
+    // Attempt to make a private transaction directly on the group
+    groupAsBob.set("root", map.id, "private");
+
+    // Verify the transaction is marked invalid (count should not increase)
+    const validTransactions = groupAsBob.core.getValidTransactions();
+    expect(validTransactions).toHaveLength(countBefore);
+
+    // Verify the change didn't take effect
+    expect(groupAsBob.get("root")).toBeUndefined();
+  });
+
+  test("A Group with a private transaction can be loaded without issues", async () => {
+    const alice = await setupTestAccount({ connected: true });
+    const bob = await setupTestAccount({ connected: true });
+
+    const group = alice.node.createGroup();
+    const map = group.createMap();
+
+    // Attempt to make a private transaction directly on the group
+    group.set("root", map.id, "private");
+    group.addMember(bob.account, "reader");
+
+    const groupAsBob = await loadCoValueOrFail(bob.node, group.id);
+
+    expect(groupAsBob.myRole()).toBe("reader");
+    expect(groupAsBob.core.getCurrentReadKey()).not.toBeUndefined();
+  });
 });

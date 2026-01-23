@@ -1814,7 +1814,7 @@ export class CoValueCore {
       );
     }
 
-    if (this.verified.header.ruleset.type === "group") {
+    if (this.isGroupOrAccount()) {
       return expectGroup(this.getCurrentContent()).getCurrentReadKey();
     } else if (this.verified.header.ruleset.type === "ownedByGroup") {
       return this.node
@@ -1842,16 +1842,26 @@ export class CoValueCore {
       );
     }
 
-    // Getting the readKey from accounts
-    if (this.verified.header.ruleset.type === "group") {
+    if (this.isGroup()) {
+      // is group
       const content = expectGroup(
-        // load the account without private transactions, because we are here
-        // to be able to decrypt those
+        // Private transactions are not considered valid in groups, so we don't need to pass
+        // ignorePrivateTransactions: true to safely load the content
+        this.getCurrentContent(),
+      );
+
+      return content.getReadKey(keyID);
+    } else if (this.isGroupOrAccount()) {
+      // is account
+      const content = expectGroup(
+        // Old accounts might have private transactions, because we were encrypting the root id in the past
+        // So we need to load the account without private transactions, because we can't decrypt them without the read key
         this.getCurrentContent({ ignorePrivateTransactions: true }),
       );
 
       return content.getReadKey(keyID);
     } else if (this.verified.header.ruleset.type === "ownedByGroup") {
+      // is a CoValue owned by a group
       return expectGroup(
         this.node
           .expectCoValueLoaded(this.verified.header.ruleset.group)
