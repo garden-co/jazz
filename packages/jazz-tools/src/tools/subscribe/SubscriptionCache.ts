@@ -12,26 +12,12 @@ import { SubscriptionScope } from "./SubscriptionScope.js";
 import type { BranchDefinition } from "./types.js";
 import { isEqualRefsToResolve } from "./utils.js";
 
-/**
- * Deep clone a resolve query to prevent mutations from affecting cache lookups.
- * SubscriptionScope.subscribeToKey mutates the resolve object when autoloading,
- * so we need to store a separate copy in the cache entry.
- */
-function cloneResolve(resolve: RefsToResolve<any>): RefsToResolve<any> {
-  if (
-    typeof resolve === "boolean" ||
-    resolve === null ||
-    resolve === undefined
-  ) {
+function copyResolve(resolve: RefsToResolve<any>): RefsToResolve<any> {
+  if (typeof resolve !== "object" || resolve === null) {
     return resolve;
   }
 
-  const cloned: Record<string, any> = {};
-  for (const key of Object.keys(resolve)) {
-    const value = (resolve as Record<string, any>)[key];
-    cloned[key] = cloneResolve(value);
-  }
-  return cloned;
+  return { ...resolve };
 }
 
 interface CacheEntry {
@@ -259,7 +245,7 @@ export class SubscriptionCache {
     const entry: CacheEntry = {
       subscriptionScope,
       schema,
-      resolve: cloneResolve(resolve),
+      resolve: copyResolve(resolve),
       branch,
       subscriberCount: subscriptionScope.subscribers.size,
       unsubscribeFromScope: subscriptionScope.onSubscriberChange(
