@@ -130,7 +130,7 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
       0,
       ((clampedStart - (displayRange?.min ?? 0)) / range) * 100,
     );
-    const width = Math.max(0.5, ((clampedEnd - clampedStart) / range) * 100);
+    const width = Math.max(0, ((clampedEnd - clampedStart) / range) * 100);
 
     const color =
       entry.status === "pending"
@@ -141,7 +141,7 @@ export function PerformancePage({ onNavigate, style }: PerformancePageProps) {
 
     return {
       barLeft: `${left}%`,
-      barWidth: `${width}%`,
+      barWidth: width === 0 ? "1px" : `${width}%`,
       barColor: color,
     };
   };
