@@ -1,6 +1,6 @@
 import clsx from "clsx";
-import { CoPlainText, ImageDefinition } from "jazz-tools";
-import { Image } from "jazz-tools/react";
+import { CoPlainText, ImageDefinition, Account } from "jazz-tools";
+import { Image, useCoState } from "jazz-tools/react";
 import { ImageIcon, SendIcon } from "lucide-react";
 import { useId, useRef } from "react";
 import { inIframe } from "@/util.ts";
@@ -102,13 +102,17 @@ export function BubbleImage(props: { image: ImageDefinition }) {
   );
 }
 
-export function BubbleInfo(props: { by: string | undefined; madeAt: Date }) {
+export function BubbleInfo(props: { by: string | undefined; madeAt: number }) {
+  const by = useCoState(Account, props.by, { resolve: { profile: true } });
   return (
-    <div className="text-xs text-neutral-500 mb-1.5">
-      {props.by} ·{" "}
-      {props.madeAt.toLocaleTimeString("en-US", {
-        hour12: false,
-      })}
+    <div className="text-xs text-neutral-500 mb-1.5 h-4">
+      {by.$isLoaded
+        ? by.profile.name +
+          " · " +
+          new Date(props.madeAt).toLocaleTimeString("en-US", {
+            hour12: false,
+          })
+        : ""}
     </div>
   );
 }

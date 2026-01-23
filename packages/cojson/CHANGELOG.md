@@ -1,5 +1,81 @@
 # cojson
 
+## 0.20.1
+
+### Patch Changes
+
+- 03195eb: Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently.
+
+  When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
+
+  - cojson-core-wasm@0.20.1
+  - cojson-core-rn@0.20.1
+  - cojson-core-napi@0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- f562a1f: Restricted the `Uniqueness` type to only accept specific values instead of any `JsonValue`.
+  The allowed types are now: `string`, `number` (as integers), `boolean`, `null`, `undefined`,
+  or an object with string values. Arrays, non-integer numbers, and objects with non-string values are no longer
+  accepted and will throw an error.
+
+  Deprecated `number`, even if it is an integer, as it is not a valid uniqueness type in TS, if you want to continue using numbers,
+  use a string instead or ignore the type check.
+
+- b5ada4d: breaking change: now removeMember throws if unauthorized
+- 8934d8a: ## Full native crypto (0.20.0)
+
+  With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+  ## 💥 Breaking changes
+
+  ### Crypto providers / fallback behavior
+
+  - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+  - **Removed `RNQuickCrypto`** from `jazz-tools`.
+  - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+  - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+
+  Full migration guide: `https://jazz.tools/docs/upgrade/0-20-0`
+
+### Patch Changes
+
+- 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
+
+  - CoValues are marked with a tombstone, making them inaccessible to all users
+  - Supports deleting nested CoValues via resolve queries
+  - Requires admin permissions on the CoValue's group
+  - Introduces new `deleted` loading state for deleted CoValues
+  - Groups and Accounts are skipped during deletion
+
+  See documentation: https://jazz.tools/docs/react/core-concepts/deleting
+
+- 89332d5: Moved stable JSON serialization from JavaScript to Rust in SessionLog operations
+
+  ### Changes
+
+  - **`tryAdd`**: Stable serialization now happens in Rust. The Rust layer parses each transaction and re-serializes it to ensure a stable JSON representation for signature verification. JavaScript side now uses `JSON.stringify` instead of `stableStringify`.
+
+  - **`addNewPrivateTransaction`** and **`addNewTrustingTransaction`**: Removed `stableStringify` usage since the data is either encrypted (private) or already in string format (trusting), making stable serialization unnecessary on the JS side.
+
+- Updated dependencies [89332d5]
+- Updated dependencies [8934d8a]
+  - cojson-core-wasm@0.20.0
+  - cojson-core-napi@0.20.0
+  - cojson-core-rn@0.20.0
+
+## 0.19.22
+
+### Patch Changes
+
+- 3b70482: Wait for CoValues' dependencies to be garbage-collected before collecting them. This makes accounts and groups safe to be collected.
+- 6078ea5: Wait for CoValues to be synced before garbage-collecting them
+  - cojson-core-wasm@0.19.22
+  - cojson-core-rn@0.19.22
+  - cojson-core-napi@0.19.22
+
 ## 0.19.19
 
 ### Patch Changes
@@ -355,6 +431,7 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
+
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -375,6 +452,7 @@
 - 2ddf4d9: Introducing version control APIs, unstable_branch and unstable_merge
 
   Flagged as unstable because branch & merge scope & propagation needs to be validated.
+
   - cojson-core-wasm@0.18.13
 
 ## 0.18.12
@@ -590,6 +668,7 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
+
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

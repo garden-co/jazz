@@ -33,7 +33,14 @@ export class RichTextSchema implements CoreRichTextSchema {
   readonly builtin = "CoRichText" as const;
   readonly resolveQuery = true as const;
 
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  #permissions: SchemaPermissions | null = null;
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(private coValueClass: typeof CoRichText) {}
 
@@ -102,7 +109,7 @@ export class RichTextSchema implements CoreRichTextSchema {
    */
   withPermissions(permissions: SchemaPermissions): RichTextSchema {
     const copy = new RichTextSchema(this.coValueClass);
-    copy.permissions = permissions;
+    copy.#permissions = permissions;
     return copy;
   }
 }

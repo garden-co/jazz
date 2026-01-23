@@ -2,9 +2,7 @@ import { consumeInviteLinkFromWindowLocation } from "jazz-tools/browser";
 import { useEffect } from "react";
 
 import { CoValueClassOrSchema } from "jazz-tools";
-import { useJazzContext } from "jazz-tools/react-core";
-
-export { useCoState, useAuthSecretStorage } from "jazz-tools/react-core";
+import { useJazzContextValue } from "jazz-tools/react-core";
 
 export function useAcceptInvite<S extends CoValueClassOrSchema>({
   invitedObjectSchema,
@@ -15,7 +13,7 @@ export function useAcceptInvite<S extends CoValueClassOrSchema>({
   onAccept: (valueID: string) => void;
   forValueHint?: string;
 }): void {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
 
   if (!("me" in context)) {
     throw new Error(
@@ -48,8 +46,12 @@ export function useAcceptInvite<S extends CoValueClassOrSchema>({
 
 export {
   experimental_useInboxSender,
+  useJazzContextValue,
   useJazzContext,
+  useAuthSecretStorage,
   useAccount,
+  useCoState,
+  useCoStates,
   useAgent,
   useLogOut,
   useSyncConnectionStatus,
@@ -58,4 +60,5 @@ export {
   useSubscriptionSelector,
   useSuspenseAccount,
   useSuspenseCoState,
+  useSuspenseCoStates,
 } from "jazz-tools/react-core";

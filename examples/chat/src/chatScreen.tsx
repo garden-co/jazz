@@ -1,7 +1,7 @@
-import { Account, getLoadedOrUndefined } from "jazz-tools";
+import { Account } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
 import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Chat, Message } from "./schema.ts";
 import {
   BubbleBody,
@@ -15,21 +15,25 @@ import {
   InputBar,
   TextInput,
 } from "./ui.tsx";
+import { useCoStates } from "jazz-tools/react-core";
 
 const INITIAL_MESSAGES_TO_SHOW = 30;
 
-const ChatWithMessages = Chat.resolved({
-  $each: true,
-});
-
 export function ChatScreen(props: { chatID: string }) {
-  useMessagesPreload(props.chatID);
-
-  const chat = useSuspenseCoState(ChatWithMessages, props.chatID);
+  const chat = useSuspenseCoState(Chat, props.chatID);
   const me = useSuspenseAccount();
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
+
+  const messageIds = Array.from(chat.$jazz.refs)
+    // We call slice before reverse to avoid mutating the original array
+    .slice(-showNLastMessages)
+    // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
+    .reverse()
+    .map((msgRef) => msgRef.id);
+
+  const messages = useCoStates(Message, messageIds);
 
   const sendImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
@@ -56,17 +60,12 @@ export function ChatScreen(props: { chatID: string }) {
   return (
     <>
       <ChatBody>
-        {chat.length > 0 ? (
-          chat
-            // We call slice before reverse to avoid mutating the original array
-            .slice(-showNLastMessages)
-            // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
-            .reverse()
-            .map((msg) =>
-              msg.text.$isLoaded ? (
-                <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
-              ) : null,
-            )
+        {messages.length > 0 ? (
+          messages.map((msg) =>
+            msg.$isLoaded ? (
+              <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
+            ) : null,
+          )
         ) : (
           <EmptyChatMessage />
         )}
@@ -94,61 +93,15 @@ export function ChatScreen(props: { chatID: string }) {
 }
 
 function ChatBubble({ me, msg }: { me: Account; msg: Message }) {
-  const { text, image } = msg;
-  if (!me.canRead(msg) || !text.$isLoaded) {
-    return (
-      <BubbleContainer fromMe={false}>
-        <BubbleBody fromMe={false}>
-          <BubbleText
-            text="Message not readable"
-            className="text-gray-500 italic"
-          />
-        </BubbleBody>
-      </BubbleContainer>
-    );
-  }
-
-  const lastEdit = msg.$jazz.getEdits().text;
-  const fromMe = lastEdit?.by?.isMe;
-  const lastEditor = lastEdit?.by?.profile;
-  const lastEditorName = getLoadedOrUndefined(lastEditor)?.name;
+  const fromMe = msg.$jazz.createdBy === me.$jazz.id;
 
   return (
     <BubbleContainer fromMe={fromMe}>
-      {lastEdit && <BubbleInfo by={lastEditorName} madeAt={lastEdit.madeAt} />}
+      <BubbleInfo by={msg.$jazz.createdBy} madeAt={msg.$jazz.createdAt} />
       <BubbleBody fromMe={fromMe}>
-        {image?.$isLoaded ? <BubbleImage image={image} /> : null}
-        <BubbleText text={text} />
+        {msg.image ? <BubbleImage image={msg.image} /> : null}
+        <BubbleText text={msg.text} />
       </BubbleBody>
     </BubbleContainer>
   );
-}
-
-/**
- * Warms the local cache with the initial messages to load only the initial messages
- * and avoid flickering
- */
-function useMessagesPreload(chatID: string) {
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    preloadChatMessages(chatID).finally(() => {
-      setIsLoading(false);
-    });
-  }, [chatID]);
-
-  return isLoading;
-}
-
-async function preloadChatMessages(chatID: string) {
-  const chat = await Chat.load(chatID);
-
-  if (!chat.$isLoaded) return;
-
-  const promises = Array.from(chat.$jazz.refs)
-    .reverse()
-    .slice(0, INITIAL_MESSAGES_TO_SHOW)
-    .map((msg) => Message.load(msg.id, { resolve: { text: true } }));
-
-  await Promise.all(promises);
 }

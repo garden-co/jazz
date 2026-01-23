@@ -154,7 +154,7 @@ async function createImage<TSourceType, TResizeOutput>(
   if (options?.progressive) {
     imageCoValue.$jazz.set("progressive", true);
 
-    const resizes = ([256, 1024, 2048] as const).filter(
+    const resizes = ([256, 512, 1024, 2048] as const).filter(
       (s) =>
         s <
         Math.max(imageCoValue.originalSize[0], imageCoValue.originalSize[1]),

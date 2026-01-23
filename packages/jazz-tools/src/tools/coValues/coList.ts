@@ -549,7 +549,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       "private",
     );
 
-    return this.raw.entries().length;
+    return this.raw.length();
   }
 
   /**
@@ -567,7 +567,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       this.raw.prepend(item);
     }
 
-    return this.raw.entries().length;
+    return this.raw.length();
   }
 
   /**
@@ -936,40 +936,65 @@ function toRawItems<Item>(
   return rawItems;
 }
 
+function getCoListItemValue(target: CoList, key: string) {
+  const rawValue = target.$jazz.raw.get(Number(key));
+
+  if (rawValue === undefined) {
+    return undefined;
+  }
+
+  const itemDescriptor: Schema = target.$jazz.schema[ItemsSym];
+
+  if (itemDescriptor === "json") {
+    return rawValue;
+  } else if ("encoded" in itemDescriptor) {
+    return itemDescriptor.encoded.decode(rawValue);
+  } else if (isRefEncoded(itemDescriptor)) {
+    if (rawValue === null) {
+      return undefined;
+    }
+
+    return accessChildByKey(target, rawValue as string, key);
+  }
+
+  return undefined;
+}
+
 const CoListProxyHandler: ProxyHandler<CoList> = {
   get(target, key, receiver) {
-    if (typeof key === "string" && !isNaN(+key)) {
-      const itemDescriptor = target.$jazz.schema[ItemsSym] as Schema;
-      const rawValue = target.$jazz.raw.get(Number(key));
-      if (itemDescriptor === "json") {
-        return rawValue;
-      } else if ("encoded" in itemDescriptor) {
-        return rawValue === undefined
-          ? undefined
-          : itemDescriptor.encoded.decode(rawValue);
-      } else if (isRefEncoded(itemDescriptor)) {
-        return rawValue === undefined || rawValue === null
-          ? undefined
-          : accessChildByKey(target, rawValue as string, key);
-      }
-    } else if (key === "length") {
-      return target.$jazz.raw.entries().length;
-    } else {
+    if (typeof key === "symbol") {
       return Reflect.get(target, key, receiver);
     }
+
+    if (!isNaN(+key)) {
+      return getCoListItemValue(target, key);
+    } else if (key === "length") {
+      return target.$jazz.raw.length();
+    }
+
+    return Reflect.get(target, key, receiver);
   },
   set(target, key, value, receiver) {
-    if (key === ItemsSym && typeof value === "object" && SchemaInit in value) {
-      (target.constructor as typeof CoList)._schema ||= {};
-      (target.constructor as typeof CoList)._schema[ItemsSym] =
-        value[SchemaInit];
-      return true;
-    }
-    if (typeof key === "string" && !isNaN(+key)) {
-      throw Error("Cannot update a CoList directly. Use `$jazz.set` instead.");
-    } else {
+    if (typeof key === "symbol") {
       return Reflect.set(target, key, value, receiver);
     }
+
+    if (key === ItemsSym && typeof value === "object" && SchemaInit in value) {
+      const constructor = target.constructor as typeof CoList;
+
+      if (!constructor._schema) {
+        constructor._schema = {};
+      }
+
+      constructor._schema[ItemsSym] = value[SchemaInit];
+      return true;
+    }
+
+    if (!isNaN(+key)) {
+      throw Error("Cannot update a CoList directly. Use `$jazz.set` instead.");
+    }
+
+    return Reflect.set(target, key, value, receiver);
   },
   defineProperty(target, key, descriptor) {
     if (
@@ -978,9 +1003,13 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {
-      (target.constructor as typeof CoList)._schema ||= {};
-      (target.constructor as typeof CoList)._schema[ItemsSym] =
-        descriptor.value[SchemaInit];
+      const constructor = target.constructor as typeof CoList;
+
+      if (!constructor._schema) {
+        constructor._schema = {};
+      }
+
+      constructor._schema[ItemsSym] = descriptor.value[SchemaInit];
       return true;
     } else {
       return Reflect.defineProperty(target, key, descriptor);
@@ -988,7 +1017,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   },
   has(target, key) {
     if (typeof key === "string" && !isNaN(+key)) {
-      return Number(key) < target.$jazz.raw.entries().length;
+      return Number(key) < target.$jazz.raw.length();
     } else {
       return Reflect.has(target, key);
     }
@@ -996,11 +1025,17 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   ownKeys(target) {
     const keys = Reflect.ownKeys(target);
     // Add numeric indices for all entries in the list
-    const indexKeys = target.$jazz.raw.entries().map((_entry, i) => String(i));
-    keys.push(...indexKeys);
+    const length = target.$jazz.raw.length();
+    for (let i = 0; i < length; i++) {
+      keys.push(String(i));
+    }
     return keys;
   },
   getOwnPropertyDescriptor(target, key) {
+    if (typeof key === "symbol") {
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    }
+
     if (key === TypeSym) {
       // Make TypeSym non-enumerable so it doesn't show up in Object.keys()
       return {
@@ -1009,23 +1044,24 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
         writable: false,
         value: target[TypeSym],
       };
-    } else if (key in target) {
-      return Reflect.getOwnPropertyDescriptor(target, key);
-    } else if (typeof key === "string" && !isNaN(+key)) {
+    } else if (!isNaN(+key)) {
       const index = Number(key);
-      if (index >= 0 && index < target.$jazz.raw.entries().length) {
+      if (index >= 0 && index < target.$jazz.raw.length()) {
         return {
           enumerable: true,
           configurable: true,
-          writable: true,
+          writable: false,
+          value: getCoListItemValue(target, key),
         };
       }
     } else if (key === "length") {
       return {
         enumerable: false,
         configurable: false,
-        writable: false,
+        writable: true, // Must be writable, otherwise JS complains
+        value: target.$jazz.raw.length(),
       };
     }
+    return Reflect.getOwnPropertyDescriptor(target, key);
   },
 };

@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jazz Sync Server Metrics Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 20px;
+      min-height: 100vh;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 24px;
+      color: #58a6ff;
+      font-size: 1.8rem;
+      font-weight: 600;
+    }
+
+    .dashboard {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .card-title {
+      font-size: 0.85rem;
+      color: #8b949e;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .card-value {
+      font-size: 2rem;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+
+    .card-sub {
+      font-size: 0.9rem;
+      color: #8b949e;
+      margin-top: 4px;
+    }
+
+    .chart-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .chart-card h3 {
+      font-size: 1rem;
+      color: #c9d1d9;
+      margin-bottom: 12px;
+      font-weight: 500;
+    }
+
+    .chart-container {
+      position: relative;
+      height: 200px;
+    }
+
+    .status {
+      text-align: center;
+      font-size: 0.8rem;
+      color: #8b949e;
+      margin-top: 16px;
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #3fb950;
+      margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .error {
+      color: #f85149;
+    }
+
+    .error .status-dot {
+      background: #f85149;
+      animation: none;
+    }
+
+    /* Scenario status section */
+    .scenario-section {
+      max-width: 1400px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 0 auto;
+      margin-bottom: 16px;
+    }
+
+    .scenario-section.hidden {
+      display: none;
+    }
+
+    .scenario-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .scenario-badge {
+      background: #238636;
+      color: #fff;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .scenario-badge.duration {
+      background: #1f6feb;
+    }
+
+    .scenario-badge.batch {
+      background: #8957e5;
+    }
+
+    .scenario-title {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #c9d1d9;
+    }
+
+    .scenario-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+    }
+
+    .stat-item {
+      background: #0d1117;
+      border-radius: 6px;
+      padding: 12px;
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 4px;
+    }
+
+    .stat-value {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+
+    .stat-value.success {
+      color: #3fb950;
+    }
+
+    .stat-value.warning {
+      color: #f0883e;
+    }
+
+    .stat-value.error {
+      color: #f85149;
+    }
+
+    .progress-bar {
+      height: 8px;
+      background: #21262d;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #238636, #3fb950);
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+
+    .progress-bar-fill.duration {
+      background: linear-gradient(90deg, #1f6feb, #58a6ff);
+    }
+
+    /* Save results section */
+    .save-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #30363d;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .save-input {
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: #c9d1d9;
+      font-size: 0.9rem;
+    }
+
+    .save-input:focus {
+      outline: none;
+      border-color: #58a6ff;
+    }
+
+    .save-input::placeholder {
+      color: #6e7681;
+    }
+
+    .btn {
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn:hover {
+      background: #2ea043;
+    }
+
+    .btn:disabled {
+      background: #21262d;
+      color: #6e7681;
+      cursor: not-allowed;
+    }
+
+    .btn-danger {
+      background: #da3633;
+    }
+
+    .btn-danger:hover {
+      background: #f85149;
+    }
+
+    .btn-small {
+      padding: 4px 8px;
+      font-size: 0.75rem;
+    }
+
+    /* Saved results section */
+    .saved-results-section {
+      max-width: 1400px;
+      margin: 0 auto;
+      margin-bottom: 16px;
+    }
+
+    .saved-results-section.hidden {
+      display: none;
+    }
+
+    .saved-results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .saved-results-title {
+      font-size: 1rem;
+      color: #8b949e;
+      font-weight: 500;
+    }
+
+    .saved-results-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .saved-result-item {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .saved-result-info {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .saved-result-name {
+      font-weight: 600;
+      color: #c9d1d9;
+    }
+
+    .saved-result-meta {
+      font-size: 0.8rem;
+      color: #8b949e;
+    }
+
+    .saved-result-stats {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .saved-result-stat {
+      text-align: center;
+    }
+
+    .saved-result-stat-value {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+
+    .saved-result-stat-value.success {
+      color: #3fb950;
+    }
+
+    .saved-result-stat-label {
+      font-size: 0.7rem;
+      color: #8b949e;
+      text-transform: uppercase;
+    }
+
+    .saved-result-actions {
+      display: flex;
+      gap: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Jazz Sync Server Metrics Dashboard</h1>
+  
+  <!-- Scenario Status Section -->
+  <div id="scenario-duration" class="scenario-section hidden">
+    <div class="scenario-header">
+      <span class="scenario-badge duration">Duration</span>
+      <span class="scenario-title">Load Test in Progress</span>
+    </div>
+    <div class="scenario-stats">
+      <div class="stat-item">
+        <div class="stat-label">Workers</div>
+        <div class="stat-value" id="duration-workers">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Progress</div>
+        <div class="stat-value" id="duration-progress">-</div>
+        <div class="progress-bar">
+          <div class="progress-bar-fill duration" id="duration-progress-bar" style="width: 0%"></div>
+        </div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Ops/sec</div>
+        <div class="stat-value success" id="duration-ops-sec">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Total Ops</div>
+        <div class="stat-value" id="duration-ops-total">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">File Ops</div>
+        <div class="stat-value" id="duration-file-ops">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Map Ops</div>
+        <div class="stat-value" id="duration-map-ops">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Full File Ops</div>
+        <div class="stat-value" id="duration-full-file-ops">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Unavailable</div>
+        <div class="stat-value" id="duration-unavailable">-</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="scenario-batch" class="scenario-section hidden">
+    <div class="scenario-header">
+      <span class="scenario-badge batch">Batch</span>
+      <span class="scenario-title">Benchmark in Progress</span>
+    </div>
+    <div class="scenario-stats">
+      <div class="stat-item">
+        <div class="stat-label">Workers</div>
+        <div class="stat-value" id="batch-workers">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Run</div>
+        <div class="stat-value" id="batch-run">-</div>
+        <div class="progress-bar">
+          <div class="progress-bar-fill" id="batch-run-bar" style="width: 0%"></div>
+        </div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Throughput (maps/s)</div>
+        <div class="stat-value success" id="batch-throughput-median">-</div>
+        <div class="stat-sub" id="batch-throughput-range">-</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-label">Run Time (ms)</div>
+        <div class="stat-value" id="batch-time-median">-</div>
+        <div class="stat-sub" id="batch-time-range">-</div>
+      </div>
+    </div>
+    <div class="save-section">
+      <input type="text" class="save-input" id="batch-save-name" placeholder="Enter a name for this result...">
+      <button class="btn" id="batch-save-btn" onclick="saveBatchResult()">Save Result</button>
+    </div>
+  </div>
+
+  <!-- Saved Results Section -->
+  <div id="saved-results" class="saved-results-section hidden">
+    <div class="saved-results-header">
+      <span class="saved-results-title">Saved Results</span>
+    </div>
+    <div class="saved-results-list" id="saved-results-list"></div>
+  </div>
+
+  <div class="dashboard">
+    <div class="card-row">
+      <div class="card">
+        <div class="card-title">Peers Connected</div>
+        <div class="card-value" id="peers">-</div>
+      </div>
+      <div class="card">
+        <div class="card-title">CoValues Loaded</div>
+        <div class="card-value" id="covalues-available">-</div>
+        <div class="card-sub">
+          <span id="covalues-loading">loading: -</span> | 
+          <span id="covalues-unknown">unknown: -</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Ingress</div>
+        <div class="card-value" id="ingress">-</div>
+      </div>
+      <div class="card">
+        <div class="card-title">Egress</div>
+        <div class="card-value" id="egress">-</div>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Incoming Message Queue (by peerRole)</h3>
+      <div class="chart-container">
+        <canvas id="incomingChart"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Outgoing Message Queue (by priority)</h3>
+      <div class="chart-container">
+        <canvas id="outgoingChart"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Storage Streaming Queue (by priority)</h3>
+      <div class="chart-container">
+        <canvas id="storageChart"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <h3>Transaction Size Histogram</h3>
+      <div class="chart-container">
+        <canvas id="histogramChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="status" id="status">
+    <span class="status-dot"></span>
+    Connecting...
+  </div>
+
+  <script>
+    // Prometheus text format parser
+    function parsePrometheus(text) {
+      const metrics = {};
+      const lines = text.split('\n');
+      
+      for (const line of lines) {
+        if (line.startsWith('#') || line.trim() === '') continue;
+        
+        // Parse metric line: metric_name{label="value"} value
+        const match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)((?:\{[^}]*\})?)?\s+(.+)$/);
+        if (!match) continue;
+        
+        const [, name, labelsStr, valueStr] = match;
+        const value = parseFloat(valueStr);
+        
+        // Parse labels
+        const labels = {};
+        if (labelsStr) {
+          const labelMatch = labelsStr.slice(1, -1).matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g);
+          for (const [, key, val] of labelMatch) {
+            labels[key] = val;
+          }
+        }
+        
+        if (!metrics[name]) {
+          metrics[name] = [];
+        }
+        metrics[name].push({ labels, value });
+      }
+      
+      return metrics;
+    }
+
+    // Format bytes to human readable
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    // Chart.js default configuration
+    const chartDefaults = {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 0 },
+      plugins: {
+        legend: {
+          labels: { color: '#8b949e', font: { size: 11 } }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#30363d' },
+          ticks: { color: '#8b949e', maxTicksLimit: 10 }
+        },
+        y: {
+          grid: { color: '#30363d' },
+          ticks: { color: '#8b949e' },
+          beginAtZero: true
+        }
+      }
+    };
+
+    // Colors for chart lines
+    const colors = {
+      pushed: { client: '#58a6ff', server: '#3fb950' },
+      pulled: { client: '#a371f7', server: '#f0883e' },
+      priority: {
+        0: { pushed: '#58a6ff', pulled: '#a371f7' },
+        3: { pushed: '#3fb950', pulled: '#f0883e' },
+        6: { pushed: '#f85149', pulled: '#ffa657' }
+      }
+    };
+
+    // Data storage for time series (last 60 points) - stores delta (pushed - pulled)
+    const MAX_POINTS = 60;
+    const timeLabels = [];
+    const incomingData = {
+      client: [],
+      server: []
+    };
+    const outgoingData = {
+      p0: [],
+      p3: [],
+      p6: []
+    };
+    const storageData = {
+      p0: [],
+      p3: [],
+      p6: []
+    };
+
+    // Initialize charts
+    const incomingChart = new Chart(document.getElementById('incomingChart'), {
+      type: 'line',
+      data: {
+        labels: timeLabels,
+        datasets: [
+          { label: 'client backlog', data: incomingData.client, borderColor: colors.pushed.client, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
+          { label: 'server backlog', data: incomingData.server, borderColor: colors.pushed.server, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 }
+        ]
+      },
+      options: chartDefaults
+    });
+
+    const outgoingChart = new Chart(document.getElementById('outgoingChart'), {
+      type: 'line',
+      data: {
+        labels: timeLabels,
+        datasets: [
+          { label: 'priority 0 backlog', data: outgoingData.p0, borderColor: colors.priority[0].pushed, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
+          { label: 'priority 3 backlog', data: outgoingData.p3, borderColor: colors.priority[3].pushed, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
+          { label: 'priority 6 backlog', data: outgoingData.p6, borderColor: colors.priority[6].pushed, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 }
+        ]
+      },
+      options: chartDefaults
+    });
+
+    const storageChart = new Chart(document.getElementById('storageChart'), {
+      type: 'line',
+      data: {
+        labels: timeLabels,
+        datasets: [
+          { label: 'priority 0 backlog', data: storageData.p0, borderColor: colors.priority[0].pushed, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
+          { label: 'priority 3 backlog', data: storageData.p3, borderColor: colors.priority[3].pushed, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 },
+          { label: 'priority 6 backlog', data: storageData.p6, borderColor: colors.priority[6].pushed, backgroundColor: 'transparent', tension: 0.3, pointRadius: 0 }
+        ]
+      },
+      options: chartDefaults
+    });
+
+    const histogramChart = new Chart(document.getElementById('histogramChart'), {
+      type: 'bar',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Count',
+          data: [],
+          backgroundColor: '#58a6ff',
+          borderColor: '#58a6ff',
+          borderWidth: 1
+        }]
+      },
+      options: {
+        ...chartDefaults,
+        plugins: {
+          legend: { display: false }
+        }
+      }
+    });
+
+    // Helper to get metric value by labels (returns first match)
+    function getMetricValue(metrics, name, labels = {}) {
+      const entries = metrics[name] || [];
+      for (const entry of entries) {
+        let match = true;
+        for (const [key, val] of Object.entries(labels)) {
+          if (entry.labels[key] !== val) {
+            match = false;
+            break;
+          }
+        }
+        if (match) return entry.value;
+      }
+      return 0;
+    }
+
+    // Helper to sum metric values across all matching entries
+    function sumMetricValues(metrics, name, labels = {}) {
+      const entries = metrics[name] || [];
+      let sum = 0;
+      for (const entry of entries) {
+        let match = true;
+        for (const [key, val] of Object.entries(labels)) {
+          if (entry.labels[key] !== val) {
+            match = false;
+            break;
+          }
+        }
+        if (match) sum += entry.value;
+      }
+      return sum;
+    }
+
+    // Update scenario status section
+    function updateScenarioStatus(metrics) {
+      const durationSection = document.getElementById('scenario-duration');
+      const batchSection = document.getElementById('scenario-batch');
+      
+      // Check which scenario is active (0=none, 1=duration, 2=batch)
+      const scenarioActive = getMetricValue(metrics, 'loadtest_scenario_active');
+      
+      // Show/hide based on which scenario is active
+      if (scenarioActive === 1) {
+        durationSection.classList.remove('hidden');
+        batchSection.classList.add('hidden');
+        
+        const workers = getMetricValue(metrics, 'loadtest_workers');
+        const durationElapsedMs = getMetricValue(metrics, 'loadtest_duration_elapsed_ms');
+        const durationTargetMs = getMetricValue(metrics, 'loadtest_duration_target_ms');
+        const opsTotal = getMetricValue(metrics, 'loadtest_ops_total');
+        const opsPerSecond = getMetricValue(metrics, 'loadtest_ops_per_second');
+        const fileOps = getMetricValue(metrics, 'loadtest_file_ops');
+        const mapOps = getMetricValue(metrics, 'loadtest_map_ops');
+        const fullFileOps = getMetricValue(metrics, 'loadtest_full_file_ops');
+        const unavailable = getMetricValue(metrics, 'loadtest_unavailable');
+        
+        const progressPct = durationTargetMs > 0 ? Math.min(100, (durationElapsedMs / durationTargetMs) * 100) : 0;
+        const elapsedSec = Math.floor(durationElapsedMs / 1000);
+        const targetSec = Math.floor(durationTargetMs / 1000);
+        
+        document.getElementById('duration-workers').textContent = workers;
+        document.getElementById('duration-progress').textContent = `${elapsedSec}s / ${targetSec}s`;
+        document.getElementById('duration-progress-bar').style.width = `${progressPct}%`;
+        document.getElementById('duration-ops-sec').textContent = opsPerSecond.toFixed(1);
+        document.getElementById('duration-ops-total').textContent = opsTotal.toLocaleString();
+        document.getElementById('duration-file-ops').textContent = fileOps.toLocaleString();
+        document.getElementById('duration-map-ops').textContent = mapOps.toLocaleString();
+        document.getElementById('duration-full-file-ops').textContent = fullFileOps.toLocaleString();
+        
+        const unavailableEl = document.getElementById('duration-unavailable');
+        unavailableEl.textContent = unavailable.toLocaleString();
+        unavailableEl.className = unavailable > 0 ? 'stat-value error' : 'stat-value';
+        
+      } else if (scenarioActive === 2) {
+        batchSection.classList.remove('hidden');
+        durationSection.classList.add('hidden');
+        
+        const workers = getMetricValue(metrics, 'loadtest_workers');
+        const batchRunCurrent = getMetricValue(metrics, 'loadtest_batch_run_current');
+        const batchRunsTotal = getMetricValue(metrics, 'loadtest_batch_runs_total');
+        
+        // Time stats
+        const timeMsMin = getMetricValue(metrics, 'loadtest_batch_time_ms_min');
+        const timeMsMedian = getMetricValue(metrics, 'loadtest_batch_time_ms_median');
+        const timeMsMax = getMetricValue(metrics, 'loadtest_batch_time_ms_max');
+        
+        // Throughput stats
+        const throughputMin = getMetricValue(metrics, 'loadtest_batch_throughput_min');
+        const throughputMedian = getMetricValue(metrics, 'loadtest_batch_throughput_median');
+        const throughputMax = getMetricValue(metrics, 'loadtest_batch_throughput_max');
+        
+        const runProgressPct = batchRunsTotal > 0 ? (batchRunCurrent / batchRunsTotal) * 100 : 0;
+        
+        document.getElementById('batch-workers').textContent = workers;
+        document.getElementById('batch-run').textContent = `${batchRunCurrent} / ${batchRunsTotal}`;
+        document.getElementById('batch-run-bar').style.width = `${runProgressPct}%`;
+        
+        // Throughput: show median with min-max range
+        document.getElementById('batch-throughput-median').textContent = throughputMedian.toFixed(1);
+        document.getElementById('batch-throughput-range').textContent = `${throughputMin.toFixed(1)} - ${throughputMax.toFixed(1)}`;
+        
+        // Time: show median with min-max range
+        document.getElementById('batch-time-median').textContent = timeMsMedian.toFixed(0);
+        document.getElementById('batch-time-range').textContent = `${timeMsMin.toFixed(0)} - ${timeMsMax.toFixed(0)}`;
+        
+      } else {
+        durationSection.classList.add('hidden');
+        batchSection.classList.add('hidden');
+      }
+    }
+
+    // Update dashboard with new metrics
+    function updateDashboard(metrics) {
+      // Update scenario status first
+      updateScenarioStatus(metrics);
+
+      // Update gauge cards - sum peers across all roles
+      const peers = sumMetricValues(metrics, 'jazz_peers');
+      document.getElementById('peers').textContent = peers;
+
+      const covaluesAvailable = getMetricValue(metrics, 'jazz_covalues_loaded', { state: 'available' });
+      const covaluesLoading = getMetricValue(metrics, 'jazz_covalues_loaded', { state: 'loading' });
+      const covaluesUnknown = getMetricValue(metrics, 'jazz_covalues_loaded', { state: 'unknown' });
+      document.getElementById('covalues-available').textContent = covaluesAvailable;
+      document.getElementById('covalues-loading').textContent = `loading: ${covaluesLoading}`;
+      document.getElementById('covalues-unknown').textContent = `unknown: ${covaluesUnknown}`;
+
+      // Update usage cards
+      const ingress = getMetricValue(metrics, 'jazz_usage_ingress_total');
+      const egress = getMetricValue(metrics, 'jazz_usage_egress_total');
+      document.getElementById('ingress').textContent = formatBytes(ingress);
+      document.getElementById('egress').textContent = formatBytes(egress);
+
+      // Add time label
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      timeLabels.push(timeStr);
+      if (timeLabels.length > MAX_POINTS) timeLabels.shift();
+
+      // Update incoming queue data (delta = pushed - pulled = backlog)
+      const clientPushed = getMetricValue(metrics, 'jazz_messagequeue_incoming_pushed_total', { peerRole: 'client' });
+      const clientPulled = getMetricValue(metrics, 'jazz_messagequeue_incoming_pulled_total', { peerRole: 'client' });
+      const serverPushed = getMetricValue(metrics, 'jazz_messagequeue_incoming_pushed_total', { peerRole: 'server' });
+      const serverPulled = getMetricValue(metrics, 'jazz_messagequeue_incoming_pulled_total', { peerRole: 'server' });
+      incomingData.client.push(clientPushed - clientPulled);
+      incomingData.server.push(serverPushed - serverPulled);
+      for (const arr of Object.values(incomingData)) {
+        if (arr.length > MAX_POINTS) arr.shift();
+      }
+
+      // Update outgoing queue data (delta = pushed - pulled = backlog)
+      const out0Pushed = sumMetricValues(metrics, 'jazz_messagequeue_outgoing_pushed_total', { priority: '0' });
+      const out0Pulled = sumMetricValues(metrics, 'jazz_messagequeue_outgoing_pulled_total', { priority: '0' });
+      const out3Pushed = sumMetricValues(metrics, 'jazz_messagequeue_outgoing_pushed_total', { priority: '3' });
+      const out3Pulled = sumMetricValues(metrics, 'jazz_messagequeue_outgoing_pulled_total', { priority: '3' });
+      const out6Pushed = sumMetricValues(metrics, 'jazz_messagequeue_outgoing_pushed_total', { priority: '6' });
+      const out6Pulled = sumMetricValues(metrics, 'jazz_messagequeue_outgoing_pulled_total', { priority: '6' });
+      outgoingData.p0.push(out0Pushed - out0Pulled);
+      outgoingData.p3.push(out3Pushed - out3Pulled);
+      outgoingData.p6.push(out6Pushed - out6Pulled);
+      for (const arr of Object.values(outgoingData)) {
+        if (arr.length > MAX_POINTS) arr.shift();
+      }
+
+      // Update storage streaming queue data (delta = pushed - pulled = backlog)
+      const stor0Pushed = getMetricValue(metrics, 'jazz_messagequeue_storage_streaming_pushed_total', { priority: '0' });
+      const stor0Pulled = getMetricValue(metrics, 'jazz_messagequeue_storage_streaming_pulled_total', { priority: '0' });
+      const stor3Pushed = getMetricValue(metrics, 'jazz_messagequeue_storage_streaming_pushed_total', { priority: '3' });
+      const stor3Pulled = getMetricValue(metrics, 'jazz_messagequeue_storage_streaming_pulled_total', { priority: '3' });
+      const stor6Pushed = getMetricValue(metrics, 'jazz_messagequeue_storage_streaming_pushed_total', { priority: '6' });
+      const stor6Pulled = getMetricValue(metrics, 'jazz_messagequeue_storage_streaming_pulled_total', { priority: '6' });
+      storageData.p0.push(stor0Pushed - stor0Pulled);
+      storageData.p3.push(stor3Pushed - stor3Pulled);
+      storageData.p6.push(stor6Pushed - stor6Pulled);
+      for (const arr of Object.values(storageData)) {
+        if (arr.length > MAX_POINTS) arr.shift();
+      }
+
+      // Update time series charts
+      incomingChart.update();
+      outgoingChart.update();
+      storageChart.update();
+
+      // Update histogram
+      const histogramEntries = (metrics['jazz_transactions_size_bucket'] || [])
+        .filter(e => e.labels.le !== '+Inf')
+        .sort((a, b) => parseFloat(a.labels.le) - parseFloat(b.labels.le));
+      
+      if (histogramEntries.length > 0) {
+        const bucketLabels = histogramEntries.map(e => `≤${e.labels.le}`);
+        const bucketCounts = [];
+        
+        // Convert cumulative counts to per-bucket counts
+        for (let i = 0; i < histogramEntries.length; i++) {
+          const current = histogramEntries[i].value;
+          const previous = i > 0 ? histogramEntries[i - 1].value : 0;
+          bucketCounts.push(current - previous);
+        }
+        
+        histogramChart.data.labels = bucketLabels;
+        histogramChart.data.datasets[0].data = bucketCounts;
+        histogramChart.update();
+      }
+    }
+
+    // Fetch metrics and update dashboard
+    async function fetchMetrics() {
+      try {
+        const response = await fetch('/api/metrics');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        const metrics = parsePrometheus(text);
+        updateDashboard(metrics);
+        
+        const statusEl = document.getElementById('status');
+        statusEl.className = 'status';
+        statusEl.innerHTML = '<span class="status-dot"></span>Last updated: ' + new Date().toLocaleTimeString();
+      } catch (error) {
+        const statusEl = document.getElementById('status');
+        statusEl.className = 'status error';
+        statusEl.innerHTML = '<span class="status-dot"></span>Error: ' + error.message;
+      }
+    }
+
+    // Initial fetch and set up auto-refresh
+    fetchMetrics();
+    setInterval(fetchMetrics, 2000);
+
+    // ===== Saved Results Management =====
+    const STORAGE_KEY = 'jazz-loadtest-saved-results';
+
+    // Current batch state (updated from metrics)
+    let currentBatchState = null;
+
+    function getSavedResults() {
+      try {
+        const data = localStorage.getItem(STORAGE_KEY);
+        return data ? JSON.parse(data) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function setSavedResults(results) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(results));
+    }
+
+    function saveBatchResult() {
+      const nameInput = document.getElementById('batch-save-name');
+      const name = nameInput.value.trim();
+      
+      if (!name) {
+        nameInput.focus();
+        nameInput.style.borderColor = '#f85149';
+        setTimeout(() => nameInput.style.borderColor = '#30363d', 2000);
+        return;
+      }
+
+      if (!currentBatchState) {
+        alert('No batch results available to save');
+        return;
+      }
+
+      const result = {
+        id: Date.now().toString(),
+        name,
+        savedAt: new Date().toISOString(),
+        scenario: 'batch',
+        workers: currentBatchState.workers,
+        runs: currentBatchState.runsTotal,
+        throughputMin: currentBatchState.throughputMin,
+        throughputMedian: currentBatchState.throughputMedian,
+        throughputMax: currentBatchState.throughputMax,
+        timeMsMin: currentBatchState.timeMsMin,
+        timeMsMedian: currentBatchState.timeMsMedian,
+        timeMsMax: currentBatchState.timeMsMax,
+      };
+
+      const saved = getSavedResults();
+      saved.unshift(result);
+      setSavedResults(saved);
+      
+      nameInput.value = '';
+      renderSavedResults();
+    }
+
+    function deleteSavedResult(id) {
+      const saved = getSavedResults();
+      const filtered = saved.filter(r => r.id !== id);
+      setSavedResults(filtered);
+      renderSavedResults();
+    }
+
+    function renderSavedResults() {
+      const section = document.getElementById('saved-results');
+      const list = document.getElementById('saved-results-list');
+      const saved = getSavedResults();
+
+      if (saved.length === 0) {
+        section.classList.add('hidden');
+        return;
+      }
+
+      section.classList.remove('hidden');
+      list.innerHTML = saved.map(result => `
+        <div class="saved-result-item">
+          <div class="saved-result-info">
+            <div class="saved-result-name">${escapeHtml(result.name)}</div>
+            <div class="saved-result-meta">
+              ${result.workers} workers · ${result.runs} runs · ${new Date(result.savedAt).toLocaleString()}
+            </div>
+          </div>
+          <div class="saved-result-stats">
+            <div class="saved-result-stat">
+              <div class="saved-result-stat-value success">${result.throughputMedian.toFixed(1)}</div>
+              <div class="saved-result-stat-label">Throughput (median)</div>
+            </div>
+            <div class="saved-result-stat">
+              <div class="saved-result-stat-value">${result.throughputMin.toFixed(1)} - ${result.throughputMax.toFixed(1)}</div>
+              <div class="saved-result-stat-label">Throughput (range)</div>
+            </div>
+            <div class="saved-result-stat">
+              <div class="saved-result-stat-value">${result.timeMsMedian.toFixed(0)}</div>
+              <div class="saved-result-stat-label">Time ms (median)</div>
+            </div>
+          </div>
+          <div class="saved-result-actions">
+            <button class="btn btn-danger btn-small" onclick="deleteSavedResult('${result.id}')">Delete</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Update currentBatchState when batch scenario is active
+    function updateBatchState(metrics) {
+      const scenarioActive = getMetricValue(metrics, 'loadtest_scenario_active');
+      
+      if (scenarioActive === 2) {
+        currentBatchState = {
+          workers: getMetricValue(metrics, 'loadtest_workers'),
+          runCurrent: getMetricValue(metrics, 'loadtest_batch_run_current'),
+          runsTotal: getMetricValue(metrics, 'loadtest_batch_runs_total'),
+          timeMsMin: getMetricValue(metrics, 'loadtest_batch_time_ms_min'),
+          timeMsMedian: getMetricValue(metrics, 'loadtest_batch_time_ms_median'),
+          timeMsMax: getMetricValue(metrics, 'loadtest_batch_time_ms_max'),
+          throughputMin: getMetricValue(metrics, 'loadtest_batch_throughput_min'),
+          throughputMedian: getMetricValue(metrics, 'loadtest_batch_throughput_median'),
+          throughputMax: getMetricValue(metrics, 'loadtest_batch_throughput_max'),
+        };
+      }
+    }
+
+    // Patch updateDashboard to also update batch state
+    const originalUpdateDashboard = updateDashboard;
+    updateDashboard = function(metrics) {
+      originalUpdateDashboard(metrics);
+      updateBatchState(metrics);
+    };
+
+    // Initial render of saved results
+    renderSavedResults();
+  </script>
+</body>
+</html>

@@ -3,7 +3,6 @@ use cojson_core::core::{
     SignerSecret, Transaction, TransactionMode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use thiserror::Error;
 
 #[derive(Error, Debug, uniffi::Error)]
@@ -63,32 +62,6 @@ impl SessionLog {
             Ok(SessionLog {
                 internal: std::sync::Mutex::new(internal.clone()),
             })
-        } else {
-            Err(SessionLogError::LockError)
-        }
-    }
-
-    pub fn try_add(
-        &self,
-        transactions_json: Vec<String>,
-        new_signature_str: String,
-        skip_verify: bool,
-    ) -> Result<(), SessionLogError> {
-        let transactions: Vec<Box<RawValue>> = transactions_json
-            .into_iter()
-            .map(|s| {
-                serde_json::from_str(&s).map_err(|e| {
-                    SessionLogError::Generic(format!("Failed to parse transaction string: {}", e))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let new_signature = Signature(new_signature_str);
-
-        if let Ok(mut internal) = self.internal.lock() {
-            internal
-                .try_add(transactions, &new_signature, skip_verify)
-                .map_err(Into::into)
         } else {
             Err(SessionLogError::LockError)
         }
@@ -156,6 +129,61 @@ impl SessionLog {
             Err(SessionLogError::Generic(
                 "Failed to acquire lock".to_string(),
             ))
+        }
+    }
+
+    /// Add an existing private transaction to the staging area.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
+    /// Note: made_at uses f64 because JavaScript's number type is f64.
+    pub fn add_existing_private_transaction(
+        &self,
+        encrypted_changes: String,
+        key_used: String,
+        made_at: f64,
+        meta: Option<String>,
+    ) -> Result<(), SessionLogError> {
+        if let Ok(mut internal) = self.internal.lock() {
+            internal
+                .add_existing_private_transaction(encrypted_changes, key_used, made_at as u64, meta)
+                .map_err(Into::into)
+        } else {
+            Err(SessionLogError::LockError)
+        }
+    }
+
+    /// Add an existing trusting transaction to the staging area.
+    /// The transaction is NOT committed until commit_transactions() succeeds.
+    /// Note: made_at uses f64 because JavaScript's number type is f64.
+    pub fn add_existing_trusting_transaction(
+        &self,
+        changes: String,
+        made_at: f64,
+        meta: Option<String>,
+    ) -> Result<(), SessionLogError> {
+        if let Ok(mut internal) = self.internal.lock() {
+            internal
+                .add_existing_trusting_transaction(changes, made_at as u64, meta)
+                .map_err(Into::into)
+        } else {
+            Err(SessionLogError::LockError)
+        }
+    }
+
+    /// Commit pending transactions to the main state.
+    /// If skip_validate is false, validates the signature first.
+    /// If skip_validate is true, commits without validation.
+    pub fn commit_transactions(
+        &self,
+        new_signature_str: String,
+        skip_validate: bool,
+    ) -> Result<(), SessionLogError> {
+        let new_signature = Signature(new_signature_str);
+        if let Ok(mut internal) = self.internal.lock() {
+            internal
+                .commit_transactions(&new_signature, skip_validate)
+                .map_err(Into::into)
+        } else {
+            Err(SessionLogError::LockError)
         }
     }
 

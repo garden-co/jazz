@@ -46,7 +46,7 @@ describe("SyncStateManager", () => {
     const newPeerState = client.node.syncManager.peers[peerState.id]!;
 
     expect(updateSpy).toHaveBeenCalledWith(
-      peerState.id,
+      expect.objectContaining({ id: peerState.id }),
       newPeerState.getKnownState(map.core.id)!,
       { uploaded: true },
     );

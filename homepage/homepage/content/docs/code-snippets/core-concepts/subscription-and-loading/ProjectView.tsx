@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { Project, MyAppAccount } from "./schema";
+import { useMemo, useState } from "react";
+import { Project, MyAppAccount, Task } from "./schema";
 // #region Basic
 import { useCoState } from "jazz-tools/react";
 
@@ -17,6 +17,8 @@ function ProjectView({ projectId }: { projectId: string }) {
         return "Project not found";
       case "loading":
         return "Loading project...";
+      case "deleted":
+        return "Project deleted";
     }
   }
 
@@ -195,6 +197,48 @@ function ProjectViewSuspense({ projectId }: { projectId: string }) {
           <li key={task.$jazz.id}>{task.title}</li>
         ))}
       </ul>
+    </div>
+  );
+}
+// #endregion
+
+// #region ProjectViewWithPagination
+import { useSuspenseCoStates } from "jazz-tools/react";
+
+const TASK_PAGE_SIZE = 20;
+
+function ProjectViewWithPagination({ projectId }: { projectId: string }) {
+  // Load the task list, but not the tasks themselves
+  const project = useSuspenseCoState(Project, projectId, {
+    resolve: { tasks: true },
+  });
+  const [taskCount, setTaskCount] = useState(TASK_PAGE_SIZE);
+  
+  // Get the ids of the tasks to be loaded
+  const taskIds = Array.from(project.tasks.$jazz.refs)
+    .slice(0, taskCount)
+    .map(ref => ref.id);
+  
+  // Load the tasks for the current page
+  const tasks = useSuspenseCoStates(Task, taskIds);
+
+  const loadMoreTasks = () => {
+    setTaskCount(taskCount => taskCount + TASK_PAGE_SIZE);
+  };
+
+  const hasMoreTasks = taskCount < project.tasks.length;
+
+  return (
+    <div>
+      <h1>{project.name}</h1>
+      <ul>
+        {tasks.map((task) => (
+          <li key={task.$jazz.id}>{task.title}</li>
+        ))}
+      </ul>
+      {hasMoreTasks && (
+        <button onClick={loadMoreTasks}>Load more tasks</button>
+      )}
     </div>
   );
 }

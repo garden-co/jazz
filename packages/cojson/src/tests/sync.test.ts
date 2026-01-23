@@ -18,7 +18,8 @@ import {
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";
-import { stableStringify } from "../jsonStringify.js";
+import { Stringified } from "../jsonStringify.js";
+import { JsonValue } from "../jsonValue.js";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -168,7 +169,9 @@ test("should not verify transactions when SyncManager has verification disabled"
     [
       {
         privacy: "trusting",
-        changes: stableStringify([{ op: "set", key: "hello", value: "world" }]),
+        changes: JSON.stringify([
+          { op: "set", key: "hello", value: "world" },
+        ]) as Stringified<JsonValue[]>,
         madeAt: Date.now(),
       },
     ],

@@ -4,7 +4,6 @@ import {
   CoList,
   CoMap,
   type CoValue,
-  type ID,
   MaybeLoaded,
   NotLoaded,
   type RefEncoded,
@@ -23,6 +22,7 @@ import {
 } from "./JazzError.js";
 import type {
   BranchDefinition,
+  SubscriptionPerformanceDetail,
   SubscriptionValue,
   SubscriptionValueLoading,
 } from "./types.js";
@@ -30,6 +30,7 @@ import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import {
   captureError,
   isCustomErrorReportingEnabled,
+  isDev,
 } from "./errorReporting.js";
 import {
   createCoValue,
@@ -40,11 +41,21 @@ import {
 } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
+  static isProfilingEnabled = isDev;
+
+  static setProfilingEnabled(enabled: boolean) {
+    this.isProfilingEnabled = enabled;
+  }
+
+  static enableProfiling() {
+    this.isProfilingEnabled = true;
+  }
+
+  private performanceUuid: string | undefined;
+  private performanceSource: string | undefined;
+
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
-  childValues: Map<string, SubscriptionValue<any, any>> = new Map<
-    string,
-    SubscriptionValue<D, any>
-  >();
+  childValues: Map<string, SubscriptionValue<CoValue>> = new Map();
   /**
    * Explicitly-loaded child ids that are unloaded
    */
@@ -53,7 +64,7 @@ export class SubscriptionScope<D extends CoValue> {
    * Autoloaded child ids that are unloaded
    */
   private pendingAutoloadedChildren: Set<string> = new Set();
-  value: SubscriptionValue<D, any> | SubscriptionValueLoading;
+  value: SubscriptionValue<D> | SubscriptionValueLoading;
   private childErrors: Map<string, JazzError> = new Map();
   private validationErrors: Map<string, JazzError> = new Map();
   errorFromChildren: JazzError | undefined;
@@ -81,9 +92,9 @@ export class SubscriptionScope<D extends CoValue> {
 
   constructor(
     public node: LocalNode,
-    resolve: RefsToResolve<D>,
-    public id: ID<D>,
-    public schema: RefEncoded<D>,
+    resolve: RefsToResolve<any>,
+    public id: string,
+    public schema: RefEncoded<CoValue>,
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
@@ -141,7 +152,110 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  updateValue(value: SubscriptionValue<D, any>) {
+  trackLoadingPerformance(source: string) {
+    if (!SubscriptionScope.isProfilingEnabled) {
+      return;
+    }
+
+    // Already tracking this subscription
+    if (this.performanceUuid) {
+      return;
+    }
+
+    const currentState = this.getCurrentRawValue();
+
+    this.performanceUuid = crypto.randomUUID();
+    this.performanceSource = source;
+
+    const detail: SubscriptionPerformanceDetail = {
+      type: "jazz-subscription",
+      uuid: this.performanceUuid,
+      id: this.id,
+      source,
+      resolve: this.resolve,
+      status: "pending",
+      startTime: performance.now(),
+      callerStack: this.callerStack?.stack,
+    };
+
+    performance.mark(`jazz.subscription.start:${this.performanceUuid}`, {
+      detail,
+    });
+
+    if (currentState !== CoValueLoadingState.LOADING) {
+      this.emitLoadingComplete(currentState);
+      return;
+    }
+
+    // Subscribe to get notified when loading completes
+    const unsubscribe = this.subscribe(() => {
+      const rawValue = this.getCurrentRawValue();
+
+      if (rawValue === CoValueLoadingState.LOADING) {
+        return;
+      }
+
+      this.emitLoadingComplete(rawValue);
+      unsubscribe();
+    });
+  }
+
+  private emitLoadingComplete(rawValue: D | NotLoadedCoValueState) {
+    if (!this.performanceUuid) return;
+
+    const isError = typeof rawValue === "string";
+    const endTime = performance.now();
+
+    let errorType: SubscriptionPerformanceDetail["errorType"];
+    if (isError) {
+      if (
+        rawValue === CoValueLoadingState.UNAVAILABLE ||
+        rawValue === CoValueLoadingState.UNAUTHORIZED ||
+        rawValue === CoValueLoadingState.DELETED
+      ) {
+        errorType = rawValue;
+      }
+    }
+
+    const detail: SubscriptionPerformanceDetail = {
+      type: "jazz-subscription",
+      uuid: this.performanceUuid,
+      id: this.id,
+      source: this.performanceSource ?? "unknown",
+      resolve: this.resolve,
+      status: isError ? "error" : "loaded",
+      startTime: 0, // Will be calculated from measure
+      endTime,
+      errorType,
+      devtools: {
+        track: "Jazz 🎶",
+        properties: [
+          ["id", this.id],
+          ["source", this.performanceSource ?? "unknown"],
+        ],
+        tooltipText: this.getCreationStackLines(false),
+      },
+    };
+
+    performance.mark(`jazz.subscription.end:${this.performanceUuid}`, {
+      detail,
+    });
+
+    try {
+      performance.measure(
+        `${detail.source}(${this.id}, ${JSON.stringify(this.resolve)})`,
+        {
+          start: `jazz.subscription.start:${this.performanceUuid}`,
+          end: `jazz.subscription.end:${this.performanceUuid}`,
+          detail,
+        },
+      );
+    } catch {
+      // Marks may have been cleared
+    }
+  }
+
+  updateValue(value: SubscriptionValue<D>) {
     this.value = value;
 
     // Flags that the value has changed and we need to trigger an update
@@ -168,6 +282,25 @@ export class SubscriptionScope<D extends CoValue> {
       }
 
       this.triggerUpdate();
+      return;
+    }
+
+    if (update.core.isDeleted) {
+      if (this.value.type !== CoValueLoadingState.DELETED) {
+        const error = new JazzError(this.id, CoValueLoadingState.DELETED, [
+          {
+            code: CoValueLoadingState.DELETED,
+            message: `Jazz Deleted Error: ${this.id} has been deleted`,
+            params: {
+              id: this.id,
+            },
+            path: [],
+          },
+        ]);
+
+        this.updateValue(error);
+        this.triggerUpdate();
+      }
       return;
     }
 
@@ -266,7 +399,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   handleChildUpdate(
     id: string,
-    value: SubscriptionValue<any, any> | SubscriptionValueLoading,
+    value: SubscriptionValue<CoValue> | SubscriptionValueLoading,
     key?: string,
   ) {
     if (value.type === CoValueLoadingState.LOADING) {
@@ -279,6 +412,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (
       value.type === CoValueLoadingState.UNAVAILABLE ||
+      value.type === CoValueLoadingState.DELETED ||
       value.type === CoValueLoadingState.UNAUTHORIZED
     ) {
       this.childErrors.set(id, value.prependPath(key ?? id));
@@ -414,6 +548,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (
       rawValue === CoValueLoadingState.UNAUTHORIZED ||
+      rawValue === CoValueLoadingState.DELETED ||
       rawValue === CoValueLoadingState.UNAVAILABLE ||
       rawValue === CoValueLoadingState.LOADING
     ) {
@@ -427,6 +562,7 @@ export class SubscriptionScope<D extends CoValue> {
   private getCurrentRawValue(): D | NotLoadedCoValueState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
+      this.value.type === CoValueLoadingState.DELETED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       return this.value.type;
@@ -447,7 +583,7 @@ export class SubscriptionScope<D extends CoValue> {
     return CoValueLoadingState.LOADING;
   }
 
-  private getCreationStackLines() {
+  private getCreationStackLines(fullFrame: boolean = true) {
     const stack = this.callerStack?.stack;
 
     if (!stack) {
@@ -470,6 +606,10 @@ export class SubscriptionScope<D extends CoValue> {
       (result += "Subscription created "), (result += creationAppFrame.trim());
     }
 
+    if (!fullFrame) {
+      return result;
+    }
+
     result += "\nFull subscription creation stack:";
     for (const line of creationStackLines.slice(0, 8)) {
       result += "\n    " + line.trim();
@@ -481,6 +621,7 @@ export class SubscriptionScope<D extends CoValue> {
   private getError() {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
+      this.value.type === CoValueLoadingState.DELETED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       return this.value;
@@ -532,7 +673,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.dirty = false;
   }
 
-  subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
+  subscribers = new Set<(value: SubscriptionValue<D>) => void>();
   subscriberChangeCallbacks = new Set<(count: number) => void>();
 
   /**
@@ -555,7 +696,7 @@ export class SubscriptionScope<D extends CoValue> {
     });
   }
 
-  subscribe(listener: (value: SubscriptionValue<D, any>) => void) {
+  subscribe(listener: (value: SubscriptionValue<D>) => void) {
     this.subscribers.add(listener);
     this.notifySubscriberChange();
 
@@ -565,7 +706,7 @@ export class SubscriptionScope<D extends CoValue> {
     };
   }
 
-  setListener(listener: (value: SubscriptionValue<D, any>) => void) {
+  setListener(listener: (value: SubscriptionValue<D>) => void) {
     const hadListener = this.subscribers.has(listener);
     this.subscribers.add(listener);
     // Only notify if this is a new listener (count actually changed)
@@ -601,11 +742,11 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = true;
 
     if (value[TypeSym] === "CoMap" || value[TypeSym] === "Account") {
-      const map = value as CoMap;
+      const map = value as unknown as CoMap;
 
       this.loadCoMapKey(map, key, true);
     } else if (value[TypeSym] === "CoList") {
-      const list = value as CoList;
+      const list = value as unknown as CoList;
 
       this.loadCoListKey(list, key, true);
     }
@@ -627,7 +768,7 @@ export class SubscriptionScope<D extends CoValue> {
    *
    * Used to make the autoload work on closed subscription scopes
    */
-  pullValue(listener: (value: SubscriptionValue<D, any>) => void) {
+  pullValue(listener: (value: SubscriptionValue<D>) => void) {
     if (!this.closed) {
       throw new Error("Cannot pull a non-closed subscription scope");
     }
@@ -684,7 +825,7 @@ export class SubscriptionScope<D extends CoValue> {
     const child = new SubscriptionScope(
       this.node,
       true,
-      id as ID<any>,
+      id,
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
@@ -728,7 +869,7 @@ export class SubscriptionScope<D extends CoValue> {
         coValueType === "Account" ||
         coValueType === "Group"
       ) {
-        const map = value as CoMap;
+        const map = value as unknown as CoMap;
         const keys =
           "$each" in depth ? map.$jazz.raw.keys() : Object.keys(depth);
 
@@ -740,7 +881,7 @@ export class SubscriptionScope<D extends CoValue> {
           }
         }
       } else if (value[TypeSym] === "CoList") {
-        const list = value as CoList;
+        const list = value as unknown as CoList;
 
         const descriptor = list.$jazz.getItemsDescriptor();
 
@@ -759,7 +900,7 @@ export class SubscriptionScope<D extends CoValue> {
           }
         }
       } else if (value[TypeSym] === "CoStream") {
-        const stream = value as CoFeed;
+        const stream = value as unknown as CoFeed;
         const descriptor = stream.$jazz.getItemsDescriptor();
 
         if (descriptor && isRefEncoded(descriptor)) {
@@ -946,7 +1087,7 @@ export class SubscriptionScope<D extends CoValue> {
     const child = new SubscriptionScope(
       this.node,
       resolve,
-      id as ID<any>,
+      id,
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,

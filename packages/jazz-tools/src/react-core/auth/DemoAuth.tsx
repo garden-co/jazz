@@ -1,6 +1,6 @@
 import { DemoAuth } from "jazz-tools";
 import { useEffect, useMemo, useState } from "react";
-import { useAuthSecretStorage, useJazzContext } from "../hooks.js";
+import { useAuthSecretStorage, useJazzContextValue } from "../hooks.js";
 import { useIsAuthenticated } from "../hooks.js";
 
 /**
@@ -14,7 +14,7 @@ import { useIsAuthenticated } from "../hooks.js";
  * @category Auth Providers
  */
 export function useDemoAuth() {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
   const authSecretStorage = useAuthSecretStorage();
 
   if ("guest" in context) {

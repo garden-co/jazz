@@ -82,15 +82,12 @@ export class LocalNode {
     this.crypto = crypto;
   }
 
-  enableGarbageCollector(opts?: { garbageCollectGroups?: boolean }) {
+  enableGarbageCollector() {
     if (this.garbageCollector) {
       return;
     }
 
-    this.garbageCollector = new GarbageCollector(
-      this.coValues,
-      opts?.garbageCollectGroups ?? false,
-    );
+    this.garbageCollector = new GarbageCollector(this.coValues);
   }
 
   setStorage(storage: StorageAPI) {
@@ -102,6 +99,21 @@ export class LocalNode {
     this.storage?.close();
     this.storage = undefined;
     this.syncManager.removeStorage();
+  }
+
+  /**
+   * Enable background erasure of deleted coValues (space reclamation).
+   *
+   * Deleted coValues are immediately blocked from syncing via tombstones; this feature
+   * only reclaims local storage space by deleting historical content while preserving
+   * the tombstone (header + delete session).
+   *
+   * This is opt-in and affects only the currently configured storage (if any)
+   *
+   * @category 3. Low-level
+   */
+  enableDeletedCoValuesErasure() {
+    this.storage?.enableDeletedCoValuesErasure();
   }
 
   hasCoValue(id: RawCoID) {
@@ -133,6 +145,7 @@ export class LocalNode {
 
   internalDeleteCoValue(id: RawCoID) {
     this.coValues.delete(id);
+    this.storage?.onCoValueUnmounted(id);
   }
 
   getCurrentAccountOrAgentID(): RawAccountID | AgentID {
@@ -736,9 +749,16 @@ export class LocalNode {
       };
     }
 
-    const account = coValue.getCurrentContent() as RawAccount;
+    const agentId = coValue.verified.header.ruleset.initialAdmin;
 
-    return { value: account.currentAgentID(), error: undefined };
+    if (!isAgentID(agentId)) {
+      return {
+        value: undefined,
+        error: new Error(`Unexpectedly not account: ${expectation}`),
+      };
+    }
+
+    return { value: agentId, error: undefined };
   }
 
   createGroup(

@@ -1,17 +1,19 @@
-import { randomUUID } from "node:crypto";
-import { unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, onTestFinished, test, vi } from "vitest";
-import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { CoID, LocalNode, RawCoID, RawCoMap, logger } from "../exports.js";
+import { describe, expect, test, vi, afterEach } from "vitest";
+import { CoID, RawCoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
 import { CoValueKnownState, emptyKnownState } from "../knownState.js";
-import { createSyncStorage } from "./testStorage.js";
-import { loadCoValueOrFail, randomAgentAndSessionID } from "./testUtils.js";
-
-const crypto = await WasmCrypto.create();
+import {
+  createSyncStorage,
+  getAllCoValuesWaitingForDelete,
+  getCoValueStoredSessions,
+  getDbPath,
+} from "./testStorage.js";
+import {
+  fillCoMapWithLargeData,
+  loadCoValueOrFail,
+  setupTestNode,
+} from "./testUtils.js";
 
 /**
  * Helper function that gets new content since a known state, throwing if:
@@ -35,55 +37,23 @@ function getNewContentSince(
   return contentMessage;
 }
 
-async function createFixturesNode(customDbPath?: string) {
-  const [admin, session] = randomAgentAndSessionID();
-  const node = new LocalNode(admin.agentSecret, session, crypto);
-
-  // Create a unique database file for each test
-  const dbPath = customDbPath ?? join(tmpdir(), `test-${randomUUID()}.db`);
-  const storage = createSyncStorage({
-    filename: dbPath,
-    nodeName: "test",
-    storageName: "test-storage",
-  });
-
-  onTestFinished(() => {
-    try {
-      unlinkSync(dbPath);
-    } catch {}
-  });
-
-  node.setStorage(storage);
-
-  return {
-    fixturesNode: node,
-    dbPath,
-  };
-}
-
-async function createTestNode(dbPath?: string) {
-  const [admin, session] = randomAgentAndSessionID();
-  const node = new LocalNode(admin.agentSecret, session, crypto);
-
-  const storage = createSyncStorage({
-    filename: dbPath,
-    nodeName: "test",
-    storageName: "test-storage",
-  });
-
-  return {
-    node,
-    storage,
-  };
-}
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("StorageApiSync", () => {
   describe("getKnownState", () => {
     test("should return empty known state for new coValue ID and cache the result", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
-      const id = fixturesNode.createGroup().id;
+      const id = fixtures.node.createGroup().id;
       const knownState = storage.getKnownState(id);
 
       expect(knownState).toEqual(emptyKnownState(id));
@@ -91,7 +61,13 @@ describe("StorageApiSync", () => {
     });
 
     test("should return separate known state instances for different coValue IDs", async () => {
-      const { storage } = await createTestNode();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
       const id1 = "test-id-1";
       const id2 = "test-id-2";
 
@@ -104,7 +80,13 @@ describe("StorageApiSync", () => {
 
   describe("load", () => {
     test("should fail gracefully when loading non-existent coValue and preserve known state", async () => {
-      const { storage } = await createTestNode();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
       const id = "non-existent-id";
       const callback = vi.fn();
       const done = vi.fn();
@@ -124,15 +106,31 @@ describe("StorageApiSync", () => {
     });
 
     test("should successfully load coValue with header and update known state", async () => {
-      const { fixturesNode, dbPath } = await createFixturesNode();
-      const { node, storage } = await createTestNode(dbPath);
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
       const callback = vi.fn((content) =>
-        node.syncManager.handleNewContent(content, "storage"),
+        client.node.syncManager.handleNewContent(content, "storage"),
       );
       const done = vi.fn();
 
       // Create a real group and get its content message
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
       await group.core.waitForSync();
 
       // Get initial known state
@@ -154,7 +152,7 @@ describe("StorageApiSync", () => {
       const updatedKnownState = storage.getKnownState(group.id);
       expect(updatedKnownState).toEqual(group.core.knownState());
 
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
 
       expect(groupOnNode.core.verified.header).toEqual(
         group.core.verified.header,
@@ -162,15 +160,31 @@ describe("StorageApiSync", () => {
     });
 
     test("should successfully load coValue with transactions and update known state", async () => {
-      const { fixturesNode, dbPath } = await createFixturesNode();
-      const { node, storage } = await createTestNode(dbPath);
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
       const callback = vi.fn((content) =>
-        node.syncManager.handleNewContent(content, "storage"),
+        client.node.syncManager.handleNewContent(content, "storage"),
       );
       const done = vi.fn();
 
       // Create a real group and add a member to create transactions
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
       group.addMember("everyone", "reader");
       await group.core.waitForSync();
 
@@ -185,7 +199,7 @@ describe("StorageApiSync", () => {
           id: group.id,
           header: group.core.verified.header,
           new: expect.objectContaining({
-            [fixturesNode.currentSessionID]: expect.any(Object),
+            [fixtures.node.currentSessionID]: expect.any(Object),
           }),
         }),
       );
@@ -195,17 +209,30 @@ describe("StorageApiSync", () => {
       const updatedKnownState = storage.getKnownState(group.id);
       expect(updatedKnownState).toEqual(group.core.knownState());
 
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
       expect(groupOnNode.get("everyone")).toEqual("reader");
     });
   });
 
   describe("store", () => {
     test("should successfully store new coValue with header and update known state", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { node, storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
       // Create a real group and get its content message
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
       const contentMessage = getNewContentSince(
         group.core,
         emptyKnownState(group.id),
@@ -222,9 +249,9 @@ describe("StorageApiSync", () => {
       const updatedKnownState = storage.getKnownState(group.id);
       expect(updatedKnownState).toEqual(group.core.knownState());
 
-      node.setStorage(storage);
+      client.addStorage({ storage });
 
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
 
       expect(groupOnNode.core.verified.header).toEqual(
         group.core.verified.header,
@@ -232,11 +259,24 @@ describe("StorageApiSync", () => {
     });
 
     test("should successfully store coValue with transactions and update known state", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { node, storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
       // Create a real group and add a member to create transactions
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
 
       group.addMember("everyone", "reader");
 
@@ -256,17 +296,30 @@ describe("StorageApiSync", () => {
       const updatedKnownState = storage.getKnownState(group.id);
       expect(updatedKnownState).toEqual(group.core.knownState());
 
-      node.setStorage(storage);
+      client.addStorage({ storage });
 
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
       expect(groupOnNode.get("everyone")).toEqual("reader");
     });
 
     test("should handle correction when header assumption is invalid", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { node, storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
-      const group = fixturesNode.createGroup();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = fixtures.node.createGroup();
       const knownState = group.core.knownState();
 
       group.addMember("everyone", "reader");
@@ -290,17 +343,30 @@ describe("StorageApiSync", () => {
       const updatedKnownState = storage.getKnownState(group.id);
       expect(updatedKnownState).toEqual(group.core.knownState());
 
-      node.setStorage(storage);
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      client.addStorage({ storage });
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
 
       expect(groupOnNode.get("everyone")).toEqual("reader");
     });
 
     test("should handle correction when new content assumption is invalid", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { node, storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
-      const group = fixturesNode.createGroup();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = fixtures.node.createGroup();
 
       const initialContent = getNewContentSince(
         group.core,
@@ -340,17 +406,30 @@ describe("StorageApiSync", () => {
       const finalKnownState = storage.getKnownState(group.id);
       expect(finalKnownState).toEqual(group.core.knownState());
 
-      node.setStorage(storage);
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      client.addStorage({ storage });
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
 
       expect(groupOnNode.get("everyone")).toEqual("writer");
     });
 
     test("should log error and fail when correction callback returns undefined", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
-      const group = fixturesNode.createGroup();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = fixtures.node.createGroup();
 
       const knownState = group.core.knownState();
       group.addMember("everyone", "writer");
@@ -385,10 +464,23 @@ describe("StorageApiSync", () => {
     });
 
     test("should log error and fail when correction callback returns invalid content message", async () => {
-      const { fixturesNode } = await createFixturesNode();
-      const { storage } = await createTestNode();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
-      const group = fixturesNode.createGroup();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = fixtures.node.createGroup();
 
       const knownState = group.core.knownState();
       group.addMember("everyone", "writer");
@@ -420,15 +512,39 @@ describe("StorageApiSync", () => {
     });
 
     test("should successfully store coValue with multiple sessions", async () => {
-      const { fixturesNode, dbPath } = await createFixturesNode();
-      const { fixturesNode: fixtureNode2 } = await createFixturesNode(dbPath);
-      const { node, storage } = await createTestNode();
+      const dbPath = getDbPath();
 
-      const coValue = fixturesNode.createCoValue({
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const fixture2 = setupTestNode();
+      fixture2.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const coValue = fixtures.node.createCoValue({
         type: "comap",
         ruleset: { type: "unsafeAllowAll" },
         meta: null,
-        ...crypto.createdNowUnique(),
+        ...fixtures.node.crypto.createdNowUnique(),
       });
 
       coValue.makeTransaction(
@@ -443,7 +559,7 @@ describe("StorageApiSync", () => {
       await coValue.waitForSync();
 
       const mapOnNode2 = await loadCoValueOrFail(
-        fixtureNode2,
+        fixture2.node,
         coValue.id as CoID<RawCoMap>,
       );
 
@@ -466,27 +582,216 @@ describe("StorageApiSync", () => {
 
       storage.store(contentMessage, correctionCallback);
 
-      node.setStorage(storage);
+      client.addStorage({ storage });
 
-      const finalMap = await loadCoValueOrFail(node, mapOnNode2.id);
+      const finalMap = await loadCoValueOrFail(client.node, mapOnNode2.id);
       expect(finalMap.core.knownState()).toEqual(knownState);
+    });
+  });
+
+  describe("delete flow", () => {
+    test("deleteCoValue enqueues the coValue for erasure", async () => {
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      const queued = await getAllCoValuesWaitingForDelete(storage);
+      expect(queued).toContain(map.id);
+    });
+
+    test("background erasure doesn't run if not enabled", async () => {
+      const dbPath = getDbPath();
+      const node = setupTestNode();
+      const { storage } = node.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      vi.useFakeTimers();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      await vi.advanceTimersByTimeAsync(70_000);
+
+      // Queue drained
+      expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
+    });
+
+    test("background erasure run if enabled", async () => {
+      const dbPath = getDbPath();
+      const node = setupTestNode();
+      const { storage } = node.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      vi.useFakeTimers();
+
+      node.node.enableDeletedCoValuesErasure();
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      await vi.advanceTimersByTimeAsync(70_000);
+
+      // Queue drained
+      expect(await getAllCoValuesWaitingForDelete(storage)).not.toContain(
+        map.id,
+      );
+
+      const sessionIDs = await getCoValueStoredSessions(storage, map.id);
+
+      expect(sessionIDs).toHaveLength(1);
+      expect(sessionIDs[0]).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
+    });
+
+    test("eraseAllDeletedCoValues deletes history but preserves tombstone", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+      const { storage } = node.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
+
+      await storage.eraseAllDeletedCoValues();
+
+      // Queue drained
+      expect(await getAllCoValuesWaitingForDelete(storage)).not.toContain(
+        map.id,
+      );
+
+      // Tombstone preserved + history erased when loaded from storage
+      const client = setupTestNode();
+      const { storage: clientStorage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const loaded = await loadCoValueOrFail(
+        client.node,
+        map.id as CoID<RawCoMap>,
+      );
+
+      expect(loaded.core.isDeleted).toBe(true);
+      expect(loaded.get("k")).toBeUndefined();
+
+      const sessionIDs = await getCoValueStoredSessions(clientStorage, map.id);
+
+      expect(sessionIDs).toHaveLength(1);
+      expect(sessionIDs[0]).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
+    });
+
+    test("eraseAllDeletedCoValues does not break when called while a coValue is streaming from storage", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+
+      const storage = createSyncStorage({
+        filename: dbPath,
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+      node.addStorage({ storage });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      fillCoMapWithLargeData(map);
+      await map.core.waitForSync();
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      storage.close();
+
+      const newStorage = createSyncStorage({
+        filename: dbPath,
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+
+      const callback = vi.fn();
+
+      const loadPromise = new Promise((resolve) => {
+        newStorage.load(map.id, callback, resolve);
+      });
+      await newStorage.eraseAllDeletedCoValues();
+
+      expect(await loadPromise).toBe(true);
     });
   });
 
   describe("dependencies", () => {
     test("should load dependencies before dependent coValues and update all known states", async () => {
-      const { fixturesNode, dbPath } = await createFixturesNode();
-      const { node, storage } = await createTestNode(dbPath);
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
       // Create a group and a map owned by that group to create dependencies
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
       group.addMember("everyone", "reader");
       const map = group.createMap({ test: "value" });
       await group.core.waitForSync();
       await map.core.waitForSync();
 
       const callback = vi.fn((content) =>
-        node.syncManager.handleNewContent(content, "storage"),
+        client.node.syncManager.handleNewContent(content, "storage"),
       );
       const done = vi.fn();
 
@@ -521,24 +826,40 @@ describe("StorageApiSync", () => {
       expect(updatedGroupKnownState).toEqual(group.core.knownState());
       expect(updatedMapKnownState).toEqual(map.core.knownState());
 
-      node.setStorage(storage);
-      const mapOnNode = await loadCoValueOrFail(node, map.id);
+      client.addStorage({ storage });
+      const mapOnNode = await loadCoValueOrFail(client.node, map.id);
       expect(mapOnNode.get("test")).toEqual("value");
     });
 
     test("should skip loading already loaded dependencies", async () => {
-      const { fixturesNode, dbPath } = await createFixturesNode();
-      const { node, storage } = await createTestNode(dbPath);
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
       // Create a group and a map owned by that group
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
       group.addMember("everyone", "reader");
       const map = group.createMap({ test: "value" });
       await group.core.waitForSync();
       await map.core.waitForSync();
 
       const callback = vi.fn((content) =>
-        node.syncManager.handleNewContent(content, "storage"),
+        client.node.syncManager.handleNewContent(content, "storage"),
       );
       const done = vi.fn();
 
@@ -574,19 +895,100 @@ describe("StorageApiSync", () => {
       const finalMapKnownState = storage.getKnownState(map.id);
       expect(finalMapKnownState).toEqual(map.core.knownState());
 
-      node.setStorage(storage);
-      const mapOnNode = await loadCoValueOrFail(node, map.id);
+      client.addStorage({ storage });
+      const mapOnNode = await loadCoValueOrFail(client.node, map.id);
+      expect(mapOnNode.get("test")).toEqual("value");
+    });
+
+    test("should load dependencies again if they were unmounted", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create a group and a map owned by that group
+      const group = fixtures.node.createGroup();
+      group.addMember("everyone", "reader");
+      const map = group.createMap({ test: "value" });
+      await group.core.waitForSync();
+      await map.core.waitForSync();
+
+      const callback = vi.fn((content) =>
+        client.node.syncManager.handleNewContent(content, "storage"),
+      );
+      const done = vi.fn();
+
+      // Load the map (and its group)
+      await storage.load(map.id, callback, done);
+      callback.mockClear();
+      done.mockClear();
+
+      // Unmount the map and its group
+      storage.onCoValueUnmounted(map.id);
+      storage.onCoValueUnmounted(group.id);
+
+      // Load the map. The group dependency should be loaded again
+      await storage.load(map.id, callback, done);
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(callback).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          id: group.id,
+        }),
+      );
+      expect(callback).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          id: map.id,
+        }),
+      );
+
+      expect(done).toHaveBeenCalledWith(true);
+
+      client.addStorage({ storage });
+      const mapOnNode = await loadCoValueOrFail(client.node, map.id);
       expect(mapOnNode.get("test")).toEqual("value");
     });
   });
 
   describe("waitForSync", () => {
     test("should resolve immediately when coValue is already synced", async () => {
-      const { fixturesNode, dbPath } = await createFixturesNode();
-      const { node, storage } = await createTestNode(dbPath);
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
       // Create a group and add a member
-      const group = fixturesNode.createGroup();
+      const group = fixtures.node.createGroup();
       group.addMember("everyone", "reader");
       await group.core.waitForSync();
 
@@ -598,10 +1000,10 @@ describe("StorageApiSync", () => {
       const correctionCallback = vi.fn();
       storage.store(contentMessage, correctionCallback);
 
-      node.setStorage(storage);
+      client.addStorage({ storage });
 
       // Load the group on the new node
-      const groupOnNode = await loadCoValueOrFail(node, group.id);
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
 
       // Wait for sync should resolve immediately since the coValue is already synced
       await expect(
@@ -614,9 +1016,225 @@ describe("StorageApiSync", () => {
 
   describe("close", () => {
     test("should close storage without throwing errors", async () => {
-      const { storage } = await createTestNode();
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
 
       expect(() => storage.close()).not.toThrow();
+    });
+  });
+
+  describe("loadKnownState", () => {
+    test("should return correct knownState structure for existing CoValue", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create a group to have data in the database
+      const group = fixtures.node.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(group.id);
+      expect(result?.header).toBe(true);
+      expect(result?.sessions).toEqual(group.core.knownState().sessions);
+    });
+
+    test("should return undefined for non-existent CoValue", async () => {
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState("co_nonexistent" as any, resolve);
+        },
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    test("should handle CoValue with no sessions (header only)", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create a CoValue with just a header (no transactions yet)
+      const coValue = fixtures.node.createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...fixtures.node.crypto.createdNowUnique(),
+      });
+      await coValue.waitForSync();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(coValue.id, resolve);
+        },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(coValue.id);
+      expect(result?.header).toBe(true);
+      // The sessions should have one entry with lastIdx = 0 (just header)
+      expect(Object.keys(result?.sessions || {}).length).toBe(0);
+    });
+
+    test("should handle CoValue with multiple sessions", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const fixtures2 = setupTestNode();
+      fixtures2.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create a CoValue and have two nodes make transactions
+      const coValue = fixtures.node.createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...fixtures.node.crypto.createdNowUnique(),
+      });
+
+      coValue.makeTransaction([{ key1: "value1" }], "trusting");
+      await coValue.waitForSync();
+
+      const coValueOnNode2 = await loadCoValueOrFail(
+        fixtures2.node,
+        coValue.id as CoID<RawCoMap>,
+      );
+
+      coValueOnNode2.set("key2", "value2", "trusting");
+      await coValueOnNode2.core.waitForSync();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(coValue.id, resolve);
+        },
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.id).toBe(coValue.id);
+      expect(result?.header).toBe(true);
+      // Should have two sessions
+      expect(Object.keys(result?.sessions || {}).length).toBe(2);
+      // Verify sessions match the expected state
+      expect(result?.sessions).toEqual(
+        coValueOnNode2.core.knownState().sessions,
+      );
+    });
+
+    test("should use cache when knownState is cached", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create a group to have data in the database
+      const group = fixtures.node.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      // First call should hit the database and cache the result
+      const result1 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result1).toBeDefined();
+      expect(result1?.id).toBe(group.id);
+      expect(result1?.header).toBe(true);
+
+      // Second call should return from cache
+      const result2 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result2).toEqual(result1);
     });
   });
 });

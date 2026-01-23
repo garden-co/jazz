@@ -4,6 +4,7 @@ import type {
   AnyAccountSchema,
   BranchDefinition,
   CoValue,
+  CoValueClass,
   CoValueClassOrSchema,
   CoValueFromRaw,
   SchemaResolveQuery,
@@ -15,10 +16,11 @@ import type {
   ResolveQueryStrict,
 } from "jazz-tools";
 import {
+  captureStack,
   coValueClassFromCoValueClassOrSchema,
-  subscribeToCoValue,
   CoValueLoadingState,
   getUnloadedCoValueWithoutId,
+  SubscriptionScope,
 } from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
@@ -69,6 +71,7 @@ export class CoState<
     id: CoStateId | (() => CoStateId),
     options?: CoStateOptions<V, R> | (() => CoStateOptions<V, R>),
   ) {
+    const callerStack = captureStack();
     this.#id = $derived.by(typeof id === "function" ? id : () => id);
     this.#options = $derived.by(
       typeof options === "function" ? options : () => options,
@@ -89,32 +92,36 @@ export class CoState<
             getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
           );
         }
-        const agent = "me" in ctx ? ctx.me : ctx.guest;
-        const resolve = getResolveQuery(Schema, options?.resolve);
 
-        const unsubscribe = subscribeToCoValue(
-          coValueClassFromCoValueClassOrSchema(Schema),
+        const agent = "me" in ctx ? ctx.me : ctx.guest;
+        const node = "node" in agent ? agent.node : agent.$jazz.localNode;
+        const resolve = getResolveQuery(Schema, options?.resolve);
+        const cls = coValueClassFromCoValueClassOrSchema(Schema) as CoValueClass<Loaded<V, R>>;
+
+        const subscriptionScope = new SubscriptionScope<Loaded<V, R>>(
+          node,
+          resolve,
           id,
-          {
-            // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
-            resolve,
-            loadAs: agent,
-            onUnavailable: (value) => {
-              this.update(value);
-            },
-            onUnauthorized: (value) => {
-              this.update(value);
-            },
-            syncResolution: true,
-            unstable_branch: options?.unstable_branch,
-          },
-          (value) => {
-            this.update(value as Loaded<V, R>);
-          },
+          { ref: cls, optional: false },
+          false, // skipRetry
+          false, // bestEffortResolution
+          options?.unstable_branch,
         );
 
+        subscriptionScope.callerStack = callerStack;
+
+        // Track performance for Svelte subscriptions
+        subscriptionScope.trackLoadingPerformance("CoState");
+
+        subscriptionScope.subscribe(() => {
+          const value = subscriptionScope.getCurrentValue();
+          this.update(value);
+        });
+
+        this.update(subscriptionScope.getCurrentValue());
+
         return () => {
-          unsubscribe();
+          subscriptionScope.destroy();
         };
       });
     });
@@ -153,6 +160,7 @@ export class AccountCoState<
     Schema: A,
     options?: CoStateOptions<A, R> | (() => CoStateOptions<A, R>),
   ) {
+    const callerStack = captureStack();
     this.#options = $derived.by(
       typeof options === "function" ? options : () => options,
     );
@@ -173,30 +181,34 @@ export class AccountCoState<
         }
 
         const me = ctx.me;
+        const node = me.$jazz.localNode;
         const resolve = getResolveQuery(Schema, options?.resolve);
-
-        const unsubscribe = subscribeToCoValue(
-          coValueClassFromCoValueClassOrSchema(Schema),
+        const cls = coValueClassFromCoValueClassOrSchema(Schema) as CoValueClass<Loaded<A, R>>;
+ 
+        const subscriptionScope = new SubscriptionScope<Loaded<A, R>>(
+          node,
+          resolve,
           me.$jazz.id,
-          {
-            resolve,
-            loadAs: me,
-            onUnavailable: (value) => {
-              this.update(value);
-            },
-            onUnauthorized: (value) => {
-              this.update(value);
-            },
-            syncResolution: true,
-            unstable_branch: options?.unstable_branch,
-          },
-          (value) => {
-            this.update(value as Loaded<A, R>);
-          },
+          { ref: cls, optional: false },
+          false, // skipRetry
+          false, // bestEffortResolution
+          options?.unstable_branch,
         );
 
+        subscriptionScope.callerStack = callerStack;
+
+        // Track performance for Svelte subscriptions
+        subscriptionScope.trackLoadingPerformance("AccountCoState");
+
+        subscriptionScope.subscribe(() => {
+          const value = subscriptionScope.getCurrentValue();
+          this.update(value);
+        });
+
+        this.update(subscriptionScope.getCurrentValue());
+
         return () => {
-          unsubscribe();
+          subscriptionScope.destroy();
         };
       });
     });

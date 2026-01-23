@@ -21,7 +21,7 @@ const { CO_VALUE_PRIORITY, getContentMessageSize, WEBSOCKET_CONFIG } =
 export class BatchedOutgoingMessages
   implements CojsonInternalTypes.OutgoingPeerChannel
 {
-  private backlog = "";
+  private backlog: string[] = [];
   private queue: PriorityBasedMessageQueue;
   private processing = false;
   private closed = false;
@@ -69,6 +69,14 @@ export class BatchedOutgoingMessages
       return;
     }
 
+    if (
+      isWebSocketOpen(this.websocket) &&
+      !hasWebSocketTooMuchBufferedData(this.websocket)
+    ) {
+      this.processMessage(msg, true);
+      return;
+    }
+
     this.processQueue().catch((e) => {
       logger.error("Error while processing sendMessage queue", { err: e });
     });
@@ -78,12 +86,6 @@ export class BatchedOutgoingMessages
     const { websocket } = this;
 
     this.processing = true;
-
-    // Delay the initiation of the queue processing to accumulate messages
-    // before sending them, in order to do prioritization and batching
-    await new Promise<void>((resolve) =>
-      setTimeout(resolve, WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY),
-    );
 
     let msg = this.queue.pull();
 
@@ -111,14 +113,14 @@ export class BatchedOutgoingMessages
     this.processing = false;
   }
 
-  private processMessage(msg: SyncMessage) {
+  private processMessage(msg: SyncMessage, skipBatching: boolean = false) {
     if (msg.action === "content") {
       this.egressBytesCounter.add(getContentMessageSize(msg), this.meta);
     }
 
-    const stringifiedMsg = JSON.stringify(msg);
+    const stringifiedMsg = this.serializeMessage(msg);
 
-    if (!this.batching) {
+    if (!this.batching || skipBatching) {
       this.websocket.send(stringifiedMsg);
       return;
     }
@@ -134,11 +136,7 @@ export class BatchedOutgoingMessages
       this.sendMessagesInBulk();
     }
 
-    if (this.backlog.length > 0) {
-      this.backlog += `\n${stringifiedMsg}`;
-    } else {
-      this.backlog = stringifiedMsg;
-    }
+    this.appendMessage(stringifiedMsg);
 
     // If message itself exceeds the chunk size, send it immediately
     if (msgSize >= WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES) {
@@ -146,10 +144,18 @@ export class BatchedOutgoingMessages
     }
   }
 
+  private serializeMessage(msg: SyncMessage) {
+    return JSON.stringify(msg);
+  }
+
+  private appendMessage(msg: string) {
+    this.backlog.push(msg);
+  }
+
   private sendMessagesInBulk() {
     if (this.backlog.length > 0 && isWebSocketOpen(this.websocket)) {
-      this.websocket.send(this.backlog);
-      this.backlog = "";
+      this.websocket.send(this.backlog.join("\n"));
+      this.backlog.length = 0;
     }
   }
 

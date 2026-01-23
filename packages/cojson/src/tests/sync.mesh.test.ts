@@ -11,7 +11,8 @@ import {
   setupTestNode,
   waitFor,
 } from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { Stringified } from "../jsonStringify";
+import { JsonValue } from "../jsonValue";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -325,7 +326,9 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
 
     msg.new[mesh.edgeFrance.node.currentSessionID]!.newTransactions.push({
       privacy: "trusting",
-      changes: stableStringify([{ op: "set", key: "hello", value: "updated" }]),
+      changes: JSON.stringify([
+        { op: "set", key: "hello", value: "updated" },
+      ]) as Stringified<JsonValue[]>,
       madeAt: Date.now(),
     });
 
@@ -506,7 +509,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       ]
     `);
 
-    edge.restart();
+    await edge.restart();
 
     edge.connectToSyncServer({
       syncServerName: "core",
@@ -561,11 +564,11 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "edge -> client | CONTENT Map header: false new: After: 63 New: 21 expectContentUntil: header/100",
         "storage -> edge | CONTENT Map header: true new: After: 84 New: 16",
         "edge -> client | CONTENT Map header: false new: After: 84 New: 16",
-        "core -> storage | LOAD Group sessions: empty",
-        "storage -> core | KNOWN Group sessions: empty",
+        "core -> storage | GET_KNOWN_STATE Group",
+        "storage -> core | GET_KNOWN_STATE_RESULT Group sessions: empty",
         "core -> edge | KNOWN Group sessions: empty",
-        "core -> storage | LOAD Map sessions: empty",
-        "storage -> core | KNOWN Map sessions: empty",
+        "core -> storage | GET_KNOWN_STATE Map",
+        "storage -> core | GET_KNOWN_STATE_RESULT Map sessions: empty",
         "core -> edge | KNOWN Map sessions: empty",
         "client -> edge | KNOWN Group sessions: header/5",
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",

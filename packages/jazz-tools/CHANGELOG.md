@@ -1,5 +1,97 @@
 # jazz-tools
 
+## 0.20.1
+
+### Patch Changes
+
+- ca306c0: Fixed `CoList` to return the correct length when calling `getOwnPropertyDescriptor` with `length`. Previously it was always returning 0.
+- d7f9cba: `setDefaultSchemaPermissions` now modifies existing CoValue schemas
+- Updated dependencies [03195eb]
+  - cojson@0.20.1
+  - cojson-storage-indexeddb@0.20.1
+  - cojson-transport-ws@0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- ee19292: Removed `JazzContextManagerContext` and added error when nesting `JazzProvider` components. This prevents bad patterns like nested providers and simplifies the alternative approach of using `JazzContext.Provider` directly with `useJazzContext()`.
+
+  ### Breaking changes
+
+  - Removed `JazzContextManagerContext` export from `jazz-tools/react-core`
+  - Renamed `useJazzContext` to `useJazzContextValue` (returns the context value)
+  - `useJazzContext` now returns the context manager instead of the context value
+  - Nesting `JazzProvider` components now throws an error
+
+  ### Migration
+
+  If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
+
+  ```diff
+  - import { useJazzContext } from "jazz-tools/react-core";
+  + import { useJazzContextValue } from "jazz-tools/react-core";
+
+  - const context = useJazzContext();
+  + const context = useJazzContextValue();
+  ```
+
+  If you need to provide context to children without creating a new context (e.g., for components that don't propagate React context), use:
+
+  ```tsx
+  <JazzContext.Provider value={useJazzContext()}>
+    {children}
+  </JazzContext.Provider>
+  ```
+
+- 8934d8a: ## Full native crypto (0.20.0)
+
+  With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+  ## 💥 Breaking changes
+
+  ### Crypto providers / fallback behavior
+
+  - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+  - **Removed `RNQuickCrypto`** from `jazz-tools`.
+  - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+  - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+
+  Full migration guide: `https://jazz.tools/docs/upgrade/0-20-0`
+
+### Patch Changes
+
+- 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
+
+  - CoValues are marked with a tombstone, making them inaccessible to all users
+  - Supports deleting nested CoValues via resolve queries
+  - Requires admin permissions on the CoValue's group
+  - Introduces new `deleted` loading state for deleted CoValues
+  - Groups and Accounts are skipped during deletion
+
+  See documentation: https://jazz.tools/docs/react/core-concepts/deleting
+
+- Updated dependencies [6b9368a]
+- Updated dependencies [89332d5]
+- Updated dependencies [f562a1f]
+- Updated dependencies [b5ada4d]
+- Updated dependencies [8934d8a]
+  - cojson@0.20.0
+  - cojson-storage-indexeddb@0.20.0
+  - cojson-transport-ws@0.20.0
+
+## 0.19.22
+
+### Patch Changes
+
+- 89d8798: Adds a 512 variant for progressive image loading.
+- 30b5339: Fix an issue when generating image placeholders from clients using Expo Image Manipulator
+- Updated dependencies [3b70482]
+- Updated dependencies [6078ea5]
+  - cojson@0.19.22
+  - cojson-storage-indexeddb@0.19.22
+  - cojson-transport-ws@0.19.22
+
 ## 0.19.19
 
 ### Patch Changes
@@ -465,6 +557,7 @@
 ### Patch Changes
 
 - f2f478a: Add connection status API for React and Svelte
+
   - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
   - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
 
@@ -500,6 +593,7 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
+
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -883,6 +977,7 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
+
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

@@ -28,7 +28,7 @@ export type TransactionID = {
 
 export type AgentID = `sealer_z${string}/signer_z${string}`;
 
-export function isAgentID(id: string): id is AgentID {
+export function isAgentID(id: unknown): id is AgentID {
   return (
     typeof id === "string" &&
     id.startsWith("sealer_") &&
@@ -36,7 +36,17 @@ export function isAgentID(id: string): id is AgentID {
   );
 }
 
-export type SessionID = `${RawAccountID | AgentID}_session_z${string}`;
+export type ActiveSessionID = `${RawAccountID | AgentID}_session_z${string}`;
+export type DeleteSessionID = `${RawAccountID | AgentID}_session_d${string}$`;
+export type SessionID = ActiveSessionID | DeleteSessionID;
+
+const CHAR_DOLLAR = "$".charCodeAt(0);
+
+export function isDeleteSessionID(
+  sessionID: SessionID,
+): sessionID is DeleteSessionID {
+  return sessionID.charCodeAt(sessionID.length - 1) === CHAR_DOLLAR;
+}
 
 export function isParentGroupReference(
   key: string,

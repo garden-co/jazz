@@ -59,14 +59,14 @@ export class RawCoList<
   afterStart: OpID[] = [];
   beforeEnd: OpID[] = [];
   insertions: {
-    [sessionID: SessionID]: {
+    [sessionID: SessionIndex]: {
       [txIdx: number]: {
         [changeIdx: number]: InsertionEntry<Item>;
       };
     };
   } = {};
   deletionsByInsertion: {
-    [deletedSessionID: SessionID]: {
+    [deletedSessionID: SessionIndex]: {
       [deletedTxIdx: number]: {
         [deletedChangeIdx: number]: DeletionEntry[];
       };
@@ -376,6 +376,10 @@ export class RawCoList<
     const arr = this.entriesUncached();
     this._cachedEntries = arr;
     return arr;
+  }
+
+  length() {
+    return this.entries().length;
   }
 
   /** @internal */
@@ -700,7 +704,9 @@ export class RawCoList<
   }
 }
 
-function getSessionIndex(txID: TransactionID): SessionID {
+type SessionIndex = SessionID | `${SessionID}_branch_${RawCoID}`;
+
+function getSessionIndex(txID: TransactionID): SessionIndex {
   if (txID.branch) {
     return `${txID.sessionID}_branch_${txID.branch}`;
   }

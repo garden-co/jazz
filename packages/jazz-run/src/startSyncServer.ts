@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CryptoProvider, LocalNode } from "cojson";
@@ -14,16 +14,21 @@ export const startSyncServer = async ({
   inMemory,
   db,
   crypto,
+  middleware,
 }: {
   host: string | undefined;
   port: string | undefined;
   inMemory: boolean;
   db: string;
   crypto?: CryptoProvider;
+  middleware?: (req: IncomingMessage, res: ServerResponse) => boolean;
 }): Promise<SyncServer> => {
   crypto ??= await WasmCrypto.create();
 
   const server = createServer((req, res) => {
+    if (middleware?.(req, res)) {
+      return;
+    }
     if (req.url === "/health") {
       res.writeHead(200);
       res.end("ok");
@@ -48,9 +53,7 @@ export const startSyncServer = async ({
     localNode.setStorage(storage);
   }
 
-  localNode.enableGarbageCollector({
-    garbageCollectGroups: true,
-  });
+  localNode.enableGarbageCollector();
 
   wss.on("connection", function connection(ws, req) {
     // ping/pong for the connection liveness

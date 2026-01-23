@@ -604,16 +604,16 @@ describe("Inbox", () => {
         Message.create({ text: `Message ${i}`, value: i }, group),
       );
 
-      // Subscribe with concurrency limit of 1
+      // Subscribe with concurrency limit of 3
       const unsubscribe = receiverInbox.subscribe(
         Message,
         async (message) => {
           const messageText = message.text;
           processingOrder.push(`start-${messageText}`);
 
-          // Simulate processing time
+          // Simulate processing time (later messages take longer to ensure deterministic ordering)
           await new Promise((resolve) =>
-            setTimeout(resolve, 20 - message.value * 10),
+            setTimeout(resolve, 10 + message.value * 10),
           );
 
           processingOrder.push(`end-${messageText}`);
@@ -633,13 +633,13 @@ describe("Inbox", () => {
           "start-Message 0",
           "start-Message 1",
           "start-Message 2",
-          "end-Message 2",
-          "start-Message 3",
-          "end-Message 3",
-          "start-Message 4",
-          "end-Message 4",
-          "end-Message 1",
           "end-Message 0",
+          "start-Message 3",
+          "end-Message 1",
+          "start-Message 4",
+          "end-Message 2",
+          "end-Message 3",
+          "end-Message 4",
         ]
       `);
       unsubscribe();

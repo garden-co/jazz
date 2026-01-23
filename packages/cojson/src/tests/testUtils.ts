@@ -5,7 +5,7 @@ import {
   MeterProvider,
   MetricReader,
 } from "@opentelemetry/sdk-metrics";
-import { expect, onTestFinished, vi } from "vitest";
+import { assert, expect, onTestFinished, vi } from "vitest";
 import { ControlledAccount, ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import {
@@ -13,28 +13,27 @@ import {
   AnyRawCoValue,
   type CoID,
   type CoValueCore,
+  MessageChannelLike,
+  MessagePortLike,
   type RawAccount,
   RawAccountID,
   RawCoMap,
   type RawCoValue,
   StorageAPI,
 } from "../exports.js";
-import type { SessionID } from "../ids.js";
+import type { RawCoID, SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
-import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { CoValueHeader } from "../coValueCore/verifiedState.js";
 import { idforHeader } from "../coValueCore/coValueCore.js";
 
 let Crypto = await WasmCrypto.create();
 
-export function setCurrentTestCryptoProvider(
-  crypto: WasmCrypto | PureJSCrypto,
-) {
+export function setCurrentTestCryptoProvider(crypto: WasmCrypto) {
   Crypto = crypto;
 }
 
@@ -187,8 +186,8 @@ export function newGroupHighLevel() {
 
   const group = node.createGroup();
 
-  onTestFinished(() => {
-    node.gracefulShutdown();
+  onTestFinished(async () => {
+    await node.gracefulShutdown();
   });
   return { admin, node, group };
 }
@@ -269,6 +268,7 @@ export function blockMessageTypeOnOutgoingPeer(
   opts: {
     id?: string;
     once?: boolean;
+    matcher?: (msg: SyncMessage) => boolean;
   },
 ) {
   const push = peer.outgoing.push;
@@ -281,7 +281,8 @@ export function blockMessageTypeOnOutgoingPeer(
       typeof msg === "object" &&
       msg.action === messageType &&
       (!opts.id || msg.id === opts.id) &&
-      (!opts.once || !blockedIds.has(msg.id))
+      (!opts.once || !blockedIds.has(msg.id)) &&
+      (!opts.matcher || opts.matcher(msg))
     ) {
       blockedMessages.push(msg);
       blockedIds.add(msg.id);
@@ -501,11 +502,11 @@ export function setupTestNode(
   }
 
   async function addAsyncStorage(
-    opts: { ourName?: string; filename?: string } = {},
+    opts: { ourName?: string; filename?: string; storageName?: string } = {},
   ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
       filename: opts.filename,
     });
     node.setStorage(storage);
@@ -517,8 +518,8 @@ export function setupTestNode(
     connectToSyncServer();
   }
 
-  onTestFinished(() => {
-    node.gracefulShutdown();
+  onTestFinished(async () => {
+    await node.gracefulShutdown();
   });
 
   const ctx = {
@@ -526,8 +527,8 @@ export function setupTestNode(
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
-    restart: () => {
-      node.gracefulShutdown();
+    restart: async () => {
+      await node.gracefulShutdown();
       ctx.node = node = new LocalNode(
         admin.agentSecret,
         session,
@@ -638,10 +639,12 @@ export async function setupTestAccount(
     return { storage };
   }
 
-  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+  async function addAsyncStorage(
+    opts: { ourName?: string; storageName?: string } = {},
+  ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
     });
     ctx.node.setStorage(storage);
 
@@ -656,9 +659,14 @@ export async function setupTestAccount(
     await ctx.node.gracefulShutdown();
   });
 
+  const account = ctx.node
+    .getCoValue(ctx.accountID)
+    .getCurrentContent() as RawAccount;
+
   return {
     node: ctx.node,
     accountID: ctx.accountID,
+    account,
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
@@ -679,10 +687,22 @@ export async function setupTestAccount(
   };
 }
 
+export type LazyLoadMessage = {
+  action: "lazyLoad";
+  id: RawCoID;
+};
+
+export type LazyLoadResultMessage = {
+  action: "lazyLoadResult";
+  id: RawCoID;
+  header: boolean;
+  sessions: { [sessionID: string]: number };
+};
+
 export type SyncTestMessage = {
   from: string;
   to: string;
-  msg: SyncMessage;
+  msg: SyncMessage | LazyLoadMessage | LazyLoadResultMessage;
 };
 
 export function connectedPeersWithMessagesTracking(opts: {
@@ -798,4 +818,96 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   }
 
   return map;
+}
+
+export function importContentIntoNode(
+  coValue: CoValueCore,
+  node: LocalNode,
+  chunks?: number,
+) {
+  const content = coValue.newContentSince(undefined);
+  assert(content);
+  for (const [i, chunk] of content.entries()) {
+    if (chunks && i >= chunks) {
+      break;
+    }
+    node.syncManager.handleNewContent(chunk, "import");
+  }
+}
+
+// ============================================================================
+// MessageChannel Test Helpers
+// ============================================================================
+
+/**
+ * Type guard to check if a message is a SyncMessage.
+ */
+export function isSyncMessage(msg: unknown): msg is SyncMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "action" in msg &&
+    typeof (msg as { action: unknown }).action === "string"
+  );
+}
+
+/**
+ * Creates a MessageChannel that logs all sync messages exchanged between ports.
+ * Similar to connectedPeersWithMessagesTracking but for MessageChannel.
+ */
+export function createTrackedMessageChannel(opts: {
+  port1Name?: string;
+  port2Name?: string;
+}) {
+  const { port1, port2 } = new MessageChannel();
+  const port1Name = opts.port1Name ?? "port1";
+  const port2Name = opts.port2Name ?? "port2";
+
+  // Wrap port1.postMessage to log messages
+  const originalPort1PostMessage = port1.postMessage.bind(port1);
+  port1.postMessage = (message, transfer) => {
+    if (isSyncMessage(message)) {
+      SyncMessagesLog.add({
+        from: port1Name,
+        to: port2Name,
+        msg: message,
+      });
+    }
+
+    originalPort1PostMessage(message, transfer);
+  };
+
+  // Wrap port2.postMessage to log messages
+  const originalPort2PostMessage = port2.postMessage.bind(port2);
+  port2.postMessage = (message, transfer) => {
+    if (isSyncMessage(message)) {
+      SyncMessagesLog.add({
+        from: port2Name,
+        to: port1Name,
+        msg: message,
+      });
+    }
+
+    originalPort2PostMessage(message, transfer);
+  };
+
+  return { port1, port2 };
+}
+
+/**
+ * Creates a mock worker target that simulates receiving a port
+ * and calling a callback with the received port (simulating a connection handshake).
+ */
+export function createMockWorkerWithAccept(
+  onPortReceived: (port: MessagePortLike) => Promise<void>,
+) {
+  return {
+    postMessage: vi.fn().mockImplementation((data, transfer) => {
+      if (data?.type === "jazz:port" && transfer?.[0]) {
+        const port = transfer[0] as MessagePortLike;
+        // Simulate the worker receiving the port and calling accept
+        onPortReceived(port);
+      }
+    }),
+  };
 }

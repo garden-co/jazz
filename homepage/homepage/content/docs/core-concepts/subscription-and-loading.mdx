@@ -297,7 +297,7 @@ You can also subscribe to an existing CoValue instance using the `$jazz.subscrib
 </CodeGroup>
 
 ### Error handling for manual subscriptions
-You can also pass `onUnauthorized` and `onUnavailable` handlers as options to your subscription which will run reactively whenever the CoValue you're subscribing to is unavailable, or you do not have the appropriate permissions to read it.
+You can pass an `onError` handler as an option to your subscription. This handler will run reactively whenever the CoValue you're subscribing to is inaccessible&hairsp;—&hairsp;for example, when the CoValue is unavailable (not found or network timeout) or when you do not have the appropriate permissions to read it. You can check `$jazz.loadingState` to determine the specific reason.
 
 <CodeGroup preferWrap>
 ```ts error-handling-in-manual.ts#ErrorHandling
@@ -353,6 +353,27 @@ In most cases, you'll have specified the depth of data you need in a `resolve` q
 </CodeGroup>
 
 This can be useful if you have a shallowly loaded CoValue instance, and would like to load its references deeply.
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+
+## Loading multiple CoValues at the same time [!framework=react,react-native,react-native-expo]
+
+When you need to load multiple CoValues dynamically (for example, when implementing pagination or loading a variable number of CoValues), React's Rules of Hooks can be challenging.
+Since hooks can't be called conditionally or inside loops, you're forced to create a separate component for each CoValue you want to load.
+
+The `useCoStates` and `useSuspenseCoStates` hooks solve this by accepting an array of CoValue IDs and returning the corresponding CoValues.
+This allows you to load multiple CoValues in a single component.
+
+- **`useCoStates`** — Returns `MaybeLoaded` CoValues, similar to `useCoState`. You should check `$isLoaded` before accessing the data.
+- **`useSuspenseCoStates`** — Returns `Loaded` CoValues, similar to `useSuspenseCoState`. Use this with React Suspense boundaries.
+
+Both hooks support the same options as their single-value counterparts, including `resolve` queries, `select` functions, and `equalityFn`.
+
+<CodeGroup>
+```tsx ProjectView.tsx#ProjectViewWithPagination
+```
+</CodeGroup>
+</ContentByFramework>
 
 ## Best practices
 

@@ -9,9 +9,9 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
-  parseSubscribeRestArgs,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
 } from "../../../internal.js";
@@ -42,11 +42,14 @@ export class CoFeedSchema<
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
 
+  #permissions: SchemaPermissions | null = null;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+  get permissions(): SchemaPermissions {
+    return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
+  }
 
   constructor(
     public element: T,
@@ -118,12 +121,16 @@ export class CoFeedSchema<
     );
   }
 
-  subscribe(
+  subscribe<
+    const R extends RefsToResolve<
+      CoFeedInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
     id: string,
-    listener: (
-      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, true>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
@@ -133,18 +140,33 @@ export class CoFeedSchema<
   >(
     id: string,
     options: SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
-    listener: (
-      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void;
-  subscribe(id: string, ...args: any) {
-    const { options, listener } = parseSubscribeRestArgs(args);
+  subscribe<
+    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>>,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+      | SubscribeCallback<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>
+    >,
+  ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
       // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      maybeListener,
     );
   }
 
@@ -190,7 +212,7 @@ export class CoFeedSchema<
       hydrateCoreCoValueSchema(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
-    copy.permissions = permissions ?? this.permissions;
+    copy.#permissions = permissions ?? this.#permissions;
     return copy;
   }
 }

@@ -1,4 +1,4 @@
-import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework } from "@/components/forMdx";
 
 export const metadata = {
   description: "co.plainText() and co.richText() enable real-time collaborative text editing. They provide fine-grained control over text edits, and efficient merging of concurrent changes."
@@ -77,6 +77,10 @@ When using CoTexts in JSX, you can read the text directly:
 ```
 </CodeGroup>
 </ContentByFramework>
+
+<Alert variant="info" title="Primitive values">
+`CoTexts` extend the native `String` class, so `typeof description` will return `object`. If you need the primitive string value (e.g. for strict equality checks or 3rd party libraries), use `description.toString()`.
+</Alert>
 
 ## Making Edits
 

@@ -14,7 +14,7 @@ import {
 import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
-import { RawCoID, SessionID, isRawCoID } from "./ids.js";
+import { isDeleteSessionID, RawCoID, SessionID, isRawCoID } from "./ids.js";
 import { LocalNode } from "./localNode.js";
 import { logger } from "./logger.js";
 import { CoValuePriority } from "./priority.js";
@@ -25,6 +25,7 @@ import {
   CoValueKnownState,
   knownStateFrom,
   KnownStateSessions,
+  peerHasAllContent,
 } from "./knownState.js";
 import { StorageAPI } from "./storage/index.js";
 
@@ -99,6 +100,10 @@ export interface Peer {
   role: "server" | "client";
   priority?: number;
   persistent?: boolean;
+}
+
+function isPersistentServerPeer(peer: Peer | PeerState): boolean {
+  return peer.role === "server" && (peer.persistent ?? false);
 }
 
 export type ServerPeerSelector = (
@@ -208,7 +213,6 @@ export class SyncManager {
       return;
     }
 
-    // TODO: validate
     switch (msg.action) {
       case "load":
         return this.handleLoad(msg, peer);
@@ -260,10 +264,18 @@ export class SyncManager {
 
       peer.combineOptimisticWith(id, coValue.knownState());
     } else if (!peer.toldKnownState.has(id)) {
-      this.trySendToPeer(peer, {
-        action: "known",
-        ...coValue.knownStateWithStreaming(),
-      });
+      if (coValue.isDeleted) {
+        // This way we make the peer believe that we've always ingested all the content they sent, even though we skipped it because the coValue is deleted
+        this.trySendToPeer(
+          peer,
+          coValue.stopSyncingKnownStateMessage(peer.getKnownState(id)),
+        );
+      } else {
+        this.trySendToPeer(peer, {
+          action: "known",
+          ...coValue.knownStateWithStreaming(),
+        });
+      }
     }
 
     peer.trackToldKnownState(id);
@@ -353,7 +365,7 @@ export class SyncManager {
   }
 
   startPeerReconciliation(peer: PeerState) {
-    if (peer.role === "server" && peer.persistent) {
+    if (isPersistentServerPeer(peer)) {
       // Resume syncing unsynced CoValues asynchronously
       this.resumeUnsyncedCoValues().catch((error) => {
         logger.warn("Failed to resume unsynced CoValues:", error);
@@ -393,13 +405,7 @@ export class SyncManager {
         // If the coValue is unavailable and we never tried this peer
         // we try to load it from the peer
         if (!peer.loadRequestSent.has(coValue.id)) {
-          peer.trackLoadRequestSent(coValue.id);
-          this.trySendToPeer(peer, {
-            action: "load",
-            header: false,
-            id: coValue.id,
-            sessions: {},
-          });
+          peer.sendLoadRequest(coValue, "low-priority");
         }
       } else {
         // Build the list of coValues ordered by dependency
@@ -419,12 +425,11 @@ export class SyncManager {
        * - Subscribe to the coValue updates
        * - Start the sync process in case we or the other peer
        *   lacks some transactions
+       *
+       * Use low priority for reconciliation loads so that user-initiated
+       * loads take precedence.
        */
-      peer.trackLoadRequestSent(coValue.id);
-      this.trySendToPeer(peer, {
-        action: "load",
-        ...coValue.knownState(),
-      });
+      peer.sendLoadRequest(coValue, "low-priority");
     }
   }
 
@@ -503,7 +508,7 @@ export class SyncManager {
         currentTimer - lastTimer >
         SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
       ) {
-        await new Promise<void>((resolve) => setTimeout(resolve));
+        await waitForNextTick();
         lastTimer = performance.now();
       }
     }
@@ -524,7 +529,7 @@ export class SyncManager {
 
     const unsubscribeFromKnownStatesUpdates =
       peerState.subscribeToKnownStatesUpdates((id, knownState) => {
-        this.syncState.triggerUpdate(peer.id, id, knownState.value());
+        this.syncState.triggerUpdate(peer, id, knownState.value());
       });
 
     if (!skipReconciliation && peerState.role === "server") {
@@ -583,33 +588,125 @@ export class SyncManager {
     peer.setKnownState(msg.id, knownStateFrom(msg));
     const coValue = this.local.getCoValue(msg.id);
 
+    // Fast path: CoValue is already in memory
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
       return;
     }
 
-    const peers = this.getServerPeers(msg.id, peer.id);
+    const peerKnownState = peer.getOptimisticKnownState(msg.id);
 
-    coValue.load(peers);
+    // Fast path: Peer has no content at all - skip lazy load check, just load directly
+    if (!peerKnownState?.header) {
+      this.loadFromStorageAndRespond(msg.id, peer, coValue);
+      return;
+    }
 
-    const handleLoadResult = () => {
+    // Check storage knownState before doing full load (lazy load optimization)
+    coValue.getKnownStateFromStorage((storageKnownState) => {
+      // Race condition: CoValue might have been loaded while we were waiting for storage
       if (coValue.isAvailable()) {
+        this.sendNewContent(msg.id, peer);
         return;
       }
 
-      peer.trackToldKnownState(msg.id);
-      this.trySendToPeer(peer, {
-        action: "known",
-        id: msg.id,
-        header: false,
-        sessions: {},
-      });
+      if (!storageKnownState) {
+        // Not in storage, try loading from peers
+        this.loadFromPeersAndRespond(msg.id, peer, coValue);
+        return;
+      }
+
+      // Check if peer already has all content
+      if (peerHasAllContent(storageKnownState, peerKnownState)) {
+        // Peer already has everything - reply with known message, no full load needed
+        peer.trackToldKnownState(msg.id);
+        this.trySendToPeer(peer, {
+          action: "known",
+          ...storageKnownState,
+        });
+        return;
+      }
+
+      // Peer needs content - do full load from storage
+      this.loadFromStorageAndRespond(msg.id, peer, coValue);
+    });
+  }
+
+  /**
+   * Helper to load from storage and respond appropriately.
+   * Falls back to peers if not found in storage.
+   */
+  private loadFromStorageAndRespond(
+    id: RawCoID,
+    peer: PeerState,
+    coValue: CoValueCore,
+  ) {
+    coValue.loadFromStorage((found) => {
+      if (found && coValue.isAvailable()) {
+        this.sendNewContent(id, peer);
+      } else {
+        this.loadFromPeersAndRespond(id, peer, coValue);
+      }
+    });
+  }
+
+  /**
+   * Helper to load from peers and respond appropriately.
+   */
+  private loadFromPeersAndRespond(
+    id: RawCoID,
+    peer: PeerState,
+    coValue: CoValueCore,
+  ) {
+    const peers = this.getServerPeers(id, peer.id);
+    coValue.loadFromPeers(peers);
+
+    const handleLoadResult = () => {
+      if (coValue.isAvailable()) {
+        this.sendNewContent(id, peer);
+        return;
+      }
+      this.handleLoadNotFound(id, peer);
     };
 
-    if (peers.length > 0 || this.local.storage) {
+    if (peers.length > 0) {
       coValue.waitForAvailableOrUnavailable().then(handleLoadResult);
     } else {
       handleLoadResult();
+    }
+  }
+
+  /**
+   * Handle case when CoValue is not found.
+   */
+  private handleLoadNotFound(id: RawCoID, peer: PeerState) {
+    peer.trackToldKnownState(id);
+    this.trySendToPeer(peer, {
+      action: "known",
+      id,
+      header: false,
+      sessions: {},
+    });
+  }
+
+  /**
+   * Request full content from a peer when we don't have the CoValue.
+   */
+  private requestFullContent(id: RawCoID, peer: PeerState | undefined) {
+    if (peer) {
+      this.trySendToPeer(peer, {
+        action: "known",
+        isCorrection: true,
+        id,
+        header: false,
+        sessions: {},
+      });
+    } else {
+      // The wrong assumption has been made by storage or import, we don't have a recovery mechanism
+      // Should never happen
+      logger.error("Received new content with no header on a missing CoValue", {
+        id,
+      });
     }
   }
 
@@ -618,8 +715,8 @@ export class SyncManager {
 
     peer.combineWith(msg.id, knownStateFrom(msg));
 
-    // The header is a boolean value that tells us if the other peer do have information about the header.
-    // If it's false in this point it means that the coValue is unavailable on the other peer.
+    // The header is a boolean value that tells us if the other peer has information about the header.
+    // If it's false at this point it means that the coValue is unavailable on the other peer.
     const availableOnPeer = peer.getOptimisticKnownState(msg.id)?.header;
 
     if (!availableOnPeer) {
@@ -629,6 +726,8 @@ export class SyncManager {
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
     }
+
+    peer.trackLoadRequestComplete(coValue);
   }
 
   recordTransactionsSize(newTransactions: Transaction[], source: string) {
@@ -647,6 +746,7 @@ export class SyncManager {
   ) {
     const coValue = this.local.getCoValue(msg.id);
     const peer = from === "storage" || from === "import" ? undefined : from;
+
     const sourceRole =
       from === "storage"
         ? "storage"
@@ -663,6 +763,7 @@ export class SyncManager {
       };
     }
 
+    peer?.trackLoadRequestUpdate(coValue);
     coValue.addDependenciesFromContentMessage(msg);
 
     // If some of the dependencies are missing, we wait for them to be available
@@ -682,7 +783,12 @@ export class SyncManager {
             peers.push(peer);
           }
 
-          dependencyCoValue.load(peers);
+          // Use immediate mode to bypass the concurrency limit for dependencies
+          // We do this to avoid that the dependency load is blocked
+          // by the pending dependendant load
+          // Also these should be done with the highest priority, because we need to
+          // unblock the coValue wait
+          dependencyCoValue.load(peers, "immediate");
         }
       }
 
@@ -694,46 +800,37 @@ export class SyncManager {
      */
     if (!coValue.hasVerifiedContent()) {
       /**
-       * The peer has assumed we already have the CoValue
+       * The peer/import has assumed we already have the CoValue
        */
       if (!msg.header) {
-        // We check if the covalue was in memory and has been garbage collected
-        // In that case we should have it tracked in the storage
-        const storageKnownState = this.local.storage?.getKnownState(msg.id);
-
-        if (storageKnownState?.header) {
-          // If the CoValue has been garbage collected, we load it from the storage before handling the new content
-          coValue.loadFromStorage((found) => {
-            if (found) {
-              this.handleNewContent(msg, from);
-            } else {
-              logger.error("Known CoValue not found in storage", {
-                id: msg.id,
-              });
-            }
-          });
+        // Content from storage without header - this can happen if:
+        // 1. Storage is streaming a large CoValue in chunks
+        // 2. Server is under heavy load, so a chunk isn't processed for a long time
+        // 3. GC cleanup unmounts the CoValue while streaming is in progress
+        // 4. The chunk is finally processed, but the CoValue is no longer available
+        // TODO: Fix this by either not unmounting CoValues with active streaming,
+        // or by cleaning up the streaming queue on unmount
+        if (from === "storage") {
+          logger.warn(
+            "Received content from storage without header - CoValue may have been garbage collected mid-stream",
+            {
+              id: msg.id,
+              from,
+            },
+          );
           return;
         }
 
-        // The peer assumption is not correct, so we ask for the full CoValue
-        if (peer) {
-          this.trySendToPeer(peer, {
-            action: "known",
-            isCorrection: true,
-            id: msg.id,
-            header: false,
-            sessions: {},
-          });
-        } else {
-          // The wrong assumption has been made by storage or import, we don't have a recovery mechanism
-          // Should never happen
-          logger.error(
-            "Received new content with no header on a missing CoValue",
-            {
-              id: msg.id,
-            },
-          );
-        }
+        // Try to load from storage - the CoValue might have been garbage collected from memory
+        coValue.loadFromStorage((found) => {
+          if (found) {
+            // CoValue was in storage, process the new content
+            this.handleNewContent(msg, from);
+          } else {
+            // CoValue not in storage, ask peer for full content
+            this.requestFullContent(msg.id, peer);
+          }
+        });
         return;
       }
 
@@ -787,6 +884,8 @@ export class SyncManager {
       new: {},
     };
 
+    let wasAlreadyDeleted = coValue.isDeleted;
+
     /**
      * The coValue is in memory, load the transactions from the content message
      */
@@ -794,6 +893,10 @@ export class SyncManager {
       sessionID,
       newContentForSession,
     ] of getSessionEntriesFromContentMessage(msg)) {
+      if (wasAlreadyDeleted && !isDeleteSessionID(sessionID)) {
+        continue;
+      }
+
       const newTransactions = getNewTransactionsFromContentMessage(
         newContentForSession,
         coValue.knownState(),
@@ -848,12 +951,25 @@ export class SyncManager {
         this.recordTransactionsSize(newTransactions, sourceRole);
       }
 
+      // We reset the new content for the deleted coValue
+      // because we want to store only the delete session/transaction
+      if (!wasAlreadyDeleted && coValue.isDeleted) {
+        wasAlreadyDeleted = true;
+        validNewContent.new = {};
+      }
+
       // The new content for this session has been verified, so we can store it
       validNewContent.new[sessionID] = newContentForSession;
     }
 
     if (peer) {
-      peer.combineWith(msg.id, knownStateFromContent(validNewContent));
+      if (coValue.isDeleted) {
+        // In case of deleted coValues, we combine the known state with the content message
+        // to avoid that clients that don't support deleted coValues try to sync their own content indefinitely
+        peer.combineWith(msg.id, knownStateFromContent(msg));
+      } else {
+        peer.combineWith(msg.id, knownStateFromContent(validNewContent));
+      }
     }
 
     /**
@@ -885,14 +1001,20 @@ export class SyncManager {
        * This way the sender knows that the content has been received and applied
        * and can update their peer's knownState accordingly.
        */
-      this.trySendToPeer(peer, {
-        action: "known",
-        ...coValue.knownState(),
-      });
+      if (coValue.isDeleted) {
+        // This way we make the peer believe that we've ingested all the content, even though we skipped it because the coValue is deleted
+        this.trySendToPeer(
+          peer,
+          coValue.stopSyncingKnownStateMessage(peer.getKnownState(msg.id)),
+        );
+      } else {
+        this.trySendToPeer(peer, {
+          action: "known",
+          ...coValue.knownState(),
+        });
+      }
       peer.trackToldKnownState(msg.id);
     }
-
-    const syncedPeers = [];
 
     /**
      * Store the content and propagate it to the server peers and the subscribed client peers
@@ -907,6 +1029,8 @@ export class SyncManager {
       }
     }
 
+    peer?.trackLoadRequestComplete(coValue);
+
     for (const peer of this.getPeers(coValue.id)) {
       /**
        * We sync the content against the source peer if it is a client or server peers
@@ -920,25 +1044,8 @@ export class SyncManager {
       // We directly forward the new content to peers that have an active subscription
       if (peer.isCoValueSubscribedToPeer(coValue.id)) {
         this.sendNewContent(coValue.id, peer);
-        syncedPeers.push(peer);
-      } else if (
-        peer.role === "server" &&
-        !peer.loadRequestSent.has(coValue.id)
-      ) {
-        const state = coValue.getLoadingStateForPeer(peer.id);
-
-        // Check if there is a inflight load operation and we
-        // are waiting for other peers to send the load request
-        if (state === "unknown") {
-          // Sending a load message to the peer to get to know how much content is missing
-          // before sending the new content
-          this.trySendToPeer(peer, {
-            action: "load",
-            ...coValue.knownStateWithStreaming(),
-          });
-          peer.trackLoadRequestSent(coValue.id);
-          syncedPeers.push(peer);
-        }
+      } else if (peer.role === "server") {
+        peer.sendLoadRequest(coValue);
       }
     }
   }
@@ -992,6 +1099,18 @@ export class SyncManager {
     const isSyncRequired = this.local.syncWhen !== "never";
     if (isSyncRequired && peers.length === 0) {
       this.unsyncedTracker.add(coValueId);
+
+      // Mark CoValue as synced once a persistent server peer is added and
+      // the CoValue is synced
+      const unsubscribe = this.syncState.subscribeToCoValueUpdates(
+        coValueId,
+        (peer, _knownState, syncState) => {
+          if (isPersistentServerPeer(peer) && syncState.uploaded) {
+            this.unsyncedTracker.remove(coValueId);
+            unsubscribe();
+          }
+        },
+      );
       return;
     }
 
@@ -1024,6 +1143,12 @@ export class SyncManager {
 
     const value = this.local.getCoValue(content.id);
 
+    if (value.isDeleted) {
+      // This doesn't persist the delete flag, it only signals the storage
+      // API that the delete transaction is valid
+      storage.markDeleteAsValid(value.id);
+    }
+
     // Try to store the content as-is for performance
     // In case that some transactions are missing, a correction will be requested, but it's an edge case
     storage.store(content, (correction) => {
@@ -1042,6 +1167,19 @@ export class SyncManager {
 
       return value.newContentSince(correction);
     });
+  }
+
+  /**
+   * Returns true if the local CoValue changes have been synced to all persistent server peers.
+   *
+   * Used during garbage collection to determine if the coValue is pending sync.
+   */
+  isSyncedToServerPeers(id: RawCoID): boolean {
+    // If there are currently no server peers, go ahead with GC.
+    // The CoValue will be reloaded into memory and synced when a peer is added.
+    return this.getPersistentServerPeers(id).every((peer) =>
+      this.syncState.isSynced(peer, id),
+    );
   }
 
   waitForSyncWithPeer(peerId: PeerID, id: RawCoID, timeout: number) {
@@ -1190,4 +1328,11 @@ export function hwrServerPeerSelector(n: number): ServerPeerSelector {
       .slice(0, n)
       .map((wp) => wp.peer);
   };
+}
+
+let waitForNextTick = () =>
+  new Promise<void>((resolve) => queueMicrotask(resolve));
+
+if (typeof setImmediate === "function") {
+  waitForNextTick = () => new Promise<void>((resolve) => setImmediate(resolve));
 }

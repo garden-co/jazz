@@ -8,6 +8,7 @@ import {
   vi,
 } from "vitest";
 
+import type { JsonValue } from "../exports";
 import { cojsonInternals, emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
@@ -19,7 +20,7 @@ import {
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { Stringified } from "../jsonStringify";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -83,7 +84,7 @@ describe("client with storage syncs with server", () => {
 
     await loadCoValueOrFail(client.node, map.id);
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer();
     client.addStorage({
@@ -167,7 +168,7 @@ describe("client with storage syncs with server", () => {
 
     await map.core.waitForSync();
 
-    client.restart();
+    await client.restart();
 
     client.addStorage({
       storage,
@@ -217,7 +218,7 @@ describe("client with storage syncs with server", () => {
     branch.set("branchKey", "branchValue");
     await branch.core.waitForSync();
 
-    client.restart();
+    await client.restart();
     client.addStorage({
       storage,
     });
@@ -388,7 +389,7 @@ describe("client syncs with a server with storage", () => {
 
     SyncMessagesLog.clear();
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -457,7 +458,7 @@ describe("client syncs with a server with storage", () => {
 
     expect(correctionSpy).not.toHaveBeenCalled();
 
-    client.restart();
+    await client.restart();
 
     client.connectToSyncServer({
       ourName: "client",
@@ -572,7 +573,9 @@ describe("client syncs with a server with storage", () => {
     const invalidMapContent = structuredClone(mapContent);
     invalidMapContent.new[bob.node.currentSessionID]!.newTransactions.push({
       privacy: "trusting",
-      changes: stableStringify([{ op: "set", key: "hello", value: "updated" }]),
+      changes: JSON.stringify([
+        { op: "set", key: "hello", value: "updated" },
+      ]) as Stringified<JsonValue[]>,
       madeAt: Date.now(),
     });
     client.node.syncManager.handleNewContent(invalidMapContent, "import");
@@ -771,7 +774,7 @@ describe("client syncs with a server with storage", () => {
 
     SyncMessagesLog.clear();
 
-    syncServer.restart();
+    await syncServer.restart();
     syncServer.addStorage({
       ourName: "syncServer",
       storage,
@@ -848,7 +851,7 @@ describe("client syncs with a server with storage", () => {
       ]);
 
       // Restart to load from storage
-      client.restart();
+      await client.restart();
       client.addStorage({ storage });
 
       // Load all maps concurrently from storage
@@ -892,7 +895,7 @@ describe("client syncs with a server with storage", () => {
       SyncMessagesLog.clear();
 
       // Restart client with storage
-      client.restart();
+      await client.restart();
       client.connectToSyncServer();
       client.addStorage({ storage });
 
@@ -985,7 +988,7 @@ describe("client syncs with a server with storage", () => {
 
       SyncMessagesLog.clear();
 
-      syncServer.restart();
+      await syncServer.restart();
       syncServer.addStorage({
         ourName: "syncServer",
         storage,
@@ -1021,9 +1024,9 @@ describe("client syncs with a server with storage", () => {
           "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
           "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
           "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
-          "bob -> server | KNOWN ParentGroup sessions: header/76",
           "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
           "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
+          "bob -> server | KNOWN ParentGroup sessions: header/76",
           "bob -> server | KNOWN Group sessions: header/5",
           "bob -> server | KNOWN Map sessions: header/1",
           "bob -> server | KNOWN ParentGroup sessions: header/149",
