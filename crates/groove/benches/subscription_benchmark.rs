@@ -307,6 +307,78 @@ fn filtered_subscription_latency(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure batch insert latency with subscription (exercises delta fast path).
+///
+/// This benchmark inserts multiple documents before calling process(),
+/// which allows the subscription scan to use incremental deltas instead
+/// of full index scans.
+fn batch_insert_subscription_latency(c: &mut Criterion) {
+    let mut group = c.benchmark_group("subscription/batch_insert");
+
+    for scale in [1_000usize, 10_000usize] {
+        let batch_size = 100u64;
+        group.throughput(Throughput::Elements(batch_size));
+        group.bench_with_input(
+            BenchmarkId::new("documents_x100", scale),
+            &scale,
+            |b, &scale| {
+                // Setup
+                let mut qm = create_query_manager();
+                let data = setup_data(&mut qm, scale, USER_ID);
+                let session = create_session(USER_ID);
+
+                // Subscribe to documents
+                let query = qm.query("documents").build();
+                let _sub_id = qm
+                    .subscribe_with_session(query, Some(session.clone()))
+                    .expect("subscribe");
+                qm.process();
+                qm.take_updates(); // Clear initial updates
+
+                let folder_ids: Vec<_> = data
+                    .owned_folders
+                    .iter()
+                    .cycle()
+                    .take(batch_size as usize)
+                    .copied()
+                    .collect();
+                let mut batch_counter = 0u64;
+
+                b.iter(|| {
+                    batch_counter += 1;
+                    let timestamp = current_timestamp();
+
+                    // Insert batch of documents WITHOUT calling process() between each
+                    // This accumulates deltas that the subscription can use
+                    for (i, &folder_id) in folder_ids.iter().enumerate() {
+                        let _handle = qm
+                            .insert_with_session(
+                                "documents",
+                                &[
+                                    Value::Uuid(folder_id),
+                                    Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
+                                    Value::Text("Batch subscription test".to_string()),
+                                    Value::Text(USER_ID.to_string()),
+                                    Value::Timestamp(timestamp + i as u64),
+                                ],
+                                Some(&session),
+                            )
+                            .expect("insert");
+                    }
+
+                    // Single process() call - subscription scan uses delta fast path
+                    qm.process();
+                    let updates = qm.take_updates();
+
+                    assert!(!updates.is_empty(), "should receive batch update");
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // TODO: complex_query_latency disabled - ORDER BY + LIMIT subscription updates
 // need investigation (not receiving updates for top-50 docs)
 criterion_group!(
@@ -314,6 +386,7 @@ criterion_group!(
     single_subscription_latency,
     fanout_latency,
     cold_start_latency,
-    filtered_subscription_latency
+    filtered_subscription_latency,
+    batch_insert_subscription_latency
 );
 criterion_main!(benches);

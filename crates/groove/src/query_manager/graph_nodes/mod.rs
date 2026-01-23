@@ -82,6 +82,7 @@ pub trait RowNode {
     fn is_dirty(&self) -> bool;
 }
 
+pub use crate::query_manager::index::ScanCondition;
 pub use alias::AliasNode;
 pub use array_subquery::ArraySubqueryNode;
 pub use exists_output::ExistsOutputNode;

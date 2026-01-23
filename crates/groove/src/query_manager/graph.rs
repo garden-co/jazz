@@ -13,7 +13,7 @@ use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::array_subquery::ArraySubqueryNode;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::filter::{FilterNode, Predicate};
-use super::graph_nodes::index_scan::{IndexScanNode, ScanCondition};
+use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::join::JoinNode;
 use super::graph_nodes::limit_offset::LimitOffsetNode;
 use super::graph_nodes::materialize::MaterializeNode;
@@ -25,6 +25,7 @@ use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
 use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::BTreeIndex;
+use super::index::ScanCondition;
 use super::query::{Condition, Query};
 use super::session::Session;
 use super::types::{
