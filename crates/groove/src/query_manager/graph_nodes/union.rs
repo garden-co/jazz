@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use crate::query_manager::types::{Tuple, TupleDelta, TupleDescriptor};
 
@@ -11,7 +11,7 @@ pub struct UnionNode {
     /// Output tuple descriptor.
     output_tuple_descriptor: Option<TupleDescriptor>,
     /// Current union of all input tuples.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -20,7 +20,7 @@ impl UnionNode {
     pub fn new() -> Self {
         Self {
             output_tuple_descriptor: None,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: false,
         }
     }
@@ -29,7 +29,7 @@ impl UnionNode {
     pub fn with_tuple_descriptor(tuple_descriptor: TupleDescriptor) -> Self {
         Self {
             output_tuple_descriptor: Some(tuple_descriptor),
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: false,
         }
     }
@@ -49,9 +49,9 @@ impl Default for UnionNode {
 impl TransformNode for UnionNode {
     /// Compute the union of multiple input tuple sets.
     /// For union: a tuple is present if it's in ANY input.
-    fn process(&mut self, inputs: &[&HashSet<Tuple>]) -> TupleDelta {
+    fn process(&mut self, inputs: &[&AHashSet<Tuple>]) -> TupleDelta {
         // Compute new union of tuples
-        let mut new_tuples = HashSet::new();
+        let mut new_tuples = AHashSet::new();
         for tuples in inputs {
             new_tuples.extend(tuples.iter().cloned());
         }
@@ -79,7 +79,7 @@ impl TransformNode for UnionNode {
         }
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
@@ -102,7 +102,7 @@ mod tests {
         tuples.iter().any(|t| t.ids().contains(&id))
     }
 
-    fn tuple_set_contains(set: &HashSet<Tuple>, id: ObjectId) -> bool {
+    fn tuple_set_contains(set: &AHashSet<Tuple>, id: ObjectId) -> bool {
         set.iter().any(|t| t.ids().contains(&id))
     }
 
@@ -112,10 +112,10 @@ mod tests {
         let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
         let id3 = ObjectId::from_uuid(Uuid::from_u128(3));
 
-        let set1: HashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id2)]
+        let set1: AHashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id2)]
             .into_iter()
             .collect();
-        let set2: HashSet<Tuple> = [Tuple::from_id(id2), Tuple::from_id(id3)]
+        let set2: AHashSet<Tuple> = [Tuple::from_id(id2), Tuple::from_id(id3)]
             .into_iter()
             .collect();
 
@@ -135,14 +135,14 @@ mod tests {
         let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
         let id3 = ObjectId::from_uuid(Uuid::from_u128(3));
 
-        let set1: HashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
-        let set2: HashSet<Tuple> = [Tuple::from_id(id2)].into_iter().collect();
+        let set1: AHashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
+        let set2: AHashSet<Tuple> = [Tuple::from_id(id2)].into_iter().collect();
 
         let mut node = UnionNode::new();
         node.process(&[&set1, &set2]);
 
         // Add id3 to set1
-        let new_set1: HashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id3)]
+        let new_set1: AHashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id3)]
             .into_iter()
             .collect();
         let delta = node.process(&[&new_set1, &set2]);
@@ -157,16 +157,16 @@ mod tests {
         let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
         let id2 = ObjectId::from_uuid(Uuid::from_u128(2));
 
-        let set1: HashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id2)]
+        let set1: AHashSet<Tuple> = [Tuple::from_id(id1), Tuple::from_id(id2)]
             .into_iter()
             .collect();
-        let set2: HashSet<Tuple> = HashSet::new();
+        let set2: AHashSet<Tuple> = AHashSet::new();
 
         let mut node = UnionNode::new();
         node.process(&[&set1, &set2]);
 
         // Remove id1 from set1
-        let new_set1: HashSet<Tuple> = [Tuple::from_id(id2)].into_iter().collect();
+        let new_set1: AHashSet<Tuple> = [Tuple::from_id(id2)].into_iter().collect();
         let delta = node.process(&[&new_set1, &set2]);
 
         assert!(delta.added.is_empty());
@@ -178,14 +178,14 @@ mod tests {
     fn union_keeps_id_if_in_any_input() {
         let id1 = ObjectId::from_uuid(Uuid::from_u128(1));
 
-        let set1: HashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
-        let set2: HashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
+        let set1: AHashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
+        let set2: AHashSet<Tuple> = [Tuple::from_id(id1)].into_iter().collect();
 
         let mut node = UnionNode::new();
         node.process(&[&set1, &set2]);
 
         // Remove id1 from set1 but keep in set2
-        let new_set1: HashSet<Tuple> = HashSet::new();
+        let new_set1: AHashSet<Tuple> = AHashSet::new();
         let delta = node.process(&[&new_set1, &set2]);
 
         // id1 should still be present (in set2)

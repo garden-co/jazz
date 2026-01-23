@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap, AHashSet};
+use std::collections::HashSet;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -20,15 +21,15 @@ pub struct MaterializeNode {
     /// Which elements to materialize (indices).
     elements_to_materialize: HashSet<usize>,
     /// Current materialized rows, keyed by ObjectId.
-    rows: HashMap<ObjectId, Row>,
+    rows: AHashMap<ObjectId, Row>,
     /// Current tuples (fully or partially materialized).
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     /// IDs that are pending (loader returned None, still loading).
-    pending_ids: HashSet<ObjectId>,
+    pending_ids: AHashSet<ObjectId>,
     /// IDs to check for content updates (row data may have changed).
-    updated_ids: HashSet<ObjectId>,
+    updated_ids: AHashSet<ObjectId>,
     /// IDs that were deleted (emit removal delta during settle).
-    deleted_ids: HashSet<ObjectId>,
+    deleted_ids: AHashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
@@ -50,11 +51,11 @@ impl MaterializeNode {
             output_descriptor,
             descriptor,
             elements_to_materialize,
-            rows: HashMap::new(),
-            current_tuples: HashSet::new(),
-            pending_ids: HashSet::new(),
-            updated_ids: HashSet::new(),
-            deleted_ids: HashSet::new(),
+            rows: AHashMap::new(),
+            current_tuples: AHashSet::new(),
+            pending_ids: AHashSet::new(),
+            updated_ids: AHashSet::new(),
+            deleted_ids: AHashSet::new(),
             dirty: true,
         }
     }
@@ -76,11 +77,11 @@ impl MaterializeNode {
             output_descriptor,
             descriptor,
             elements_to_materialize: elements,
-            rows: HashMap::new(),
-            current_tuples: HashSet::new(),
-            pending_ids: HashSet::new(),
-            updated_ids: HashSet::new(),
-            deleted_ids: HashSet::new(),
+            rows: AHashMap::new(),
+            current_tuples: AHashSet::new(),
+            pending_ids: AHashSet::new(),
+            updated_ids: AHashSet::new(),
+            deleted_ids: AHashSet::new(),
             dirty: true,
         }
     }
@@ -101,7 +102,7 @@ impl MaterializeNode {
     }
 
     /// Get the set of pending IDs.
-    pub fn pending_ids(&self) -> &HashSet<ObjectId> {
+    pub fn pending_ids(&self) -> &AHashSet<ObjectId> {
         &self.pending_ids
     }
 
@@ -376,7 +377,7 @@ impl MaterializeNode {
     }
 
     /// Get current tuples.
-    pub fn current_tuples(&self) -> &HashSet<Tuple> {
+    pub fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 }

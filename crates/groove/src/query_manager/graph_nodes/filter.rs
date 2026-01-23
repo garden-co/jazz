@@ -1,3 +1,4 @@
+use ahash::AHashSet;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -126,7 +127,7 @@ pub struct FilterNode {
     /// Cached set of element indices required for predicate evaluation.
     required_elements: HashSet<usize>,
     /// Current tuples that pass the filter.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     dirty: bool,
 }
 
@@ -160,7 +161,7 @@ impl FilterNode {
             combined_descriptor,
             predicate,
             required_elements,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         })
     }
@@ -178,7 +179,7 @@ impl FilterNode {
             combined_descriptor,
             predicate,
             required_elements,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -350,7 +351,7 @@ impl RowNode for FilterNode {
         result
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

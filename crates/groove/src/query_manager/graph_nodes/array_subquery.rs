@@ -5,7 +5,8 @@
 //! chosen over shared hash indices to explore subgraph patterns and collect
 //! learnings for future optimizations.
 
-use std::collections::{HashMap, HashSet};
+use ahash::AHashSet;
+use std::collections::HashMap;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -67,7 +68,7 @@ pub struct ArraySubqueryNode {
     instances: HashMap<ObjectId, (Value, Value)>,
 
     /// Current output tuples.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
 
     dirty: bool,
     /// True if the inner table changed (need to reevaluate all instances).
@@ -119,7 +120,7 @@ impl ArraySubqueryNode {
             outer_correlation_col,
             array_column_name,
             instances: HashMap::new(),
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
             inner_dirty: false,
         }
@@ -404,7 +405,7 @@ impl RowNode for ArraySubqueryNode {
         result
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

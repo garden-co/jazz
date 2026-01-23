@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::types::{
@@ -31,7 +31,7 @@ pub struct OutputNode {
     output_tuple_descriptor: TupleDescriptor,
     mode: OutputMode,
     /// Current result tuples (for RowNode trait).
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     /// Ordered tuples for deterministic output (preserves sort order).
     ordered_tuples: Vec<Tuple>,
     /// Pending tuple deltas to deliver.
@@ -54,7 +54,7 @@ impl OutputNode {
             descriptor,
             output_tuple_descriptor,
             mode,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             ordered_tuples: Vec::new(),
             pending_tuple_deltas: Vec::new(),
             held_pending: false,
@@ -74,7 +74,7 @@ impl OutputNode {
             descriptor,
             output_tuple_descriptor,
             mode,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             ordered_tuples: Vec::new(),
             pending_tuple_deltas: Vec::new(),
             held_pending: false,
@@ -258,7 +258,7 @@ impl RowNode for OutputNode {
         input
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

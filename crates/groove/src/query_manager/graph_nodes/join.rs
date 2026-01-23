@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use ahash::{AHashMap, AHashSet};
 
 use crate::object::ObjectId;
 use crate::query_manager::encoding::column_bytes;
@@ -30,21 +30,21 @@ pub struct JoinNode {
     right_local_col_index: usize,
 
     /// Current left tuples.
-    left_tuples: HashSet<Tuple>,
+    left_tuples: AHashSet<Tuple>,
     /// Current right tuples.
-    right_tuples: HashSet<Tuple>,
+    right_tuples: AHashSet<Tuple>,
     /// Current joined output tuples.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
 
     /// Index: join key -> left tuples with that key.
-    left_by_key: HashMap<Vec<u8>, HashSet<Tuple>>,
+    left_by_key: AHashMap<Vec<u8>, AHashSet<Tuple>>,
     /// Index: join key -> right tuples with that key.
-    right_by_key: HashMap<Vec<u8>, HashSet<Tuple>>,
+    right_by_key: AHashMap<Vec<u8>, AHashSet<Tuple>>,
 
     /// Track which output tuples came from which left tuple.
-    left_to_output: HashMap<Vec<ObjectId>, HashSet<Tuple>>,
+    left_to_output: AHashMap<Vec<ObjectId>, AHashSet<Tuple>>,
     /// Track which output tuples came from which right tuple.
-    right_to_output: HashMap<Vec<ObjectId>, HashSet<Tuple>>,
+    right_to_output: AHashMap<Vec<ObjectId>, AHashSet<Tuple>>,
 
     dirty: bool,
 }
@@ -99,13 +99,13 @@ impl JoinNode {
             right_element_index: right_elem_idx,
             left_local_col_index: left_local_idx,
             right_local_col_index: right_local_idx,
-            left_tuples: HashSet::new(),
-            right_tuples: HashSet::new(),
-            current_tuples: HashSet::new(),
-            left_by_key: HashMap::new(),
-            right_by_key: HashMap::new(),
-            left_to_output: HashMap::new(),
-            right_to_output: HashMap::new(),
+            left_tuples: AHashSet::new(),
+            right_tuples: AHashSet::new(),
+            current_tuples: AHashSet::new(),
+            left_by_key: AHashMap::new(),
+            right_by_key: AHashMap::new(),
+            left_to_output: AHashMap::new(),
+            right_to_output: AHashMap::new(),
             dirty: true,
         })
     }
@@ -367,7 +367,7 @@ impl JoinNode {
     }
 
     /// Get current joined tuples.
-    pub fn current_tuples(&self) -> &HashSet<Tuple> {
+    pub fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

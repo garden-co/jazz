@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
 
@@ -17,7 +17,7 @@ pub struct LimitOffsetNode {
     /// Current tuples after limit/offset.
     windowed_tuples: Vec<Tuple>,
     /// HashSet view for trait requirement.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     dirty: bool,
 }
 
@@ -33,7 +33,7 @@ impl LimitOffsetNode {
             offset,
             all_tuples: Vec::new(),
             windowed_tuples: Vec::new(),
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -52,7 +52,7 @@ impl LimitOffsetNode {
             offset,
             all_tuples: Vec::new(),
             windowed_tuples: Vec::new(),
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -155,7 +155,7 @@ impl RowNode for LimitOffsetNode {
         self.compute_tuple_delta(&old_tuples, &self.windowed_tuples, pending)
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

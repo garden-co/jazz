@@ -1,5 +1,5 @@
+use ahash::AHashSet;
 use std::cmp::Ordering;
-use std::collections::HashSet;
 
 use crate::query_manager::encoding::compare_column;
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
@@ -30,7 +30,7 @@ pub struct SortNode {
     /// Current sorted tuples.
     sorted_tuples: Vec<Tuple>,
     /// HashSet view of current tuples (for trait requirement).
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     dirty: bool,
 }
 
@@ -44,7 +44,7 @@ impl SortNode {
             output_tuple_descriptor,
             sort_keys,
             sorted_tuples: Vec::new(),
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -60,7 +60,7 @@ impl SortNode {
             output_tuple_descriptor: tuple_descriptor,
             sort_keys,
             sorted_tuples: Vec::new(),
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -126,9 +126,9 @@ impl RowNode for SortNode {
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
         // Track which tuple IDs are added/removed
-        let mut added_ids: HashSet<_> = input.added.iter().map(|t| t.ids()).collect();
-        let mut removed_ids: HashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
-        let updated_old_ids: HashSet<_> = input.updated.iter().map(|(old, _)| old.ids()).collect();
+        let mut added_ids: AHashSet<_> = input.added.iter().map(|t| t.ids()).collect();
+        let mut removed_ids: AHashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
+        let updated_old_ids: AHashSet<_> = input.updated.iter().map(|(old, _)| old.ids()).collect();
 
         // Handle removals - find and remove
         for tuple in &input.removed {
@@ -189,7 +189,7 @@ impl RowNode for SortNode {
         result
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

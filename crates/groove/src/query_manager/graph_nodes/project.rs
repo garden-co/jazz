@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use crate::query_manager::encoding::project_row;
 use crate::query_manager::types::{
@@ -26,7 +26,7 @@ pub struct ProjectNode {
     /// Vec of (src_col_idx, dst_col_idx) pairs.
     column_mapping: Vec<(usize, usize)>,
     /// Current projected tuples.
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     dirty: bool,
 }
 
@@ -66,7 +66,7 @@ impl ProjectNode {
             output_descriptor,
             output_tuple_descriptor,
             column_mapping,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -105,7 +105,7 @@ impl ProjectNode {
             output_descriptor,
             output_tuple_descriptor,
             column_mapping,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -198,7 +198,7 @@ impl RowNode for ProjectNode {
         result
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 

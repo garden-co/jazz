@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use ahash::AHashSet;
 
 use crate::query_manager::types::{
     CombinedRowDescriptor, RowDescriptor, Tuple, TupleDelta, TupleDescriptor,
@@ -27,7 +27,7 @@ pub struct AliasNode {
     /// Combined descriptor with alias applied.
     combined_descriptor: CombinedRowDescriptor,
     /// Current tuples (pass-through, unchanged).
-    current_tuples: HashSet<Tuple>,
+    current_tuples: AHashSet<Tuple>,
     dirty: bool,
 }
 
@@ -45,7 +45,7 @@ impl AliasNode {
             row_descriptor,
             output_tuple_descriptor,
             combined_descriptor,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -73,7 +73,7 @@ impl AliasNode {
             row_descriptor,
             output_tuple_descriptor,
             combined_descriptor,
-            current_tuples: HashSet::new(),
+            current_tuples: AHashSet::new(),
             dirty: true,
         }
     }
@@ -123,7 +123,7 @@ impl RowNode for AliasNode {
         input
     }
 
-    fn current_tuples(&self) -> &HashSet<Tuple> {
+    fn current_tuples(&self) -> &AHashSet<Tuple> {
         &self.current_tuples
     }
 
