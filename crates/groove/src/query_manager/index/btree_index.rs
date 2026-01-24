@@ -322,7 +322,7 @@ impl BTreeIndex {
 
         match self.find_leaf_for_key(key) {
             Ok(page_id) => {
-                if let Some(BTreePage::Leaf { entries }) = self.get_page(page_id) {
+                if let Some(BTreePage::Leaf { entries, .. }) = self.get_page(page_id) {
                     for entry in entries {
                         if entry.key == key {
                             return entry.row_ids.iter().copied().collect();
@@ -381,7 +381,7 @@ impl BTreeIndex {
 
         // Collect all entries from all loaded leaf pages
         for state in self.pages.values() {
-            if let PageState::Loaded(BTreePage::Leaf { entries }) = state {
+            if let PageState::Loaded(BTreePage::Leaf { entries, .. }) = state {
                 for entry in entries {
                     results.extend(entry.row_ids.iter().copied());
                 }
@@ -515,7 +515,18 @@ impl BTreeIndex {
 
     /// Find the leaf page that should contain the given key.
     fn find_leaf_for_key(&self, key: &[u8]) -> Result<PageId, IndexError> {
+        let (leaf_id, _path) = self.find_leaf_with_path(key)?;
+        Ok(leaf_id)
+    }
+
+    /// Find the leaf page for a key, returning both the leaf ID and the path from root.
+    /// Path is a list of (parent_page_id, child_index) pairs.
+    fn find_leaf_with_path(
+        &self,
+        key: &[u8],
+    ) -> Result<(PageId, Vec<(PageId, usize)>), IndexError> {
         let mut current_page_id = self.meta.root_page_id;
+        let mut path = Vec::new();
 
         loop {
             let page = self
@@ -523,10 +534,11 @@ impl BTreeIndex {
                 .ok_or(IndexError::PageNotLoaded(current_page_id))?;
 
             match page {
-                BTreePage::Leaf { .. } => return Ok(current_page_id),
+                BTreePage::Leaf { .. } => return Ok((current_page_id, path)),
                 BTreePage::Internal { keys, children } => {
                     // Binary search for the correct child
                     let idx = keys.partition_point(|k| k.as_slice() <= key);
+                    path.push((current_page_id, idx));
                     current_page_id = children[idx];
                 }
             }
@@ -552,6 +564,7 @@ impl BTreeIndex {
     }
 
     /// Scan leaves from a starting page, collecting entries in range.
+    /// Follows sibling pointers to traverse multiple leaf pages.
     fn scan_leaves(
         &self,
         start_page_id: PageId,
@@ -559,9 +572,15 @@ impl BTreeIndex {
         max: &Bound<Vec<u8>>,
         results: &mut Vec<ObjectId>,
     ) {
-        // For now, just scan the single leaf we found
-        // TODO: Add sibling pointers for efficient range scans across pages
-        if let Some(BTreePage::Leaf { entries }) = self.get_page(start_page_id) {
+        let mut current_page_id = Some(start_page_id);
+
+        while let Some(page_id) = current_page_id {
+            let (entries, next_leaf) = match self.get_page(page_id) {
+                Some(BTreePage::Leaf { entries, next_leaf }) => (entries, *next_leaf),
+                _ => break,
+            };
+
+            let mut hit_max = false;
             for entry in entries {
                 // Check min bound
                 let skip = match min {
@@ -580,18 +599,27 @@ impl BTreeIndex {
                     Bound::Unbounded => false,
                 };
                 if stop {
+                    hit_max = true;
                     break;
                 }
 
                 results.extend(entry.row_ids.iter().copied());
             }
+
+            // Stop if we've passed the max bound
+            if hit_max {
+                break;
+            }
+
+            // Move to next leaf page via sibling pointer
+            current_page_id = next_leaf;
         }
     }
 
     /// Insert a key-value pair into the tree.
     fn insert_into_tree(&mut self, key: &[u8], row_id: ObjectId) -> Result<(), IndexError> {
-        // Find leaf page
-        let leaf_page_id = self.find_leaf_for_key(key)?;
+        // Find leaf page with path for split propagation
+        let (leaf_page_id, path) = self.find_leaf_with_path(key)?;
 
         // Get leaf and insert
         let need_split = {
@@ -599,7 +627,7 @@ impl BTreeIndex {
                 .get_page_mut(leaf_page_id)
                 .ok_or(IndexError::PageNotLoaded(leaf_page_id))?;
 
-            if let BTreePage::Leaf { entries } = leaf {
+            if let BTreePage::Leaf { entries, .. } = leaf {
                 // Find insertion point
                 let idx = entries.partition_point(|e| e.key.as_slice() < key);
 
@@ -618,42 +646,52 @@ impl BTreeIndex {
         };
 
         if need_split {
-            self.split_leaf(leaf_page_id)?;
+            self.split_leaf(leaf_page_id, &path)?;
         }
 
         Ok(())
     }
 
     /// Split a leaf page that has exceeded MAX_LEAF_ENTRIES.
-    fn split_leaf(&mut self, page_id: PageId) -> Result<(), IndexError> {
-        // Get the entries
-        let (left_entries, right_entries, split_key) = {
+    /// `path` is the list of (parent_page_id, child_index) from root to this leaf.
+    fn split_leaf(&mut self, page_id: PageId, path: &[(PageId, usize)]) -> Result<(), IndexError> {
+        // Get the entries and old next_leaf pointer
+        let (left_entries, right_entries, split_key, old_next_leaf) = {
             let page = self
                 .get_page(page_id)
                 .ok_or(IndexError::PageNotLoaded(page_id))?;
 
-            if let BTreePage::Leaf { entries } = page {
+            if let BTreePage::Leaf { entries, next_leaf } = page {
                 let mid = entries.len() / 2;
                 let split_key = entries[mid].key.clone();
-                (entries[..mid].to_vec(), entries[mid..].to_vec(), split_key)
+                (
+                    entries[..mid].to_vec(),
+                    entries[mid..].to_vec(),
+                    split_key,
+                    *next_leaf,
+                )
             } else {
                 return Err(IndexError::InternalError("expected leaf".to_string()));
             }
         };
 
-        // Create new right page
+        // Create new right page (inherits old next_leaf)
         let right_page_id = self.alloc_page();
         self.pages.insert(
             right_page_id,
             PageState::Loaded(BTreePage::Leaf {
                 entries: right_entries,
+                next_leaf: old_next_leaf,
             }),
         );
         self.dirty_pages.insert(right_page_id);
 
-        // Update left page
-        if let Some(PageState::Loaded(BTreePage::Leaf { entries })) = self.pages.get_mut(&page_id) {
+        // Update left page (next_leaf now points to right page)
+        if let Some(PageState::Loaded(BTreePage::Leaf { entries, next_leaf })) =
+            self.pages.get_mut(&page_id)
+        {
             *entries = left_entries;
+            *next_leaf = Some(right_page_id);
             self.dirty_pages.insert(page_id);
         }
 
@@ -672,9 +710,119 @@ impl BTreeIndex {
             self.meta.root_page_id = new_root_id;
             self.meta_dirty = true;
         } else {
-            // Insert into parent (simplified - assumes parent is already loaded)
-            // For a complete implementation, would need to track path and propagate splits
-            // TODO: Implement proper parent propagation
+            // Insert separator key and new child pointer into parent
+            self.insert_into_internal(path, split_key, right_page_id)?;
+        }
+
+        Ok(())
+    }
+
+    /// Insert a separator key and child pointer into an internal node.
+    /// May recursively split internal nodes if they overflow.
+    fn insert_into_internal(
+        &mut self,
+        path: &[(PageId, usize)],
+        key: Vec<u8>,
+        new_child: PageId,
+    ) -> Result<(), IndexError> {
+        // Get the parent from the path
+        let (parent_id, child_idx) = path
+            .last()
+            .ok_or_else(|| IndexError::InternalError("empty path for non-root split".into()))?;
+        let parent_id = *parent_id;
+        let child_idx = *child_idx;
+
+        // Insert into parent's keys and children
+        let need_split = {
+            let parent = self
+                .get_page_mut(parent_id)
+                .ok_or(IndexError::PageNotLoaded(parent_id))?;
+
+            if let BTreePage::Internal { keys, children } = parent {
+                // Insert key at child_idx (between children[child_idx] and children[child_idx+1])
+                keys.insert(child_idx, key);
+                children.insert(child_idx + 1, new_child);
+
+                // Check if we need to split this internal node too
+                // Use same threshold as leaves for simplicity
+                keys.len() > MAX_LEAF_ENTRIES
+            } else {
+                return Err(IndexError::InternalError("expected internal node".into()));
+            }
+        };
+
+        self.dirty_pages.insert(parent_id);
+
+        if need_split {
+            self.split_internal(parent_id, &path[..path.len() - 1])?;
+        }
+
+        Ok(())
+    }
+
+    /// Split an internal node that has exceeded capacity.
+    fn split_internal(
+        &mut self,
+        page_id: PageId,
+        path: &[(PageId, usize)],
+    ) -> Result<(), IndexError> {
+        // Get keys and children
+        let (left_keys, right_keys, promote_key, left_children, right_children) = {
+            let page = self
+                .get_page(page_id)
+                .ok_or(IndexError::PageNotLoaded(page_id))?;
+
+            if let BTreePage::Internal { keys, children } = page {
+                let mid = keys.len() / 2;
+                // The middle key gets promoted to parent, not kept in either child
+                let promote_key = keys[mid].clone();
+                (
+                    keys[..mid].to_vec(),
+                    keys[mid + 1..].to_vec(),
+                    promote_key,
+                    children[..=mid].to_vec(),
+                    children[mid + 1..].to_vec(),
+                )
+            } else {
+                return Err(IndexError::InternalError("expected internal node".into()));
+            }
+        };
+
+        // Create new right internal page
+        let right_page_id = self.alloc_page();
+        self.pages.insert(
+            right_page_id,
+            PageState::Loaded(BTreePage::Internal {
+                keys: right_keys,
+                children: right_children,
+            }),
+        );
+        self.dirty_pages.insert(right_page_id);
+
+        // Update left page
+        if let Some(PageState::Loaded(BTreePage::Internal { keys, children })) =
+            self.pages.get_mut(&page_id)
+        {
+            *keys = left_keys;
+            *children = left_children;
+            self.dirty_pages.insert(page_id);
+        }
+
+        // Handle root split vs propagate up
+        if page_id == self.meta.root_page_id {
+            let new_root_id = self.alloc_page();
+            self.pages.insert(
+                new_root_id,
+                PageState::Loaded(BTreePage::Internal {
+                    keys: vec![promote_key],
+                    children: vec![page_id, right_page_id],
+                }),
+            );
+            self.dirty_pages.insert(new_root_id);
+            self.meta.root_page_id = new_root_id;
+            self.meta_dirty = true;
+        } else {
+            self.insert_into_internal(path, promote_key, right_page_id)?;
         }
 
         Ok(())
@@ -691,7 +839,7 @@ impl BTreeIndex {
                 .get_page_mut(leaf_page_id)
                 .ok_or(IndexError::PageNotLoaded(leaf_page_id))?;
 
-            if let BTreePage::Leaf { entries } = leaf {
+            if let BTreePage::Leaf { entries, .. } = leaf {
                 // Find the key
                 if let Some(idx) = entries.iter().position(|e| e.key == key) {
                     entries[idx].row_ids.remove(&row_id);
@@ -1055,5 +1203,174 @@ mod tests {
         index.insert(b"test2@example.com", ObjectId::new()).unwrap();
         index.clear_deltas();
         assert_eq!(index.delta_epoch(), 2);
+    }
+
+    #[test]
+    fn find_leaf_returns_correct_leaf() {
+        let mut index = BTreeIndex::new("test", "key");
+        index.process_meta_load(None);
+
+        // Insert 100 entries with BE encoding
+        for i in 0..100i32 {
+            let row = ObjectId::new();
+            index.insert(&(i * 10).to_be_bytes(), row).unwrap();
+        }
+
+        // Search for key 250
+        let search_key = 250i32.to_be_bytes();
+        let leaf_id = index.find_leaf_for_key(&search_key).unwrap();
+
+        // Get the first key in this leaf
+        if let Some(BTreePage::Leaf { entries, .. }) = index.get_page(leaf_id) {
+            let first_key = i32::from_be_bytes(entries[0].key.clone().try_into().unwrap());
+            let last_key =
+                i32::from_be_bytes(entries.last().unwrap().key.clone().try_into().unwrap());
+            assert!(
+                first_key <= 250 && 250 <= last_key,
+                "Leaf should contain key 250, but leaf has keys {} to {}",
+                first_key,
+                last_key
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_pointers_after_split() {
+        let mut index = BTreeIndex::new("test", "key");
+        index.process_meta_load(None);
+
+        // Insert enough to cause a split
+        for i in 0..70u32 {
+            let row = ObjectId::new();
+            index.insert(&i.to_be_bytes(), row).unwrap();
+        }
+
+        // Find first leaf and follow sibling chain
+        let first_leaf_id = index.find_leftmost_leaf().unwrap();
+
+        let mut leaf_count = 0;
+        let mut total_entries = 0;
+        let mut current = Some(first_leaf_id);
+
+        while let Some(page_id) = current {
+            if let Some(BTreePage::Leaf { entries, next_leaf }) = index.get_page(page_id) {
+                leaf_count += 1;
+                total_entries += entries.len();
+                current = *next_leaf;
+            } else {
+                break;
+            }
+        }
+
+        assert!(
+            leaf_count >= 2,
+            "Expected at least 2 leaf pages after 70 inserts, got {}",
+            leaf_count
+        );
+        assert_eq!(
+            total_entries, 70,
+            "Expected 70 total entries across all leaves, got {}",
+            total_entries
+        );
+    }
+
+    #[test]
+    fn range_scan_spans_multiple_leaves() {
+        let mut index = BTreeIndex::new("users", "score");
+        index.process_meta_load(None);
+
+        // Insert 100 entries to ensure we get multiple leaf pages
+        // (MAX_LEAF_ENTRIES = 64, so this will cause at least one split)
+        // Use big-endian encoding so byte order matches numeric order
+        let mut rows: Vec<(i32, ObjectId)> = Vec::new();
+        for i in 0..100i32 {
+            let row = ObjectId::new();
+            let key = i * 10; // Keys: 0, 10, 20, ..., 990
+            index.insert(&key.to_be_bytes(), row).unwrap();
+            rows.push((key, row));
+        }
+
+        // Verify we have multiple pages (tree depth > 0 means we split)
+        assert!(
+            index.meta.root_page_id.0 > 0 || index.pages.len() > 1,
+            "Expected multiple pages after inserting 100 entries, got {} pages",
+            index.pages.len()
+        );
+
+        // First verify scan_all works
+        let all_results = index.scan_all();
+        assert_eq!(
+            all_results.len(),
+            100,
+            "scan_all should return all 100 entries"
+        );
+
+        // Range scan [250, 750] should include keys 250, 260, ..., 750
+        // That's (750 - 250) / 10 + 1 = 51 entries
+        let results = index.range_scan(
+            &Bound::Included(250i32.to_be_bytes().to_vec()),
+            &Bound::Included(750i32.to_be_bytes().to_vec()),
+        );
+
+        // Collect expected rows
+        let expected: Vec<ObjectId> = rows
+            .iter()
+            .filter(|(k, _)| *k >= 250 && *k <= 750)
+            .map(|(_, id)| *id)
+            .collect();
+
+        // Also check an unbounded scan to verify sibling traversal
+        let unbounded_results = index.range_scan(&Bound::Unbounded, &Bound::Unbounded);
+        assert_eq!(
+            unbounded_results.len(),
+            100,
+            "Unbounded range scan should return all 100 entries, got {}",
+            unbounded_results.len()
+        );
+
+        assert_eq!(
+            results.len(),
+            expected.len(),
+            "Range scan should return {} entries but got {}. \
+             This likely means range_scan doesn't traverse sibling pages.",
+            expected.len(),
+            results.len()
+        );
+
+        for id in &expected {
+            assert!(results.contains(id), "Missing expected row from range scan");
+        }
+    }
+
+    #[test]
+    fn sibling_chain_complete_after_multiple_splits() {
+        let mut index = BTreeIndex::new("test", "key");
+        index.process_meta_load(None);
+
+        // Insert 100 entries (causes 2+ splits with MAX_LEAF_ENTRIES=64)
+        for i in 0..100i32 {
+            let row = ObjectId::new();
+            index.insert(&(i * 10).to_be_bytes(), row).unwrap();
+        }
+
+        // Count entries via sibling chain - this verifies all leaves are reachable
+        let first_leaf_id = index.find_leftmost_leaf().unwrap();
+        let mut total_entries = 0;
+        let mut current = Some(first_leaf_id);
+
+        while let Some(page_id) = current {
+            if let Some(BTreePage::Leaf { entries, next_leaf }) = index.get_page(page_id) {
+                total_entries += entries.len();
+                current = *next_leaf;
+            } else {
+                break;
+            }
+        }
+
+        assert_eq!(
+            total_entries, 100,
+            "Expected 100 entries reachable via sibling chain, got {}",
+            total_entries
+        );
     }
 }

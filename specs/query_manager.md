@@ -339,8 +339,6 @@ crates/groove/src/query_manager/
 
 ### Medium Priority
 
-- **B-Tree range scan sibling pointers**: `range_scan()` only scans a single leaf page. Large ranges may miss entries. Need sibling pointers in leaf pages.
-
 - **Self-referential INHERITS**: Currently disallowed. Common pattern for hierarchical data (folders → parent_id) needs iterative settlement with depth limit.
 
 - **UUID format mismatch**: Session claim comparison uses Debug format which may differ from JSON string format, causing false negatives in IN checks.
