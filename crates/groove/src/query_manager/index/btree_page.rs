@@ -58,6 +58,8 @@ pub enum BTreePage {
     Leaf {
         /// Entries sorted by key. Each entry maps a key to a set of row IDs.
         entries: Vec<LeafEntry>,
+        /// Pointer to the next leaf page (for range scans).
+        next_leaf: Option<PageId>,
     },
 }
 
@@ -85,6 +87,7 @@ impl BTreePage {
     pub fn new_leaf() -> Self {
         BTreePage::Leaf {
             entries: Vec::new(),
+            next_leaf: None,
         }
     }
 
@@ -125,13 +128,17 @@ impl BTreePage {
                     buf.extend_from_slice(key);
                 }
             }
-            BTreePage::Leaf { entries } => {
+            BTreePage::Leaf { entries, next_leaf } => {
                 // Type byte
                 buf.push(1);
 
                 // Entry count
                 let entry_count = entries.len() as u16;
                 buf.extend_from_slice(&entry_count.to_le_bytes());
+
+                // Next leaf pointer (0 = None, otherwise page_id + 1)
+                let next_leaf_val = next_leaf.map(|p| p.0 + 1).unwrap_or(0);
+                buf.extend_from_slice(&next_leaf_val.to_le_bytes());
 
                 // Entries
                 for entry in entries {
@@ -208,6 +215,18 @@ impl BTreePage {
                 let entry_count = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
                 pos += 2;
 
+                // Next leaf pointer
+                if pos + 8 > data.len() {
+                    return None;
+                }
+                let next_leaf_val = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+                let next_leaf = if next_leaf_val == 0 {
+                    None
+                } else {
+                    Some(PageId(next_leaf_val - 1))
+                };
+                pos += 8;
+
                 let mut entries = Vec::with_capacity(entry_count);
                 for _ in 0..entry_count {
                     // Key
@@ -244,7 +263,7 @@ impl BTreePage {
                     entries.push(LeafEntry { key, row_ids });
                 }
 
-                Some(BTreePage::Leaf { entries })
+                Some(BTreePage::Leaf { entries, next_leaf })
             }
             _ => None,
         }
@@ -261,7 +280,7 @@ impl BTreePage {
                     size += key.capacity() + std::mem::size_of::<Vec<u8>>();
                 }
             }
-            BTreePage::Leaf { entries } => {
+            BTreePage::Leaf { entries, .. } => {
                 for entry in entries {
                     size += entry.key.capacity();
                     size += entry.row_ids.capacity() * std::mem::size_of::<ObjectId>();
@@ -339,12 +358,15 @@ mod tests {
         entries.push(LeafEntry::new(b"key1".to_vec(), row1));
         entries.push(LeafEntry::new(b"key2".to_vec(), row2));
 
-        let page = BTreePage::Leaf { entries };
+        let page = BTreePage::Leaf {
+            entries,
+            next_leaf: None,
+        };
         let serialized = page.serialize();
         let deserialized = BTreePage::deserialize(&serialized).unwrap();
 
         match deserialized {
-            BTreePage::Leaf { entries } => {
+            BTreePage::Leaf { entries, .. } => {
                 assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0].key, b"key1");
                 assert!(entries[0].row_ids.contains(&row1));
@@ -386,7 +408,7 @@ mod tests {
         let deserialized = BTreePage::deserialize(&serialized).unwrap();
 
         match deserialized {
-            BTreePage::Leaf { entries } => {
+            BTreePage::Leaf { entries, .. } => {
                 assert!(entries.is_empty());
             }
             _ => panic!("expected leaf"),
@@ -420,13 +442,14 @@ mod tests {
         let entry = LeafEntry::with_row_ids(b"key".to_vec(), row_ids.clone());
         let page = BTreePage::Leaf {
             entries: vec![entry],
+            next_leaf: None,
         };
 
         let serialized = page.serialize();
         let deserialized = BTreePage::deserialize(&serialized).unwrap();
 
         match deserialized {
-            BTreePage::Leaf { entries } => {
+            BTreePage::Leaf { entries, .. } => {
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].row_ids.len(), 2);
                 assert!(entries[0].row_ids.contains(&row1));
