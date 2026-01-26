@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.20.5
+
+### Patch Changes
+
+- 23a5d7c: Fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- 0b95532: Fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+  - cojson@0.20.5
+  - cojson-storage-indexeddb@0.20.5
+  - cojson-transport-ws@0.20.5
+
 ## 0.20.4
 
 ### Patch Changes
