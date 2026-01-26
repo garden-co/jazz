@@ -231,9 +231,14 @@ export class RawGroup<
     TimeBasedEntry<ParentGroupReferenceRole>
   >;
 
+  // Cache for key-for-key revelations: maps encrypted keyID to set of encrypting keyIDs
+  // This avoids iterating through all keys in getUncachedReadKey and findValidParentKeys
+  private declare keyRevelations: Map<KeyID, Set<KeyID>>;
+
   protected resetInternalState() {
     super.resetInternalState();
     this.parentGroupsChanges = new Map();
+    this.keyRevelations = new Map();
     this._lastReadableKeyId = undefined;
   }
 
@@ -249,25 +254,49 @@ export class RawGroup<
   }
 
   // We override the handleNewTransaction hook from CoMap to build the parent group cache
+  // and key revelations cache
   override handleNewTransaction(transaction: DecryptedTransaction): void {
     if (!this.parentGroupsChanges) {
       this.parentGroupsChanges = new Map();
     }
+    if (!this.keyRevelations) {
+      this.keyRevelations = new Map();
+    }
 
-    // Build parent group cache incrementally
+    // Build caches incrementally
     for (const changeValue of transaction.changes) {
       const change = changeValue as {
         op: "set" | "del";
         key: string;
         value?: any;
       };
-      if (change.op === "set" && isParentGroupReference(change.key)) {
-        this.updateParentGroupCache(
-          change.key,
-          change.value as ParentGroupReferenceRole,
-          transaction.madeAt,
-        );
+      if (change.op === "set") {
+        if (isParentGroupReference(change.key)) {
+          this.updateParentGroupCache(
+            change.key,
+            change.value as ParentGroupReferenceRole,
+            transaction.madeAt,
+          );
+        } else if (isKeyForKeyField(change.key)) {
+          this.updateKeyRevelationsCache(change.key);
+        }
       }
+    }
+  }
+
+  private updateKeyRevelationsCache(key: string): void {
+    // Key format: key_encryptedID_for_key_encryptingID
+    const parts = key.split("_for_");
+    if (parts.length === 2) {
+      const encryptedKeyID = parts[0] as KeyID;
+      const encryptingKeyID = parts[1] as KeyID;
+
+      let revelations = this.keyRevelations.get(encryptedKeyID);
+      if (!revelations) {
+        revelations = new Set();
+        this.keyRevelations.set(encryptedKeyID, revelations);
+      }
+      revelations.add(encryptingKeyID);
     }
   }
 
@@ -791,16 +820,19 @@ export class RawGroup<
     }
 
     // Try to find indirect revelation through previousKeys
-    for (const co of this.keys()) {
-      if (isKeyForKeyField(co) && co.startsWith(keyID)) {
-        const encryptingKeyID = co.split("_for_")[1] as KeyID;
+    // Use keyRevelations cache instead of iterating through all keys
+    const revelationsForKey = this.keyRevelations.get(keyID);
+    if (revelationsForKey) {
+      for (const encryptingKeyID of revelationsForKey) {
         const encryptingKeySecret = this.getReadKey(encryptingKeyID);
 
         if (!encryptingKeySecret) {
           continue;
         }
 
-        const encryptedPreviousKey = this.get(co)!;
+        const encryptedPreviousKey = this.get(
+          `${keyID}_for_${encryptingKeyID}`,
+        )!;
 
         const secret = this.crypto.decryptKeySecret(
           {
@@ -822,38 +854,34 @@ export class RawGroup<
     }
 
     // try to find revelation to parent group read keys
-    for (const co of this.keys()) {
-      if (isParentGroupReference(co)) {
-        const parentGroupID = getParentGroupId(co);
-        const parentGroup = core.node.expectCoValueLoaded(
-          parentGroupID,
-          "Expected parent group to be loaded",
-        );
+    // Use parentGroupsChanges cache instead of iterating through all keys
+    for (const parentGroupID of this.parentGroupsChanges.keys()) {
+      const parentGroup = core.node.expectCoValueLoaded(
+        parentGroupID,
+        "Expected parent group to be loaded",
+      );
 
-        const parentKeys = this.findValidParentKeys(keyID, parentGroup);
+      const parentKeys = this.findValidParentKeys(keyID, parentGroup);
 
-        for (const parentKey of parentKeys) {
-          const revelationForParentKey = this.get(
-            `${keyID}_for_${parentKey.id}`,
+      for (const parentKey of parentKeys) {
+        const revelationForParentKey = this.get(`${keyID}_for_${parentKey.id}`);
+
+        if (revelationForParentKey) {
+          const secret = parentGroup.node.crypto.decryptKeySecret(
+            {
+              encryptedID: keyID,
+              encryptingID: parentKey.id,
+              encrypted: revelationForParentKey,
+            },
+            parentKey.secret,
           );
 
-          if (revelationForParentKey) {
-            const secret = parentGroup.node.crypto.decryptKeySecret(
-              {
-                encryptedID: keyID,
-                encryptingID: parentKey.id,
-                encrypted: revelationForParentKey,
-              },
-              parentKey.secret,
+          if (secret) {
+            return secret as KeySecret;
+          } else {
+            logger.warn(
+              `Encrypting parent ${parentKey.id} key didn't decrypt ${keyID}`,
             );
-
-            if (secret) {
-              return secret as KeySecret;
-            } else {
-              logger.warn(
-                `Encrypting parent ${parentKey.id} key didn't decrypt ${keyID}`,
-              );
-            }
           }
         }
       }
@@ -865,9 +893,10 @@ export class RawGroup<
   private findValidParentKeys(keyID: KeyID, parentGroup: CoValueCore) {
     const validParentKeys: { id: KeyID; secret: KeySecret }[] = [];
 
-    for (const co of this.keys()) {
-      if (isKeyForKeyField(co) && co.startsWith(keyID)) {
-        const encryptingKeyID = co.split("_for_")[1] as KeyID;
+    // Use keyRevelations cache instead of iterating through all keys
+    const revelationsForKey = this.keyRevelations.get(keyID);
+    if (revelationsForKey) {
+      for (const encryptingKeyID of revelationsForKey) {
         const encryptingKeySecret = parentGroup.getReadKey(encryptingKeyID);
 
         if (!encryptingKeySecret) {
