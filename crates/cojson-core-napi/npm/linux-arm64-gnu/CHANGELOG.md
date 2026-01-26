@@ -1,5 +1,7 @@
 # cojson-core-napi-linux-arm64-gnu
 
+## 0.20.6
+
 ## 0.20.5
 
 ## 0.20.4

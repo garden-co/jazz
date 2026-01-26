@@ -1,5 +1,11 @@
 # jazz-react-tailwind-starter
 
+## 0.0.227
+
+### Patch Changes
+
+- jazz-tools@0.20.6
+
 ## 0.0.226
 
 ### Patch Changes
