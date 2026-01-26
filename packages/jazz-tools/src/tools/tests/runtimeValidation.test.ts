@@ -1,10 +1,9 @@
 import { beforeEach, describe, test, expect, vi } from "vitest";
+import { co, z } from "../exports.js";
 import {
-  co,
-  z,
-  setDefaultValidationMode,
   getDefaultValidationMode,
-} from "../exports.js";
+  setDefaultValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { expectValidationError } from "./utils.js";
 

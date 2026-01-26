@@ -68,7 +68,6 @@ export {
   getUnloadedCoValueWithoutId,
   setDefaultSchemaPermissions,
   setDefaultValidationMode,
-  getDefaultValidationMode,
   deleteCoValues,
   getJazzErrorType,
 } from "./internal.js";
