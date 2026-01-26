@@ -179,25 +179,43 @@ export async function createAccountAs<S extends AccountSchema<any, any>>(
   return account;
 }
 
-export async function expectValidationError(
-  fn: () => any | Promise<any>,
-  expectedIssues?: any,
-) {
-  let thrown = false;
-  try {
-    await fn();
-  } catch (e: any) {
-    thrown = true;
-    if (e?.name !== "ZodError") {
-      throw e;
-    }
-
-    if (expectedIssues) {
-      expect(e.issues).toEqual(expectedIssues);
-    }
+function verifyValidationError(e: any, expectedIssues?: any) {
+  if (e?.name !== "ZodError") {
+    throw e;
   }
 
-  if (!thrown) {
-    throw new Error("Expected validation error, but no error was thrown");
+  if (expectedIssues) {
+    expect(e.issues).toEqual(expectedIssues);
+  }
+}
+
+export function expectValidationError(
+  fn: () => Promise<any>,
+  expectedIssues?: any,
+): Promise<void>;
+export function expectValidationError(
+  fn: () => any,
+  expectedIssues?: any,
+): void;
+export function expectValidationError(
+  fn: () => any,
+  expectedIssues?: any,
+): void | Promise<void> {
+  try {
+    const result = fn();
+
+    if (result instanceof Promise) {
+      return result
+        .then(() => {
+          throw new Error("Expected validation error, but no error was thrown");
+        })
+        .catch((e: any) => {
+          verifyValidationError(e, expectedIssues);
+        });
+    } else {
+      throw new Error("Expected validation error, but no error was thrown");
+    }
+  } catch (e: any) {
+    verifyValidationError(e, expectedIssues);
   }
 }

@@ -194,7 +194,7 @@ describe("Creating and finding unique CoMaps", async () => {
       title: z.string(),
     });
 
-    expectValidationError(async () => {
+    await expectValidationError(async () => {
       await Event.upsertUnique({
         value: {
           // @ts-expect-error - number is not a string
@@ -220,7 +220,7 @@ describe("Creating and finding unique CoMaps", async () => {
       owner: group,
     });
 
-    expectValidationError(async () => {
+    await expectValidationError(async () => {
       await Event.upsertUnique({
         value: {
           // @ts-expect-error - number is not a string
