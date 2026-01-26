@@ -710,8 +710,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     deleteCount: number,
     ...items: CoFieldInit<CoListItem<L>>[]
   ): CoListItem<L>[] {
-    const deleted = this.coList.slice(start, start + deleteCount);
-
     const validationMode = resolveValidationMode();
     if (validationMode !== "loose" && this.coListSchema) {
       const schema = z.array(this.getItemSchema());
@@ -719,6 +717,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         CoListItem<L>
       >[];
     }
+    const deleted = this.coList.slice(start, start + deleteCount);
 
     for (
       let idxToDelete = start + deleteCount - 1;

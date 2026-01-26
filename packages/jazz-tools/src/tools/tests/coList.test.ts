@@ -401,6 +401,8 @@ describe("Simple CoList operations", async () => {
           // @ts-expect-error - number is not a string
           () => list.$jazz.push("test", 2),
         );
+
+        expect(list).toEqual(["bread", "butter", "onion"]);
       });
 
       test("push with validation errors with loose validation", () => {
@@ -499,6 +501,8 @@ describe("Simple CoList operations", async () => {
           // @ts-expect-error - number is not a string
           () => list.$jazz.unshift("test", 2),
         );
+
+        expect(list).toEqual(["bread", "butter", "onion"]);
       });
 
       test("unshift with validation errors with loose validation", () => {
@@ -624,8 +628,10 @@ describe("Simple CoList operations", async () => {
 
         expectValidationError(
           // @ts-expect-error - number is not a string
-          () => list.$jazz.splice(1, 0, "test", 2),
+          () => list.$jazz.splice(0, 1, "test", 2),
         );
+
+        expect(list).toEqual(["bread", "butter", "onion"]);
       });
     });
 
