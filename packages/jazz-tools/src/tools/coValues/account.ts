@@ -67,9 +67,6 @@ export type AccountCreationProps = {
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
   declare [TypeSym]: "Account";
-  static {
-    this.prototype[TypeSym] = "Account";
-  }
 
   /**
    * Jazz methods for Accounts are inside this property.

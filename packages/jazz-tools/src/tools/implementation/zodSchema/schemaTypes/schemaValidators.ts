@@ -1,4 +1,4 @@
-import { Account, Group, isCoValueSchema, TypeSym } from "../../../internal.js";
+import { Account, Group, isCoValueSchema } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import type { CoreCoValueSchema } from "./CoValueSchema.js";
 
@@ -14,11 +14,11 @@ export function generateValidationSchemaFromItem(item: InputSchema): z.ZodType {
   // This is because users can define the schema
   // using Group class instead of GroupSchema
   // e.g. `co.map({ group: Group })` vs `co.map({ group: co.group() })`
-  if ("prototype" in item && item.prototype?.[TypeSym] === "Group") {
+  if (item === Group) {
     return z.instanceof(Group);
   }
   // Same as above: `co.map({ account: Account })` vs `co.map({ account: co.account() })`
-  if ("prototype" in item && item.prototype?.[TypeSym] === "Account") {
+  if (item === Account) {
     return z.instanceof(Account);
   }
 
