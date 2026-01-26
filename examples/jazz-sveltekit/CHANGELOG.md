@@ -1,5 +1,11 @@
 # jazz-sveltekit
 
+## 0.0.49
+
+### Patch Changes
+
+- jazz-tools@0.20.6
+
 ## 0.0.48
 
 ### Patch Changes

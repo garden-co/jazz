@@ -1,5 +1,12 @@
 # passkey-rn
 
+## 0.0.11
+
+### Patch Changes
+
+- jazz-tools@0.20.6
+- cojson-core-rn@0.20.6
+
 ## 0.0.10
 
 ### Patch Changes

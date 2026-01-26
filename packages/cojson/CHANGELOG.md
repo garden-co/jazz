@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.6
+
+### Patch Changes
+
+- cdf8274: Improve performance of read key lookups in groups by using cached indices instead of iterating through all keys
+  - cojson-core-wasm@0.20.6
+  - cojson-core-rn@0.20.6
+  - cojson-core-napi@0.20.6
+
 ## 0.20.5
 
 ### Patch Changes

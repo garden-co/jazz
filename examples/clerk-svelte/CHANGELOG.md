@@ -1,5 +1,11 @@
 # clerk-svelte
 
+## 0.0.5
+
+### Patch Changes
+
+- jazz-tools@0.20.6
+
 ## 0.0.4
 
 ### Patch Changes
