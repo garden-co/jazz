@@ -153,7 +153,7 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   trackLoadingPerformance(source: string) {
-    if (!SubscriptionScope.isProfilingEnabled) {
+    if (!SubscriptionScope.isProfilingEnabled || !crypto.randomUUID) {
       return;
     }
 
