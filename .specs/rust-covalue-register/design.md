@@ -86,11 +86,171 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
 
 ### Component Responsibilities
 
+#### CryptoProvider Pattern
+
+The Register follows the same pattern as `SessionLogImpl` - created by the platform-specific crypto provider:
+
+```
+CryptoProvider (abstract)
+├── createSessionLog() → SessionLogImpl     // Existing
+├── createRegister() → RegisterImpl         // NEW
+│
+├── NapiCrypto (Node.js)
+│   └── creates RegisterAdapter wrapping cojson-core-napi Register
+├── WasmCrypto (Browser)
+│   └── creates RegisterAdapter wrapping cojson-core-wasm Register
+└── RNCrypto (React Native)
+    └── creates RegisterAdapter wrapping cojson-core-rn Register
+```
+
+#### TypeScript: `RegisterImpl` Interface (NEW)
+
+```typescript
+// packages/cojson/src/crypto/crypto.ts
+
+export interface RegisterImpl {
+  // Lifecycle
+  free(id: string): boolean;
+  freeAll(): void;
+  size(): number;
+  
+  // Header operations
+  setHeader(id: string, headerJson: string): void;
+  getHeader(id: string): string | undefined;
+  hasHeader(id: string): boolean;
+  
+  // Session map operations
+  createSessionMap(id: string): void;
+  hasSessionMap(id: string): boolean;
+  
+  // Transaction operations
+  addTransactions(
+    id: string,
+    sessionId: string,
+    signerId: string | null,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean,
+  ): void;
+  
+  makeNewPrivateTransaction(
+    id: string,
+    sessionId: string,
+    signerId: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | null,
+    madeAt: number,
+  ): string;  // Returns { signature, transaction } JSON
+  
+  makeNewTrustingTransaction(
+    id: string,
+    sessionId: string,
+    signerId: string,
+    changesJson: string,
+    metaJson: string | null,
+    madeAt: number,
+  ): string;  // Returns { signature, transaction } JSON
+  
+  // Session queries
+  getSession(id: string, sessionId: string): string | undefined;
+  getSessionIds(id: string): string[];
+  getSessionTxCount(id: string, sessionId: string): number;
+  getSessionTransactions(id: string, sessionId: string, fromIndex: number): string;
+  getLastSignature(id: string, sessionId: string): string | undefined;
+  getSignatureAfter(id: string, sessionId: string, txIndex: number): string | undefined;
+  
+  // Known state
+  getKnownState(id: string): string;
+  getKnownStateWithStreaming(id: string): string | undefined;
+  setStreamingKnownState(id: string, streamingJson: string): void;
+  
+  // Deletion
+  markAsDeleted(id: string): void;
+  isDeleted(id: string): boolean;
+  
+  // Decryption
+  decryptTransaction(id: string, sessionId: string, txIndex: number, keySecret: string): string | undefined;
+  decryptTransactionMeta(id: string, sessionId: string, txIndex: number, keySecret: string): string | undefined;
+}
+```
+
+#### TypeScript: `CryptoProvider` (MODIFIED)
+
+```typescript
+// packages/cojson/src/crypto/crypto.ts
+
+export abstract class CryptoProvider {
+  // ... existing methods ...
+  
+  abstract createSessionLog(
+    coID: RawCoID,
+    sessionID: SessionID,
+    signerID?: SignerID,
+  ): SessionLogImpl;
+  
+  // NEW: Create the register (singleton per crypto instance)
+  abstract createRegister(): RegisterImpl;
+}
+```
+
+#### Platform Implementations
+
+```typescript
+// packages/cojson/src/crypto/NapiCrypto.ts
+import { Register } from "cojson-core-napi";
+
+export class NapiCrypto extends CryptoProvider {
+  private _register: RegisterImpl | undefined;
+  
+  createRegister(): RegisterImpl {
+    if (!this._register) {
+      this._register = new RegisterAdapter(new Register());
+    }
+    return this._register;
+  }
+}
+
+class RegisterAdapter implements RegisterImpl {
+  constructor(private readonly register: Register) {}
+  
+  setHeader(id: string, headerJson: string): void {
+    this.register.setHeader(id, headerJson);
+  }
+  
+  // ... implement all methods delegating to native Register ...
+}
+```
+
+```typescript
+// packages/cojson/src/crypto/WasmCrypto.ts
+import { Register } from "cojson-core-wasm";
+
+export class WasmCrypto extends CryptoProvider {
+  createRegister(): RegisterImpl {
+    // Same pattern as NapiCrypto
+  }
+}
+```
+
+```typescript
+// packages/cojson/src/crypto/RNCrypto.ts
+import { Register } from "cojson-core-rn";
+
+export class RNCrypto extends CryptoProvider {
+  createRegister(): RegisterImpl {
+    // Same pattern as NapiCrypto
+  }
+}
+```
+
 #### Rust: `CoValueRegister`
 - **Storage**: Owns all `CoValueHeader` and `SessionMap` instances
 - **Lifecycle**: `create`, `free`, `freeAll` operations
 - **Header access**: `set_header`, `get_header`, `has_header`
 - **Session map access**: `get_session_map`, `create_session_map`
+- **Exposed via**: NAPI, WASM, UniFFI bindings
 
 #### Rust: `SessionMap`
 - **Session storage**: HashMap of `SessionID` → `SessionLog`
@@ -107,14 +267,33 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
 - **Crypto delegation**: Uses existing `SessionLogInternal` for verification/decryption
 
 #### TypeScript: `SessionMap.ts` (Thin Wrapper)
-- Delegates all operations to Rust via FFI
+- Gets `RegisterImpl` from `CryptoProvider`
+- Delegates all operations to Register via the interface
 - Converts between TypeScript branded types and JSON strings
 - Maintains API compatibility with existing code
 
 #### TypeScript: `VerifiedState`
-- Thin wrapper holding reference to Rust data
+- Thin wrapper holding reference to Rust data via Register
 - `newContentSince()` stays here for now - reads data from Rust, builds messages
 - Orchestrates operations but doesn't own data
+
+#### TypeScript: `LocalNode` (MODIFIED)
+- Holds single `RegisterImpl` instance from crypto provider
+- Passes register to `VerifiedState` / `SessionMap` when creating CoValues
+
+```typescript
+// packages/cojson/src/localNode.ts
+
+export class LocalNode {
+  readonly crypto: CryptoProvider;
+  readonly register: RegisterImpl;
+  
+  constructor(crypto: CryptoProvider, ...) {
+    this.crypto = crypto;
+    this.register = crypto.createRegister();  // Singleton for this node
+  }
+}
+```
 
 ## Data Models
 
@@ -454,7 +633,7 @@ impl CoValueRegister {
 export class SessionMap {
   constructor(
     private readonly id: RawCoID,
-    private readonly register: CoValueRegister,
+    private readonly register: RegisterImpl,  // From CryptoProvider via LocalNode
   ) {
     register.createSessionMap(id);
   }
@@ -569,6 +748,50 @@ export class SessionMap {
 
   get size(): number {
     return this.register.getSessionIds(this.id).length;
+  }
+  
+  // Note: clone() removed - VerifiedState.clone() is never called externally
+}
+```
+
+### TypeScript: `VerifiedState` (MODIFIED)
+
+```typescript
+// packages/cojson/src/coValueCore/verifiedState.ts
+
+export class VerifiedState {
+  readonly id: RawCoID;
+  readonly register: RegisterImpl;
+  readonly sessions: SessionMap;
+  
+  // Header is fetched from Rust Register
+  get header(): CoValueHeader {
+    const json = this.register.getHeader(this.id);
+    if (!json) throw new Error(`Header not found for ${this.id}`);
+    return JSON.parse(json);
+  }
+  
+  constructor(
+    id: RawCoID,
+    register: RegisterImpl,
+    header: CoValueHeader,
+  ) {
+    this.id = id;
+    this.register = register;
+    
+    // Store header in Rust
+    register.setHeader(id, JSON.stringify(header));
+    
+    // Create SessionMap wrapper
+    this.sessions = new SessionMap(id, register);
+  }
+  
+  // Note: clone() removed - never called externally
+  
+  // newContentSince stays in TypeScript, reads from Rust via SessionMap
+  newContentSince(knownState: CoValueKnownState | undefined): NewContentMessage[] | undefined {
+    // Uses this.sessions.entries(), this.sessions.get(), etc.
+    // Implementation stays largely the same, just uses Rust-backed data
   }
 }
 ```
