@@ -7,7 +7,6 @@ import type {
   StoredSessionRow,
 } from "cojson";
 import { IDBClient } from "./idbClient.js";
-import { CoJsonIDBTransaction, StoreName } from "./CoJsonIDBTransaction.js";
 
 let DATABASE_NAME = "jazz-storage";
 
@@ -16,85 +15,81 @@ export function internal_setDatabaseName(name: string) {
 }
 
 /**
+ * Helper to wrap an IDBRequest in a Promise
+ */
+function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/**
  * Migrates data from the old object stores (coValues, sessions, signatureAfter)
  * into the new coValuesWithSessions store
  */
 async function migrateToCoValuesWithSessions(db: IDBDatabase): Promise<void> {
-  // Create a single transaction for all operations
-  const oldStoreNames = [
-    "coValues",
-    "sessions",
-    "signatureAfter",
-  ] as unknown as StoreName[];
-  const tx = new CoJsonIDBTransaction(db, [
-    ...oldStoreNames,
-    "coValuesWithSessions",
-  ]);
+  const oldStoreNames = ["coValues", "sessions", "signatureAfter"];
 
-  try {
-    const [coValues = [], sessions = [], signatures = []] = await Promise.all<
-      [StoredCoValueRow[], StoredSessionRow[], SignatureAfterRow[]]
-    >(
-      oldStoreNames.map((storeName) =>
-        tx.handleRequest((tx) => {
-          return tx.getObjectStore(storeName).getAll();
-        }),
-      ) as any,
-    );
+  // Read all data in a single read-only transaction
+  const readTx = db.transaction(oldStoreNames, "readonly");
+  const coValuesPromise = requestToPromise<StoredCoValueRow[]>(
+    readTx.objectStore("coValues").getAll(),
+  );
+  const sessionsPromise = requestToPromise<StoredSessionRow[]>(
+    readTx.objectStore("sessions").getAll(),
+  );
+  const signaturesPromise = requestToPromise<SignatureAfterRow[]>(
+    readTx.objectStore("signatureAfter").getAll(),
+  );
 
-    const coValuesByRowID = new Map<number, StoredNewCoValueRow>();
-    for (const coValue of coValues) {
-      coValuesByRowID.set(coValue.rowID, {
-        id: coValue.id,
-        header: coValue.header,
-        sessions: {},
-        rowID: coValue.rowID,
-      });
-    }
-
-    const sessionsByRowID = new Map<number, StoredNewSessionRow>();
-    for (const session of sessions) {
-      if (session.rowID && session.coValue) {
-        const migratedSession: StoredNewSessionRow = {
-          sessionID: session.sessionID,
-          // Necessary for backward compatibility. Used to fetch existing transactions
-          rowID: session.rowID,
-          lastIdx: session.lastIdx,
-          lastSignature: session.lastSignature,
-          bytesSinceLastSignature: session.bytesSinceLastSignature,
-          signatures: {},
-        };
-        sessionsByRowID.set(session.rowID, migratedSession);
-        const coValue = coValuesByRowID.get(session.coValue);
-        if (coValue) {
-          coValue.sessions[session.sessionID] = migratedSession;
-        }
-      }
-    }
-
-    for (const signature of signatures) {
-      const session = sessionsByRowID.get(signature.ses);
-      if (session) {
-        session.signatures[signature.idx] = signature.signature;
-      }
-    }
-
-    await Promise.all(
-      coValuesByRowID
-        .values()
-        .map((coValue) =>
-          tx.handleRequest((tx) =>
-            tx.getObjectStore("coValuesWithSessions").put(coValue),
-          ),
-        ),
-    );
-
-    tx.commit();
-  } catch (error) {
-    console.error("Failed to migrate Jazz storage", error);
-    tx.rollback();
-    throw error;
+  const coValuesByRowID = new Map<number, StoredNewCoValueRow>();
+  for (const coValue of await coValuesPromise) {
+    coValuesByRowID.set(coValue.rowID, {
+      id: coValue.id,
+      header: coValue.header,
+      sessions: {},
+      rowID: coValue.rowID,
+    });
   }
+
+  const sessionsByRowID = new Map<number, StoredNewSessionRow>();
+  for (const session of await sessionsPromise) {
+    if (session.rowID && session.coValue) {
+      const migratedSession: StoredNewSessionRow = {
+        sessionID: session.sessionID,
+        // Necessary for backward compatibility. Used to fetch existing transactions
+        rowID: session.rowID,
+        lastIdx: session.lastIdx,
+        lastSignature: session.lastSignature,
+        bytesSinceLastSignature: session.bytesSinceLastSignature,
+        signatures: {},
+      };
+      sessionsByRowID.set(session.rowID, migratedSession);
+      const coValue = coValuesByRowID.get(session.coValue);
+      if (coValue) {
+        coValue.sessions[session.sessionID] = migratedSession;
+      }
+    }
+  }
+
+  for (const signature of await signaturesPromise) {
+    const session = sessionsByRowID.get(signature.ses);
+    if (session) {
+      session.signatures[signature.idx] = signature.signature;
+    }
+  }
+
+  // Write all data in a single transaction
+  const writeTx = db.transaction(["coValuesWithSessions"], "readwrite");
+  const store = writeTx.objectStore("coValuesWithSessions");
+  for (const coValue of coValuesByRowID.values()) {
+    store.put(coValue);
+  }
+  await new Promise<void>((resolve, reject) => {
+    writeTx.oncomplete = () => resolve();
+    writeTx.onerror = () => reject(writeTx.error);
+  });
 }
 
 export async function getIndexedDBStorage(name = DATABASE_NAME) {
@@ -185,7 +180,7 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
 
   const db = await dbPromise;
 
-  if (needsDataMigration) {
+  if (needsDataMigration || true) {
     await migrateToCoValuesWithSessions(db);
   }
 
