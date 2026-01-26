@@ -1,3 +1,10 @@
+Released Jazz 0.20.5:
+- Bugfix: fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- Bugfix: fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+
+Released Jazz 0.20.4:
+- Bugfix: infinite re-render loop when accessing nested CoValues in React hooks calls with `resolve: {}`
+
 Released Jazz 0.20.3:
 - Added caching for groups when accessing a readKey
 
