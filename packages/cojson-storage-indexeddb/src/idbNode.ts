@@ -79,11 +79,15 @@ async function migrateToCoValuesWithSessions(db: IDBDatabase): Promise<void> {
       }
     }
 
-    for (const coValue of coValuesByRowID.values()) {
-      await tx.handleRequest((tx) =>
-        tx.getObjectStore("coValuesWithSessions").put(coValue),
-      );
-    }
+    await Promise.all(
+      coValuesByRowID
+        .values()
+        .map((coValue) =>
+          tx.handleRequest((tx) =>
+            tx.getObjectStore("coValuesWithSessions").put(coValue),
+          ),
+        ),
+    );
 
     tx.commit();
   } catch (error) {
