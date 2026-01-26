@@ -555,7 +555,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
   private getItemSchema(): z.ZodType {
     /**
-     * coMapSchema may be undefined if the CoMap is created directly with its constructor,
+     * coListSchema may be undefined if the CoList is created directly with its constructor,
      * without using a co.list().create() to create it.
      * In that case, we can't validate the values.
      */
