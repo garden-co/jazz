@@ -69,6 +69,8 @@
         "tsconfig*.json",
         "*.config.*",
         ".env*",
+        "../cojson-core/src/**",
+        "../cojson-core/Cargo.toml",
         "!node_modules/**",
         "!*.node",
         "!dist/**",
@@ -96,7 +98,9 @@
         "package.json",
         "ubrn.config.yaml",
         "tsconfig*.json",
-        "*.config.*"
+        "*.config.*",
+        "../cojson-core/src/**",
+        "../cojson-core/Cargo.toml"
       ]
     },
     "build:rn:android": {
@@ -108,6 +112,8 @@
         "ubrn.config.yaml",
         "tsconfig*.json",
         "*.config.*",
+        "../cojson-core/src/**",
+        "../cojson-core/Cargo.toml",
         "!node_modules/**",
         "!*.node",
         "!dist/**",
@@ -125,6 +131,8 @@
         "ubrn.config.yaml",
         "tsconfig*.json",
         "*.config.*",
+        "../cojson-core/src/**",
+        "../cojson-core/Cargo.toml",
         "!node_modules/**",
         "!*.node",
         "!dist/**",
@@ -144,6 +152,8 @@
         "package.json",
         "tsconfig*.json",
         "*.config.*",
+        "../cojson-core/src/**",
+        "../cojson-core/Cargo.toml",
         "!node_modules/**",
         "!dist/**",
         "!.turbo/**"
