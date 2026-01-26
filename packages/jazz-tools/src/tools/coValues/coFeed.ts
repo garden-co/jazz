@@ -437,11 +437,14 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    */
   pushLoose(...items: CoFieldInit<CoFeedItem<F>>[]): void {
     for (const item of items) {
-      this.pushItem(item);
+      this.pushItem(item, { validationMode: "loose" });
     }
   }
 
-  private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
+  private pushItem(
+    item: CoFieldInit<CoFeedItem<F>>,
+    { validationMode }: { validationMode?: LocalValidationMode },
+  ) {
     const itemDescriptor = this.schema[ItemsSym] as Schema;
 
     if (itemDescriptor === "json") {
@@ -460,6 +463,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
           this.owner,
           newOwnerStrategy,
           onCreate,
+          validationMode,
         );
         refId = coValue.$jazz.id;
       }

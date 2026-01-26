@@ -15,6 +15,7 @@ import {
   type RefPermissions,
   SchemaInit,
   isCoValueClass,
+  LocalValidationMode,
 } from "../internal.js";
 
 /** @category Schema definition */
@@ -178,6 +179,7 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   containerOwner: Group,
   newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
   onCreate?: RefOnCreateCallback,
+  validationMode?: LocalValidationMode,
 ): V {
   if (!isCoValueClass<V>(schema.ref)) {
     throw Error(
@@ -187,7 +189,10 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   const owner = newOwnerStrategy(() => Group.create(), containerOwner, init);
   onCreate?.(owner, init);
   // @ts-expect-error - create is a static method in all CoValue classes
-  return schema.ref.create(init, owner);
+  return schema.ref.create(init, {
+    owner,
+    validation: validationMode,
+  });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

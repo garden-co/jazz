@@ -292,7 +292,13 @@ export class CoMap extends CoValueBase implements CoValue {
       },
     });
 
-    const raw = CoMap.rawFromInit(instance, init, owner, uniqueness);
+    const raw = CoMap.rawFromInit(
+      instance,
+      init,
+      owner,
+      uniqueness,
+      options && "validation" in options ? options.validation : undefined,
+    );
 
     return instance;
   }
@@ -306,6 +312,7 @@ export class CoMap extends CoValueBase implements CoValue {
     init: Simplify<CoMapInit_DEPRECATED<Fields>> | undefined,
     owner: Group,
     uniqueness?: CoValueUniqueness,
+    validationMode?: LocalValidationMode,
   ) {
     const rawOwner = owner.$jazz.raw;
 
@@ -338,6 +345,7 @@ export class CoMap extends CoValueBase implements CoValue {
                 owner,
                 newOwnerStrategy,
                 onCreate,
+                validationMode,
               );
               refId = coValue.$jazz.id;
             }
@@ -661,12 +669,6 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     value: CoFieldInit<M[K]>,
     options?: { validation?: LocalValidationMode },
   ): void {
-    const descriptor = this.getDescriptor(key as string);
-
-    if (!descriptor) {
-      throw Error(`Cannot set unknown key ${key}`);
-    }
-
     // Validate the value based on the resolved validation mode
     const validationMode = resolveValidationMode(options?.validation);
     if (validationMode !== "loose" && this.coMapSchema) {
@@ -677,6 +679,12 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
         value,
         validationMode,
       ) as CoFieldInit<M[K]>;
+    }
+
+    const descriptor = this.getDescriptor(key as string);
+
+    if (!descriptor) {
+      throw Error(`Cannot set unknown key ${key}`);
     }
 
     let refId = (value as CoValue)?.$jazz?.id;
@@ -701,6 +709,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
             this.owner,
             newOwnerStrategy,
             onCreate,
+            options?.validation,
           );
           refId = coValue.$jazz.id;
         }

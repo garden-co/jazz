@@ -212,7 +212,12 @@ export class CoList<out Item = any>
     });
 
     const raw = owner.$jazz.raw.createList(
-      toRawItems(items, instance.$jazz.schema[ItemsSym], owner),
+      toRawItems(
+        items,
+        instance.$jazz.schema[ItemsSym],
+        owner,
+        options && "validation" in options ? options.validation : undefined,
+      ),
       null,
       "private",
       uniqueness,
@@ -1008,6 +1013,7 @@ function toRawItems<Item>(
   items: Item[],
   itemDescriptor: Schema,
   owner: Group,
+  validationMode?: LocalValidationMode,
 ): JsonValue[] {
   let rawItems: JsonValue[] = [];
   if (itemDescriptor === "json") {
@@ -1030,6 +1036,7 @@ function toRawItems<Item>(
           owner,
           newOwnerStrategy,
           onCreate,
+          validationMode,
         );
         refId = coValue.$jazz.id;
       }
