@@ -250,12 +250,16 @@ export class HomePage {
       .getByRole("textbox", { name: "Type the phrase to confirm" })
       .fill("I want to delete my account");
 
-    await this.page
-      .getByRole("dialog")
-      .getByRole("button", { name: "Delete account" })
-      .click();
+    // Click delete and wait for the navigation triggered by window.location.href = "/"
+    await Promise.all([
+      this.page.waitForURL("/", { timeout: 100_000 }),
+      this.page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Delete account" })
+        .click(),
+    ]);
 
-    // Wait for redirect to home and username input to be visible
+    // Wait for the page to fully load and username input to be visible
     await this.page.getByRole("textbox", { name: "Username" }).waitFor({
       state: "visible",
       timeout: 100_000,
