@@ -114,9 +114,9 @@ export interface RegisterImpl {
   freeAll(): void;
   size(): number;
   
-  // Header operations
+  // Header operations (all can throw RegisterError)
   setHeader(id: string, headerJson: string): void;
-  getHeader(id: string): string | undefined;
+  getHeader(id: string): string | undefined;  // undefined if not found
   hasHeader(id: string): boolean;
   
   // Session map operations
@@ -153,24 +153,25 @@ export interface RegisterImpl {
     madeAt: number,
   ): string;  // Returns { signature, transaction } JSON
   
-  // Session queries
-  getSession(id: string, sessionId: string): string | undefined;
-  getSessionIds(id: string): string[];
-  getSessionTxCount(id: string, sessionId: string): number;
-  getSessionTransactions(id: string, sessionId: string, fromIndex: number): string;
+  // Session queries - return undefined if not found (no exceptions for missing data)
+  getSessionIds(id: string): string[];  // throws if coValue not found
+  getTransactionCount(id: string, sessionId: string): number | undefined;
+  getTransaction(id: string, sessionId: string, txIndex: number): string | undefined;
+  getSessionTransactions(id: string, sessionId: string, fromIndex: number): string | undefined;
   getLastSignature(id: string, sessionId: string): string | undefined;
   getSignatureAfter(id: string, sessionId: string, txIndex: number): string | undefined;
+  getLastSignatureCheckpoint(id: string, sessionId: string): number | undefined;
   
   // Known state
-  getKnownState(id: string): string;
+  getKnownState(id: string): string | undefined;
   getKnownStateWithStreaming(id: string): string | undefined;
   setStreamingKnownState(id: string, streamingJson: string): void;
   
   // Deletion
   markAsDeleted(id: string): void;
-  isDeleted(id: string): boolean;
+  isDeleted(id: string): boolean | undefined;  // undefined if not found
   
-  // Decryption
+  // Decryption (throws if coValue/session not found)
   decryptTransaction(id: string, sessionId: string, txIndex: number, keySecret: string): string | undefined;
   decryptTransactionMeta(id: string, sessionId: string, txIndex: number, keySecret: string): string | undefined;
 }
@@ -518,7 +519,7 @@ impl CoValueRegister {
     // === Header Operations ===
     
     pub fn set_header(&mut self, id: &str, header_json: &str) -> Result<(), RegisterError>;
-    pub fn get_header(&self, id: &str) -> Option<String>;  // Returns JSON
+    pub fn get_header(&self, id: &str) -> Result<Option<String>, RegisterError>;
     pub fn has_header(&self, id: &str) -> bool;
     
     // === Session Map Operations ===
@@ -528,8 +529,8 @@ impl CoValueRegister {
     
     // === Known State ===
     
-    pub fn get_known_state(&self, id: &str) -> Result<String, RegisterError>;  // JSON
-    pub fn get_known_state_with_streaming(&self, id: &str) -> Result<String, RegisterError>;
+    pub fn get_known_state(&self, id: &str) -> Result<Option<String>, RegisterError>;
+    pub fn get_known_state_with_streaming(&self, id: &str) -> Result<Option<String>, RegisterError>;
     pub fn set_streaming_known_state(&mut self, id: &str, streaming_json: &str) -> Result<(), RegisterError>;
 }
 ```
@@ -576,23 +577,24 @@ impl CoValueRegister {
     ) -> Result<String, RegisterError>;  // Returns { signature, transaction } JSON
     
     // === Session Queries ===
-    
-    /// Get a session log (for iteration in newContentSince)
-    pub fn get_session(&self, id: &str, session_id: &str) -> Option<String>;  // JSON SessionLog
+    // All return Option to indicate "not found" - bindings convert to undefined
     
     /// Get all session IDs
     pub fn get_session_ids(&self, id: &str) -> Result<Vec<String>, RegisterError>;
     
-    /// Get transaction count for a session
-    pub fn get_session_tx_count(&self, id: &str, session_id: &str) -> u32;
+    /// Get transaction count for a session (None if session not found)
+    pub fn get_transaction_count(&self, id: &str, session_id: &str) -> Option<u32>;
     
-    /// Get transactions for a session (for newContentSince iteration)
+    /// Get single transaction by index
+    pub fn get_transaction(&self, id: &str, session_id: &str, tx_index: u32) -> Result<Option<String>, RegisterError>;
+    
+    /// Get transactions for a session from index (for newContentSince iteration)
     pub fn get_session_transactions(
         &self,
         id: &str,
         session_id: &str,
         from_index: u32,
-    ) -> Result<String, RegisterError>;  // JSON array of transactions
+    ) -> Result<Option<String>, RegisterError>;
     
     /// Get last signature for a session
     pub fn get_last_signature(&self, id: &str, session_id: &str) -> Option<String>;
@@ -600,10 +602,14 @@ impl CoValueRegister {
     /// Get signature after specific transaction index
     pub fn get_signature_after(&self, id: &str, session_id: &str, tx_index: u32) -> Option<String>;
     
+    /// Get the last signature checkpoint index (max index in signatureAfter map, or -1 if no checkpoints)
+    /// Returns None if session not found
+    pub fn get_last_signature_checkpoint(&self, id: &str, session_id: &str) -> Option<i32>;
+    
     // === Deletion ===
     
     pub fn mark_as_deleted(&mut self, id: &str) -> Result<(), RegisterError>;
-    pub fn is_deleted(&self, id: &str) -> bool;
+    pub fn is_deleted(&self, id: &str) -> Option<bool>;  // None if not found
     
     // === Decryption (key provided by TypeScript from group lookup) ===
     
@@ -625,6 +631,399 @@ impl CoValueRegister {
 }
 ```
 
+### Rust Implementation Examples
+
+```rust
+// crates/cojson-core/src/core/register.rs
+
+impl CoValueRegister {
+    pub fn new() -> Self {
+        Self {
+            headers: HashMap::new(),
+            session_maps: HashMap::new(),
+        }
+    }
+    
+    // === Header Operations ===
+    
+    pub fn set_header(&mut self, id: &str, header_json: &str) -> Result<(), RegisterError> {
+        if self.headers.contains_key(id) {
+            return Err(RegisterError::HeaderExists(id.to_string()));
+        }
+        let header: CoValueHeader = serde_json::from_str(header_json)?;
+        self.headers.insert(id.to_string(), header);
+        Ok(())
+    }
+    
+    pub fn get_header(&self, id: &str) -> Result<Option<String>, RegisterError> {
+        match self.headers.get(id) {
+            Some(header) => {
+                let json = serde_json::to_string(header)?;
+                Ok(Some(json))
+            }
+            None => Ok(None),
+        }
+    }
+    
+    pub fn has_header(&self, id: &str) -> bool {
+        self.headers.contains_key(id)
+    }
+    
+    // === Session Map Operations ===
+    
+    pub fn create_session_map(&mut self, id: &str) -> Result<(), RegisterError> {
+        if self.session_maps.contains_key(id) {
+            return Err(RegisterError::SessionMapExists(id.to_string()));
+        }
+        let session_map = SessionMap {
+            co_id: id.to_string(),
+            sessions: HashMap::new(),
+            known_state: KnownState {
+                header: true,
+                id: id.to_string(),
+                sessions: BTreeMap::new(),
+            },
+            known_state_with_streaming: None,
+            streaming_known_state: None,
+            is_deleted: false,
+        };
+        self.session_maps.insert(id.to_string(), session_map);
+        Ok(())
+    }
+    
+    pub fn has_session_map(&self, id: &str) -> bool {
+        self.session_maps.contains_key(id)
+    }
+    
+    // === Transaction Operations ===
+    
+    pub fn add_transactions(
+        &mut self,
+        id: &str,
+        session_id: &str,
+        signer_id: Option<&str>,
+        transactions_json: &str,
+        signature: &str,
+        skip_verify: bool,
+    ) -> Result<(), RegisterError> {
+        let session_map = self.session_maps.get_mut(id)
+            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+        
+        if session_map.is_deleted && !is_delete_session_id(session_id) {
+            return Err(RegisterError::DeletedCoValue(id.to_string()));
+        }
+        
+        let transactions: Vec<Transaction> = serde_json::from_str(transactions_json)?;
+        
+        // Get or create session log
+        let session_log = session_map.sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionLog {
+                signer_id: signer_id.map(|s| s.to_string()),
+                impl_: SessionLogInternal::new(id, session_id, signer_id),
+                transactions: Vec::new(),
+                last_signature: None,
+                signature_after: HashMap::new(),
+                tx_size_since_last_inbetween_signature: 0,
+                session_id: session_id.to_string(),
+            });
+        
+        // Verify signature using SessionLogInternal
+        if !skip_verify {
+            session_log.impl_.try_add(&transactions, signature)?;
+        }
+        
+        // Add transactions
+        for tx in transactions {
+            let tx_size = match &tx {
+                Transaction::Private { encrypted_changes, .. } => encrypted_changes.len(),
+                Transaction::Trusting { changes, .. } => changes.len(),
+            };
+            session_log.tx_size_since_last_inbetween_signature += tx_size;
+            session_log.transactions.push(tx);
+        }
+        
+        session_log.last_signature = Some(signature.to_string());
+        
+        // Update known state
+        let tx_count = session_log.transactions.len() as u32;
+        session_map.known_state.sessions.insert(session_id.to_string(), tx_count);
+        
+        // Check if we need an in-between signature (exceeds recommended size)
+        if exceeds_recommended_size(session_log.tx_size_since_last_inbetween_signature) {
+            let idx = (session_log.transactions.len() - 1) as u32;
+            session_log.signature_after.insert(idx, signature.to_string());
+            session_log.tx_size_since_last_inbetween_signature = 0;
+        }
+        
+        Ok(())
+    }
+    
+    // === Session Queries ===
+    // All return Option to indicate "not found" - bindings convert to undefined
+    
+    pub fn get_session_ids(&self, id: &str) -> Result<Vec<String>, RegisterError> {
+        let session_map = self.session_maps.get(id)
+            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+        
+        Ok(session_map.sessions.keys().cloned().collect())
+    }
+    
+    pub fn get_transaction_count(&self, id: &str, session_id: &str) -> Option<u32> {
+        self.session_maps.get(id)
+            .and_then(|sm| sm.sessions.get(session_id))
+            .map(|sl| sl.transactions.len() as u32)
+    }
+    
+    pub fn get_transaction(
+        &self,
+        id: &str,
+        session_id: &str,
+        tx_index: u32,
+    ) -> Result<Option<String>, RegisterError> {
+        let session_map = match self.session_maps.get(id) {
+            Some(sm) => sm,
+            None => return Ok(None),
+        };
+        
+        let session_log = match session_map.sessions.get(session_id) {
+            Some(sl) => sl,
+            None => return Ok(None),
+        };
+        
+        match session_log.transactions.get(tx_index as usize) {
+            Some(tx) => {
+                let json = serde_json::to_string(tx)?;
+                Ok(Some(json))
+            }
+            None => Ok(None),
+        }
+    }
+    
+    pub fn get_session_transactions(
+        &self,
+        id: &str,
+        session_id: &str,
+        from_index: u32,
+    ) -> Result<Option<String>, RegisterError> {
+        let session_map = match self.session_maps.get(id) {
+            Some(sm) => sm,
+            None => return Ok(None),
+        };
+        
+        let session_log = match session_map.sessions.get(session_id) {
+            Some(sl) => sl,
+            None => return Ok(None),
+        };
+        
+        let transactions: Vec<&Transaction> = session_log.transactions
+            .iter()
+            .skip(from_index as usize)
+            .collect();
+        
+        let json = serde_json::to_string(&transactions)?;
+        Ok(Some(json))
+    }
+    
+    pub fn get_last_signature(&self, id: &str, session_id: &str) -> Option<String> {
+        self.session_maps.get(id)
+            .and_then(|sm| sm.sessions.get(session_id))
+            .and_then(|sl| sl.last_signature.clone())
+    }
+    
+    pub fn get_signature_after(&self, id: &str, session_id: &str, tx_index: u32) -> Option<String> {
+        self.session_maps.get(id)
+            .and_then(|sm| sm.sessions.get(session_id))
+            .and_then(|sl| sl.signature_after.get(&tx_index).cloned())
+    }
+    
+    pub fn get_last_signature_checkpoint(&self, id: &str, session_id: &str) -> Option<i32> {
+        let session_log = self.session_maps.get(id)
+            .and_then(|sm| sm.sessions.get(session_id))?;
+        
+        match session_log.signature_after.keys().max() {
+            Some(&idx) => Some(idx as i32),
+            None => Some(-1),  // Session exists but no checkpoints
+        }
+    }
+    
+    // === Known State ===
+    
+    pub fn get_known_state(&self, id: &str) -> Result<Option<String>, RegisterError> {
+        match self.session_maps.get(id) {
+            Some(session_map) => {
+                let json = serde_json::to_string(&session_map.known_state)?;
+                Ok(Some(json))
+            }
+            None => Ok(None),
+        }
+    }
+    
+    pub fn get_known_state_with_streaming(&self, id: &str) -> Result<Option<String>, RegisterError> {
+        let session_map = match self.session_maps.get(id) {
+            Some(sm) => sm,
+            None => return Ok(None),
+        };
+        
+        match &session_map.known_state_with_streaming {
+            Some(ks) => {
+                let json = serde_json::to_string(ks)?;
+                Ok(Some(json))
+            }
+            None => Ok(None),
+        }
+    }
+    
+    pub fn set_streaming_known_state(
+        &mut self,
+        id: &str,
+        streaming_json: &str,
+    ) -> Result<(), RegisterError> {
+        let session_map = self.session_maps.get_mut(id)
+            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+        
+        let streaming: KnownStateSessions = serde_json::from_str(streaming_json)?;
+        
+        // Check if streaming state is subset of current known state
+        let is_subset = streaming.iter().all(|(session_id, &count)| {
+            session_map.known_state.sessions
+                .get(session_id)
+                .map(|&current| count <= current)
+                .unwrap_or(false)
+        });
+        
+        if is_subset {
+            return Ok(());  // Already have this data
+        }
+        
+        session_map.streaming_known_state = Some(streaming.clone());
+        
+        // Update known_state_with_streaming
+        let mut combined = session_map.known_state.clone();
+        for (session_id, count) in streaming {
+            combined.sessions
+                .entry(session_id)
+                .and_modify(|c| *c = (*c).max(count))
+                .or_insert(count);
+        }
+        session_map.known_state_with_streaming = Some(combined);
+        
+        Ok(())
+    }
+    
+    // === Deletion ===
+    
+    pub fn mark_as_deleted(&mut self, id: &str) -> Result<(), RegisterError> {
+        let session_map = self.session_maps.get_mut(id)
+            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+        
+        session_map.is_deleted = true;
+        
+        // Reset known state to only report delete sessions
+        let mut new_known_state = KnownState {
+            header: true,
+            id: id.to_string(),
+            sessions: BTreeMap::new(),
+        };
+        
+        // Only keep delete session counts in known state
+        for (session_id, session_log) in &session_map.sessions {
+            if is_delete_session_id(session_id) {
+                new_known_state.sessions.insert(
+                    session_id.clone(),
+                    session_log.transactions.len() as u32,
+                );
+            }
+        }
+        
+        session_map.known_state = new_known_state;
+        session_map.known_state_with_streaming = None;
+        session_map.streaming_known_state = None;
+        
+        Ok(())
+    }
+    
+    pub fn is_deleted(&self, id: &str) -> Option<bool> {
+        self.session_maps.get(id).map(|sm| sm.is_deleted)
+    }
+    
+    // === Decryption ===
+    
+    pub fn decrypt_transaction(
+        &self,
+        id: &str,
+        session_id: &str,
+        tx_index: u32,
+        key_secret: &str,
+    ) -> Result<Option<String>, RegisterError> {
+        let session_map = self.session_maps.get(id)
+            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+        
+        let session_log = session_map.sessions.get(session_id)
+            .ok_or_else(|| RegisterError::NotFound(format!("session {}:{}", id, session_id)))?;
+        
+        // Delegate to SessionLogInternal for actual decryption
+        session_log.impl_.decrypt_transaction_changes(tx_index, key_secret)
+    }
+    
+    pub fn decrypt_transaction_meta(
+        &self,
+        id: &str,
+        session_id: &str,
+        tx_index: u32,
+        key_secret: &str,
+    ) -> Result<Option<String>, RegisterError> {
+        let session_map = self.session_maps.get(id)
+            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+        
+        let session_log = session_map.sessions.get(session_id)
+            .ok_or_else(|| RegisterError::NotFound(format!("session {}:{}", id, session_id)))?;
+        
+        // Check if transaction has meta
+        let tx = session_log.transactions.get(tx_index as usize)
+            .ok_or_else(|| RegisterError::NotFound(format!("tx {}:{}:{}", id, session_id, tx_index)))?;
+        
+        let has_meta = match tx {
+            Transaction::Private { meta, .. } => meta.is_some(),
+            Transaction::Trusting { meta, .. } => meta.is_some(),
+        };
+        
+        if !has_meta {
+            return Ok(None);
+        }
+        
+        // Delegate to SessionLogInternal for actual decryption
+        session_log.impl_.decrypt_transaction_meta(tx_index, key_secret)
+    }
+    
+    // === Lifecycle ===
+    
+    pub fn free(&mut self, id: &str) -> bool {
+        let header_removed = self.headers.remove(id).is_some();
+        let session_map_removed = self.session_maps.remove(id).is_some();
+        header_removed || session_map_removed
+    }
+    
+    pub fn free_all(&mut self) {
+        self.headers.clear();
+        self.session_maps.clear();
+    }
+    
+    pub fn size(&self) -> usize {
+        self.session_maps.len()
+    }
+}
+
+// Helper functions
+fn is_delete_session_id(session_id: &str) -> bool {
+    session_id.contains("_session_d") && session_id.ends_with('$')
+}
+
+fn exceeds_recommended_size(size: usize) -> bool {
+    size > 100_000  // 100KB threshold
+}
+```
+
 ### TypeScript Thin Wrapper (`SessionMap.ts`)
 
 ```typescript
@@ -638,9 +1037,32 @@ export class SessionMap {
     register.createSessionMap(id);
   }
 
-  get(sessionID: SessionID): SessionLog | undefined {
-    const json = this.register.getSession(this.id, sessionID);
+  // No get() returning full SessionLog - use specific accessors:
+  
+  getTransactionCount(sessionID: SessionID): number | undefined {
+    return this.register.getTransactionCount(this.id, sessionID);
+  }
+  
+  getTransaction(sessionID: SessionID, txIndex: number): Transaction | undefined {
+    const json = this.register.getTransaction(this.id, sessionID, txIndex);
     return json ? JSON.parse(json) : undefined;
+  }
+  
+  getTransactions(sessionID: SessionID, fromIndex: number = 0): Transaction[] | undefined {
+    const json = this.register.getSessionTransactions(this.id, sessionID, fromIndex);
+    return json ? JSON.parse(json) : undefined;
+  }
+  
+  getLastSignature(sessionID: SessionID): Signature | undefined {
+    return this.register.getLastSignature(this.id, sessionID) as Signature | undefined;
+  }
+  
+  getSignatureAfter(sessionID: SessionID, txIndex: number): Signature | undefined {
+    return this.register.getSignatureAfter(this.id, sessionID, txIndex) as Signature | undefined;
+  }
+  
+  getLastSignatureCheckpoint(sessionID: SessionID): number | undefined {
+    return this.register.getLastSignatureCheckpoint(this.id, sessionID);
   }
 
   addTransaction(
@@ -788,12 +1210,24 @@ export class VerifiedState {
   
   // Note: clone() removed - never called externally
   
+  // Delegates to SessionMap (calculated in Rust)
+  getLastSignatureCheckpoint(sessionID: SessionID): number {
+    return this.sessions.getLastSignatureCheckpoint(sessionID);
+  }
+  
   // newContentSince stays in TypeScript, reads from Rust via SessionMap
   newContentSince(knownState: CoValueKnownState | undefined): NewContentMessage[] | undefined {
-    // Uses this.sessions.entries(), this.sessions.get(), etc.
+    // Uses this.sessions.entries(), getTransactions(), getLastSignature(), etc.
     // Implementation stays largely the same, just uses Rust-backed data
   }
 }
+
+// Example usage changes in CoValueCore:
+// Before: this.verified.sessions.get(sessionID)?.transactions.length || 0
+// After:  this.verified.sessions.getTransactionCount(sessionID)
+
+// Before: this.verified?.sessions.get(txID.sessionID)?.transactions[txIndex]
+// After:  this.verified?.sessions.getTransaction(txID.sessionID, txIndex)
 ```
 
 ## FFI Data Passing Strategy
