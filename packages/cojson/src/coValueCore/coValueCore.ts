@@ -214,6 +214,14 @@ export class VerifiedTransaction {
     return Boolean(this.isValid && this.changes);
   }
 
+  isProcessable(includeInvalidMetaTransactions: boolean): this is {
+    changes: JsonValue[];
+  } {
+    return Boolean(
+      this.changes && (includeInvalidMetaTransactions || this.isValid),
+    );
+  }
+
   markValid() {
     const validityChanged = this.isValid === false;
     this.isValid = true;
@@ -1532,6 +1540,14 @@ export class CoValueCore {
     }
 
     if ("init" in transaction.meta) {
+      // Init transaction must be the first transaction in its session (txIndex === 0)
+      if (transaction.txID.txIndex !== 0) {
+        transaction.markInvalid(
+          "Init transaction must be the first transaction in its session",
+        );
+        return;
+      }
+
       const firstInitTransaction = this.#firstInitTransaction;
       // First-init-wins: keep the transaction with the smallest madeAt
       // compareInitTransactions returns < 0 if transaction is earlier than firstInitTransaction
@@ -1634,7 +1650,7 @@ export class CoValueCore {
     from?: CoValueKnownState["sessions"];
     to?: CoValueKnownState["sessions"];
     knownTransactions?: Record<RawCoID, number>;
-
+    includeInvalidMetaTransactions?: boolean;
     // If true, the branch source transactions will be skipped. Used to gather the transactions for the merge operation.
     skipBranchSource?: boolean;
   }): DecryptedTransaction[] {
@@ -1653,6 +1669,11 @@ export class CoValueCore {
 
     const knownTransactions = options?.knownTransactions?.[this.id] ?? 0;
 
+    // Include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    // permission errors are still not included
+    const includeInvalidMetaTransactions =
+      options?.includeInvalidMetaTransactions ?? false;
+
     for (
       let i = knownTransactions;
       i < this.toProcessTransactions.length;
@@ -1660,7 +1681,7 @@ export class CoValueCore {
     ) {
       const transaction = this.toProcessTransactions[i]!;
 
-      if (!transaction.isValidTransactionWithChanges()) {
+      if (!transaction.isProcessable(includeInvalidMetaTransactions)) {
         continue;
       }
 
@@ -1688,6 +1709,7 @@ export class CoValueCore {
     // If this is a branch, we load the valid transactions from the source
     if (source && this.branchStart && !options?.skipBranchSource) {
       const sourceTransactions = source.getValidTransactions({
+        includeInvalidMetaTransactions,
         knownTransactions: options?.knownTransactions,
         to: this.branchStart,
         ignorePrivateTransactions: options?.ignorePrivateTransactions ?? false,
@@ -1846,6 +1868,9 @@ export class CoValueCore {
 
     // The transactions that have already been processed, used for the incremental builds of the content views
     knownTransactions?: Record<RawCoID, number>;
+
+    // Whether to include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    includeInvalidMetaTransactions?: boolean;
   }): DecryptedTransaction[] {
     const allTransactions = this.getValidTransactions(options);
 
