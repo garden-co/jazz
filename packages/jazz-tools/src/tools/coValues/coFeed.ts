@@ -19,6 +19,7 @@ import {
   CoValueClass,
   getCoValueOwner,
   getIdFromHeader,
+  getUniqueHeader,
   Group,
   ID,
   internalLoadUnique,
@@ -276,24 +277,8 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
   ) {
-    const header = CoFeed._getUniqueHeader(unique, ownerID);
+    const header = getUniqueHeader("costream", unique, ownerID);
     return getIdFromHeader(header, as);
-  }
-
-  /** @internal */
-  static _getUniqueHeader(
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-  ) {
-    return {
-      type: "costream" as const,
-      ruleset: {
-        type: "ownedByGroup" as const,
-        group: ownerID as RawCoID,
-      },
-      meta: null,
-      uniqueness: unique,
-    };
   }
 
   /**
@@ -326,13 +311,9 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<F, R>;
     },
   ): Promise<Settled<Resolved<F, R>>> {
-    const header = CoFeed._getUniqueHeader(
-      options.unique,
-      options.owner.$jazz.id,
-    );
-
     return internalLoadUnique(this, {
-      header,
+      type: "costream",
+      unique: options.unique,
       owner: options.owner,
       resolve: options.resolve,
       onCreateWhenMissing: () => {

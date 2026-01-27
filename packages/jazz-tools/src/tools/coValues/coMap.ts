@@ -32,6 +32,7 @@ import {
   TypeSym,
   BranchDefinition,
   getIdFromHeader,
+  getUniqueHeader,
   internalLoadUnique,
   Account,
   CoValueBase,
@@ -457,25 +458,8 @@ export class CoMap extends CoValueBase implements CoValue {
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
   ) {
-    const header = CoMap._getUniqueHeader(unique, ownerID);
-
+    const header = getUniqueHeader("comap", unique, ownerID);
     return getIdFromHeader(header, as);
-  }
-
-  /** @internal */
-  static _getUniqueHeader(
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-  ) {
-    return {
-      type: "comap" as const,
-      ruleset: {
-        type: "ownedByGroup" as const,
-        group: ownerID as RawCoID,
-      },
-      meta: null,
-      uniqueness: unique,
-    };
   }
 
   /**
@@ -509,13 +493,9 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
     },
   ): Promise<Settled<Resolved<M, R>>> {
-    const header = CoMap._getUniqueHeader(
-      options.unique,
-      options.owner.$jazz.id,
-    );
-
     return internalLoadUnique(this, {
-      header,
+      type: "comap",
+      unique: options.unique,
       owner: options.owner,
       resolve: options.resolve,
       onCreateWhenMissing: () => {
@@ -567,13 +547,9 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
     },
   ): Promise<Settled<Resolved<M, R>>> {
-    const header = CoMap._getUniqueHeader(
-      options.unique,
-      options.owner.$jazz.id,
-    );
-
     return internalLoadUnique(this, {
-      header,
+      type: "comap",
+      unique: options.unique,
       owner: options.owner,
       resolve: options.resolve,
       onCreateWhenMissing: () => {
@@ -609,8 +585,6 @@ export class CoMap extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
     },
   ): Promise<Settled<Resolved<M, R>>> {
-    const header = CoMap._getUniqueHeader(unique, ownerID);
-
     const owner = await Group.load(ownerID, {
       loadAs: options?.loadAs,
     });
@@ -618,7 +592,8 @@ export class CoMap extends CoValueBase implements CoValue {
     if (!owner.$isLoaded) return owner;
 
     return internalLoadUnique(this, {
-      header,
+      type: "comap",
+      unique,
       owner,
       resolve: options?.resolve,
     });

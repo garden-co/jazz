@@ -2,6 +2,7 @@ import {
   cojsonInternals,
   type CoValueUniqueness,
   type CojsonInternalTypes,
+  type RawCoID,
   type RawCoValue,
 } from "cojson";
 import { AvailableCoValueCore } from "cojson";
@@ -556,6 +557,19 @@ export function getIdFromHeader(
   return cojsonInternals.idforHeader(header, node.crypto);
 }
 
+/**
+ * Mapping from CoValue TypeSym to the CoValueHeaderType.
+ */
+const coValueTypeSymToHeaderType: Record<string, CoValueHeaderType | null> = {
+  CoMap: "comap",
+  Group: null,
+  Account: null,
+  CoList: "colist",
+  CoStream: "costream",
+  CoPlainText: "coplaintext",
+  BinaryCoStream: null,
+};
+
 export async function unstable_loadUnique<
   S extends CoValueClassOrSchema,
   const R extends ResolveQuery<S>,
@@ -571,23 +585,50 @@ export async function unstable_loadUnique<
 ): Promise<MaybeLoaded<Loaded<S, R>>> {
   const cls = coValueClassFromCoValueClassOrSchema(schema);
 
-  if (
-    !("_getUniqueHeader" in cls) ||
-    typeof cls._getUniqueHeader !== "function"
-  ) {
-    throw new Error("CoValue class does not support unique headers");
+  const typeSym = cls.prototype[TypeSym] as string | undefined;
+  if (!typeSym) {
+    throw new Error(`Cannot determine CoValue type from class: ${cls.name}`);
   }
 
-  const header = cls._getUniqueHeader(options.unique, options.owner.$jazz.id);
+  const headerType = coValueTypeSymToHeaderType[typeSym];
+  if (!headerType) {
+    throw new Error(
+      `Unsupported CoValue type for unique headers: ${typeSym}. ` +
+        `Only CoMap, CoList, CoFeed (CoStream), and CoPlainText are supported.`,
+    );
+  }
 
   // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
   return internalLoadUnique(cls, {
-    header,
+    type: headerType,
+    unique: options.unique,
     onCreateWhenMissing: options.onCreateWhenMissing,
     onUpdateWhenFound: options.onUpdateWhenFound,
     owner: options.owner,
     resolve: options.resolve,
   }) as unknown as MaybeLoaded<Loaded<S, R>>;
+}
+
+type CoValueHeaderType = "comap" | "colist" | "costream" | "coplaintext";
+
+/**
+ * Generate a unique header for a CoValue class.
+ * Throws for unsupported types (Group, Account, BinaryCoStream).
+ */
+export function getUniqueHeader(
+  type: CoValueHeaderType,
+  unique: CoValueUniqueness["uniqueness"],
+  ownerID: ID<Account> | ID<Group>,
+): CoValueHeader {
+  return {
+    type,
+    ruleset: {
+      type: "ownedByGroup" as const,
+      group: ownerID as RawCoID,
+    },
+    meta: null,
+    uniqueness: unique,
+  };
 }
 
 export async function internalLoadUnique<
@@ -596,7 +637,8 @@ export async function internalLoadUnique<
 >(
   cls: CoValueClass<V>,
   options: {
-    header: CoValueHeader;
+    unique: CoValueUniqueness["uniqueness"];
+    type: CoValueHeaderType;
     onCreateWhenMissing?: () => void;
     onUpdateWhenFound?: (value: Resolved<V, R>) => void;
     owner: Account | Group;
@@ -608,7 +650,12 @@ export async function internalLoadUnique<
   const node =
     loadAs[TypeSym] === "Anonymous" ? loadAs.node : loadAs.$jazz.localNode;
 
-  const id = cojsonInternals.idforHeader(options.header, node.crypto);
+  const header = getUniqueHeader(
+    options.type,
+    options.unique,
+    options.owner.$jazz.id,
+  );
+  const id = cojsonInternals.idforHeader(header, node.crypto);
 
   // We first try to load the unique value without using resolve and without
   // retrying failures
