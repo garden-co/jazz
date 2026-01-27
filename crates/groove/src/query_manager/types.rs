@@ -1,12 +1,243 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use blake3;
 use internment::Intern;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 
 use super::encoding::{decode_row, encode_row};
+
+// ============================================================================
+// Schema Hashing - Content-addressed schema identification
+// ============================================================================
+
+/// Content-addressed hash of a schema's structural elements.
+/// Uses BLAKE3 over canonicalized (sorted) schema representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SchemaHash(pub [u8; 32]);
+
+impl SchemaHash {
+    /// Create a SchemaHash from raw bytes.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Get the raw bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Get an 8-character hex prefix for display/branch naming.
+    pub fn short(&self) -> String {
+        hex::encode(&self.0[..4])
+    }
+
+    /// Compute hash for a complete schema (HashMap<TableName, TableSchema>).
+    pub fn compute(schema: &Schema) -> Self {
+        let mut hasher = blake3::Hasher::new();
+
+        // Sort tables by name for deterministic ordering
+        let mut table_names: Vec<_> = schema.keys().collect();
+        table_names.sort_by_key(|t| t.as_str());
+
+        for table_name in table_names {
+            let table_schema = &schema[table_name];
+
+            // Hash table name
+            hasher.update(table_name.as_str().as_bytes());
+            hasher.update(&[0]); // delimiter
+
+            // Hash row descriptor (columns sorted by name)
+            hash_row_descriptor(&mut hasher, &table_schema.descriptor);
+        }
+
+        Self(*hasher.finalize().as_bytes())
+    }
+}
+
+impl std::fmt::Display for SchemaHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(&self.0))
+    }
+}
+
+/// Hash a RowDescriptor into a hasher, sorting columns by name for order-independence.
+fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescriptor) {
+    // Sort columns by name
+    let mut columns: Vec<_> = descriptor.columns.iter().collect();
+    columns.sort_by_key(|c| c.name.as_str());
+
+    for col in columns {
+        hash_column_descriptor(hasher, col);
+    }
+}
+
+/// Hash a single ColumnDescriptor.
+fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
+    // Name
+    hasher.update(col.name.as_str().as_bytes());
+    hasher.update(&[0]);
+
+    // Type
+    hash_column_type(hasher, &col.column_type);
+
+    // Nullable flag
+    hasher.update(&[col.nullable as u8]);
+
+    // References (FK)
+    if let Some(ref table) = col.references {
+        hasher.update(&[1]);
+        hasher.update(table.as_str().as_bytes());
+    } else {
+        hasher.update(&[0]);
+    }
+    hasher.update(&[0]); // delimiter
+}
+
+/// Hash a ColumnType recursively (for Array and Row types).
+fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
+    match col_type {
+        ColumnType::Integer => {
+            hasher.update(&[1]);
+        }
+        ColumnType::BigInt => {
+            hasher.update(&[2]);
+        }
+        ColumnType::Boolean => {
+            hasher.update(&[3]);
+        }
+        ColumnType::Text => {
+            hasher.update(&[4]);
+        }
+        ColumnType::Timestamp => {
+            hasher.update(&[5]);
+        }
+        ColumnType::Uuid => {
+            hasher.update(&[6]);
+        }
+        ColumnType::Array(elem) => {
+            hasher.update(&[7]);
+            hash_column_type(hasher, elem);
+        }
+        ColumnType::Row(desc) => {
+            hasher.update(&[8]);
+            hash_row_descriptor(hasher, desc);
+        }
+    }
+}
+
+/// Simple hex encoding (avoiding external crate).
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+// ============================================================================
+// Composed Branch Name - Environment-qualified branch naming
+// ============================================================================
+
+use crate::object::BranchName;
+
+/// A branch name composed of environment, schema hash, and user branch.
+/// Format: `{env}-{schemaHash8}-{userBranch}`
+/// Example: `dev-a1b2c3d4-main`, `prod-f9e8d7c6-feature-x`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ComposedBranchName {
+    pub env: String,
+    pub schema_hash: SchemaHash,
+    pub user_branch: String,
+}
+
+impl ComposedBranchName {
+    /// Create a new composed branch name.
+    pub fn new(env: &str, schema_hash: SchemaHash, user_branch: &str) -> Self {
+        Self {
+            env: env.to_string(),
+            schema_hash,
+            user_branch: user_branch.to_string(),
+        }
+    }
+
+    /// Create from a schema, computing the hash automatically.
+    pub fn from_schema(env: &str, schema: &Schema, user_branch: &str) -> Self {
+        Self::new(env, SchemaHash::compute(schema), user_branch)
+    }
+
+    /// Convert to a BranchName string: "{env}-{hash8}-{userBranch}"
+    pub fn to_branch_name(&self) -> BranchName {
+        BranchName::new(format!(
+            "{}-{}-{}",
+            self.env,
+            self.schema_hash.short(),
+            self.user_branch
+        ))
+    }
+
+    /// Parse a BranchName back into its components.
+    /// Returns None if the format doesn't match.
+    pub fn parse(name: &BranchName) -> Option<Self> {
+        let s = name.as_str();
+        let parts: Vec<&str> = s.splitn(3, '-').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+
+        let env = parts[0].to_string();
+        let hash_str = parts[1];
+        let user_branch = parts[2].to_string();
+
+        // Validate hash is 8 hex chars
+        if hash_str.len() != 8 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+
+        // We can't fully reconstruct the hash from just 8 chars,
+        // so we store a partial hash. For matching purposes, we use a zeroed hash
+        // with the short portion filled in.
+        let mut hash_bytes = [0u8; 32];
+        if let Ok(bytes) = hex_decode(hash_str) {
+            hash_bytes[..4].copy_from_slice(&bytes);
+        }
+
+        Some(Self {
+            env,
+            schema_hash: SchemaHash::from_bytes(hash_bytes),
+            user_branch,
+        })
+    }
+
+    /// Check if this branch matches an environment and user branch,
+    /// ignoring the schema hash (for finding related branches).
+    pub fn matches_env_and_branch(&self, env: &str, user_branch: &str) -> bool {
+        self.env == env && self.user_branch == user_branch
+    }
+}
+
+impl std::fmt::Display for ComposedBranchName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}-{}-{}",
+            self.env,
+            self.schema_hash.short(),
+            self.user_branch
+        )
+    }
+}
+
+/// Decode a hex string to bytes.
+fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    if !s.len().is_multiple_of(2) {
+        return Err(());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ()))
+        .collect()
+}
 
 /// Interned name identifying a table in the schema.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -240,12 +471,19 @@ impl RowDescriptor {
             descriptors.iter().flat_map(|d| d.columns.clone()).collect();
         Self { columns }
     }
+
+    /// Compute a content hash of this descriptor (column-order-independent).
+    pub fn content_hash(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hash_row_descriptor(&mut hasher, self);
+        *hasher.finalize().as_bytes()
+    }
 }
 
 use super::policy::PolicyExpr;
 
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct OperationPolicy {
     /// USING clause - filters rows for SELECT/UPDATE/DELETE.
     /// For SELECT: rows not matching are silently filtered out.
@@ -284,7 +522,7 @@ impl OperationPolicy {
 }
 
 /// Policies for all operations on a table.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TablePolicies {
     pub select: OperationPolicy,
     pub insert: OperationPolicy,
@@ -334,7 +572,7 @@ impl TablePolicies {
 }
 
 /// Schema for a single table, including row structure and policies.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TableSchema {
     /// Row structure definition.
     pub descriptor: RowDescriptor,
@@ -358,11 +596,124 @@ impl TableSchema {
             policies,
         }
     }
+
+    /// Start building a new table schema.
+    pub fn builder(name: &str) -> TableSchemaBuilder {
+        TableSchemaBuilder::new(name)
+    }
 }
 
 impl From<RowDescriptor> for TableSchema {
     fn from(descriptor: RowDescriptor) -> Self {
         Self::new(descriptor)
+    }
+}
+
+/// Builder for creating TableSchema with a fluent API.
+#[derive(Debug, Clone)]
+pub struct TableSchemaBuilder {
+    name: String,
+    columns: Vec<ColumnDescriptor>,
+    policies: TablePolicies,
+}
+
+impl TableSchemaBuilder {
+    /// Create a new builder for a table with the given name.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            columns: Vec::new(),
+            policies: TablePolicies::default(),
+        }
+    }
+
+    /// Add a column to the table.
+    pub fn column(mut self, name: &str, column_type: ColumnType) -> Self {
+        self.columns.push(ColumnDescriptor::new(name, column_type));
+        self
+    }
+
+    /// Add a nullable column to the table.
+    pub fn nullable_column(mut self, name: &str, column_type: ColumnType) -> Self {
+        self.columns
+            .push(ColumnDescriptor::new(name, column_type).nullable());
+        self
+    }
+
+    /// Add a foreign key column.
+    pub fn fk_column(mut self, name: &str, references: &str) -> Self {
+        self.columns
+            .push(ColumnDescriptor::new(name, ColumnType::Uuid).references(references));
+        self
+    }
+
+    /// Add a nullable foreign key column.
+    pub fn nullable_fk_column(mut self, name: &str, references: &str) -> Self {
+        self.columns.push(
+            ColumnDescriptor::new(name, ColumnType::Uuid)
+                .nullable()
+                .references(references),
+        );
+        self
+    }
+
+    /// Set policies for the table.
+    pub fn policies(mut self, policies: TablePolicies) -> Self {
+        self.policies = policies;
+        self
+    }
+
+    /// Get the table name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Build the TableSchema (returns just the schema, not the name).
+    pub fn build(self) -> TableSchema {
+        TableSchema {
+            descriptor: RowDescriptor::new(self.columns),
+            policies: self.policies,
+        }
+    }
+
+    /// Build and return both name and schema (for inserting into Schema map).
+    pub fn build_named(self) -> (TableName, TableSchema) {
+        let name = TableName::new(&self.name);
+        let schema = TableSchema {
+            descriptor: RowDescriptor::new(self.columns),
+            policies: self.policies,
+        };
+        (name, schema)
+    }
+}
+
+/// Builder for creating a complete Schema with multiple tables.
+#[derive(Debug, Clone, Default)]
+pub struct SchemaBuilder {
+    tables: Vec<TableSchemaBuilder>,
+}
+
+impl SchemaBuilder {
+    /// Create a new empty schema builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a table builder to the schema.
+    pub fn table(mut self, builder: TableSchemaBuilder) -> Self {
+        self.tables.push(builder);
+        self
+    }
+
+    /// Build the complete schema.
+    pub fn build(self) -> Schema {
+        self.tables.into_iter().map(|t| t.build_named()).collect()
+    }
+
+    /// Compute the schema hash.
+    pub fn hash(&self) -> SchemaHash {
+        let schema = self.clone().build();
+        SchemaHash::compute(&schema)
     }
 }
 
@@ -1752,5 +2103,217 @@ mod tests {
         assert_eq!(combined.columns.len(), 2);
         assert_eq!(combined.columns[0].name, "id");
         assert_eq!(combined.columns[1].name, "title");
+    }
+
+    // ========================================================================
+    // Schema Hash Tests
+    // ========================================================================
+
+    #[test]
+    fn schema_hash_deterministic() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let hash1 = SchemaHash::compute(&schema);
+        let hash2 = SchemaHash::compute(&schema);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn schema_hash_column_order_independent() {
+        // Schema with columns in different order should have same hash
+        let schema1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .column("age", ColumnType::Integer),
+            )
+            .build();
+
+        // Build same schema with different column order
+        let schema2: Schema = [(
+            TableName::new("users"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("age", ColumnType::Integer),
+                ColumnDescriptor::new("id", ColumnType::Uuid),
+                ColumnDescriptor::new("name", ColumnType::Text),
+            ])),
+        )]
+        .into_iter()
+        .collect();
+
+        let hash1 = SchemaHash::compute(&schema1);
+        let hash2 = SchemaHash::compute(&schema2);
+        assert_eq!(hash1, hash2, "Column order should not affect hash");
+    }
+
+    #[test]
+    fn schema_hash_table_order_independent() {
+        // Build with tables in different orders
+        let schema1 = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .table(TableSchema::builder("posts").column("id", ColumnType::Uuid))
+            .build();
+
+        let schema2 = SchemaBuilder::new()
+            .table(TableSchema::builder("posts").column("id", ColumnType::Uuid))
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let hash1 = SchemaHash::compute(&schema1);
+        let hash2 = SchemaHash::compute(&schema2);
+        assert_eq!(hash1, hash2, "Table order should not affect hash");
+    }
+
+    #[test]
+    fn schema_hash_different_schemas() {
+        let schema1 = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let schema2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let hash1 = SchemaHash::compute(&schema1);
+        let hash2 = SchemaHash::compute(&schema2);
+        assert_ne!(
+            hash1, hash2,
+            "Different schemas should have different hashes"
+        );
+    }
+
+    #[test]
+    fn schema_hash_short() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let hash = SchemaHash::compute(&schema);
+        let short = hash.short();
+
+        assert_eq!(short.len(), 8, "Short hash should be 8 hex chars");
+        assert!(short.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn table_schema_builder() {
+        let (name, schema) = TableSchema::builder("users")
+            .column("id", ColumnType::Uuid)
+            .nullable_column("email", ColumnType::Text)
+            .fk_column("org_id", "orgs")
+            .nullable_fk_column("manager_id", "users")
+            .build_named();
+
+        assert_eq!(name.as_str(), "users");
+        assert_eq!(schema.descriptor.columns.len(), 4);
+
+        let id_col = schema.descriptor.column("id").unwrap();
+        assert_eq!(id_col.column_type, ColumnType::Uuid);
+        assert!(!id_col.nullable);
+
+        let email_col = schema.descriptor.column("email").unwrap();
+        assert_eq!(email_col.column_type, ColumnType::Text);
+        assert!(email_col.nullable);
+
+        let org_col = schema.descriptor.column("org_id").unwrap();
+        assert_eq!(org_col.column_type, ColumnType::Uuid);
+        assert!(!org_col.nullable);
+        assert_eq!(org_col.references, Some(TableName::new("orgs")));
+
+        let manager_col = schema.descriptor.column("manager_id").unwrap();
+        assert!(manager_col.nullable);
+        assert_eq!(manager_col.references, Some(TableName::new("users")));
+    }
+
+    #[test]
+    fn row_descriptor_content_hash() {
+        let desc1 = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Uuid),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ]);
+
+        let desc2 = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("id", ColumnType::Uuid),
+        ]);
+
+        // Same columns, different order -> same hash (order-independent)
+        assert_eq!(desc1.content_hash(), desc2.content_hash());
+
+        // Different columns -> different hash
+        let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);
+        assert_ne!(desc1.content_hash(), desc3.content_hash());
+    }
+
+    // ========================================================================
+    // ComposedBranchName Tests
+    // ========================================================================
+
+    #[test]
+    fn composed_branch_name_format() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let composed = ComposedBranchName::from_schema("dev", &schema, "main");
+        let branch_name = composed.to_branch_name();
+        let s = branch_name.as_str();
+
+        // Should be in format: dev-XXXXXXXX-main
+        assert!(s.starts_with("dev-"));
+        assert!(s.ends_with("-main"));
+        assert_eq!(s.matches('-').count(), 2);
+    }
+
+    #[test]
+    fn composed_branch_name_parse() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let original = ComposedBranchName::from_schema("prod", &schema, "feature-x");
+        let branch_name = original.to_branch_name();
+        let parsed = ComposedBranchName::parse(&branch_name).unwrap();
+
+        assert_eq!(parsed.env, "prod");
+        assert_eq!(parsed.user_branch, "feature-x");
+        // Note: full hash can't be recovered from 8 chars, but short() should match
+        assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
+    }
+
+    #[test]
+    fn composed_branch_name_parse_invalid() {
+        // Too few parts
+        let name = BranchName::new("just-one");
+        assert!(ComposedBranchName::parse(&name).is_none());
+
+        // Hash not 8 chars
+        let name = BranchName::new("dev-abc-main");
+        assert!(ComposedBranchName::parse(&name).is_none());
+
+        // Hash not hex
+        let name = BranchName::new("dev-gggggggg-main");
+        assert!(ComposedBranchName::parse(&name).is_none());
+    }
+
+    #[test]
+    fn composed_branch_name_matches() {
+        let hash = SchemaHash::from_bytes([0xab; 32]);
+        let composed = ComposedBranchName::new("dev", hash, "main");
+
+        assert!(composed.matches_env_and_branch("dev", "main"));
+        assert!(!composed.matches_env_and_branch("prod", "main"));
+        assert!(!composed.matches_env_and_branch("dev", "feature"));
     }
 }

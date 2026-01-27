@@ -299,11 +299,11 @@ impl Query {
         }
     }
 
-    /// Create a new query for a table on the default "main" branch.
+    /// Create a new query for a table.
+    ///
+    /// Note: Branch must be set explicitly before execution.
     pub fn new(table: impl Into<TableName>) -> Self {
-        let mut q = Self::new_internal(table);
-        q.branches = vec!["main".to_string()];
-        q
+        Self::new_internal(table)
     }
 
     /// Check if this is a multi-branch query.
@@ -378,8 +378,8 @@ impl QueryBuilder {
     /// Start building a query for a table.
     ///
     /// Note: Branch must be explicitly specified via `.branch()` or `.branches()`.
-    /// Using `build()` without specifying a branch will default to "main" for
-    /// backward compatibility, but this behavior may change in the future.
+    /// Queries without branches will error at execution time unless a SchemaContext
+    /// is present (which provides branch expansion).
     pub fn new(table: impl Into<TableName>) -> Self {
         Self {
             // Use new_internal which doesn't set default branch
@@ -622,25 +622,11 @@ impl QueryBuilder {
 
     /// Build the query.
     ///
-    /// If no branch was specified via `.branch()` or `.branches()`,
-    /// defaults to "main" for backward compatibility.
-    pub fn build(mut self) -> Query {
-        // Default to "main" if no branch specified (backward compatibility)
-        if self.query.branches.is_empty() {
-            self.query.branches = vec!["main".to_string()];
-        }
-        self.query
-    }
-
-    /// Build the query, requiring at least one branch to be specified.
-    ///
-    /// # Panics
-    /// Panics if no branch was specified via `.branch()` or `.branches()`.
-    pub fn build_strict(self) -> Query {
-        assert!(
-            !self.query.branches.is_empty(),
-            "branch required: use .branch(\"name\") or .branches(&[\"a\", \"b\"])"
-        );
+    /// Branches should be specified via `.branch()` or `.branches()`.
+    /// If no branches specified:
+    /// - With SchemaManager: automatically expands to all live schema branches
+    /// - Without SchemaManager: QueryManager returns an error
+    pub fn build(self) -> Query {
         self.query
     }
 }
@@ -1138,11 +1124,11 @@ mod tests {
     }
 
     #[test]
-    fn query_builder_default_branch() {
-        // Without calling .branch(), build() defaults to "main"
+    fn query_builder_no_default_branch() {
+        // Without calling .branch(), branches is empty
         let query = QueryBuilder::new("users").build();
 
-        assert_eq!(query.branches, vec!["main".to_string()]);
+        assert!(query.branches.is_empty());
         assert!(!query.is_multi_branch());
     }
 
@@ -1172,25 +1158,10 @@ mod tests {
     }
 
     #[test]
-    fn query_builder_strict_with_branch() {
-        // build_strict should work when branch is specified
-        let query = QueryBuilder::new("users").branch("main").build_strict();
-
-        assert_eq!(query.branches, vec!["main".to_string()]);
-    }
-
-    #[test]
-    #[should_panic(expected = "branch required")]
-    fn query_builder_strict_without_branch() {
-        // build_strict should panic when no branch is specified
-        let _ = QueryBuilder::new("users").build_strict();
-    }
-
-    #[test]
-    fn query_new_has_main_branch() {
-        // Query::new() should set "main" as default branch
+    fn query_new_has_no_default_branch() {
+        // Query::new() does not set a default branch
         let query = Query::new("users");
 
-        assert_eq!(query.branches, vec!["main".to_string()]);
+        assert!(query.branches.is_empty());
     }
 }

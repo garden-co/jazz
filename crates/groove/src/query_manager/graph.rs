@@ -1,4 +1,5 @@
 use ahash::{AHashMap, AHashSet};
+use std::collections::HashMap;
 use std::ops::Bound;
 
 use bitvec::prelude::*;
@@ -7,6 +8,7 @@ use smallvec::SmallVec;
 use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
+use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
 use super::encoding::encode_value;
 use super::graph_nodes::alias::AliasNode;
@@ -28,8 +30,8 @@ use super::index::ScanCondition;
 use super::query::{Condition, Query};
 use super::session::Session;
 use super::types::{
-    ColumnDescriptor, ColumnName, ColumnType, Row, RowDelta, RowDescriptor, Schema, TableName,
-    Tuple, TupleDelta, TupleDescriptor,
+    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, Row, RowDelta, RowDescriptor,
+    Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 /// A node in the query graph (type-erased).
@@ -313,6 +315,232 @@ impl QueryGraph {
 
         // Phase 2: Filter node (only if there are remaining conditions not covered by index)
         // Build remaining predicate - only include conditions not fully handled by index scans
+        let predicate = build_remaining_predicate(query, &index_columns, &current_descriptor);
+        if !matches!(predicate, Predicate::True) {
+            let filter_node = FilterNode::new(current_descriptor.clone(), predicate);
+            let filter_id = graph.add_node(GraphNode::Filter(filter_node));
+            graph.add_edge(filter_id, phase2_input);
+            phase2_input = filter_id;
+        }
+
+        // Sort node (if order_by specified)
+        if !query.order_by.is_empty() {
+            let sort_keys = query.sort_keys(&current_descriptor);
+            if !sort_keys.is_empty() {
+                let sort_node = SortNode::new(current_descriptor.clone(), sort_keys);
+                let sort_id = graph.add_node(GraphNode::Sort(sort_node));
+                graph.add_edge(sort_id, phase2_input);
+                phase2_input = sort_id;
+            }
+        }
+
+        // LimitOffset node (if limit or offset specified)
+        if query.limit.is_some() || query.offset > 0 {
+            let limit_offset_node =
+                LimitOffsetNode::new(current_descriptor.clone(), query.limit, query.offset);
+            let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
+            graph.add_edge(limit_offset_id, phase2_input);
+            phase2_input = limit_offset_id;
+        }
+
+        // Project node (if select_columns specified)
+        if let Some(columns) = &query.select_columns {
+            let col_refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+            let project_node = ProjectNode::new(current_descriptor.clone(), &col_refs);
+            current_descriptor = project_node.output_descriptor().clone();
+            let project_id = graph.add_node(GraphNode::Project(project_node));
+            graph.add_edge(project_id, phase2_input);
+            phase2_input = project_id;
+        }
+
+        // Output node
+        let output_node = OutputNode::new(current_descriptor, OutputMode::Delta);
+        let output_id = graph.add_node(GraphNode::Output(output_node));
+        graph.add_edge(output_id, phase2_input);
+        graph.output_node = output_id;
+
+        Some(graph)
+    }
+
+    /// Compile a query with schema context for multi-schema queries.
+    ///
+    /// When schema context is provided:
+    /// - Branches are automatically expanded to include all live schema branches
+    /// - Column names are translated through lens chain for old schema branches
+    /// - The descriptor uses the current schema (lens transforms happen at row load time)
+    pub fn compile_with_schema_context(
+        query: &Query,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Option<Self> {
+        // Build branch -> schema hash map for column translation
+        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
+        for branch_name in schema_context.all_branch_names() {
+            let branch_str = branch_name.as_str().to_string();
+            if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+                branch_schema_map.insert(branch_str, composed.schema_hash);
+            }
+        }
+
+        // Expand branches to include all live schema branches if not specified
+        let branches: Vec<String> = if query.branches.is_empty() {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        } else {
+            query.branches.clone()
+        };
+
+        if query.is_join() {
+            // TODO: Add schema context support for joins
+            return Self::compile_join(query, schema);
+        }
+
+        let table_schema = schema.get(&query.table)?;
+        let descriptor = table_schema.descriptor.clone();
+        let select_policy = table_schema.policies.select.using.clone();
+        let mut graph = QueryGraph::new(query.table, descriptor.clone());
+        let table_str = query.table.as_str();
+
+        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
+        // For multi-branch queries, we create scans for each branch and union them
+        // Column names are translated for old schema branches
+        let mut phase1_outputs: Vec<NodeId> = Vec::new();
+        let mut index_columns: Vec<String> = Vec::new();
+
+        for branch in &branches {
+            // Get schema hash for this branch to determine if column translation is needed
+            let branch_schema_hash = branch_schema_map.get(branch).copied();
+
+            for disjunct in &query.disjuncts {
+                // Find best index condition for this disjunct
+                let (scan_column, scan_condition) =
+                    if let Some(cond) = disjunct.best_index_condition() {
+                        let column = cond.column().to_string();
+                        let scan_cond = condition_to_scan(cond);
+                        (column, scan_cond)
+                    } else {
+                        // No index condition, use "_id" for full scan
+                        ("_id".to_string(), ScanCondition::All)
+                    };
+
+                // Translate column name for old schema branches
+                let translated_column = if let Some(target_hash) = branch_schema_hash {
+                    if target_hash != schema_context.current_hash {
+                        // This branch uses an old schema - translate column name
+                        translate_column_for_index(
+                            schema_context,
+                            table_str,
+                            &scan_column,
+                            &target_hash,
+                        )
+                        .unwrap_or_else(|| scan_column.clone())
+                    } else {
+                        scan_column.clone()
+                    }
+                } else {
+                    scan_column.clone()
+                };
+
+                index_columns.push(scan_column.clone());
+                let scan_column_name = ColumnName::new(&translated_column);
+
+                let scan_node = IndexScanNode::new_with_branch(
+                    query.table,
+                    scan_column_name,
+                    branch,
+                    scan_condition,
+                    descriptor.clone(),
+                );
+                let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((scan_id, query.table, scan_column_name));
+                phase1_outputs.push(scan_id);
+            }
+
+            // If include_deleted is set, also scan _id_deleted index for this branch
+            if query.include_deleted {
+                let deleted_column = ColumnName::new("_id_deleted");
+                let deleted_scan_node = IndexScanNode::new_with_branch(
+                    query.table,
+                    deleted_column,
+                    branch,
+                    ScanCondition::All,
+                    descriptor.clone(),
+                );
+                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
+                graph
+                    .index_scan_nodes
+                    .push((deleted_scan_id, query.table, deleted_column));
+                phase1_outputs.push(deleted_scan_id);
+            }
+        }
+
+        // If multiple outputs, add Union node
+        let phase1_output = if phase1_outputs.len() > 1 {
+            let union_node = UnionNode::new();
+            let union_id = graph.add_node(GraphNode::Union(union_node));
+            for scan_id in &phase1_outputs {
+                graph.add_edge(union_id, *scan_id);
+            }
+            union_id
+        } else if !phase1_outputs.is_empty() {
+            phase1_outputs[0]
+        } else {
+            return None;
+        };
+
+        // Materialize node (boundary between Phase 1 and Phase 2)
+        // Lens transforms are applied in the row_loader, so MaterializeNode uses current schema
+        let materialize_node = MaterializeNode::new(descriptor.clone());
+        let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
+        graph.add_edge(materialize_id, phase1_output);
+
+        let mut phase2_input = materialize_id;
+        let mut current_descriptor = descriptor.clone();
+
+        // Policy filter node (if session provided and table has SELECT policy)
+        if let (Some(session), Some(policy)) = (&session, select_policy) {
+            let policy_node = PolicyFilterNode::new(
+                current_descriptor.clone(),
+                policy,
+                session.clone(),
+                schema.clone(),
+                query.table.as_str(),
+            );
+            let inherits_tables: Vec<TableName> = policy_node
+                .inherits_tables()
+                .iter()
+                .map(TableName::new)
+                .collect();
+            let policy_id = graph.add_node(GraphNode::PolicyFilter(policy_node));
+            graph.add_edge(policy_id, phase2_input);
+            for inherits_table in inherits_tables {
+                graph.policy_filter_tables.push((policy_id, inherits_table));
+            }
+            phase2_input = policy_id;
+        }
+
+        // Array subqueries: insert ArraySubqueryNode for each array subquery
+        for subquery_spec in &query.array_subqueries {
+            if let Some((node, new_descriptor)) =
+                graph.compile_array_subquery(subquery_spec, &current_descriptor, schema, &branches)
+            {
+                let node_id = graph.add_node(GraphNode::ArraySubquery(node));
+                graph.add_edge(node_id, phase2_input);
+                graph
+                    .array_subquery_tables
+                    .push((node_id, subquery_spec.table));
+                phase2_input = node_id;
+                current_descriptor = new_descriptor;
+            }
+        }
+
+        // Phase 2: Filter node (only if there are remaining conditions not covered by index)
         let predicate = build_remaining_predicate(query, &index_columns, &current_descriptor);
         if !matches!(predicate, Predicate::True) {
             let filter_node = FilterNode::new(current_descriptor.clone(), predicate);
