@@ -22,6 +22,7 @@ import {
   TypeSym,
   BranchDefinition,
   getIdFromHeader,
+  getUniqueHeader,
   internalLoadUnique,
   AnonymousJazzAgent,
   ItemsSym,
@@ -332,25 +333,8 @@ export class CoList<out Item = any>
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
   ) {
-    const header = CoList._getUniqueHeader(unique, ownerID);
-
+    const header = getUniqueHeader("colist", unique, ownerID);
     return getIdFromHeader(header, as);
-  }
-
-  /** @internal */
-  static _getUniqueHeader(
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-  ) {
-    return {
-      type: "colist" as const,
-      ruleset: {
-        type: "ownedByGroup" as const,
-        group: ownerID as RawCoID,
-      },
-      meta: null,
-      uniqueness: unique,
-    };
   }
 
   /**
@@ -384,13 +368,9 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
     },
   ): Promise<Settled<Resolved<L, R>>> {
-    const header = CoList._getUniqueHeader(
-      options.unique,
-      options.owner.$jazz.id,
-    );
-
     return internalLoadUnique(this, {
-      header,
+      type: "colist",
+      unique: options.unique,
       owner: options.owner,
       resolve: options.resolve,
       onCreateWhenMissing: () => {
@@ -439,13 +419,9 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
     },
   ): Promise<Settled<Resolved<L, R>>> {
-    const header = CoList._getUniqueHeader(
-      options.unique,
-      options.owner.$jazz.id,
-    );
-
     return internalLoadUnique(this, {
-      header,
+      type: "colist",
+      unique: options.unique,
       owner: options.owner,
       resolve: options.resolve,
       onCreateWhenMissing: () => {
@@ -481,15 +457,14 @@ export class CoList<out Item = any>
       loadAs?: Account | AnonymousJazzAgent;
     },
   ): Promise<Settled<Resolved<L, R>>> {
-    const header = CoList._getUniqueHeader(unique, ownerID);
-
     const owner = await Group.load(ownerID, {
       loadAs: options?.loadAs,
     });
     if (!owner.$isLoaded) return owner;
 
     return internalLoadUnique(this, {
-      header,
+      type: "colist",
+      unique,
       owner,
       resolve: options?.resolve,
     });
