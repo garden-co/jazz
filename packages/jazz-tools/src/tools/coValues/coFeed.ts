@@ -419,7 +419,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     const validationMode = resolveValidationMode();
     if (validationMode !== "loose" && this.coFeedSchema) {
       const schema = z.array(this.getItemSchema());
-      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+      executeValidation(schema, items, validationMode) as CoFieldInit<
         CoFeedItem<F>
       >[];
     }
