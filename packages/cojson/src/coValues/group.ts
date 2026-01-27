@@ -1393,11 +1393,6 @@ export class RawGroup<
       stream.core.makeTransaction([], "trusting", initMeta);
     }
 
-    if (!uniqueness.createdAt) {
-      // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
-      stream.core.makeTransaction([], "trusting", initMeta);
-    }
-
     return stream;
   }
 

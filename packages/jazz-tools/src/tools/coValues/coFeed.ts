@@ -266,12 +266,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       uniqueness,
       initMeta,
     );
-    const instance = new this({ fromRaw: raw });
-
-    if (init) {
-      instance.$jazz.push(...init);
-    }
-    return instance;
+    return new this({ fromRaw: raw }) as S;
   }
 
   /** @deprecated Use `CoFeed.getOrCreateUnique` instead. */
@@ -344,6 +339,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         (this as any).create(options.value, {
           owner: options.owner,
           unique: options.unique,
+          firstComesWins: true,
         });
       },
       // No onUpdateWhenFound - CoFeed is append-only
