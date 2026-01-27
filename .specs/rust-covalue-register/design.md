@@ -1,16 +1,17 @@
-# Rust CoValue Register - Design Document
+# Rust SessionMap - Design Document
 
 ## Overview
 
-This document describes the architecture for moving `SessionMap` and `CoValueHeader` data structures to Rust. The focus is on **data structure ownership** - Rust owns the data, TypeScript becomes a thin orchestration layer.
+This document describes the architecture for moving `SessionMap` and `CoValueHeader` data structures to Rust. The focus is on **data structure ownership** - Rust owns the data per-CoValue, TypeScript becomes a thin orchestration layer.
 
 ### Design Goals
 
-1. **Data ownership in Rust**: `SessionMap` and `CoValueHeader` live entirely in Rust
+1. **Data ownership in Rust**: `SessionMap` (including header) lives entirely in Rust, one instance per CoValue
 2. **TypeScript as orchestrator**: TS handles cross-CoValue logic (permissions, key lookup)
-3. **Minimal FFI surface**: Batch APIs, JSON serialization for simplicity
-4. **Active by default**: Rust implementation is the only implementation, no feature flags
-5. **No performance regression**: Benchmarks must show improvement or parity
+3. **Minimal FFI surface**: JSON serialization for simplicity
+4. **Consistent pattern**: Follows the existing `SessionLogImpl` pattern - each TS wrapper owns a Rust impl
+5. **Active by default**: Rust implementation is the only implementation, no feature flags
+6. **No performance regression**: Benchmarks must show improvement or parity
 
 ### Scope
 
@@ -41,13 +42,14 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
 │  ├── decryptTransaction()  ← Orchestrates, key from groups              │
 │  └── newContentSince()  ← STAYS for now, reads from Rust               │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  VerifiedState (thin wrapper)                                            │
-│  ├── header → delegates to Rust Register                                │
-│  ├── sessions → delegates to Rust SessionMap                            │
+│  VerifiedState (thin wrapper, per CoValue)                               │
+│  ├── sessions: SessionMap (owns Rust impl)                              │
+│  ├── header → delegates to SessionMap.impl                              │
 │  └── newContentSince() → reads data from Rust, builds messages          │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  SessionMap.ts (thin wrapper)                                            │
-│  ├── All methods delegate to Rust                                       │
+│  SessionMap.ts (thin wrapper, per CoValue)                               │
+│  ├── impl: SessionMapImpl (Rust-backed)                                 │
+│  ├── All methods delegate to impl                                       │
 │  └── Converts between TS types and Rust JSON                            │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  RawGroup (permission logic) - UNCHANGED                                 │
@@ -60,15 +62,12 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
                                     │ JSON serialization
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    Rust Layer (DATA OWNERSHIP)                           │
+│                    Rust Layer (DATA OWNERSHIP, per CoValue)              │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  CoValueRegister (singleton per LocalNode)                              │
-│  ├── headers: HashMap<RawCoID, CoValueHeader>                           │
-│  ├── session_maps: HashMap<RawCoID, SessionMap>                         │
-│  └── Lifecycle: create, free, freeAll                                   │
-├─────────────────────────────────────────────────────────────────────────┤
-│  SessionMap (owns all session data for a CoValue)                       │
-│  ├── sessions: HashMap<SessionID, SessionLog>                           │
+│  SessionMapImpl (one instance per CoValue)                               │
+│  ├── co_id: String                                                      │
+│  ├── header: CoValueHeader                                              │
+│  ├── sessions: HashMap<SessionID, SessionLogInternal>                   │
 │  ├── known_state: KnownState                                            │
 │  ├── known_state_with_streaming: Option<KnownState>                     │
 │  ├── is_deleted: bool                                                   │
@@ -88,44 +87,32 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
 
 #### CryptoProvider Pattern
 
-The Register follows the same pattern as `SessionLogImpl` - created by the platform-specific crypto provider:
+`SessionMapImpl` follows the same pattern as `SessionLogImpl` - created by the platform-specific crypto provider:
 
 ```
 CryptoProvider (abstract)
 ├── createSessionLog() → SessionLogImpl     // Existing
-├── createRegister() → RegisterImpl         // NEW
+├── createSessionMap() → SessionMapImpl     // NEW (one per CoValue)
 │
 ├── NapiCrypto (Node.js)
-│   └── creates RegisterAdapter wrapping cojson-core-napi Register
+│   └── creates SessionMapImpl from cojson-core-napi
 ├── WasmCrypto (Browser)
-│   └── creates RegisterAdapter wrapping cojson-core-wasm Register
+│   └── creates SessionMapImpl from cojson-core-wasm
 └── RNCrypto (React Native)
-    └── creates RegisterAdapter wrapping cojson-core-rn Register
+    └── creates SessionMapImpl from cojson-core-rn
 ```
 
-#### TypeScript: `RegisterImpl` Interface (NEW)
+#### TypeScript: `SessionMapImpl` Interface (NEW)
 
 ```typescript
 // packages/cojson/src/crypto/crypto.ts
 
-export interface RegisterImpl {
-  // Lifecycle
-  free(id: string): boolean;
-  freeAll(): void;
-  size(): number;
-  
-  // Header operations (all can throw RegisterError)
-  setHeader(id: string, headerJson: string): void;
-  getHeader(id: string): string | undefined;  // undefined if not found
-  hasHeader(id: string): boolean;
-  
-  // Session map operations
-  createSessionMap(id: string): void;
-  hasSessionMap(id: string): boolean;
+export interface SessionMapImpl {
+  // Header (stored in this SessionMap)
+  getHeader(): string;
   
   // Transaction operations
   addTransactions(
-    id: string,
     sessionId: string,
     signerId: string | null,
     transactionsJson: string,
@@ -134,7 +121,6 @@ export interface RegisterImpl {
   ): void;
   
   makeNewPrivateTransaction(
-    id: string,
     sessionId: string,
     signerId: string,
     changesJson: string,
@@ -145,7 +131,6 @@ export interface RegisterImpl {
   ): string;  // Returns { signature, transaction } JSON
   
   makeNewTrustingTransaction(
-    id: string,
     sessionId: string,
     signerId: string,
     changesJson: string,
@@ -153,27 +138,30 @@ export interface RegisterImpl {
     madeAt: number,
   ): string;  // Returns { signature, transaction } JSON
   
-  // Session queries - return undefined if not found (no exceptions for missing data)
-  getSessionIds(id: string): string[];  // throws if coValue not found
-  getTransactionCount(id: string, sessionId: string): number | undefined;
-  getTransaction(id: string, sessionId: string, txIndex: number): string | undefined;
-  getSessionTransactions(id: string, sessionId: string, fromIndex: number): string | undefined;
-  getLastSignature(id: string, sessionId: string): string | undefined;
-  getSignatureAfter(id: string, sessionId: string, txIndex: number): string | undefined;
-  getLastSignatureCheckpoint(id: string, sessionId: string): number | undefined;
+  // Session queries - return undefined if session not found
+  getSessionIds(): string[];
+  getTransactionCount(sessionId: string): number | undefined;
+  getTransaction(sessionId: string, txIndex: number): string | undefined;
+  getSessionTransactions(sessionId: string, fromIndex: number): string | undefined;
+  getLastSignature(sessionId: string): string | undefined;
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined;
+  getLastSignatureCheckpoint(sessionId: string): number | undefined;
   
   // Known state
-  getKnownState(id: string): string | undefined;
-  getKnownStateWithStreaming(id: string): string | undefined;
-  setStreamingKnownState(id: string, streamingJson: string): void;
+  getKnownState(): string;
+  getKnownStateWithStreaming(): string | undefined;
+  setStreamingKnownState(streamingJson: string): void;
   
   // Deletion
-  markAsDeleted(id: string): void;
-  isDeleted(id: string): boolean | undefined;  // undefined if not found
+  markAsDeleted(): void;
+  isDeleted(): boolean;
   
-  // Decryption (throws if coValue/session not found)
-  decryptTransaction(id: string, sessionId: string, txIndex: number, keySecret: string): string | undefined;
-  decryptTransactionMeta(id: string, sessionId: string, txIndex: number, keySecret: string): string | undefined;
+  // Decryption (throws if session not found)
+  decryptTransaction(sessionId: string, txIndex: number, keySecret: string): string | undefined;
+  decryptTransactionMeta(sessionId: string, txIndex: number, keySecret: string): string | undefined;
+  
+  // Lifecycle
+  free(): void;
 }
 ```
 
@@ -191,8 +179,11 @@ export abstract class CryptoProvider {
     signerID?: SignerID,
   ): SessionLogImpl;
   
-  // NEW: Create the register (singleton per crypto instance)
-  abstract createRegister(): RegisterImpl;
+  // NEW: Create a SessionMap for a CoValue (one per CoValue)
+  abstract createSessionMap(
+    coID: RawCoID,
+    headerJson: string,
+  ): SessionMapImpl;
 }
 ```
 
@@ -200,101 +191,68 @@ export abstract class CryptoProvider {
 
 ```typescript
 // packages/cojson/src/crypto/NapiCrypto.ts
-import { Register } from "cojson-core-napi";
+import { SessionMap as NativeSessionMap } from "cojson-core-napi";
 
 export class NapiCrypto extends CryptoProvider {
-  private _register: RegisterImpl | undefined;
-  
-  createRegister(): RegisterImpl {
-    if (!this._register) {
-      this._register = new RegisterAdapter(new Register());
-    }
-    return this._register;
+  createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl {
+    return new NativeSessionMap(coID, headerJson);
   }
-}
-
-class RegisterAdapter implements RegisterImpl {
-  constructor(private readonly register: Register) {}
-  
-  setHeader(id: string, headerJson: string): void {
-    this.register.setHeader(id, headerJson);
-  }
-  
-  // ... implement all methods delegating to native Register ...
 }
 ```
 
 ```typescript
 // packages/cojson/src/crypto/WasmCrypto.ts
-import { Register } from "cojson-core-wasm";
+import { SessionMap as WasmSessionMap } from "cojson-core-wasm";
 
 export class WasmCrypto extends CryptoProvider {
-  createRegister(): RegisterImpl {
-    // Same pattern as NapiCrypto
+  createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl {
+    return new WasmSessionMap(coID, headerJson);
   }
 }
 ```
 
 ```typescript
 // packages/cojson/src/crypto/RNCrypto.ts
-import { Register } from "cojson-core-rn";
+import { SessionMap as RNSessionMap } from "cojson-core-rn";
 
 export class RNCrypto extends CryptoProvider {
-  createRegister(): RegisterImpl {
-    // Same pattern as NapiCrypto
+  createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl {
+    return new RNSessionMap(coID, headerJson);
   }
 }
 ```
 
-#### Rust: `CoValueRegister`
-- **Storage**: Owns all `CoValueHeader` and `SessionMap` instances
-- **Lifecycle**: `create`, `free`, `freeAll` operations
-- **Header access**: `set_header`, `get_header`, `has_header`
-- **Session map access**: `get_session_map`, `create_session_map`
-- **Exposed via**: NAPI, WASM, UniFFI bindings
-
-#### Rust: `SessionMap`
-- **Session storage**: HashMap of `SessionID` → `SessionLog`
+#### Rust: `SessionMapImpl`
+- **Per-CoValue instance**: One Rust object per CoValue, owned by TypeScript wrapper
+- **Header storage**: Stores the CoValueHeader
+- **Session storage**: HashMap of `SessionID` → `SessionLogInternal`
 - **Known state tracking**: Tracks transaction counts per session
 - **Streaming state**: Handles `knownStateWithStreaming` for partial loads
 - **Deletion handling**: `markAsDeleted`, filters non-delete sessions
-- **Transaction operations**: `addTransaction`, `makeNewPrivateTransaction`, `makeNewTrustingTransaction`
-- **Decryption**: `decryptTransaction`, `decryptTransactionMeta` (handled by SessionLog)
+- **Transaction operations**: `addTransactions`, `makeNewPrivateTransaction`, `makeNewTrustingTransaction`
+- **Decryption**: `decryptTransaction`, `decryptTransactionMeta` (delegated to SessionLogInternal)
+- **Exposed via**: NAPI, WASM, UniFFI bindings
 
-#### Rust: `SessionLog`
+#### Rust: `SessionLogInternal`
 - **Transaction storage**: Vector of transactions
 - **Signature tracking**: `lastSignature`, `signatureAfter` map
 - **Size tracking**: For chunking in sync messages
-- **Crypto operations**: `SessionLog` handles verification and decryption directly (unified)
+- **Crypto operations**: Handles verification and decryption directly (unified)
 
 #### TypeScript: `SessionMap.ts` (Thin Wrapper)
-- Gets `RegisterImpl` from `CryptoProvider`
-- Delegates all operations to Register via the interface
+- Owns a `SessionMapImpl` instance from `CryptoProvider`
+- Delegates all operations to impl
 - Converts between TypeScript branded types and JSON strings
 - Maintains API compatibility with existing code
 
 #### TypeScript: `VerifiedState`
-- Thin wrapper holding reference to Rust data via Register
+- Owns a `SessionMap` which owns the Rust impl
+- `header` getter delegates to `SessionMap.impl.getHeader()`
 - `newContentSince()` stays here for now - reads data from Rust, builds messages
-- Orchestrates operations but doesn't own data
 
-#### TypeScript: `LocalNode` (MODIFIED)
-- Holds single `RegisterImpl` instance from crypto provider
-- Passes register to `VerifiedState` / `SessionMap` when creating CoValues
-
-```typescript
-// packages/cojson/src/localNode.ts
-
-export class LocalNode {
-  readonly crypto: CryptoProvider;
-  readonly register: RegisterImpl;
-  
-  constructor(crypto: CryptoProvider, ...) {
-    this.crypto = crypto;
-    this.register = crypto.createRegister();  // Singleton for this node
-  }
-}
-```
+#### TypeScript: `LocalNode` (UNCHANGED)
+- No changes needed - does not hold a registry
+- Creates `VerifiedState` instances which create their own `SessionMap` with Rust impl
 
 ## Data Models
 
@@ -309,7 +267,9 @@ TypeScript uses `stableStringify` which **sorts object keys alphabetically** bef
 
 1. **Struct fields MUST be defined in alphabetical order** - serde serializes fields in definition order
 2. **Use `BTreeMap` for any map/object** - ensures keys are serialized in sorted order
-3. **Tagged enums**: The tag field (e.g., `"type"`, `"privacy"`) participates in alphabetical ordering
+3. **DO NOT use `#[serde(tag = "...")]`** - it puts the tag field FIRST, not alphabetically
+   - Instead, use `#[serde(untagged)]` with separate structs that have the tag as a regular field in alphabetical position
+   - Example: `{"group":"co_z...","type":"ownedByGroup"}` requires `group` field before `type` field in struct definition
 
 Structures requiring `BTreeMap`:
 - `Uniqueness::Object` - part of header, gets hashed
@@ -336,20 +296,25 @@ pub enum JsonValue {
 }
 ```
 
-Internal storage structures (`CoValueRegister.headers`, `SessionMap.sessions`) can use `HashMap` since they're never hashed, only used for lookups.
+Internal storage structures (`SessionMapImpl.sessions`) can use `HashMap` since they're never hashed, only used for lookups.
 
 ### Rust Data Structures
 
 ```rust
-// crates/cojson-core/src/core/register.rs
+// crates/cojson-core/src/core/session_map.rs
 
 use std::collections::{HashMap, BTreeMap};
 
-/// The central registry for all CoValue data
-/// Note: HashMap is fine here - this is internal storage, never serialized for hashing
-pub struct CoValueRegister {
-    headers: HashMap<String, CoValueHeader>,
-    session_maps: HashMap<String, SessionMap>,
+/// SessionMap implementation - one instance per CoValue
+/// Owns the header and all session data for a single CoValue
+pub struct SessionMapImpl {
+    co_id: String,
+    header: CoValueHeader,
+    sessions: HashMap<String, SessionLogInternal>,
+    known_state: KnownState,
+    known_state_with_streaming: Option<KnownState>,
+    streaming_known_state: Option<KnownStateSessions>,
+    is_deleted: bool,
 }
 
 /// Header matching TypeScript CoValueHeader
@@ -367,24 +332,84 @@ pub struct CoValueHeader {
     pub uniqueness: Uniqueness,
 }
 
-/// RulesetDef - tagged enum, fields within variants in alphabetical order
-/// Note: serde(tag = "type") adds "type" field, other fields must be alphabetically ordered
+/// RulesetDef - NOT using serde(tag) because it puts tag first, not alphabetically
+/// Instead, we manually include the "type" field in alphabetical position
+/// 
+/// IMPORTANT: serde(tag = "type") would produce {"type":"group","initialAdmin":"..."}
+/// but stableStringify needs {"initialAdmin":"...","type":"group"} (alphabetical)
+///
+/// Solution: Use untagged enum with explicit type fields in alphabetical order
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(untagged)]
 pub enum RulesetDef {
+    Group(RulesetGroup),
+    OwnedByGroup(RulesetOwnedByGroup),
+    UnsafeAllowAll(RulesetUnsafeAllowAll),
+}
+
+/// {"initialAdmin": "...", "type": "group"} - fields in alphabetical order
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RulesetGroup {
+    #[serde(rename = "initialAdmin")]
+    pub initial_admin: String,
+    #[serde(rename = "type")]
+    pub ruleset_type: RulesetGroupType,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RulesetGroupType {
     #[serde(rename = "group")]
-    Group { 
-        // "initialAdmin" comes before "type" alphabetically
-        #[serde(rename = "initialAdmin")]
-        initial_admin: String 
-    },
+    Group,
+}
+
+/// {"group": "...", "type": "ownedByGroup"} - fields in alphabetical order
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RulesetOwnedByGroup {
+    pub group: String,
+    #[serde(rename = "type")]
+    pub ruleset_type: RulesetOwnedByGroupType,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RulesetOwnedByGroupType {
     #[serde(rename = "ownedByGroup")]
-    OwnedByGroup { 
-        // "group" comes before "type" alphabetically
-        group: String 
-    },
+    OwnedByGroup,
+}
+
+/// {"type": "unsafeAllowAll"} - only has type field
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RulesetUnsafeAllowAll {
+    #[serde(rename = "type")]
+    pub ruleset_type: RulesetUnsafeAllowAllType,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RulesetUnsafeAllowAllType {
     #[serde(rename = "unsafeAllowAll")]
     UnsafeAllowAll,
+}
+
+// Helper constructors for ergonomic RulesetDef creation
+impl RulesetDef {
+    pub fn group(initial_admin: impl Into<String>) -> Self {
+        RulesetDef::Group(RulesetGroup {
+            initial_admin: initial_admin.into(),
+            ruleset_type: RulesetGroupType::Group,
+        })
+    }
+    
+    pub fn owned_by_group(group: impl Into<String>) -> Self {
+        RulesetDef::OwnedByGroup(RulesetOwnedByGroup {
+            group: group.into(),
+            ruleset_type: RulesetOwnedByGroupType::OwnedByGroup,
+        })
+    }
+    
+    pub fn unsafe_allow_all() -> Self {
+        RulesetDef::UnsafeAllowAll(RulesetUnsafeAllowAll {
+            ruleset_type: RulesetUnsafeAllowAllType::UnsafeAllowAll,
+        })
+    }
 }
 
 /// Uniqueness type - Object variant uses BTreeMap for stable serialization
@@ -398,18 +423,7 @@ pub enum Uniqueness {
     Object(BTreeMap<String, String>),  // BTreeMap for stable key ordering!
 }
 
-/// Session map holding all sessions for a CoValue
-/// Internal storage uses HashMap (never serialized for hashing)
-pub struct SessionMap {
-    co_id: String,
-    sessions: HashMap<String, SessionLogInternal>,  // Uses EXTENDED SessionLogInternal
-    known_state: KnownState,
-    known_state_with_streaming: Option<KnownState>,
-    streaming_known_state: Option<KnownStateSessions>,
-    is_deleted: bool,
-}
-
-/// SessionLog - EXTENDS existing SessionLogInternal from cojson-core/src/core/session_log.rs
+/// SessionLogInternal - EXTENDS existing SessionLogInternal from cojson-core/src/core/session_log.rs
 /// 
 /// The existing SessionLogInternal already stores:
 ///   - public_key: Option<VerifyingKey>     (for verification)
@@ -521,31 +535,87 @@ pub struct KnownState {
 pub type KnownStateSessions = BTreeMap<String, u32>;
 
 /// Transaction types matching TypeScript
-/// Fields within variants in alphabetical order (tag "privacy" is added by serde)
+/// NOT using serde(tag) because it puts tag first, not alphabetically
+/// 
+/// IMPORTANT: serde(tag = "privacy") would produce {"privacy":"private","encryptedChanges":"..."}
+/// but stableStringify needs {"encryptedChanges":"...","privacy":"private"} (alphabetical)
+///
+/// Solution: Use untagged enum with explicit privacy fields in alphabetical order
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "privacy")]
+#[serde(untagged)]
 pub enum Transaction {
+    Private(PrivateTransaction),
+    Trusting(TrustingTransaction),
+}
+
+/// Private transaction - fields in ALPHABETICAL order:
+/// encryptedChanges, keyUsed, madeAt, meta, privacy
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivateTransaction {
+    #[serde(rename = "encryptedChanges")]
+    pub encrypted_changes: String,
+    #[serde(rename = "keyUsed")]
+    pub key_used: String,
+    #[serde(rename = "madeAt")]
+    pub made_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<String>,
+    pub privacy: PrivatePrivacy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PrivatePrivacy {
     #[serde(rename = "private")]
-    Private {
-        // Alphabetical: encryptedChanges, keyUsed, madeAt, meta, (privacy is tag)
-        #[serde(rename = "encryptedChanges")]
-        encrypted_changes: String,
-        #[serde(rename = "keyUsed")]
-        key_used: String,
-        #[serde(rename = "madeAt")]
-        made_at: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        meta: Option<String>,
-    },
+    Private,
+}
+
+/// Trusting transaction - fields in ALPHABETICAL order:
+/// changes, madeAt, meta, privacy
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrustingTransaction {
+    pub changes: String,
+    #[serde(rename = "madeAt")]
+    pub made_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<String>,
+    pub privacy: TrustingPrivacy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TrustingPrivacy {
     #[serde(rename = "trusting")]
-    Trusting {
-        // Alphabetical: changes, madeAt, meta, (privacy is tag)
-        changes: String,
-        #[serde(rename = "madeAt")]
+    Trusting,
+}
+
+// Helper constructors for ergonomic Transaction creation
+impl Transaction {
+    pub fn private(
+        encrypted_changes: impl Into<String>,
+        key_used: impl Into<String>,
         made_at: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<String>,
-    },
+    ) -> Self {
+        Transaction::Private(PrivateTransaction {
+            encrypted_changes: encrypted_changes.into(),
+            key_used: key_used.into(),
+            made_at,
+            meta,
+            privacy: PrivatePrivacy::Private,
+        })
+    }
+    
+    pub fn trusting(
+        changes: impl Into<String>,
+        made_at: u64,
+        meta: Option<String>,
+    ) -> Self {
+        Transaction::Trusting(TrustingTransaction {
+            changes: changes.into(),
+            made_at,
+            meta,
+            privacy: TrustingPrivacy::Trusting,
+        })
+    }
 }
 ```
 
@@ -592,58 +662,35 @@ export type Transaction = PrivateTransaction | TrustingTransaction;
 
 ## API Design
 
-### Rust Public API (`CoValueRegister`)
+### Rust Public API (`SessionMapImpl`)
 
 ```rust
-impl CoValueRegister {
-    // === Lifecycle ===
+impl SessionMapImpl {
+    // === Constructor ===
     
-    pub fn new() -> Self;
-    pub fn with_capacity(capacity: usize) -> Self;
-    pub fn free(&mut self, id: &str) -> bool;
-    pub fn free_all(&mut self);
-    pub fn size(&self) -> usize;
+    /// Create a new SessionMap for a CoValue
+    pub fn new(co_id: &str, header_json: &str) -> Result<Self, SessionMapError>;
     
-    // === Header Operations ===
+    // === Header ===
     
-    pub fn set_header(&mut self, id: &str, header_json: &str) -> Result<(), RegisterError>;
-    pub fn get_header(&self, id: &str) -> Result<Option<String>, RegisterError>;
-    pub fn has_header(&self, id: &str) -> bool;
+    /// Get the header (always present after construction)
+    pub fn get_header(&self) -> String;
     
-    // === Session Map Operations ===
-    
-    pub fn create_session_map(&mut self, id: &str) -> Result<(), RegisterError>;
-    pub fn has_session_map(&self, id: &str) -> bool;
-    
-    // === Known State ===
-    
-    pub fn get_known_state(&self, id: &str) -> Result<Option<String>, RegisterError>;
-    pub fn get_known_state_with_streaming(&self, id: &str) -> Result<Option<String>, RegisterError>;
-    pub fn set_streaming_known_state(&mut self, id: &str, streaming_json: &str) -> Result<(), RegisterError>;
-}
-```
-
-### Rust Public API (`SessionMap` via Register)
-
-```rust
-impl CoValueRegister {
     // === Transaction Operations ===
     
     /// Add transactions to a session
     pub fn add_transactions(
         &mut self,
-        id: &str,
         session_id: &str,
         signer_id: Option<&str>,
         transactions_json: &str,  // JSON array of Transaction
         signature: &str,
         skip_verify: bool,
-    ) -> Result<(), RegisterError>;
+    ) -> Result<(), SessionMapError>;
     
     /// Create new private transaction (for local writes)
     pub fn make_new_private_transaction(
         &mut self,
-        id: &str,
         session_id: &str,
         signer_id: &str,
         changes_json: &str,
@@ -651,172 +698,136 @@ impl CoValueRegister {
         key_secret: &str,
         meta_json: Option<&str>,
         made_at: u64,
-    ) -> Result<String, RegisterError>;  // Returns { signature, transaction } JSON
+    ) -> Result<String, SessionMapError>;  // Returns { signature, transaction } JSON
     
     /// Create new trusting transaction (for local writes)
     pub fn make_new_trusting_transaction(
         &mut self,
-        id: &str,
         session_id: &str,
         signer_id: &str,
         changes_json: &str,
         meta_json: Option<&str>,
         made_at: u64,
-    ) -> Result<String, RegisterError>;  // Returns { signature, transaction } JSON
+    ) -> Result<String, SessionMapError>;  // Returns { signature, transaction } JSON
     
     // === Session Queries ===
-    // All return Option to indicate "not found" - bindings convert to undefined
+    // Return Option to indicate "not found" - bindings convert to undefined
     
     /// Get all session IDs
-    pub fn get_session_ids(&self, id: &str) -> Result<Vec<String>, RegisterError>;
+    pub fn get_session_ids(&self) -> Vec<String>;
     
     /// Get transaction count for a session (None if session not found)
-    pub fn get_transaction_count(&self, id: &str, session_id: &str) -> Option<u32>;
+    pub fn get_transaction_count(&self, session_id: &str) -> Option<u32>;
     
     /// Get single transaction by index
-    pub fn get_transaction(&self, id: &str, session_id: &str, tx_index: u32) -> Result<Option<String>, RegisterError>;
+    pub fn get_transaction(&self, session_id: &str, tx_index: u32) -> Option<String>;
     
     /// Get transactions for a session from index (for newContentSince iteration)
-    pub fn get_session_transactions(
-        &self,
-        id: &str,
-        session_id: &str,
-        from_index: u32,
-    ) -> Result<Option<String>, RegisterError>;
+    pub fn get_session_transactions(&self, session_id: &str, from_index: u32) -> Option<String>;
     
     /// Get last signature for a session
-    pub fn get_last_signature(&self, id: &str, session_id: &str) -> Option<String>;
+    pub fn get_last_signature(&self, session_id: &str) -> Option<String>;
     
     /// Get signature after specific transaction index
-    pub fn get_signature_after(&self, id: &str, session_id: &str, tx_index: u32) -> Option<String>;
+    pub fn get_signature_after(&self, session_id: &str, tx_index: u32) -> Option<String>;
     
     /// Get the last signature checkpoint index (max index in signatureAfter map, or -1 if no checkpoints)
-    /// Returns None if session not found
-    pub fn get_last_signature_checkpoint(&self, id: &str, session_id: &str) -> Option<i32>;
+    pub fn get_last_signature_checkpoint(&self, session_id: &str) -> Option<i32>;
+    
+    // === Known State ===
+    
+    pub fn get_known_state(&self) -> String;
+    pub fn get_known_state_with_streaming(&self) -> Option<String>;
+    pub fn set_streaming_known_state(&mut self, streaming_json: &str) -> Result<(), SessionMapError>;
     
     // === Deletion ===
     
-    pub fn mark_as_deleted(&mut self, id: &str) -> Result<(), RegisterError>;
-    pub fn is_deleted(&self, id: &str) -> Option<bool>;  // None if not found
+    pub fn mark_as_deleted(&mut self);
+    pub fn is_deleted(&self) -> bool;
     
     // === Decryption (key provided by TypeScript from group lookup) ===
     
     pub fn decrypt_transaction(
         &self,
-        id: &str,
         session_id: &str,
         tx_index: u32,
         key_secret: &str,
-    ) -> Result<Option<String>, RegisterError>;  // Returns decrypted changes JSON
+    ) -> Result<Option<String>, SessionMapError>;  // Returns decrypted changes JSON
     
     pub fn decrypt_transaction_meta(
         &self,
-        id: &str,
         session_id: &str,
         tx_index: u32,
         key_secret: &str,
-    ) -> Result<Option<String>, RegisterError>;  // Returns decrypted meta JSON
+    ) -> Result<Option<String>, SessionMapError>;  // Returns decrypted meta JSON
+    
+    // === Lifecycle ===
+    
+    pub fn free(self);
 }
 ```
 
 ### Rust Implementation Examples
 
 ```rust
-// crates/cojson-core/src/core/register.rs
+// crates/cojson-core/src/core/session_map.rs
 
-impl CoValueRegister {
-    pub fn new() -> Self {
-        Self {
-            headers: HashMap::new(),
-            session_maps: HashMap::new(),
-        }
-    }
-    
-    // === Header Operations ===
-    
-    pub fn set_header(&mut self, id: &str, header_json: &str) -> Result<(), RegisterError> {
-        if self.headers.contains_key(id) {
-            return Err(RegisterError::HeaderExists(id.to_string()));
-        }
+impl SessionMapImpl {
+    /// Create a new SessionMap for a CoValue
+    pub fn new(co_id: &str, header_json: &str) -> Result<Self, SessionMapError> {
         let header: CoValueHeader = serde_json::from_str(header_json)?;
-        self.headers.insert(id.to_string(), header);
-        Ok(())
-    }
-    
-    pub fn get_header(&self, id: &str) -> Result<Option<String>, RegisterError> {
-        match self.headers.get(id) {
-            Some(header) => {
-                let json = serde_json::to_string(header)?;
-                Ok(Some(json))
-            }
-            None => Ok(None),
-        }
-    }
-    
-    pub fn has_header(&self, id: &str) -> bool {
-        self.headers.contains_key(id)
-    }
-    
-    // === Session Map Operations ===
-    
-    pub fn create_session_map(&mut self, id: &str) -> Result<(), RegisterError> {
-        if self.session_maps.contains_key(id) {
-            return Err(RegisterError::SessionMapExists(id.to_string()));
-        }
-        let session_map = SessionMap {
-            co_id: id.to_string(),
+        
+        Ok(Self {
+            co_id: co_id.to_string(),
+            header,
             sessions: HashMap::new(),
             known_state: KnownState {
                 header: true,
-                id: id.to_string(),
+                id: co_id.to_string(),
                 sessions: BTreeMap::new(),
             },
             known_state_with_streaming: None,
             streaming_known_state: None,
             is_deleted: false,
-        };
-        self.session_maps.insert(id.to_string(), session_map);
-        Ok(())
+        })
     }
     
-    pub fn has_session_map(&self, id: &str) -> bool {
-        self.session_maps.contains_key(id)
+    // === Header ===
+    
+    pub fn get_header(&self) -> String {
+        serde_json::to_string(&self.header).expect("header serialization should not fail")
     }
     
     // === Transaction Operations ===
     
     pub fn add_transactions(
         &mut self,
-        id: &str,
         session_id: &str,
         signer_id: Option<&str>,
         transactions_json: &str,
         signature: &str,
         skip_verify: bool,
-    ) -> Result<(), RegisterError> {
-        let session_map = self.session_maps.get_mut(id)
-            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
-        
-        if session_map.is_deleted && !is_delete_session_id(session_id) {
-            return Err(RegisterError::DeletedCoValue(id.to_string()));
+    ) -> Result<(), SessionMapError> {
+        if self.is_deleted && !is_delete_session_id(session_id) {
+            return Err(SessionMapError::DeletedCoValue(self.co_id.clone()));
         }
         
         let transactions: Vec<Transaction> = serde_json::from_str(transactions_json)?;
         
-        // Get or create session log (uses existing SessionLogInternal)
-        let session_log = session_map.sessions
+        // Get or create session log
+        let session_log = self.sessions
             .entry(session_id.to_string())
-            .or_insert_with(|| SessionLogInternal::new(id, session_id, signer_id));
+            .or_insert_with(|| SessionLogInternal::new(&self.co_id, session_id, signer_id));
         
         // Add transactions to staging area
         for tx in &transactions {
             match tx {
-                Transaction::Private { encrypted_changes, key_used, made_at, meta } => {
+                Transaction::Private(PrivateTransaction { encrypted_changes, key_used, made_at, meta, .. }) => {
                     session_log.add_existing_private_transaction(
                         encrypted_changes, key_used, *made_at, meta.as_deref()
                     );
                 }
-                Transaction::Trusting { changes, made_at, meta } => {
+                Transaction::Trusting(TrustingTransaction { changes, made_at, meta, .. }) => {
                     session_log.add_existing_trusting_transaction(
                         changes, *made_at, meta.as_deref()
                     );
@@ -825,23 +836,22 @@ impl CoValueRegister {
         }
         
         // Commit transactions with signature verification
-        // (commit_transactions already stores transactions and last_signature internally)
         session_log.commit_transactions(signature, skip_verify)?;
         
-        // Track transaction size for in-between signatures (NEW method)
+        // Track transaction size for in-between signatures
         let tx_size: usize = transactions.iter().map(|tx| {
             match tx {
-                Transaction::Private { encrypted_changes, .. } => encrypted_changes.len(),
-                Transaction::Trusting { changes, .. } => changes.len(),
+                Transaction::Private(PrivateTransaction { encrypted_changes, .. }) => encrypted_changes.len(),
+                Transaction::Trusting(TrustingTransaction { changes, .. }) => changes.len(),
             }
         }).sum();
         session_log.add_to_size_tracking(tx_size);
         
         // Update known state
         let tx_count = session_log.transaction_count() as u32;
-        session_map.known_state.sessions.insert(session_id.to_string(), tx_count);
+        self.known_state.sessions.insert(session_id.to_string(), tx_count);
         
-        // Check if we need an in-between signature (NEW method)
+        // Check if we need an in-between signature
         if session_log.needs_inbetween_signature() {
             let idx = (session_log.transaction_count() - 1) as u32;
             session_log.record_inbetween_signature(idx, signature.to_string());
@@ -851,129 +861,72 @@ impl CoValueRegister {
     }
     
     // === Session Queries ===
-    // All return Option to indicate "not found" - bindings convert to undefined
     
-    pub fn get_session_ids(&self, id: &str) -> Result<Vec<String>, RegisterError> {
-        let session_map = self.session_maps.get(id)
-            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
-        
-        Ok(session_map.sessions.keys().cloned().collect())
+    pub fn get_session_ids(&self) -> Vec<String> {
+        self.sessions.keys().cloned().collect()
     }
     
-    pub fn get_transaction_count(&self, id: &str, session_id: &str) -> Option<u32> {
-        self.session_maps.get(id)
-            .and_then(|sm| sm.sessions.get(session_id))
-            .map(|sl| sl.transaction_count() as u32)  // Use NEW method
+    pub fn get_transaction_count(&self, session_id: &str) -> Option<u32> {
+        self.sessions.get(session_id)
+            .map(|sl| sl.transaction_count() as u32)
     }
     
-    pub fn get_transaction(
-        &self,
-        id: &str,
-        session_id: &str,
-        tx_index: u32,
-    ) -> Result<Option<String>, RegisterError> {
-        let session_map = match self.session_maps.get(id) {
-            Some(sm) => sm,
-            None => return Ok(None),
-        };
-        
-        let session_log = match session_map.sessions.get(session_id) {
-            Some(sl) => sl,
-            None => return Ok(None),
-        };
-        
-        // Use NEW method - returns JSON string directly
-        match session_log.get_transaction(tx_index as usize) {
-            Some(tx_json) => Ok(Some(tx_json.to_string())),
-            None => Ok(None),
-        }
+    pub fn get_transaction(&self, session_id: &str, tx_index: u32) -> Option<String> {
+        self.sessions.get(session_id)
+            .and_then(|sl| sl.get_transaction(tx_index as usize))
+            .map(|s| s.to_string())
     }
     
-    pub fn get_session_transactions(
-        &self,
-        id: &str,
-        session_id: &str,
-        from_index: u32,
-    ) -> Result<Option<String>, RegisterError> {
-        let session_map = match self.session_maps.get(id) {
-            Some(sm) => sm,
-            None => return Ok(None),
-        };
+    pub fn get_session_transactions(&self, session_id: &str, from_index: u32) -> Option<String> {
+        let session_log = self.sessions.get(session_id)?;
         
-        let session_log = match session_map.sessions.get(session_id) {
-            Some(sl) => sl,
-            None => return Ok(None),
-        };
-        
-        // Collect transactions from index using get_transaction (NEW method)
         let count = session_log.transaction_count();
-        let transactions: Vec<String> = (from_index as usize..count)
-            .filter_map(|i| session_log.get_transaction(i).map(|s| s.to_string()))
+        let transactions: Vec<&str> = (from_index as usize..count)
+            .filter_map(|i| session_log.get_transaction(i))
             .collect();
         
-        let json = format!("[{}]", transactions.join(","));
-        Ok(Some(json))
+        // Use serde_json for safe JSON array construction
+        serde_json::to_string(&transactions).ok()
     }
     
-    pub fn get_last_signature(&self, id: &str, session_id: &str) -> Option<String> {
-        self.session_maps.get(id)
-            .and_then(|sm| sm.sessions.get(session_id))
-            .and_then(|sl| sl.get_last_signature().map(|s| s.to_string()))  // Use NEW method
+    pub fn get_last_signature(&self, session_id: &str) -> Option<String> {
+        self.sessions.get(session_id)
+            .and_then(|sl| sl.get_last_signature())
+            .map(|s| s.to_string())
     }
     
-    pub fn get_signature_after(&self, id: &str, session_id: &str, tx_index: u32) -> Option<String> {
-        self.session_maps.get(id)
-            .and_then(|sm| sm.sessions.get(session_id))
-            .and_then(|sl| sl.get_signature_after(tx_index).map(|s| s.to_string()))  // Use NEW method
+    pub fn get_signature_after(&self, session_id: &str, tx_index: u32) -> Option<String> {
+        self.sessions.get(session_id)
+            .and_then(|sl| sl.get_signature_after(tx_index))
+            .map(|s| s.to_string())
     }
     
-    pub fn get_last_signature_checkpoint(&self, id: &str, session_id: &str) -> Option<i32> {
-        let session_log = self.session_maps.get(id)
-            .and_then(|sm| sm.sessions.get(session_id))?;
-        
-        Some(session_log.get_last_signature_checkpoint())  // Use NEW method
+    pub fn get_last_signature_checkpoint(&self, session_id: &str) -> Option<i32> {
+        self.sessions.get(session_id)
+            .map(|sl| sl.get_last_signature_checkpoint())
     }
     
     // === Known State ===
     
-    pub fn get_known_state(&self, id: &str) -> Result<Option<String>, RegisterError> {
-        match self.session_maps.get(id) {
-            Some(session_map) => {
-                let json = serde_json::to_string(&session_map.known_state)?;
-                Ok(Some(json))
-            }
-            None => Ok(None),
-        }
+    pub fn get_known_state(&self) -> String {
+        serde_json::to_string(&self.known_state).expect("known_state serialization should not fail")
     }
     
-    pub fn get_known_state_with_streaming(&self, id: &str) -> Result<Option<String>, RegisterError> {
-        let session_map = match self.session_maps.get(id) {
-            Some(sm) => sm,
-            None => return Ok(None),
-        };
-        
-        match &session_map.known_state_with_streaming {
-            Some(ks) => {
-                let json = serde_json::to_string(ks)?;
-                Ok(Some(json))
-            }
-            None => Ok(None),
-        }
+    pub fn get_known_state_with_streaming(&self) -> Option<String> {
+        self.known_state_with_streaming.as_ref()
+            .map(|ks| serde_json::to_string(ks).expect("known_state serialization should not fail"))
     }
     
-    pub fn set_streaming_known_state(
-        &mut self,
-        id: &str,
-        streaming_json: &str,
-    ) -> Result<(), RegisterError> {
-        let session_map = self.session_maps.get_mut(id)
-            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+    pub fn set_streaming_known_state(&mut self, streaming_json: &str) -> Result<(), SessionMapError> {
+        if self.is_deleted {
+            return Ok(());
+        }
         
         let streaming: KnownStateSessions = serde_json::from_str(streaming_json)?;
         
         // Check if streaming state is subset of current known state
         let is_subset = streaming.iter().all(|(session_id, &count)| {
-            session_map.known_state.sessions
+            self.known_state.sessions
                 .get(session_id)
                 .map(|&current| count <= current)
                 .unwrap_or(false)
@@ -983,120 +936,89 @@ impl CoValueRegister {
             return Ok(());  // Already have this data
         }
         
-        session_map.streaming_known_state = Some(streaming.clone());
+        self.streaming_known_state = Some(streaming.clone());
         
         // Update known_state_with_streaming
-        let mut combined = session_map.known_state.clone();
+        let mut combined = self.known_state.clone();
         for (session_id, count) in streaming {
             combined.sessions
                 .entry(session_id)
                 .and_modify(|c| *c = (*c).max(count))
                 .or_insert(count);
         }
-        session_map.known_state_with_streaming = Some(combined);
+        self.known_state_with_streaming = Some(combined);
         
         Ok(())
     }
     
     // === Deletion ===
     
-    pub fn mark_as_deleted(&mut self, id: &str) -> Result<(), RegisterError> {
-        let session_map = self.session_maps.get_mut(id)
-            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
-        
-        session_map.is_deleted = true;
+    pub fn mark_as_deleted(&mut self) {
+        self.is_deleted = true;
         
         // Reset known state to only report delete sessions
         let mut new_known_state = KnownState {
             header: true,
-            id: id.to_string(),
+            id: self.co_id.clone(),
             sessions: BTreeMap::new(),
         };
         
         // Only keep delete session counts in known state
-        for (session_id, session_log) in &session_map.sessions {
+        for (session_id, session_log) in &self.sessions {
             if is_delete_session_id(session_id) {
                 new_known_state.sessions.insert(
                     session_id.clone(),
-                    session_log.transaction_count() as u32,  // Use NEW method
+                    session_log.transaction_count() as u32,
                 );
             }
         }
         
-        session_map.known_state = new_known_state;
-        session_map.known_state_with_streaming = None;
-        session_map.streaming_known_state = None;
-        
-        Ok(())
+        self.known_state = new_known_state;
+        self.known_state_with_streaming = None;
+        self.streaming_known_state = None;
     }
     
-    pub fn is_deleted(&self, id: &str) -> Option<bool> {
-        self.session_maps.get(id).map(|sm| sm.is_deleted)
+    pub fn is_deleted(&self) -> bool {
+        self.is_deleted
     }
     
     // === Decryption ===
-    // Uses EXISTING SessionLogInternal methods (already implemented)
     
     pub fn decrypt_transaction(
         &self,
-        id: &str,
         session_id: &str,
         tx_index: u32,
         key_secret: &str,
-    ) -> Result<Option<String>, RegisterError> {
-        let session_map = self.session_maps.get(id)
-            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+    ) -> Result<Option<String>, SessionMapError> {
+        let session_log = self.sessions.get(session_id)
+            .ok_or_else(|| SessionMapError::SessionNotFound(session_id.to_string()))?;
         
-        let session_log = session_map.sessions.get(session_id)
-            .ok_or_else(|| RegisterError::NotFound(format!("session {}:{}", id, session_id)))?;
-        
-        // Use EXISTING SessionLogInternal method
         let decrypted = session_log.decrypt_next_transaction_changes_json(tx_index as usize, key_secret);
         Ok(Some(decrypted))
     }
     
     pub fn decrypt_transaction_meta(
         &self,
-        id: &str,
         session_id: &str,
         tx_index: u32,
         key_secret: &str,
-    ) -> Result<Option<String>, RegisterError> {
-        let session_map = self.session_maps.get(id)
-            .ok_or_else(|| RegisterError::NotFound(id.to_string()))?;
+    ) -> Result<Option<String>, SessionMapError> {
+        let session_log = self.sessions.get(session_id)
+            .ok_or_else(|| SessionMapError::SessionNotFound(session_id.to_string()))?;
         
-        let session_log = session_map.sessions.get(session_id)
-            .ok_or_else(|| RegisterError::NotFound(format!("session {}:{}", id, session_id)))?;
-        
-        // Use EXISTING SessionLogInternal method
         Ok(session_log.decrypt_next_transaction_meta_json(tx_index as usize, key_secret))
     }
     
     // === Lifecycle ===
     
-    pub fn free(&mut self, id: &str) -> bool {
-        let header_removed = self.headers.remove(id).is_some();
-        let session_map_removed = self.session_maps.remove(id).is_some();
-        header_removed || session_map_removed
-    }
-    
-    pub fn free_all(&mut self) {
-        self.headers.clear();
-        self.session_maps.clear();
-    }
-    
-    pub fn size(&self) -> usize {
-        self.session_maps.len()
+    pub fn free(self) {
+        // Drop self - Rust will clean up all owned data
     }
 }
 
-// Helper functions
+// Helper function
 fn is_delete_session_id(session_id: &str) -> bool {
     session_id.contains("_session_d") && session_id.ends_with('$')
-}
-
-fn exceeds_recommended_size(size: usize) -> bool {
-    size > 100_000  // 100KB threshold
 }
 ```
 
@@ -1108,37 +1030,39 @@ fn exceeds_recommended_size(size: usize) -> bool {
 export class SessionMap {
   constructor(
     private readonly id: RawCoID,
-    private readonly register: RegisterImpl,  // From CryptoProvider via LocalNode
-  ) {
-    register.createSessionMap(id);
+    private readonly impl: SessionMapImpl,  // Rust-backed, from CryptoProvider
+  ) {}
+
+  // Header access
+  get header(): CoValueHeader {
+    return JSON.parse(this.impl.getHeader());
   }
 
-  // No get() returning full SessionLog - use specific accessors:
-  
+  // Session accessors
   getTransactionCount(sessionID: SessionID): number | undefined {
-    return this.register.getTransactionCount(this.id, sessionID);
+    return this.impl.getTransactionCount(sessionID);
   }
   
   getTransaction(sessionID: SessionID, txIndex: number): Transaction | undefined {
-    const json = this.register.getTransaction(this.id, sessionID, txIndex);
+    const json = this.impl.getTransaction(sessionID, txIndex);
     return json ? JSON.parse(json) : undefined;
   }
   
   getTransactions(sessionID: SessionID, fromIndex: number = 0): Transaction[] | undefined {
-    const json = this.register.getSessionTransactions(this.id, sessionID, fromIndex);
+    const json = this.impl.getSessionTransactions(sessionID, fromIndex);
     return json ? JSON.parse(json) : undefined;
   }
   
   getLastSignature(sessionID: SessionID): Signature | undefined {
-    return this.register.getLastSignature(this.id, sessionID) as Signature | undefined;
+    return this.impl.getLastSignature(sessionID) as Signature | undefined;
   }
   
   getSignatureAfter(sessionID: SessionID, txIndex: number): Signature | undefined {
-    return this.register.getSignatureAfter(this.id, sessionID, txIndex) as Signature | undefined;
+    return this.impl.getSignatureAfter(sessionID, txIndex) as Signature | undefined;
   }
   
   getLastSignatureCheckpoint(sessionID: SessionID): number | undefined {
-    return this.register.getLastSignatureCheckpoint(this.id, sessionID);
+    return this.impl.getLastSignatureCheckpoint(sessionID) ?? undefined;
   }
 
   addTransaction(
@@ -1148,8 +1072,7 @@ export class SessionMap {
     newSignature: Signature,
     skipVerify: boolean = false,
   ) {
-    this.register.addTransactions(
-      this.id,
+    this.impl.addTransactions(
       sessionID,
       signerID ?? null,
       JSON.stringify(newTransactions),
@@ -1167,8 +1090,7 @@ export class SessionMap {
     meta: JsonObject | undefined,
     madeAt: number,
   ): { signature: Signature; transaction: Transaction } {
-    const resultJson = this.register.makeNewPrivateTransaction(
-      this.id,
+    const resultJson = this.impl.makeNewPrivateTransaction(
       sessionID,
       signerAgent.currentSignerID(),
       JSON.stringify(changes),
@@ -1187,8 +1109,7 @@ export class SessionMap {
     meta: JsonObject | undefined,
     madeAt: number,
   ): { signature: Signature; transaction: Transaction } {
-    const resultJson = this.register.makeNewTrustingTransaction(
-      this.id,
+    const resultJson = this.impl.makeNewTrustingTransaction(
       sessionID,
       signerAgent.currentSignerID(),
       JSON.stringify(changes),
@@ -1199,20 +1120,24 @@ export class SessionMap {
   }
 
   get knownState(): CoValueKnownState {
-    return JSON.parse(this.register.getKnownState(this.id));
+    return JSON.parse(this.impl.getKnownState());
   }
 
   get knownStateWithStreaming(): CoValueKnownState | undefined {
-    const json = this.register.getKnownStateWithStreaming(this.id);
+    const json = this.impl.getKnownStateWithStreaming();
     return json ? JSON.parse(json) : undefined;
   }
 
   setStreamingKnownState(streamingKnownState: KnownStateSessions) {
-    this.register.setStreamingKnownState(this.id, JSON.stringify(streamingKnownState));
+    this.impl.setStreamingKnownState(JSON.stringify(streamingKnownState));
   }
 
   markAsDeleted() {
-    this.register.markAsDeleted(this.id);
+    this.impl.markAsDeleted();
+  }
+
+  get isDeleted(): boolean {
+    return this.impl.isDeleted();
   }
 
   decryptTransaction(
@@ -1220,7 +1145,7 @@ export class SessionMap {
     txIndex: number,
     keySecret: KeySecret,
   ): JsonValue[] | undefined {
-    const json = this.register.decryptTransaction(this.id, sessionID, txIndex, keySecret);
+    const json = this.impl.decryptTransaction(sessionID, txIndex, keySecret);
     return json ? JSON.parse(json) : undefined;
   }
 
@@ -1229,26 +1154,23 @@ export class SessionMap {
     txIndex: number,
     keySecret: KeySecret,
   ): JsonObject | undefined {
-    const json = this.register.decryptTransactionMeta(this.id, sessionID, txIndex, keySecret);
+    const json = this.impl.decryptTransactionMeta(sessionID, txIndex, keySecret);
     return json ? JSON.parse(json) : undefined;
   }
 
-  // Iterator support for newContentSince (stays in TS for now)
-  *entries(): IterableIterator<[SessionID, SessionLog]> {
-    const sessionIds = this.register.getSessionIds(this.id);
-    for (const sessionId of sessionIds) {
-      const session = this.get(sessionId as SessionID);
-      if (session) {
-        yield [sessionId as SessionID, session];
-      }
-    }
+  // Iterator support for newContentSince
+  getSessionIds(): SessionID[] {
+    return this.impl.getSessionIds() as SessionID[];
   }
 
   get size(): number {
-    return this.register.getSessionIds(this.id).length;
+    return this.impl.getSessionIds().length;
   }
-  
-  // Note: clone() removed - VerifiedState.clone() is never called externally
+
+  // Lifecycle - call when VerifiedState is no longer needed
+  free() {
+    this.impl.free();
+  }
 }
 ```
 
@@ -1259,42 +1181,39 @@ export class SessionMap {
 
 export class VerifiedState {
   readonly id: RawCoID;
-  readonly register: RegisterImpl;
   readonly sessions: SessionMap;
   
-  // Header is fetched from Rust Register
+  // Header is fetched from SessionMap (which owns the Rust impl)
   get header(): CoValueHeader {
-    const json = this.register.getHeader(this.id);
-    if (!json) throw new Error(`Header not found for ${this.id}`);
-    return JSON.parse(json);
+    return this.sessions.header;
   }
   
   constructor(
     id: RawCoID,
-    register: RegisterImpl,
+    crypto: CryptoProvider,
     header: CoValueHeader,
   ) {
     this.id = id;
-    this.register = register;
     
-    // Store header in Rust
-    register.setHeader(id, JSON.stringify(header));
-    
-    // Create SessionMap wrapper
-    this.sessions = new SessionMap(id, register);
+    // Create SessionMap with Rust impl (header is stored in Rust)
+    const impl = crypto.createSessionMap(id, JSON.stringify(header));
+    this.sessions = new SessionMap(id, impl);
   }
   
-  // Note: clone() removed - never called externally
-  
   // Delegates to SessionMap (calculated in Rust)
-  getLastSignatureCheckpoint(sessionID: SessionID): number {
+  getLastSignatureCheckpoint(sessionID: SessionID): number | undefined {
     return this.sessions.getLastSignatureCheckpoint(sessionID);
   }
   
   // newContentSince stays in TypeScript, reads from Rust via SessionMap
   newContentSince(knownState: CoValueKnownState | undefined): NewContentMessage[] | undefined {
-    // Uses this.sessions.entries(), getTransactions(), getLastSignature(), etc.
+    // Uses this.sessions.getSessionIds(), getTransactions(), getLastSignature(), etc.
     // Implementation stays largely the same, just uses Rust-backed data
+  }
+  
+  // Lifecycle - call when done with this CoValue
+  free() {
+    this.sessions.free();
   }
 }
 
@@ -1314,7 +1233,7 @@ All data crossing the FFI boundary uses JSON:
 
 ```typescript
 // TypeScript side
-const result = register.addTransactions(id, sessionId, signerId, JSON.stringify(transactions), signature, false);
+sessionMap.impl.addTransactions(sessionId, signerId, JSON.stringify(transactions), signature, false);
 ```
 
 ```rust
@@ -1337,22 +1256,23 @@ let transactions: Vec<Transaction> = serde_json::from_str(&transactions_json)?;
 
 **Note**: Rust is the default and only implementation. No feature flags, no dual-write, no gradual rollout.
 
-### Phase 1: Rust SessionMap Implementation
-1. Implement `SessionMap` struct in `cojson-core/src/core/register.rs`
-2. Implement unified `SessionLog` with data storage + crypto (signature verification, decryption)
+### Phase 1: Rust SessionMapImpl Implementation
+1. Implement `SessionMapImpl` struct in `cojson-core/src/core/session_map.rs`
+2. Extend `SessionLogInternal` with new fields (signature_after, tx_size tracking)
 3. Add unit tests in Rust
 
 ### Phase 2: FFI Bindings
-1. Add NAPI bindings for all SessionMap operations
+1. Add NAPI bindings for `SessionMapImpl`
 2. Add WASM bindings
 3. Add React Native (UniFFI) bindings
 4. Test each platform independently
 
 ### Phase 3: TypeScript Integration
-1. Replace `SessionMap.ts` with thin wrapper that delegates to Rust
-2. Update `VerifiedState` to use new SessionMap
-3. Remove old TypeScript SessionMap implementation
-4. Verify all existing tests pass
+1. Add `createSessionMap()` to `CryptoProvider`
+2. Replace `SessionMap.ts` with thin wrapper around `SessionMapImpl`
+3. Update `VerifiedState` to create `SessionMap` with Rust impl
+4. Remove old TypeScript SessionMap/SessionLog data storage
+5. Verify all existing tests pass
 
 ### Phase 4: newContentSince (Deferred)
 1. Keep `newContentSince` in TypeScript
@@ -1375,15 +1295,9 @@ These stay in TypeScript due to cross-CoValue dependencies:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum RegisterError {
-    #[error("CoValue not found: {0}")]
-    NotFound(String),
-    
-    #[error("Header already exists for: {0}")]
-    HeaderExists(String),
-    
-    #[error("Session map already exists for: {0}")]
-    SessionMapExists(String),
+pub enum SessionMapError {
+    #[error("Session not found: {0}")]
+    SessionNotFound(String),
     
     #[error("Invalid transaction data: {0}")]
     InvalidTransaction(String),
@@ -1411,34 +1325,42 @@ pub enum RegisterError {
 mod tests {
     use super::*;
     
+    const TEST_HEADER: &str = r#"{"type":"comap","ruleset":{"type":"unsafeAllowAll"},"meta":null,"uniqueness":"test"}"#;
+    
     #[test]
     fn test_session_map_add_transactions() {
-        let mut register = CoValueRegister::new();
-        register.set_header("co_test", /* header_json */).unwrap();
-        register.create_session_map("co_test").unwrap();
+        let mut session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
         
-        register.add_transactions(
-            "co_test",
+        session_map.add_transactions(
             "session_1",
             Some("signer_1"),
             r#"[{"privacy":"trusting","madeAt":1234,"changes":"[]"}]"#,
             "sig_abc",
-            false,
+            true,  // skip verify for test
         ).unwrap();
         
         let known_state: KnownState = serde_json::from_str(
-            &register.get_known_state("co_test").unwrap()
+            &session_map.get_known_state()
         ).unwrap();
         assert_eq!(known_state.sessions.get("session_1"), Some(&1));
     }
     
     #[test]
     fn test_mark_as_deleted() {
-        let mut register = CoValueRegister::new();
-        // ... setup ...
+        let mut session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
         
-        register.mark_as_deleted("co_test").unwrap();
-        assert!(register.is_deleted("co_test"));
+        session_map.mark_as_deleted();
+        assert!(session_map.is_deleted());
+    }
+    
+    #[test]
+    fn test_header_round_trip() {
+        let session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
+        
+        let header_json = session_map.get_header();
+        // Should match the input (key ordering may differ but content is same)
+        let header: CoValueHeader = serde_json::from_str(&header_json).unwrap();
+        assert_eq!(header.co_type, "comap");
     }
 }
 ```
@@ -1448,7 +1370,8 @@ mod tests {
 ```typescript
 describe('SessionMap (Rust-backed)', () => {
   it('should store and retrieve transactions', () => {
-    const sessionMap = new SessionMap(coId, register);
+    const impl = crypto.createSessionMap(coId, JSON.stringify(header));
+    const sessionMap = new SessionMap(coId, impl);
     
     sessionMap.addTransaction(
       sessionId,
@@ -1457,15 +1380,22 @@ describe('SessionMap (Rust-backed)', () => {
       signature,
     );
     
-    const session = sessionMap.get(sessionId);
-    expect(session?.transactions).toHaveLength(1);
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(1);
   });
   
   it('should track known state correctly', () => {
-    const sessionMap = new SessionMap(coId, register);
+    const impl = crypto.createSessionMap(coId, JSON.stringify(header));
+    const sessionMap = new SessionMap(coId, impl);
     // ... add transactions ...
     
     expect(sessionMap.knownState.sessions[sessionId]).toBe(1);
+  });
+  
+  it('should provide header access', () => {
+    const impl = crypto.createSessionMap(coId, JSON.stringify(header));
+    const sessionMap = new SessionMap(coId, impl);
+    
+    expect(sessionMap.header.type).toBe('comap');
   });
 });
 ```
