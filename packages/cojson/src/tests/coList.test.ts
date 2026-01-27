@@ -1017,3 +1017,31 @@ test("the list should rebuild when the group permissions change", async () => {
   expect(listOnBob.version).toEqual(1);
   expect(listOnBob.totalValidTransactions).toEqual(1);
 });
+
+test("items appended after a losing init transaction are preserved", async () => {
+  const alice = setupTestNode({ connected: true });
+  const bob = setupTestNode({ connected: true });
+
+  const group = alice.node.createGroup();
+  group.addMember("everyone", "writer");
+
+  const list = group.createList(
+    ["alice-init"],
+    undefined,
+    "trusting",
+    undefined,
+    { init: true },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+
+  listOnBob.appendItems(["bob-init"], undefined, "trusting", { init: true });
+  listOnBob.appendItems(["bob-update"], undefined, "trusting");
+
+  await waitFor(() => {
+    expect(listOnBob.toJSON()).toEqual(["alice-init", "bob-update"]);
+    expect(list.toJSON()).toEqual(["alice-init", "bob-update"]);
+  });
+});

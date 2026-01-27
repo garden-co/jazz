@@ -2,13 +2,11 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import {
   createTwoConnectedNodes,
-  hotSleep,
+  importContentIntoNode,
   loadCoValueOrFail,
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
-
-const Crypto = await WasmCrypto.create();
 
 beforeEach(() => {
   setupTestNode({ isSyncServer: true });
@@ -91,9 +89,14 @@ describe("init transaction meta", () => {
   });
 
   test("late-arriving winner triggers content rebuild", async () => {
-    const client = setupTestNode();
+    const client = setupTestNode({ connected: true });
+    const clientSession2 = client.spawnNewSession();
     const group = client.node.createGroup();
     const map = group.createMap();
+    const mapOnClientSession2 = await loadCoValueOrFail(
+      clientSession2.node,
+      map.id,
+    );
 
     // Make an init transaction with a later timestamp
     const laterTime = Date.now() + 1000;
@@ -110,15 +113,18 @@ describe("init transaction meta", () => {
 
     // Now make an init transaction with an earlier timestamp (this should win)
     const earlierTime = laterTime - 500;
-    map.core.makeTransaction(
+    mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
       { init: true },
       earlierTime,
     );
 
-    // Wait for the microtask to fire
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(
+        mapOnClientSession2.core.knownState(),
+      );
+    });
 
     // The content should have been rebuilt
     expect(rebuildSpy).toHaveBeenCalled();
@@ -128,11 +134,22 @@ describe("init transaction meta", () => {
 
   test("two init transactions coming together do not trigger content rebuild", async () => {
     const alice = setupTestNode({ connected: true });
-    const bob = setupTestNode({ connected: true });
+    const aliceSession2 = alice.spawnNewSession();
+    const bob = setupTestNode({ connected: false });
     const group = alice.node.createGroup();
+    group.addMember("everyone", "writer");
     const map = group.createMap();
 
-    const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+    importContentIntoNode(group.core, bob.node);
+    importContentIntoNode(map.core, bob.node);
+
+    const mapOnBob = bob.node.getCoValue(map.id);
+    const rebuildSpy = vi.spyOn(mapOnBob, "scheduleContentRebuild");
+
+    const mapOnAliceSession2 = await loadCoValueOrFail(
+      aliceSession2.node,
+      map.id,
+    );
 
     // Make an init transaction with a later timestamp
     const laterTime = Date.now() + 1000;
@@ -147,31 +164,39 @@ describe("init transaction meta", () => {
 
     // Now make an init transaction with an earlier timestamp (this should win)
     const earlierTime = laterTime - 500;
-    map.core.makeTransaction(
+    mapOnAliceSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
       { init: true },
       earlierTime,
     );
 
-    const rebuildSpy = vi.spyOn(mapOnBob, "rebuildFromCore");
-
-    // Wait for the microtask to fire
     await waitFor(() => {
-      expect(map.core.knownState()).toEqual(mapOnBob.core.knownState());
+      expect(map.core.knownState()).toEqual(
+        mapOnAliceSession2.core.knownState(),
+      );
     });
+
+    importContentIntoNode(map.core, bob.node);
 
     // The content should have been rebuilt
     expect(rebuildSpy).not.toHaveBeenCalled();
 
-    expect(mapOnBob.get("version")).toBe("earlier");
+    expect(mapOnBob.getCurrentContent().toJSON()).toEqual({
+      version: "earlier",
+    });
     expect(map.get("version")).toBe("earlier");
   });
 
   test("content reflects the winning init transaction after rebuild", async () => {
-    const client = setupTestNode();
+    const client = setupTestNode({ connected: true });
+    const clientSession2 = client.spawnNewSession();
     const group = client.node.createGroup();
     const map = group.createMap();
+    const mapOnClientSession2 = await loadCoValueOrFail(
+      clientSession2.node,
+      map.id,
+    );
 
     // Make an init transaction with a later timestamp
     const laterTime = Date.now() + 1000;
@@ -187,21 +212,73 @@ describe("init transaction meta", () => {
 
     // Now make an init transaction with an earlier timestamp (this should win)
     const earlierTime = laterTime - 500;
-    map.core.makeTransaction(
+    mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
       { init: true },
       earlierTime,
     );
 
-    // Wait for the microtask to fire
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(
+        mapOnClientSession2.core.knownState(),
+      );
+    });
 
     // The content should reflect the earlier (winning) init transaction
     expect(map.get("version")).toBe("earlier");
   });
 
-  test("losing init transaction is marked as invalid", () => {
+  test("losing init transaction is marked as invalid (different sessions)", async () => {
+    const client = setupTestNode({ connected: true });
+    const clientSession2 = client.spawnNewSession();
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    const mapOnClientSession2 = await loadCoValueOrFail(
+      clientSession2.node,
+      map.id,
+    );
+
+    const earlierTime = Date.now();
+    map.core.makeTransaction(
+      [{ op: "set", key: "version", value: "first" }],
+      "trusting",
+      { init: true },
+      earlierTime,
+    );
+
+    const laterTime = earlierTime + 100;
+    mapOnClientSession2.core.makeTransaction(
+      [{ op: "set", key: "version", value: "second" }],
+      "trusting",
+      { init: true },
+      laterTime,
+    );
+
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(
+        mapOnClientSession2.core.knownState(),
+      );
+    });
+
+    // Check the raw verified transactions
+    const allTransactions = map.core.verifiedTransactions;
+    expect(allTransactions).toHaveLength(2);
+
+    // The first transaction should be valid
+    const firstTx = allTransactions.find((tx) => tx.madeAt === earlierTime);
+    expect(firstTx?.isValid).toBe(true);
+
+    // The second transaction should be invalid
+    const secondTx = allTransactions.find((tx) => tx.madeAt === laterTime);
+    expect(secondTx?.isValid).toBe(false);
+    expect(secondTx?.validationErrorMessage).toBe(
+      "Transaction is not the first init transaction",
+    );
+  });
+
+  test("losing init transaction is marked as invalid (same session)", () => {
     const client = setupTestNode();
     const group = client.node.createGroup();
     const map = group.createMap();
@@ -234,14 +311,20 @@ describe("init transaction meta", () => {
     const secondTx = allTransactions.find((tx) => tx.madeAt === laterTime);
     expect(secondTx?.isValid).toBe(false);
     expect(secondTx?.validationErrorMessage).toBe(
-      "Transaction is not the first init transaction",
+      "Init transaction must be the first transaction in its session",
     );
   });
 
   test("validity change on processed transaction dispatches rebuild", async () => {
-    const client = setupTestNode();
+    const client = setupTestNode({ connected: true });
+    const clientSession2 = client.spawnNewSession();
     const group = client.node.createGroup();
     const map = group.createMap();
+
+    const mapOnClientSession2 = await loadCoValueOrFail(
+      clientSession2.node,
+      map.id,
+    );
 
     // Make an init transaction and process it
     const laterTime = Date.now() + 1000;
@@ -261,15 +344,18 @@ describe("init transaction meta", () => {
 
     // Add a new init transaction with an earlier timestamp
     const earlierTime = laterTime - 500;
-    map.core.makeTransaction(
+    mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
       { init: true },
       earlierTime,
     );
 
-    // Wait for the microtask to fire
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(
+        mapOnClientSession2.core.knownState(),
+      );
+    });
 
     // The later transaction should now be invalid
     expect(laterTx?.isValid).toBe(false);
@@ -388,5 +474,87 @@ describe("init transaction meta", () => {
     });
 
     unsubscribe();
+  });
+
+  test("getValidTransactions returns discarded init transactions when includeInvalidMetaTransactions is true", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember("everyone", "writer");
+
+    const map = group.createMap();
+
+    const earlierTime = Date.now();
+    const laterTime = earlierTime + 1000;
+
+    map.core.makeTransaction(
+      [{ op: "set", key: "version", value: "later" }],
+      "trusting",
+      { init: true },
+      laterTime,
+    );
+
+    await map.core.waitForSync();
+
+    const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+    await waitFor(() => {
+      expect(mapOnNode2.get("version")).toBe("later");
+    });
+
+    mapOnNode2.core.makeTransaction(
+      [{ op: "set", key: "version", value: "earlier" }],
+      "trusting",
+      { init: true },
+      earlierTime,
+    );
+
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(mapOnNode2.core.knownState());
+    });
+
+    // Without flag: only valid transactions
+    const validOnly = map.core.getValidSortedTransactions();
+    expect(validOnly).toHaveLength(1);
+    expect(validOnly[0]?.madeAt).toBe(earlierTime);
+
+    // With flag: includes invalid init transactions
+    const withInvalid = map.core.getValidSortedTransactions({
+      includeInvalidMetaTransactions: true,
+      ignorePrivateTransactions: false,
+    });
+    expect(withInvalid).toHaveLength(2);
+    expect(withInvalid.filter((tx) => tx.isValid)).toHaveLength(1);
+    expect(withInvalid.filter((tx) => !tx.isValid)).toHaveLength(1);
+  });
+
+  test("getValidTransactions does not return permission-invalid transactions", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    const map = group.createMap();
+
+    group.addMember(node2.node.getCurrentAgent(), "reader");
+
+    map.set("key", "admin-value", "trusting");
+
+    await map.core.waitForSync();
+
+    const mapOnReader = await loadCoValueOrFail(node2.node, map.id);
+
+    await waitFor(() => {
+      expect(mapOnReader.get("key")).toBe("admin-value");
+    });
+
+    mapOnReader.set("key", "reader-value", "trusting");
+
+    // Permission-invalid transactions are never included
+    const allTx = mapOnReader.core.getValidSortedTransactions({
+      includeInvalidMetaTransactions: true,
+      ignorePrivateTransactions: false,
+    });
+
+    expect(allTx).toHaveLength(1);
+    expect(mapOnReader.get("key")).toBe("admin-value");
   });
 });
