@@ -34,6 +34,53 @@ export declare class SessionLog {
   decryptNextTransactionMetaJson(txIndex: number, encryptionKey: string): string | null
 }
 
+export declare class SessionMap {
+  /** Create a new SessionMap for a CoValue */
+  constructor(coId: string, headerJson: string)
+  /** Get the header as JSON */
+  getHeader(): string
+  /** Add transactions to a session */
+  addTransactions(sessionId: string, signerId: string | undefined | null, transactionsJson: string, signature: string, skipVerify: boolean): void
+  /**
+   * Create new private transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
+   */
+  makeNewPrivateTransaction(sessionId: string, signerSecret: string, changesJson: string, keyId: string, keySecret: string, metaJson: string | undefined | null, madeAt: number): string
+  /**
+   * Create new trusting transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
+   */
+  makeNewTrustingTransaction(sessionId: string, signerSecret: string, changesJson: string, metaJson: string | undefined | null, madeAt: number): string
+  /** Get all session IDs as JSON array */
+  getSessionIds(): string
+  /** Get transaction count for a session (returns -1 if session not found) */
+  getTransactionCount(sessionId: string): number
+  /** Get single transaction by index (returns undefined if not found) */
+  getTransaction(sessionId: string, txIndex: number): string | null
+  /** Get transactions for a session from index (returns undefined if session not found) */
+  getSessionTransactions(sessionId: string, fromIndex: number): string | null
+  /** Get last signature for a session (returns undefined if session not found) */
+  getLastSignature(sessionId: string): string | null
+  /** Get signature after specific transaction index */
+  getSignatureAfter(sessionId: string, txIndex: number): string | null
+  /** Get the last signature checkpoint index (-1 if no checkpoints, undefined if session not found) */
+  getLastSignatureCheckpoint(sessionId: string): number | null
+  /** Get the known state as JSON */
+  getKnownState(): string
+  /** Get the known state with streaming as JSON (returns undefined if no streaming) */
+  getKnownStateWithStreaming(): string | null
+  /** Set streaming known state */
+  setStreamingKnownState(streamingJson: string): void
+  /** Mark this CoValue as deleted */
+  markAsDeleted(): void
+  /** Check if this CoValue is deleted */
+  isDeleted(): boolean
+  /** Decrypt transaction changes */
+  decryptTransaction(sessionId: string, txIndex: number, keySecret: string): string | null
+  /** Decrypt transaction meta */
+  decryptTransactionMeta(sessionId: string, txIndex: number, keySecret: string): string | null
+}
+
 /**
  * Hash data once using BLAKE3.
  * - `data`: Raw bytes to hash

@@ -1,6 +1,6 @@
 use cojson_core::core::{
-  CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-  SignerSecret, Transaction, TransactionMode,
+  CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, SessionMapImpl,
+  Signature, SignerID, SignerSecret, Transaction, TransactionMode,
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -209,6 +209,225 @@ impl SessionLog {
     self
       .internal
       .decrypt_next_transaction_meta_json(tx_index, KeySecret(encryption_key))
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+}
+
+// ============================================================================
+// SessionMap - NAPI wrapper for SessionMapImpl
+// ============================================================================
+
+#[napi]
+pub struct SessionMap {
+  internal: SessionMapImpl,
+}
+
+#[napi]
+impl SessionMap {
+  /// Create a new SessionMap for a CoValue
+  #[napi(constructor)]
+  pub fn new(co_id: String, header_json: String) -> napi::Result<SessionMap> {
+    let internal = SessionMapImpl::new(&co_id, &header_json)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+    Ok(SessionMap { internal })
+  }
+
+  // === Header ===
+
+  /// Get the header as JSON
+  #[napi]
+  pub fn get_header(&self) -> String {
+    self.internal.get_header()
+  }
+
+  // === Transaction Operations ===
+
+  /// Add transactions to a session
+  #[napi]
+  pub fn add_transactions(
+    &mut self,
+    session_id: String,
+    signer_id: Option<String>,
+    transactions_json: String,
+    signature: String,
+    skip_verify: bool,
+  ) -> napi::Result<()> {
+    self
+      .internal
+      .add_transactions(
+        &session_id,
+        signer_id.as_deref(),
+        &transactions_json,
+        &signature,
+        skip_verify,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+
+  /// Create new private transaction (for local writes)
+  /// Returns JSON: { signature: string, transaction: Transaction }
+  #[napi]
+  pub fn make_new_private_transaction(
+    &mut self,
+    session_id: String,
+    signer_secret: String,
+    changes_json: String,
+    key_id: String,
+    key_secret: String,
+    meta_json: Option<String>,
+    made_at: f64,
+  ) -> napi::Result<String> {
+    self
+      .internal
+      .make_new_private_transaction(
+        &session_id,
+        &signer_secret,
+        &changes_json,
+        &key_id,
+        &key_secret,
+        meta_json.as_deref(),
+        made_at as u64,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+
+  /// Create new trusting transaction (for local writes)
+  /// Returns JSON: { signature: string, transaction: Transaction }
+  #[napi]
+  pub fn make_new_trusting_transaction(
+    &mut self,
+    session_id: String,
+    signer_secret: String,
+    changes_json: String,
+    meta_json: Option<String>,
+    made_at: f64,
+  ) -> napi::Result<String> {
+    self
+      .internal
+      .make_new_trusting_transaction(
+        &session_id,
+        &signer_secret,
+        &changes_json,
+        meta_json.as_deref(),
+        made_at as u64,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+
+  // === Session Queries ===
+
+  /// Get all session IDs as JSON array
+  #[napi]
+  pub fn get_session_ids(&self) -> napi::Result<String> {
+    let ids = self.internal.get_session_ids();
+    serde_json::to_string(&ids)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+
+  /// Get transaction count for a session (returns -1 if session not found)
+  #[napi]
+  pub fn get_transaction_count(&self, session_id: String) -> i32 {
+    self
+      .internal
+      .get_transaction_count(&session_id)
+      .map(|c| c as i32)
+      .unwrap_or(-1)
+  }
+
+  /// Get single transaction by index (returns undefined if not found)
+  #[napi]
+  pub fn get_transaction(&self, session_id: String, tx_index: u32) -> Option<String> {
+    self.internal.get_transaction(&session_id, tx_index)
+  }
+
+  /// Get transactions for a session from index (returns undefined if session not found)
+  #[napi]
+  pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Option<String> {
+    self.internal.get_session_transactions(&session_id, from_index)
+  }
+
+  /// Get last signature for a session (returns undefined if session not found)
+  #[napi]
+  pub fn get_last_signature(&self, session_id: String) -> Option<String> {
+    self.internal.get_last_signature(&session_id)
+  }
+
+  /// Get signature after specific transaction index
+  #[napi]
+  pub fn get_signature_after(&self, session_id: String, tx_index: u32) -> Option<String> {
+    self.internal.get_signature_after(&session_id, tx_index)
+  }
+
+  /// Get the last signature checkpoint index (-1 if no checkpoints, undefined if session not found)
+  #[napi]
+  pub fn get_last_signature_checkpoint(&self, session_id: String) -> Option<i32> {
+    self.internal.get_last_signature_checkpoint(&session_id)
+  }
+
+  // === Known State ===
+
+  /// Get the known state as JSON
+  #[napi]
+  pub fn get_known_state(&self) -> String {
+    self.internal.get_known_state()
+  }
+
+  /// Get the known state with streaming as JSON (returns undefined if no streaming)
+  #[napi]
+  pub fn get_known_state_with_streaming(&self) -> Option<String> {
+    self.internal.get_known_state_with_streaming()
+  }
+
+  /// Set streaming known state
+  #[napi]
+  pub fn set_streaming_known_state(&mut self, streaming_json: String) -> napi::Result<()> {
+    self
+      .internal
+      .set_streaming_known_state(&streaming_json)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+
+  // === Deletion ===
+
+  /// Mark this CoValue as deleted
+  #[napi]
+  pub fn mark_as_deleted(&mut self) {
+    self.internal.mark_as_deleted();
+  }
+
+  /// Check if this CoValue is deleted
+  #[napi]
+  pub fn is_deleted(&self) -> bool {
+    self.internal.is_deleted()
+  }
+
+  // === Decryption ===
+
+  /// Decrypt transaction changes
+  #[napi]
+  pub fn decrypt_transaction(
+    &self,
+    session_id: String,
+    tx_index: u32,
+    key_secret: String,
+  ) -> napi::Result<Option<String>> {
+    self
+      .internal
+      .decrypt_transaction(&session_id, tx_index, &key_secret)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  }
+
+  /// Decrypt transaction meta
+  #[napi]
+  pub fn decrypt_transaction_meta(
+    &self,
+    session_id: String,
+    tx_index: u32,
+    key_secret: String,
+  ) -> napi::Result<Option<String>> {
+    self
+      .internal
+      .decrypt_transaction_meta(&session_id, tx_index, &key_secret)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 }

@@ -9,6 +9,7 @@ use salsa20::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value as JsonValue};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -78,6 +79,11 @@ pub struct SessionLogInternal {
     /// Transactions are added here via add_existing_* methods and committed
     /// to the main state only when commit_transactions() succeeds.
     pending_transactions: Vec<String>,
+    /// In-between signatures at specific transaction indices
+    /// Used for chunking large sessions in sync messages
+    signature_after: HashMap<u32, String>,
+    /// Size tracking for in-between signature decisions
+    tx_size_since_last_inbetween_signature: usize,
 }
 
 fn validate_tx_size_limit_in_bytes(changes_len: &str) -> Result<(), CoJsonCoreError> {
@@ -116,6 +122,8 @@ impl SessionLogInternal {
             nonce_generator: NonceGenerator::new(co_id, session_id),
             crypto_cache: CryptoCache::new(),
             pending_transactions: Vec::new(),
+            signature_after: HashMap::new(),
+            tx_size_since_last_inbetween_signature: 0,
         }
     }
 
@@ -461,6 +469,54 @@ impl SessionLogInternal {
             // For trusting transactions, just return the plain meta field.
             Transaction::Trusting(trusting_tx) => Ok(trusting_tx.meta),
         }
+    }
+
+    // === NEW methods for SessionMapImpl support ===
+
+    /// Get transaction count
+    pub fn transaction_count(&self) -> usize {
+        self.transactions_json.len()
+    }
+
+    /// Get transaction at index (as JSON string)
+    pub fn get_transaction(&self, tx_index: usize) -> Option<&str> {
+        self.transactions_json.get(tx_index).map(|s| s.as_str())
+    }
+
+    /// Get signature after specific transaction index
+    pub fn get_signature_after(&self, tx_index: u32) -> Option<&str> {
+        self.signature_after.get(&tx_index).map(|s| s.as_str())
+    }
+
+    /// Get the last signature checkpoint index (max index in signature_after, or -1)
+    pub fn get_last_signature_checkpoint(&self) -> i32 {
+        self.signature_after
+            .keys()
+            .max()
+            .map(|&idx| idx as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Record an in-between signature after committing transactions
+    /// Called when tx_size_since_last_inbetween_signature exceeds threshold
+    pub fn record_inbetween_signature(&mut self, tx_index: u32, signature: String) {
+        self.signature_after.insert(tx_index, signature);
+        self.tx_size_since_last_inbetween_signature = 0;
+    }
+
+    /// Update size tracking after adding transactions
+    pub fn add_to_size_tracking(&mut self, size: usize) {
+        self.tx_size_since_last_inbetween_signature += size;
+    }
+
+    /// Check if we need an in-between signature (exceeds 100KB threshold)
+    pub fn needs_inbetween_signature(&self) -> bool {
+        self.tx_size_since_last_inbetween_signature > 100_000 // 100KB threshold
+    }
+
+    /// Get the signature_after map (for iteration in newContentSince)
+    pub fn signature_after_map(&self) -> &HashMap<u32, String> {
+        &self.signature_after
     }
 }
 

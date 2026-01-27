@@ -267,6 +267,8 @@ export abstract class CryptoProvider<Blake3State = any> {
     sessionID: SessionID,
     signerID?: SignerID,
   ): SessionLogImpl;
+
+  abstract createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl;
 }
 
 export type Hash = `hash_z${string}`;
@@ -312,5 +314,74 @@ export interface SessionLogImpl {
   decryptNextTransactionMetaJson(
     tx_index: number,
     key_secret: KeySecret,
+  ): string | undefined;
+}
+
+/**
+ * SessionMapImpl - Native implementation of SessionMap
+ * One instance per CoValue, owns all session data including header
+ */
+export interface SessionMapImpl {
+  // === Header ===
+  getHeader(): string;
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean,
+  ): void;
+
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string; // Returns JSON: { signature, transaction }
+
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string; // Returns JSON: { signature, transaction }
+
+  // === Session Queries ===
+  getSessionIds(): string; // Returns JSON array
+  getTransactionCount(sessionId: string): number; // -1 if not found
+  getTransaction(sessionId: string, txIndex: number): string | undefined;
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): string | undefined;
+  getLastSignature(sessionId: string): string | undefined;
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined;
+  getLastSignatureCheckpoint(sessionId: string): number | undefined; // -1 if no checkpoints, undefined if session not found
+
+  // === Known State ===
+  getKnownState(): string;
+  getKnownStateWithStreaming(): string | undefined;
+  setStreamingKnownState(streamingJson: string): void;
+
+  // === Deletion ===
+  markAsDeleted(): void;
+  isDeleted(): boolean;
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined;
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
   ): string | undefined;
 }
