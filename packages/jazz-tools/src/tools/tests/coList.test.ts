@@ -19,6 +19,7 @@ import {
   setupTwoNodes,
   waitFor,
 } from "./utils.js";
+import { setDefaultValidationMode } from "../implementation/zodSchema/validationSettings.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -1475,5 +1476,310 @@ describe("lastUpdatedAt", () => {
     list.$jazz.push("Jane");
 
     expect(list.$jazz.lastUpdatedAt).not.toEqual(updatedAt);
+  });
+});
+
+describe("nested CoValue validation mode propagation", () => {
+  test("create with nested CoValues - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogList = co.list(Dog);
+
+    // Should throw with default strict validation when age is a string
+    expectValidationError(() =>
+      DogList.create([{ age: "12" as unknown as number }]),
+    );
+
+    // Should not throw with loose validation even though age is invalid
+    expect(() =>
+      DogList.create(
+        [
+          // @ts-expect-error - age should be number
+          { age: "12" },
+        ],
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    const list = DogList.create(
+      [{ age: "12" as unknown as number }, { age: "13" as unknown as number }],
+      { validation: "loose" },
+    );
+
+    // Verify the nested CoValues were created with invalid data
+    expect(list.length).toBe(2);
+    expect(list[0]?.age).toBe("12");
+    expect(list[1]?.age).toBe("13");
+  });
+
+  test("set with nested CoValue - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogList = co.list(Dog);
+
+    const list = DogList.create([{ age: 5 }]);
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      list.$jazz.set(0, {
+        age: "invalid" as unknown as number,
+      }),
+    );
+
+    // Should not throw with loose validation
+    expect(() =>
+      list.$jazz.set(
+        0,
+        {
+          age: "invalid" as unknown as number,
+        },
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    // Verify the nested CoValue was created with invalid data
+    expect(list[0]?.age).toBe("invalid");
+  });
+
+  test("push with nested CoValues - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogList = co.list(Dog);
+
+    const list = DogList.create([{ age: 5 }], { validation: "loose" });
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      list.$jazz.push({
+        // @ts-expect-error - age should be number
+        age: "12",
+      }),
+    );
+
+    // Should not throw with unsafePush (which uses loose validation internally)
+    expect(() =>
+      list.$jazz.unsafePush(
+        {
+          age: "12" as unknown as number,
+        },
+        {
+          age: "13" as unknown as number,
+        },
+      ),
+    ).not.toThrow();
+
+    // Verify the nested CoValues were created with invalid data
+    expect(list.length).toBe(3);
+    expect(list[1]?.age).toBe("12");
+    expect(list[2]?.age).toBe("13");
+  });
+
+  test("unshift with nested CoValues - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogList = co.list(Dog);
+
+    const list = DogList.create([{ age: 5 }], { validation: "loose" });
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      list.$jazz.unshift({
+        age: "invalid" as unknown as number,
+      }),
+    );
+
+    // Should not throw with unsafeUnshift (which uses loose validation internally)
+    expect(() =>
+      list.$jazz.unsafeUnshift(
+        {
+          age: "invalid" as unknown as number,
+        },
+        {
+          age: "another" as unknown as number,
+        },
+      ),
+    ).not.toThrow();
+
+    // Verify the nested CoValues were created with invalid data
+    // Note: unshift prepends items one by one, so ["invalid", "another"] becomes ["another", "invalid", ...]
+    expect(list.length).toBe(3);
+    expect(list[0]?.age).toBe("another");
+    expect(list[1]?.age).toBe("invalid");
+  });
+
+  test("splice with nested CoValues - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogList = co.list(Dog);
+
+    const list = DogList.create([{ age: 5 }, { age: 6 }], {
+      validation: "loose",
+    });
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      list.$jazz.splice(0, 1, {
+        // @ts-expect-error - age should be number
+        age: "new",
+      }),
+    );
+
+    // Should not throw with unsafeSplice (which uses loose validation internally)
+    expect(() =>
+      list.$jazz.unsafeSplice(
+        0,
+        1,
+        {
+          age: "new" as unknown as number,
+        },
+        {
+          age: "another" as unknown as number,
+        },
+      ),
+    ).not.toThrow();
+
+    // Verify the nested CoValues were created with invalid data
+    expect(list.length).toBe(3);
+    expect(list[0]?.age).toBe("new");
+    expect(list[1]?.age).toBe("another");
+  });
+
+  test("create with deeply nested CoValues - loose validation should not throw", () => {
+    const Collar = co.map({
+      size: z.number(),
+    });
+    const Dog = co.map({
+      age: z.number(),
+      collar: Collar,
+    });
+    const DogList = co.list(Dog);
+
+    // Should throw with strict validation when any nested field is invalid
+    expectValidationError(() =>
+      DogList.create([
+        {
+          age: "12" as unknown as number,
+          collar: { size: 10 },
+        },
+      ]),
+    );
+
+    expectValidationError(() =>
+      DogList.create([
+        {
+          age: 12,
+          collar: { size: "large" as unknown as number },
+        },
+      ]),
+    );
+
+    // Should not throw with loose validation at any level
+    expect(() =>
+      DogList.create(
+        [
+          {
+            age: "12" as unknown as number,
+            collar: { size: "large" as unknown as number },
+          },
+        ],
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    const list = DogList.create(
+      [
+        {
+          age: "12" as unknown as number,
+          collar: { size: "large" as unknown as number },
+        },
+      ],
+      { validation: "loose" },
+    );
+
+    // Verify all levels were created with invalid data
+    expect(list[0]?.age).toBe("12");
+    expect(list[0]?.collar.size).toBe("large");
+  });
+
+  test("global loose validation mode propagates to nested CoValues in all mutations", () => {
+    const Collar = co.map({
+      size: z.number(),
+    });
+    const Dog = co.map({
+      age: z.number(),
+      collar: Collar,
+    });
+    const DogList = co.list(Dog);
+
+    // Set global validation mode to loose
+    setDefaultValidationMode("loose");
+
+    try {
+      // Test 1: Create with deeply nested invalid data
+      const list = DogList.create([
+        {
+          age: "5" as unknown as number,
+          collar: { size: "small" as unknown as number },
+        },
+        {
+          age: "12" as unknown as number,
+          collar: { size: "large" as unknown as number },
+        },
+      ]);
+
+      // Verify all nested levels were created with invalid data
+      expect(list.length).toBe(2);
+      expect(list[0]?.age).toBe("5");
+      expect(list[0]?.collar.size).toBe("small");
+      expect(list[1]?.age).toBe("12");
+      expect(list[1]?.collar.size).toBe("large");
+
+      // Test 2: Set with nested invalid data
+      list.$jazz.set(0, {
+        age: "8" as unknown as number,
+        collar: { size: "tiny" as unknown as number },
+      });
+
+      expect(list[0]?.age).toBe("8");
+      expect(list[0]?.collar.size).toBe("tiny");
+
+      // Test 3: Push with nested invalid data (uses global validation mode)
+      list.$jazz.push({
+        age: "15" as unknown as number,
+        collar: { size: "huge" as unknown as number },
+      });
+
+      expect(list.length).toBe(3);
+      expect(list[2]?.age).toBe("15");
+      expect(list[2]?.collar.size).toBe("huge");
+
+      // Test 4: Unshift with nested invalid data (uses global validation mode)
+      list.$jazz.unshift({
+        age: "3" as unknown as number,
+        collar: { size: "micro" as unknown as number },
+      });
+
+      expect(list.length).toBe(4);
+      expect(list[0]?.age).toBe("3");
+      expect(list[0]?.collar.size).toBe("micro");
+
+      // Test 5: Splice with nested invalid data (uses global validation mode)
+      list.$jazz.splice(1, 1, {
+        age: "10" as unknown as number,
+        collar: { size: "medium" as unknown as number },
+      });
+
+      expect(list.length).toBe(4);
+      expect(list[1]?.age).toBe("10");
+      expect(list[1]?.collar.size).toBe("medium");
+    } finally {
+      // Reset to strict mode
+      setDefaultValidationMode("strict");
+    }
   });
 });

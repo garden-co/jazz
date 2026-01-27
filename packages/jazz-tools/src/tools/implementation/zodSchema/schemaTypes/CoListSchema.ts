@@ -77,7 +77,7 @@ export class CoListSchema<
     items: CoListSchemaInit<T>,
     options?:
       | {
-          owner: Group;
+          owner?: Group;
           unique?: CoValueUniqueness["uniqueness"];
           validation?: "strict" | "loose";
         }

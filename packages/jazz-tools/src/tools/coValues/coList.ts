@@ -594,7 +594,12 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     }
 
     const itemDescriptor = this.schema[ItemsSym];
-    const rawValue = toRawItems([value], itemDescriptor, this.owner)[0]!;
+    const rawValue = toRawItems(
+      [value],
+      itemDescriptor,
+      this.owner,
+      options?.validation,
+    )[0]!;
     if (rawValue === null && !itemDescriptor.optional) {
       throw new Error(`Cannot set required reference ${index} to undefined`);
     }
@@ -627,7 +632,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    */
   unsafePush(...items: CoFieldInit<CoListItem<L>>[]): number {
     this.raw.appendItems(
-      toRawItems(items, this.schema[ItemsSym], this.owner),
+      toRawItems(items, this.schema[ItemsSym], this.owner, "loose"),
       undefined,
       "private",
     );
@@ -664,6 +669,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       items as CoFieldInit<CoListItem<L>>[],
       this.schema[ItemsSym],
       this.owner,
+      "loose",
     )) {
       this.raw.prepend(item);
     }
@@ -753,6 +759,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       items as CoListItem<L>[],
       this.schema[ItemsSym],
       this.owner,
+      "loose",
     );
 
     // If there are no items to insert, return the deleted items
