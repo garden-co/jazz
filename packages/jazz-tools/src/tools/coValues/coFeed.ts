@@ -260,11 +260,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       const coValueSchema = (this as unknown as typeof CoFeed).coValueSchema;
       if (validationMode !== "loose" && coValueSchema) {
         const fullSchema = coValueSchema.getValidationSchema();
-        init = executeValidation(
-          fullSchema,
-          init,
-          validationMode,
-        ) as typeof init;
+        executeValidation(fullSchema, init, validationMode) as typeof init;
       }
       instance.$jazz.pushLoose(...init);
     }

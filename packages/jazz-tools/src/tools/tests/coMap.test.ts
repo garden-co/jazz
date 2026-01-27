@@ -595,7 +595,8 @@ describe("CoMap", async () => {
       ).toThrow();
     });
 
-    it("should use zod defaults for plain items", async () => {
+    // .default() is not supported yet
+    it.fails("should use zod defaults for plain items", async () => {
       const Person = co.map({
         name: z.string().default("John"),
         age: z.number().default(20),

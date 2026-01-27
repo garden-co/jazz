@@ -27,7 +27,7 @@ const BlueButtonWidget = co.map({
   disabled: z.boolean().optional(),
 });
 
-const ButtonWidget = co.discriminatedUnion("type", [
+const ButtonWidget = co.discriminatedUnion("color", [
   RedButtonWidget,
   BlueButtonWidget,
 ]);

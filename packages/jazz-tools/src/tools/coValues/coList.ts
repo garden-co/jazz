@@ -193,7 +193,7 @@ export class CoList<out Item = any>
     );
 
     if (this.coValueSchema && validationMode !== "loose") {
-      items = executeValidation(
+      executeValidation(
         this.coValueSchema.getValidationSchema(),
         items,
         validationMode,
@@ -588,11 +588,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const validationMode = resolveValidationMode(options?.validation);
     if (validationMode !== "loose" && this.coListSchema) {
       const fieldSchema = this.getItemSchema();
-      value = executeValidation(
-        fieldSchema,
-        value,
-        validationMode,
-      ) as CoFieldInit<CoListItem<L>>;
+      executeValidation(fieldSchema, value, validationMode) as CoFieldInit<
+        CoListItem<L>
+      >;
     }
 
     const itemDescriptor = this.schema[ItemsSym];
@@ -613,7 +611,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const validationMode = resolveValidationMode();
     if (validationMode !== "loose" && this.coListSchema) {
       const schema = z.array(this.getItemSchema());
-      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+      executeValidation(schema, items, validationMode) as CoFieldInit<
         CoListItem<L>
       >[];
     }
@@ -647,7 +645,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const validationMode = resolveValidationMode();
     if (validationMode !== "loose" && this.coListSchema) {
       const schema = z.array(this.getItemSchema());
-      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+      executeValidation(schema, items, validationMode) as CoFieldInit<
         CoListItem<L>
       >[];
     }
@@ -718,7 +716,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const validationMode = resolveValidationMode();
     if (validationMode !== "loose" && this.coListSchema) {
       const schema = z.array(this.getItemSchema());
-      items = executeValidation(schema, items, validationMode) as CoFieldInit<
+      executeValidation(schema, items, validationMode) as CoFieldInit<
         CoListItem<L>
       >[];
     }

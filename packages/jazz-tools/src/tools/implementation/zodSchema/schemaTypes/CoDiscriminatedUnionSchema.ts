@@ -56,8 +56,29 @@ export class CoDiscriminatedUnionSchema<
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
   getValidationSchema = () => {
-    // Discriminated union schema can apply only if data are plain objects.
-    return z.any();
+    const { discriminator, options } = this.getDefinition();
+    return z.discriminatedUnion(
+      discriminator,
+      // @ts-expect-error
+      options.map((schema) => {
+        const validationSchema = schema.getValidationSchema();
+
+        if (validationSchema.def.type === "union") {
+          const def = validationSchema.def as
+            | z.core.$ZodUnionDef<z.core.$ZodType[]>
+            | z.core.$ZodDiscriminatedUnionDef<z.core.$ZodType[]>;
+          // in case of nested co.discriminatedUnion
+          // the nested `validationSchema` is already a z.discriminatedUnion
+          if ("discriminator" in def) {
+            return validationSchema;
+          }
+
+          return def.options[1];
+        }
+
+        throw new Error("Invalid schema type");
+      }),
+    );
   };
 
   /**

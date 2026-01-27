@@ -276,7 +276,7 @@ export class CoMap extends CoValueBase implements CoValue {
     );
 
     if (schema && validationMode !== "loose") {
-      init = executeValidation(
+      executeValidation(
         schema.getValidationSchema(),
         init,
         validationMode,
@@ -674,11 +674,9 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     if (validationMode !== "loose" && this.coMapSchema) {
       // Get the field schema for this specific key from the shape
       const fieldSchema = this.getPropertySchema(key);
-      value = executeValidation(
-        fieldSchema,
-        value,
-        validationMode,
-      ) as CoFieldInit<M[K]>;
+      executeValidation(fieldSchema, value, validationMode) as CoFieldInit<
+        M[K]
+      >;
     }
 
     const descriptor = this.getDescriptor(key as string);
