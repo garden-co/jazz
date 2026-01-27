@@ -218,7 +218,7 @@ export class CoMapSchema<
    * ```ts
    * const settings = await UserSettings.getOrCreateUnique({
    *   value: { theme: "dark", language: "en" },
-   *   unique: ["user-settings", me.id],
+   *   unique: "user-settings",
    *   owner: me,
    * });
    * ```
