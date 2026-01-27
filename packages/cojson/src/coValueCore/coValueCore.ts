@@ -1370,6 +1370,7 @@ export class CoValueCore {
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
+    this.#firstInitTransaction = undefined;
 
     this.parseNewTransactions(false);
 
