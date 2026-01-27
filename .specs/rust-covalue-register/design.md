@@ -20,8 +20,8 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
 | `CoValueHeader` storage | **Rust** | Core data structure |
 | Transaction storage | **Rust** | Part of SessionMap |
 | Known state tracking | **Rust** | Part of SessionMap |
-| Signature verification | **Rust** | Already in SessionLogInternal |
-| Decryption (crypto) | **Rust** | Already in SessionLogInternal |
+| Signature verification | **Rust** | Unified in SessionLog |
+| Decryption (crypto) | **Rust** | Unified in SessionLog |
 | `newContentSince()` | **TypeScript** (for now) | Deferred - uses Rust data via FFI |
 | `determineValidTransactions()` | **TypeScript** | Requires group state + cross-CoValue |
 | Key lookup (`getReadKey`) | **TypeScript** | Requires group hierarchy traversal |
@@ -74,13 +74,13 @@ This document describes the architecture for moving `SessionMap` and `CoValueHea
 │  ├── is_deleted: bool                                                   │
 │  └── Methods: add_transaction, get_session, mark_deleted, etc.          │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  SessionLog (per session)                                                │
-│  ├── signer_id: Option<SignerID>                                        │
-│  ├── impl: SessionLogInternal (crypto)                                  │
-│  ├── transactions: Vec<Transaction>                                     │
-│  ├── last_signature: Option<Signature>                                  │
-│  ├── signature_after: HashMap<u32, Signature>                           │
-│  └── tx_size_since_last_inbetween_signature: usize                      │
+│  SessionLogInternal (per session) - EXTENDED with new fields            │
+│  ├── [EXISTING] public_key, hasher, nonce_generator, crypto_cache       │
+│  ├── [EXISTING] transactions_json: Vec<String>                          │
+│  ├── [EXISTING] last_signature, pending_transactions                    │
+│  ├── [NEW] signature_after: HashMap<u32, String>                        │
+│  ├── [NEW] tx_size_since_last_inbetween_signature: usize                │
+│  └── [NEW] transaction_count(), get_signature_after(), etc.             │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -259,13 +259,13 @@ export class RNCrypto extends CryptoProvider {
 - **Streaming state**: Handles `knownStateWithStreaming` for partial loads
 - **Deletion handling**: `markAsDeleted`, filters non-delete sessions
 - **Transaction operations**: `addTransaction`, `makeNewPrivateTransaction`, `makeNewTrustingTransaction`
-- **Decryption**: `decryptTransaction`, `decryptTransactionMeta` (delegates to SessionLogInternal)
+- **Decryption**: `decryptTransaction`, `decryptTransactionMeta` (handled by SessionLog)
 
 #### Rust: `SessionLog`
 - **Transaction storage**: Vector of transactions
 - **Signature tracking**: `lastSignature`, `signatureAfter` map
 - **Size tracking**: For chunking in sync messages
-- **Crypto delegation**: Uses existing `SessionLogInternal` for verification/decryption
+- **Crypto operations**: `SessionLog` handles verification and decryption directly (unified)
 
 #### TypeScript: `SessionMap.ts` (Thin Wrapper)
 - Gets `RegisterImpl` from `CryptoProvider`
@@ -402,22 +402,110 @@ pub enum Uniqueness {
 /// Internal storage uses HashMap (never serialized for hashing)
 pub struct SessionMap {
     co_id: String,
-    sessions: HashMap<String, SessionLog>,  // Internal lookup, HashMap OK
+    sessions: HashMap<String, SessionLogInternal>,  // Uses EXTENDED SessionLogInternal
     known_state: KnownState,
     known_state_with_streaming: Option<KnownState>,
     streaming_known_state: Option<KnownStateSessions>,
     is_deleted: bool,
 }
 
-/// Individual session log
-pub struct SessionLog {
-    signer_id: Option<String>,
-    impl_: SessionLogInternal,  // Existing crypto implementation
-    transactions: Vec<Transaction>,
-    last_signature: Option<String>,
-    signature_after: HashMap<u32, String>,  // Internal, HashMap OK
-    tx_size_since_last_inbetween_signature: usize,
-    session_id: String,
+/// SessionLog - EXTENDS existing SessionLogInternal from cojson-core/src/core/session_log.rs
+/// 
+/// The existing SessionLogInternal already stores:
+///   - public_key: Option<VerifyingKey>     (for verification)
+///   - hasher: blake3::Hasher               (for signature chaining)
+///   - transactions_json: Vec<String>       (transaction storage)
+///   - last_signature: Option<Signature>    (last signature)
+///   - nonce_generator: NonceGenerator      (for crypto)
+///   - crypto_cache: CryptoCache            (for decryption)
+///   - pending_transactions: Vec<String>    (staging area)
+///
+/// We ADD these fields to SessionLogInternal:
+///   - signature_after: HashMap<u32, String>           (in-between signatures)
+///   - tx_size_since_last_inbetween_signature: usize   (size tracking)
+///
+/// This removes the data duplication in TypeScript where SessionLog stored
+/// transactions/lastSignature separately from impl (SessionLogInternal).
+
+// In crates/cojson-core/src/core/session_log.rs - EXTEND existing struct:
+#[derive(Clone)]
+pub struct SessionLogInternal {
+    // === EXISTING fields (already implemented) ===
+    public_key: Option<VerifyingKey>,
+    hasher: blake3::Hasher,
+    transactions_json: Vec<String>,
+    last_signature: Option<Signature>,
+    nonce_generator: NonceGenerator,
+    crypto_cache: CryptoCache,
+    pending_transactions: Vec<String>,
+    
+    // === NEW fields to add ===
+    signature_after: HashMap<u32, String>,           // In-between signatures
+    tx_size_since_last_inbetween_signature: usize,   // Size tracking for chunking
+}
+
+// The WASM/NAPI/RN wrappers remain thin wrappers around SessionLogInternal:
+// (No changes needed to wrapper structure)
+
+impl SessionLogInternal {
+    // === EXISTING methods (already implemented) ===
+    // - new(co_id, session_id, signer_id)
+    // - add_existing_private_transaction(...)
+    // - add_existing_trusting_transaction(...)
+    // - commit_transactions(signature, skip_verify)
+    // - add_new_private_transaction(...)
+    // - add_new_trusting_transaction(...)
+    // - decrypt_next_transaction_changes_json(tx_index, key_secret)
+    // - decrypt_next_transaction_meta_json(tx_index, key_secret)
+    // - clone()
+    // - free()
+    
+    // === NEW methods to add ===
+    
+    /// Get transaction count
+    pub fn transaction_count(&self) -> usize {
+        self.transactions_json.len()
+    }
+    
+    /// Get transaction at index (as JSON string)
+    pub fn get_transaction(&self, tx_index: usize) -> Option<&str> {
+        self.transactions_json.get(tx_index).map(|s| s.as_str())
+    }
+    
+    /// Get last signature
+    pub fn get_last_signature(&self) -> Option<&str> {
+        self.last_signature.as_ref().map(|s| s.0.as_str())
+    }
+    
+    /// Get signature after specific transaction index
+    pub fn get_signature_after(&self, tx_index: u32) -> Option<&str> {
+        self.signature_after.get(&tx_index).map(|s| s.as_str())
+    }
+    
+    /// Get the last signature checkpoint index (max index in signature_after, or -1)
+    pub fn get_last_signature_checkpoint(&self) -> i32 {
+        self.signature_after.keys()
+            .max()
+            .map(|&idx| idx as i32)
+            .unwrap_or(-1)
+    }
+    
+    /// Record an in-between signature after committing transactions
+    /// Called when tx_size_since_last_inbetween_signature exceeds threshold
+    pub fn record_inbetween_signature(&mut self, tx_index: u32, signature: String) {
+        self.signature_after.insert(tx_index, signature);
+        self.tx_size_since_last_inbetween_signature = 0;
+    }
+    
+    /// Update size tracking after adding transactions
+    pub fn add_to_size_tracking(&mut self, size: usize) {
+        self.tx_size_since_last_inbetween_signature += size;
+    }
+    
+    /// Check if we need an in-between signature
+    pub fn needs_inbetween_signature(&self) -> bool {
+        self.tx_size_since_last_inbetween_signature > 100_000  // 100KB threshold
+    }
 }
 
 /// KnownState - fields in alphabetical order, uses BTreeMap for sessions
@@ -715,45 +803,48 @@ impl CoValueRegister {
         
         let transactions: Vec<Transaction> = serde_json::from_str(transactions_json)?;
         
-        // Get or create session log
+        // Get or create session log (uses existing SessionLogInternal)
         let session_log = session_map.sessions
             .entry(session_id.to_string())
-            .or_insert_with(|| SessionLog {
-                signer_id: signer_id.map(|s| s.to_string()),
-                impl_: SessionLogInternal::new(id, session_id, signer_id),
-                transactions: Vec::new(),
-                last_signature: None,
-                signature_after: HashMap::new(),
-                tx_size_since_last_inbetween_signature: 0,
-                session_id: session_id.to_string(),
-            });
+            .or_insert_with(|| SessionLogInternal::new(id, session_id, signer_id));
         
-        // Verify signature using SessionLogInternal
-        if !skip_verify {
-            session_log.impl_.try_add(&transactions, signature)?;
+        // Add transactions to staging area
+        for tx in &transactions {
+            match tx {
+                Transaction::Private { encrypted_changes, key_used, made_at, meta } => {
+                    session_log.add_existing_private_transaction(
+                        encrypted_changes, key_used, *made_at, meta.as_deref()
+                    );
+                }
+                Transaction::Trusting { changes, made_at, meta } => {
+                    session_log.add_existing_trusting_transaction(
+                        changes, *made_at, meta.as_deref()
+                    );
+                }
+            }
         }
         
-        // Add transactions
-        for tx in transactions {
-            let tx_size = match &tx {
+        // Commit transactions with signature verification
+        // (commit_transactions already stores transactions and last_signature internally)
+        session_log.commit_transactions(signature, skip_verify)?;
+        
+        // Track transaction size for in-between signatures (NEW method)
+        let tx_size: usize = transactions.iter().map(|tx| {
+            match tx {
                 Transaction::Private { encrypted_changes, .. } => encrypted_changes.len(),
                 Transaction::Trusting { changes, .. } => changes.len(),
-            };
-            session_log.tx_size_since_last_inbetween_signature += tx_size;
-            session_log.transactions.push(tx);
-        }
-        
-        session_log.last_signature = Some(signature.to_string());
+            }
+        }).sum();
+        session_log.add_to_size_tracking(tx_size);
         
         // Update known state
-        let tx_count = session_log.transactions.len() as u32;
+        let tx_count = session_log.transaction_count() as u32;
         session_map.known_state.sessions.insert(session_id.to_string(), tx_count);
         
-        // Check if we need an in-between signature (exceeds recommended size)
-        if exceeds_recommended_size(session_log.tx_size_since_last_inbetween_signature) {
-            let idx = (session_log.transactions.len() - 1) as u32;
-            session_log.signature_after.insert(idx, signature.to_string());
-            session_log.tx_size_since_last_inbetween_signature = 0;
+        // Check if we need an in-between signature (NEW method)
+        if session_log.needs_inbetween_signature() {
+            let idx = (session_log.transaction_count() - 1) as u32;
+            session_log.record_inbetween_signature(idx, signature.to_string());
         }
         
         Ok(())
@@ -772,7 +863,7 @@ impl CoValueRegister {
     pub fn get_transaction_count(&self, id: &str, session_id: &str) -> Option<u32> {
         self.session_maps.get(id)
             .and_then(|sm| sm.sessions.get(session_id))
-            .map(|sl| sl.transactions.len() as u32)
+            .map(|sl| sl.transaction_count() as u32)  // Use NEW method
     }
     
     pub fn get_transaction(
@@ -791,11 +882,9 @@ impl CoValueRegister {
             None => return Ok(None),
         };
         
-        match session_log.transactions.get(tx_index as usize) {
-            Some(tx) => {
-                let json = serde_json::to_string(tx)?;
-                Ok(Some(json))
-            }
+        // Use NEW method - returns JSON string directly
+        match session_log.get_transaction(tx_index as usize) {
+            Some(tx_json) => Ok(Some(tx_json.to_string())),
             None => Ok(None),
         }
     }
@@ -816,35 +905,33 @@ impl CoValueRegister {
             None => return Ok(None),
         };
         
-        let transactions: Vec<&Transaction> = session_log.transactions
-            .iter()
-            .skip(from_index as usize)
+        // Collect transactions from index using get_transaction (NEW method)
+        let count = session_log.transaction_count();
+        let transactions: Vec<String> = (from_index as usize..count)
+            .filter_map(|i| session_log.get_transaction(i).map(|s| s.to_string()))
             .collect();
         
-        let json = serde_json::to_string(&transactions)?;
+        let json = format!("[{}]", transactions.join(","));
         Ok(Some(json))
     }
     
     pub fn get_last_signature(&self, id: &str, session_id: &str) -> Option<String> {
         self.session_maps.get(id)
             .and_then(|sm| sm.sessions.get(session_id))
-            .and_then(|sl| sl.last_signature.clone())
+            .and_then(|sl| sl.get_last_signature().map(|s| s.to_string()))  // Use NEW method
     }
     
     pub fn get_signature_after(&self, id: &str, session_id: &str, tx_index: u32) -> Option<String> {
         self.session_maps.get(id)
             .and_then(|sm| sm.sessions.get(session_id))
-            .and_then(|sl| sl.signature_after.get(&tx_index).cloned())
+            .and_then(|sl| sl.get_signature_after(tx_index).map(|s| s.to_string()))  // Use NEW method
     }
     
     pub fn get_last_signature_checkpoint(&self, id: &str, session_id: &str) -> Option<i32> {
         let session_log = self.session_maps.get(id)
             .and_then(|sm| sm.sessions.get(session_id))?;
         
-        match session_log.signature_after.keys().max() {
-            Some(&idx) => Some(idx as i32),
-            None => Some(-1),  // Session exists but no checkpoints
-        }
+        Some(session_log.get_last_signature_checkpoint())  // Use NEW method
     }
     
     // === Known State ===
@@ -931,7 +1018,7 @@ impl CoValueRegister {
             if is_delete_session_id(session_id) {
                 new_known_state.sessions.insert(
                     session_id.clone(),
-                    session_log.transactions.len() as u32,
+                    session_log.transaction_count() as u32,  // Use NEW method
                 );
             }
         }
@@ -948,6 +1035,7 @@ impl CoValueRegister {
     }
     
     // === Decryption ===
+    // Uses EXISTING SessionLogInternal methods (already implemented)
     
     pub fn decrypt_transaction(
         &self,
@@ -962,8 +1050,9 @@ impl CoValueRegister {
         let session_log = session_map.sessions.get(session_id)
             .ok_or_else(|| RegisterError::NotFound(format!("session {}:{}", id, session_id)))?;
         
-        // Delegate to SessionLogInternal for actual decryption
-        session_log.impl_.decrypt_transaction_changes(tx_index, key_secret)
+        // Use EXISTING SessionLogInternal method
+        let decrypted = session_log.decrypt_next_transaction_changes_json(tx_index as usize, key_secret);
+        Ok(Some(decrypted))
     }
     
     pub fn decrypt_transaction_meta(
@@ -979,21 +1068,8 @@ impl CoValueRegister {
         let session_log = session_map.sessions.get(session_id)
             .ok_or_else(|| RegisterError::NotFound(format!("session {}:{}", id, session_id)))?;
         
-        // Check if transaction has meta
-        let tx = session_log.transactions.get(tx_index as usize)
-            .ok_or_else(|| RegisterError::NotFound(format!("tx {}:{}:{}", id, session_id, tx_index)))?;
-        
-        let has_meta = match tx {
-            Transaction::Private { meta, .. } => meta.is_some(),
-            Transaction::Trusting { meta, .. } => meta.is_some(),
-        };
-        
-        if !has_meta {
-            return Ok(None);
-        }
-        
-        // Delegate to SessionLogInternal for actual decryption
-        session_log.impl_.decrypt_transaction_meta(tx_index, key_secret)
+        // Use EXISTING SessionLogInternal method
+        Ok(session_log.decrypt_next_transaction_meta_json(tx_index as usize, key_secret))
     }
     
     // === Lifecycle ===
@@ -1249,7 +1325,7 @@ let transactions: Vec<Transaction> = serde_json::from_str(&transactions_json)?;
 **Why JSON:**
 - Simple to implement and debug
 - Works consistently across all platforms (NAPI, WASM, UniFFI)
-- Matches existing `SessionLogInternal` patterns
+- Matches existing Rust patterns
 - Easy to inspect during development
 
 **Future Optimization (if needed):**
@@ -1263,9 +1339,8 @@ let transactions: Vec<Transaction> = serde_json::from_str(&transactions_json)?;
 
 ### Phase 1: Rust SessionMap Implementation
 1. Implement `SessionMap` struct in `cojson-core/src/core/register.rs`
-2. Implement `SessionLog` with transaction storage
-3. Wire up to existing `SessionLogInternal` for crypto
-4. Add unit tests in Rust
+2. Implement unified `SessionLog` with data storage + crypto (signature verification, decryption)
+3. Add unit tests in Rust
 
 ### Phase 2: FFI Bindings
 1. Add NAPI bindings for all SessionMap operations
