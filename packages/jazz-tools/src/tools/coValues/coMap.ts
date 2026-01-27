@@ -334,7 +334,7 @@ export class CoMap extends CoValueBase implements CoValue {
         }
       }
 
-    const initMeta = uniqueness ? { init: true } : undefined;
+    const initMeta = firstComesWins ? { init: true } : undefined;
     return rawOwner.createMap(rawInit, null, "private", uniqueness, initMeta);
   }
 
