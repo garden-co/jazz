@@ -1,5 +1,6 @@
 import {
   SessionLog,
+  SessionMap as NativeSessionMap,
   Blake3Hasher,
   blake3HashOnce,
   blake3HashOnceWithContext,
@@ -27,6 +28,7 @@ import {
   Sealed,
   SealerID,
   SealerSecret,
+  SessionMapImpl,
   Signature,
   SignerID,
   SignerSecret,
@@ -179,6 +181,10 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
   createSessionLog(coID: RawCoID, sessionID: SessionID, signerID?: SignerID) {
     return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
   }
+
+  createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl {
+    return new SessionMapAdapter(new NativeSessionMap(coID, headerJson));
+  }
 }
 
 class SessionLogAdapter {
@@ -290,5 +296,149 @@ class SessionLogAdapter {
 
   clone(): SessionLogAdapter {
     return new SessionLogAdapter(this.sessionLog.clone());
+  }
+}
+
+/**
+ * Adapter wrapping NativeSessionMap to implement SessionMapImpl interface
+ */
+class SessionMapAdapter implements SessionMapImpl {
+  constructor(private readonly sessionMap: NativeSessionMap) {}
+
+  // === Header ===
+  getHeader(): string {
+    return this.sessionMap.getHeader();
+  }
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean,
+  ): void {
+    this.sessionMap.addTransactions(
+      sessionId,
+      signerId,
+      transactionsJson,
+      signature,
+      skipVerify,
+    );
+  }
+
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      keyId,
+      keySecret,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  // === Session Queries ===
+  getSessionIds(): string {
+    return this.sessionMap.getSessionIds();
+  }
+
+  getTransactionCount(sessionId: string): number {
+    return this.sessionMap.getTransactionCount(sessionId);
+  }
+
+  getTransaction(sessionId: string, txIndex: number): string | undefined {
+    return this.sessionMap.getTransaction(sessionId, txIndex) ?? undefined;
+  }
+
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): string | undefined {
+    return (
+      this.sessionMap.getSessionTransactions(sessionId, fromIndex) ?? undefined
+    );
+  }
+
+  getLastSignature(sessionId: string): string | undefined {
+    return this.sessionMap.getLastSignature(sessionId) ?? undefined;
+  }
+
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined {
+    return this.sessionMap.getSignatureAfter(sessionId, txIndex) ?? undefined;
+  }
+
+  getLastSignatureCheckpoint(sessionId: string): number | undefined {
+    return this.sessionMap.getLastSignatureCheckpoint(sessionId) ?? undefined;
+  }
+
+  // === Known State ===
+  getKnownState(): string {
+    return this.sessionMap.getKnownState();
+  }
+
+  getKnownStateWithStreaming(): string | undefined {
+    return this.sessionMap.getKnownStateWithStreaming() ?? undefined;
+  }
+
+  setStreamingKnownState(streamingJson: string): void {
+    this.sessionMap.setStreamingKnownState(streamingJson);
+  }
+
+  // === Deletion ===
+  markAsDeleted(): void {
+    this.sessionMap.markAsDeleted();
+  }
+
+  isDeleted(): boolean {
+    return this.sessionMap.isDeleted();
+  }
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransaction(sessionId, txIndex, keySecret) ??
+      undefined
+    );
+  }
+
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransactionMeta(sessionId, txIndex, keySecret) ??
+      undefined
+    );
   }
 }

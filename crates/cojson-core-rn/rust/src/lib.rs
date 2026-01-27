@@ -24,3 +24,6 @@ pub mod crypto {
 
 pub mod session_log;
 pub use session_log::*;
+
+pub mod session_map;
+pub use session_map::*;
