@@ -488,7 +488,7 @@ export class CoMap extends CoValueBase implements CoValue {
    * ```ts
    * const settings = await UserSettings.getOrCreateUnique({
    *   value: { theme: "dark", language: "en" },
-   *   unique: ["user-settings", me.id],
+   *   unique: "user-settings",
    *   owner: me,
    * });
    * ```
