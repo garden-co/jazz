@@ -2,6 +2,7 @@ import { LocalNode } from "cojson";
 import type {
   CoValue,
   CoValueClassOrSchema,
+  Loaded,
   RefEncoded,
   RefsToResolve,
   ResolveQuery,
@@ -10,6 +11,14 @@ import { coValueClassFromCoValueClassOrSchema } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import type { BranchDefinition } from "./types.js";
 import { isEqualRefsToResolve } from "./utils.js";
+
+function copyResolve(resolve: RefsToResolve<any>): RefsToResolve<any> {
+  if (typeof resolve !== "object" || resolve === null) {
+    return resolve;
+  }
+
+  return { ...resolve };
+}
 
 interface CacheEntry {
   subscriptionScope: SubscriptionScope<any>;
@@ -188,7 +197,7 @@ export class SubscriptionCache {
     skipRetry?: boolean,
     bestEffortResolution?: boolean,
     branch?: BranchDefinition,
-  ): SubscriptionScope<CoValue> {
+  ): SubscriptionScope<Loaded<S, ResolveQuery<S>>> {
     // Handle undefined/null id case
     if (!id) {
       throw new Error("Cannot create subscription with undefined or null id");
@@ -201,7 +210,9 @@ export class SubscriptionCache {
       // Found existing entry - cancel any pending cleanup since we're reusing it
       this.cancelCleanup(matchingEntry);
 
-      return matchingEntry.subscriptionScope as SubscriptionScope<CoValue>;
+      return matchingEntry.subscriptionScope as SubscriptionScope<
+        Loaded<S, ResolveQuery<S>>
+      >;
     }
 
     // Create new SubscriptionScope
@@ -212,9 +223,8 @@ export class SubscriptionCache {
     };
 
     // Create new SubscriptionScope with all required parameters
-    const subscriptionScope = new SubscriptionScope<CoValue>(
+    const subscriptionScope = new SubscriptionScope<Loaded<S, ResolveQuery<S>>>(
       node,
-      // @ts-expect-error the SubscriptionScope is too generic for TS to infer its instances are CoValues
       resolve,
       id,
       refEncoded,
@@ -231,10 +241,11 @@ export class SubscriptionCache {
     };
 
     // Create cache entry with initial subscriber count (starts at 0)
+    // Clone resolve to prevent mutation by SubscriptionScope.subscribeToKey from affecting cache lookups
     const entry: CacheEntry = {
       subscriptionScope,
       schema,
-      resolve,
+      resolve: copyResolve(resolve),
       branch,
       subscriberCount: subscriptionScope.subscribers.size,
       unsubscribeFromScope: subscriptionScope.onSubscriberChange(

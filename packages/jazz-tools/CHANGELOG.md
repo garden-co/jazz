@@ -1,5 +1,63 @@
 # jazz-tools
 
+## 0.20.6
+
+### Patch Changes
+
+- Updated dependencies [cdf8274]
+  - cojson@0.20.6
+  - cojson-storage-indexeddb@0.20.6
+  - cojson-transport-ws@0.20.6
+
+## 0.20.5
+
+### Patch Changes
+
+- 23a5d7c: Fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- 0b95532: Fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+  - cojson@0.20.5
+  - cojson-storage-indexeddb@0.20.5
+  - cojson-transport-ws@0.20.5
+
+## 0.20.4
+
+### Patch Changes
+
+- 0c749d9: Fixed infinite re-render loop when accessing unresolved nested CoValues in React hooks
+  - cojson@0.20.4
+  - cojson-storage-indexeddb@0.20.4
+  - cojson-transport-ws@0.20.4
+
+## 0.20.3
+
+### Patch Changes
+
+- Updated dependencies [eca8b83]
+  - cojson@0.20.3
+  - cojson-storage-indexeddb@0.20.3
+  - cojson-transport-ws@0.20.3
+
+## 0.20.2
+
+### Patch Changes
+
+- 2df568f: Added a Performance tab in the Jazz tools inspector
+- Updated dependencies [251a89e]
+  - cojson@0.20.2
+  - cojson-storage-indexeddb@0.20.2
+  - cojson-transport-ws@0.20.2
+
+## 0.20.1
+
+### Patch Changes
+
+- ca306c0: Fixed `CoList` to return the correct length when calling `getOwnPropertyDescriptor` with `length`. Previously it was always returning 0.
+- d7f9cba: `setDefaultSchemaPermissions` now modifies existing CoValue schemas
+- Updated dependencies [03195eb]
+  - cojson@0.20.1
+  - cojson-storage-indexeddb@0.20.1
+  - cojson-transport-ws@0.20.1
+
 ## 0.20.0
 
 ### Minor Changes
@@ -7,7 +65,6 @@
 - ee19292: Removed `JazzContextManagerContext` and added error when nesting `JazzProvider` components. This prevents bad patterns like nested providers and simplifies the alternative approach of using `JazzContext.Provider` directly with `useJazzContext()`.
 
   ### Breaking changes
-
   - Removed `JazzContextManagerContext` export from `jazz-tools/react-core`
   - Renamed `useJazzContext` to `useJazzContextValue` (returns the context value)
   - `useJazzContext` now returns the context manager instead of the context value
@@ -40,7 +97,6 @@
   ## 💥 Breaking changes
 
   ### Crypto providers / fallback behavior
-
   - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
   - **Removed `RNQuickCrypto`** from `jazz-tools`.
   - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
@@ -51,7 +107,6 @@
 ### Patch Changes
 
 - 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
-
   - CoValues are marked with a tombstone, making them inaccessible to all users
   - Supports deleting nested CoValues via resolve queries
   - Requires admin permissions on the CoValue's group
@@ -546,7 +601,6 @@
 ### Patch Changes
 
 - f2f478a: Add connection status API for React and Svelte
-
   - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
   - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
 
@@ -582,7 +636,6 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
-
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -966,7 +1019,6 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
-
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

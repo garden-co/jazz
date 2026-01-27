@@ -140,7 +140,7 @@ describe("Parent Group Cache", () => {
             value: "revoked",
           },
         ],
-        "private",
+        "trusting",
         undefined,
         t2,
       );
@@ -153,7 +153,7 @@ describe("Parent Group Cache", () => {
             value: "extend",
           },
         ],
-        "private",
+        "trusting",
         undefined,
         t1,
       );

@@ -1,3 +1,21 @@
+Released Jazz 0.20.5:
+- Bugfix: fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- Bugfix: fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+
+Released Jazz 0.20.4:
+- Bugfix: infinite re-render loop when accessing nested CoValues in React hooks calls with `resolve: {}`
+
+Released Jazz 0.20.3:
+- Added caching for groups when accessing a readKey
+
+Released Jazz 0.20.2:
+- Added a Performance tab in the Jazz tools inspector
+- Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
+
+Released Jazz 0.20.1:
+- Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently. When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
+- Bugfix: `setDefaultSchemaPermissions` now modifies existing CoValue schemas
+- Bugfix: fixed `CoList` to return the correct length when calling `getOwnPropertyDescriptor` with `length`. Previously it was always returning 0.
 
 Released Jazz 0.20.0:
 
@@ -26,7 +44,7 @@ Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
 
 Released Jazz 0.19.22:
 - Added a 512 variant for progressive image loading
-- Bugfix: fixed an issue when generating image placeholders from clients using Expo Image Manipulator (cc @andreibudoi)
+- Bugfix: fixed an issue when generating image placeholders from clients using Expo Image Manipulator
 - Bugfix: wait for CoValues to be synced before garbage-collecting them
 - Bugfix: wait for CoValues' dependencies to be garbage-collected before collecting them. This makes accounts and groups safe to be collected
 

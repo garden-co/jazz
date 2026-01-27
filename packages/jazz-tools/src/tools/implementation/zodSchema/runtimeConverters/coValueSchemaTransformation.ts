@@ -40,6 +40,19 @@ import {
   schemaFieldToCoFieldDef,
 } from "./schemaFieldToCoFieldDef.js";
 
+/**
+ * A platform agnostic way to check if we're in development mode
+ *
+ * Works in Node.js and bundled code, falls back to false if process is not available
+ */
+const isDev = (function () {
+  try {
+    return process.env.NODE_ENV === "development";
+  } catch {
+    return false;
+  }
+})();
+
 // Note: if you're editing this function, edit the `isAnyCoValueSchema`
 // function in `zodReExport.ts` as well
 export function isAnyCoValueSchema(

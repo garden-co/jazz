@@ -1,0 +1,193 @@
+export const metadata = {
+  description: "Explore data modelling and schema design in Jazz."
+};
+
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
+
+# Data Modelling and Schema Design in Jazz
+
+To understand how best to model data for your Jazz application, it's helpful to first think about how your data is related.
+
+## Jazz as a Collaborative Graph
+In a traditional database, you might model different data types as 'tables' or 'collections'. With Jazz, you model data types as schemas, and data as an explicitly linked graph.
+
+For example, consider the following SQL data model for a simple blog:
+
+<CodeGroup>
+```sql
+-- Users table
+CREATE TABLE authors (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL
+);
+
+-- Posts table
+CREATE TABLE posts (
+    id SERIAL PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+);
+```
+</CodeGroup>
+
+This data model for a Jazz app is defined in a schema which might look like this:
+
+<CodeGroup>
+```ts basic-schemas.ts#BasicSchemas
+```
+</CodeGroup>
+
+<details>
+  <summary>What are `z.` and `co.`?</summary>
+  <p>Jazz uses Zod schemas to define primitive data types. `z.string()` indicates that the stored value should be a string.</p>
+  <p>To define collaborative data types, Jazz provides utilities under the `co` namespace. For example, here, we use `co.richText()`, to indicate a collaborative value.</p>
+</details>
+
+## Permissions are part of the data model
+
+In traditional databases, permissions are often left to the application layer, or are a more advanced feature of the database that requires additional configuration.
+
+With Jazz, permissions are an integral part of the data model&hairsp;—&hairsp;you need to consider permissions when structuring your data, not just when you're accessing it. Each CoValue has an ownership group, and permissions are defined based on the ownership hierarchy. This is very powerful, as it allows you to easily build cascading permissions hierarchies, but it does mean that you need to ensure each piece of data which needs different permissions to be applied lives in a different container (e.g. a separate `CoMap` or `CoList`). It is not possible to change the group which owns a CoValue. In order to change the permissions applying to a particular CoValue, an admin (or manager) can [make changes to the group membership](/docs/permissions-and-sharing/overview).
+
+You should consider the default permissions you would like a CoValue to have when you are designing your data model. You can [specify these in your schema](/docs/permissions-and-sharing/overview#defining-permissions-at-the-schema-level).
+
+### Permissions Levels
+
+The following main permissions levels exist (with each level including all the permissions from the previous level):
+
+* **none**: can't read the content of CoValue
+* **reader**: can read the content of the CoValue
+* **writer**: can update the content of the CoValue (overwrite values, add/remove items from lists, etc.)
+* **admin**: can grant or revoke permissions for others, as well as writing.
+
+These permissions can be granted to individual users or to groups.
+
+<Alert variant="warning" title="Admins">
+  By default, **only** the user creating a CoValue is the admin. In contrast to traditional databases, Jazz does not have a concept of an 'application admin', or a 'root' or 'superuser'. 
+  
+  Unless explicitly defined otherwise in your data model, only the creator of the CoValue will be added as an admin. Once a CoValue is created, its permissions can **only** be changed by an admin (or a manager).
+
+  If [creating a nested CoValue inline](/docs/permissions-and-sharing/cascading-permissions#ownership-on-inline-covalue-creation), then by default, permissions are inherited from the containing CoValue.
+</Alert>
+
+
+## Choosing your building blocks
+
+Jazz helps you build your app by providing concrete building blocks. Basic types which do not need collaborative editing, such as simple strings, numbers, and other scalar types are defined using Zod.
+
+Most apps will have more complex needs, however, and for this, Jazz provides you with **CoValues**, which are composite data structures which hold references to either these scalar types or other CoValues. Each CoValue is suited to a particular use case. 
+
+<table className="covalue-table" aria-label="CoValue Mappings">
+  <thead>
+    <tr><th>TypeScript Type</th><th>Corresponding CoValue</th><th>Usage</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>object</code></td><td><strong>CoMap</strong></td><td>Key-value stores with pre-defined keys (struct-like)</td></tr>
+    <tr><td><code>Record&lt;string, T&gt;</code></td><td><strong>CoRecord</strong></td><td>Key-value stores with arbitrary string keys (dict-like)</td></tr>
+    <tr><td><code>T[]</code></td><td><strong>CoList</strong></td><td>Lists</td></tr>
+    <tr><td><code>T[]</code> (append-only)</td><td><strong>CoFeed</strong></td><td>Session-based append-only lists</td></tr>
+    <tr><td><code>string</code></td><td><strong>CoPlainText/CoRichText</strong></td><td>Collaborative text</td></tr>
+    <tr><td><code>Blob | File</code></td><td><strong>FileStream</strong></td><td>Files</td></tr>
+    <tr><td><code>Blob | File</code> (image)</td><td><strong>ImageDefinition</strong></td><td>Images</td></tr>
+    <tr><td><code>number[] | Float32Array</code></td><td><strong>CoVector</strong></td><td>Embeddings</td></tr>
+    <tr><td><code>T | U</code> (discriminated)</td><td><strong>DiscriminatedUnion</strong></td><td>Lists of different types of items</td></tr>
+  </tbody>
+</table>
+
+In some cases, there are both scalar and collaborative options for the same data type. For example, you can use either `z.string()` or `co.richText()` for a string field. The key difference is that `z.string()` does not support collaborative editing. If you would like to update the string field, you can only do so by replacing the entire field with a new value. `co.richText()` supports collaborative editing, allows multiple users to edit the same string simultaneously.
+
+In our blog example, we used `co.richText()` for the content, to allow multiple users to edit the same post simultaneously, but we preferred `z.string()` for the title, as the title doesn't need to be edited collaboratively.
+
+This same principle applies with other data types too. For example, you can use `z.object()` or `co.map()` for an object field, and `z.tuple()` or `co.list()` for an array field.
+
+As a general rule of thumb: if you expect the whole object to be replaced when you update it, you should use a scalar type. If you expect to make small, surgical edits, or collaborate with others, a CoValue may be a better choice.
+
+<details>
+<summary>Can't I just use CoValues for everything?</summary>
+<p>Short answer is yes, you can. But you should be aware of the trade-offs. CoValues track their full edit history, and although they are very performant, they cannot achieve the same raw speed as their scalar counterparts for single-writer, full-value replacement updates.</p><p>In most real-world applications, the benefits of collaborative editing outweigh the (slight) performance costs.</p>
+</details>
+
+## Linking them together
+
+In almost every case, you'll want to link your CoValues together somehow. This is because CoValues are only addressable by their unique ID. Discovering CoValues without knowing their ID is only possible by traversing references. In a normal Jazz app, we attach a 'root' to a user's account which serves as the entry point into the graph. In case there is a need to create a 'global root', then a CoValue ID can be hard-coded, or added as an environment variable.
+
+### One directional relationships
+Let's extend our example above to attach an `Author` to each `Post`.
+
+<CodeGroup>
+```ts one-directional-relationship.ts#OneDirectionalRelationship
+```
+</CodeGroup>
+
+Here, `Post.author` is a one-way reference. Jazz stores the ID of the referenced `Author`, and when loading a `Post` you can choose whether to resolve that reference (and if so, how deeply).
+
+The above models a one-to-one relationship: both the `Post` and the `Author` have a single reference you can fill.
+
+If you would like to model a one-to-many relationship, use a `CoList`:
+
+<CodeGroup className="mb-4">
+```ts one-to-many-relationship.ts#OneToManyRelationship
+```
+</CodeGroup>
+
+<details> <summary>Mental model</summary> <p> This is similar to a foreign key in a relational database: the reference lives on one side, and Jazz doesn't infer reverse links for you. You explicitly control how references are followed using <a href="/docs/core-concepts/subscription-and-loading#using-resolve-queries">resolve queries</a>.</p> </details>
+
+### Modelling inverse relationships
+
+Jazz relationships are one-way by default: a reference is stored and you can follow the breadcrumbs to resolve the references. If you need to be able to traverse the relationship from both sides, you solve this by adding the reference to both sides of the relationship.
+
+<Alert variant="info" title="No inferred relationships" className="mt-4">
+  You are in full control of the relationships in your app, Jazz will not create inferred inverse relationships for you. It is particularly important to bear this in mind because it is not possible to query CoValues based on references from other CoValues.
+</Alert>
+
+
+### Recursive references
+As soon as you start building schemas with inverse (or recursive) relationships, you'll need to defer schema evaluation to avoid TypeScript errors. If we want `Author` to reference `Post` and `Post` to reference `Author`, whichever order we put them in will cause an error.
+
+You can address this by using getters to refer to schemas which are not yet defined: 
+
+<CodeGroup>
+```ts recursive-references.ts#RecursiveReferences
+```
+</CodeGroup>
+
+To model a many-to-many relationship, use a `CoList` at both ends of the relationship&hairsp;—&hairsp;be aware that Jazz does not maintain consistency for you, this should be managed in your application code.
+
+<CodeGroup>
+```ts many-to-many-relationship.ts#ManyToManyRelationship
+```
+</CodeGroup>
+
+<details> 
+  <summary>Can I add a unique constraint?</summary> 
+  <p>A `CoList` can contain the same item multiple times. There's no built in way to enforce that items in the list are unique, but you can adjust your data model to use a `CoRecord` keyed on the referenced CoValue ID to create a [set-like collection](/docs/core-concepts/covalues/colists#set-like-collections)</p>
+  <CodeGroup className="mb-4">
+    ```ts set-like-collections.ts#SetLikeCollections
+    ```
+  </CodeGroup>
+  <p>Note that CoRecords are *always* keyed on strings. Jazz does not enforce referential integrity here, so validating that these are valid `Post` IDs is an application-level responsibility.</p>
+</details>
+
+## Changing Your Data Model
+Over time, your data model may change. In a traditional app with a single source of truth, you could simply update the data directly in the database. With Jazz, each individual copy of a CoValue is its own authoritative state, and the schema simply tells Jazz how to interpret it.
+
+As a result, it is possible&hairsp;—&hairsp;indeed likely&hairsp;—&hairsp;that your users will end up on different versions of your schema at the same time. As a result, we recommend the following:
+
+* Add a version field to your schema
+* Only add fields, never remove them
+* Do not change the data type for existing fields
+* When adding fields, make them optional (so that you can load older data without these fields set).
+
+You can also use the [`withMigration()` method](/docs/core-concepts/covalues/comaps#running-migrations-on-comaps) which runs every time a CoValue is loaded (available on `CoMaps` and `Accounts`).
+
+<Alert variant="warning" title="Use migrations carefully">
+  Migrations run *every* time a CoValue is loaded. A poorly-written migration could cause a lot of unnecessary work being done, and potentially slow your app down. Exit as early as possible from the migration, and check the update is necessary before updating.
+</Alert>
+
+## Further Reading
+
+Looking for a deeper walk through?
+
+* Check out our [Overview of CoValues](/docs/core-concepts/covalues/overview) to learn more about the different building blocks
+* Read about [permissions in detail](/docs/permissions-and-sharing/overview) to understand how permissions govern which users can see what data
+* Learn about [how to connect CoValues](/docs/core-concepts/schemas/connecting-covalues)

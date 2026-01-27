@@ -220,11 +220,15 @@ The React context API in `jazz-tools/react-core` changed to prevent nested provi
 If you were using `useJazzContext` to get the context value, rename it to `useJazzContextValue`:
 
 <CodeGroup>
-```diff
+```ts
+// [!code --:1]
 - import { useJazzContext } from "jazz-tools/react-core";
+// [!code ++:1]
 + import { useJazzContextValue } from "jazz-tools/react-core";
 
+// [!code --:1]
 - const context = useJazzContext();
+// [!code ++:1]
 + const context = useJazzContextValue();
 ```
 </CodeGroup>

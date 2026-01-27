@@ -1,6 +1,7 @@
 import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
+import type { LoadMode } from "../queue/OutgoingLoadQueue.js";
 import {
   RawAccount,
   type ControlledAccountOrAgent,
@@ -281,6 +282,15 @@ export class CoValueCore {
       }
   >();
 
+  // Tracks why we have lastKnownState (separate from loadingStatuses)
+  // - "garbageCollected": was in memory, got GC'd
+  // - "onlyKnownState": checked storage, found knownState, but didn't load full content
+  #lastKnownStateSource?: "garbageCollected" | "onlyKnownState";
+
+  // Cache the knownState when transitioning to garbageCollected/onlyKnownState
+  // Used during peer reconciliation to send accurate LOAD requests
+  #lastKnownState?: CoValueKnownState;
+
   // cached state and listeners
   private _cachedContent?: RawCoValue;
   readonly listeners: Set<(core: CoValueCore, unsub: () => void) => void> =
@@ -307,14 +317,26 @@ export class CoValueCore {
   get loadingState() {
     if (this.verified) {
       return "available";
-    } else if (this.loadingStatuses.size === 0) {
+    }
+
+    // Check for pending peers FIRST - loading takes priority over other states
+    for (const peer of this.loadingStatuses.values()) {
+      if (peer.type === "pending") {
+        return "loading";
+      }
+    }
+
+    // Check for lastKnownStateSource (garbageCollected or onlyKnownState)
+    if (this.#lastKnownStateSource) {
+      return this.#lastKnownStateSource;
+    }
+
+    if (this.loadingStatuses.size === 0) {
       return "unknown";
     }
 
     for (const peer of this.loadingStatuses.values()) {
-      if (peer.type === "pending") {
-        return "loading";
-      } else if (peer.type === "unknown") {
+      if (peer.type === "unknown") {
         return "unknown";
       }
     }
@@ -428,32 +450,22 @@ export class CoValueCore {
   }
 
   /**
-   * Removes the CoValue from memory.
+   * Removes the CoValue content from memory but keeps a shell with cached knownState.
+   * This enables accurate LOAD requests during peer reconciliation.
    *
    * @returns true if the coValue was successfully unmounted, false otherwise
    */
   unmount(): boolean {
-    if (this.listeners.size > 0) {
-      // The coValue is still in use
-      return false;
-    }
+    return this.node.internalUnmountCoValue(this.id);
+  }
 
-    for (const dependant of this.dependant) {
-      if (this.node.hasCoValue(dependant)) {
-        // Another in-memory coValue depends on this coValue
-        return false;
-      }
-    }
-
-    if (!this.node.syncManager.isSyncedToServerPeers(this.id)) {
-      return false;
-    }
-
+  /**
+   * Decrements the counter for the current loading state.
+   * Used during unmount to properly track state transitions.
+   * @internal
+   */
+  decrementLoadingStateCounter() {
     this.counter.add(-1, { state: this.loadingState });
-
-    this.node.internalDeleteCoValue(this.id);
-
-    return true;
   }
 
   markNotFoundInPeer(peerId: PeerID) {
@@ -467,6 +479,35 @@ export class CoValueCore {
     this.loadingStatuses.set(peerId, { type: "available" });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
+  }
+
+  /**
+   * Clean up cached state when CoValue becomes available.
+   * Called after the CoValue transitions from garbageCollected/onlyKnownState to available.
+   */
+  private cleanupLastKnownState() {
+    // Clear both fields - in-memory verified state is now authoritative
+    this.#lastKnownStateSource = undefined;
+    this.#lastKnownState = undefined;
+  }
+
+  /**
+   * Initialize this CoValueCore as a garbageCollected shell.
+   * Called when creating a replacement CoValueCore after unmounting.
+   */
+  setGarbageCollectedState(knownState: CoValueKnownState) {
+    // Only set garbageCollected state if storage is active
+    // Without storage, we can't reload the CoValue anyway
+    if (!this.node.storage) {
+      return;
+    }
+
+    // Transition counter from 'unknown' (set by constructor) to 'garbageCollected'
+    // previousState will be 'unknown', newState will be 'garbageCollected'
+    const previousState = this.loadingState;
+    this.#lastKnownStateSource = "garbageCollected";
+    this.#lastKnownState = knownState;
+    this.updateCounter(previousState);
   }
 
   missingDependencies = new Set<RawCoID>();
@@ -575,6 +616,10 @@ export class CoValueCore {
       header,
       new SessionMap(this.id, this.node.crypto, streamingKnownState),
     );
+    // Clean up if transitioning from garbageCollected/onlyKnownState
+    if (this.isAvailable()) {
+      this.cleanupLastKnownState();
+    }
 
     return true;
   }
@@ -605,10 +650,11 @@ export class CoValueCore {
    * Used to correctly manage the content & subscriptions during the content streaming process
    */
   knownStateWithStreaming(): CoValueKnownState {
-    return (
-      this.verified?.immutableKnownStateWithStreaming() ??
-      emptyKnownState(this.id)
-    );
+    if (this.verified) {
+      return this.verified.immutableKnownStateWithStreaming();
+    }
+
+    return this.knownState();
   }
 
   /**
@@ -617,9 +663,22 @@ export class CoValueCore {
    * The return value identity is going to be stable as long as the CoValue is not modified.
    *
    * On change the knownState is invalidated and a new object is returned.
+   *
+   * For garbageCollected/onlyKnownState CoValues, returns the cached knownState.
    */
   knownState(): CoValueKnownState {
-    return this.verified?.immutableKnownState() ?? emptyKnownState(this.id);
+    // 1. If we have verified content in memory, use that (authoritative)
+    if (this.verified) {
+      return this.verified.immutableKnownState();
+    }
+
+    // 2. If we have last known state (GC'd or onlyKnownState), use that
+    if (this.#lastKnownState) {
+      return this.#lastKnownState;
+    }
+
+    // 3. Fallback to empty state (truly unknown CoValue)
+    return emptyKnownState(this.id);
   }
 
   /**
@@ -1755,7 +1814,7 @@ export class CoValueCore {
       );
     }
 
-    if (this.verified.header.ruleset.type === "group") {
+    if (this.isGroupOrAccount()) {
       return expectGroup(this.getCurrentContent()).getCurrentReadKey();
     } else if (this.verified.header.ruleset.type === "ownedByGroup") {
       return this.node
@@ -1783,16 +1842,26 @@ export class CoValueCore {
       );
     }
 
-    // Getting the readKey from accounts
-    if (this.verified.header.ruleset.type === "group") {
+    if (this.isGroup()) {
+      // is group
       const content = expectGroup(
-        // load the account without private transactions, because we are here
-        // to be able to decrypt those
+        // Private transactions are not considered valid in groups, so we don't need to pass
+        // ignorePrivateTransactions: true to safely load the content
+        this.getCurrentContent(),
+      );
+
+      return content.getReadKey(keyID);
+    } else if (this.isGroupOrAccount()) {
+      // is account
+      const content = expectGroup(
+        // Old accounts might have private transactions, because we were encrypting the root id in the past
+        // So we need to load the account without private transactions, because we can't decrypt them without the read key
         this.getCurrentContent({ ignorePrivateTransactions: true }),
       );
 
       return content.getReadKey(keyID);
     } else if (this.verified.header.ruleset.type === "ownedByGroup") {
+      // is a CoValue owned by a group
       return expectGroup(
         this.node
           .expectCoValueLoaded(this.verified.header.ruleset.group)
@@ -1847,11 +1916,11 @@ export class CoValueCore {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
 
-  load(peers: PeerState[]) {
+  load(peers: PeerState[], mode?: LoadMode) {
     this.loadFromStorage((found) => {
       // When found the load is triggered by handleNewContent
       if (!found) {
-        this.loadFromPeers(peers);
+        this.loadFromPeers(peers, mode);
       }
     });
   }
@@ -1890,7 +1959,16 @@ export class CoValueCore {
       return;
     }
 
-    if (currentState !== "unknown") {
+    // Check if we need to load from storage:
+    // - If storage state is not unknown (already tried), AND
+    // - Overall state is not garbageCollected/onlyKnownState (which need full content)
+    // Then return early
+    const overallState = this.loadingState;
+    if (
+      currentState !== "unknown" &&
+      overallState !== "garbageCollected" &&
+      overallState !== "onlyKnownState"
+    ) {
       done?.(currentState === "available");
       return;
     }
@@ -1915,7 +1993,8 @@ export class CoValueCore {
    * Lazily load only the knownState from storage without loading full transaction data.
    * This is useful for checking if a peer needs new content before committing to a full load.
    *
-   * Caching and deduplication are handled at the storage layer.
+   * If found in storage, marks the CoValue as onlyKnownState and caches the knownState.
+   * This enables accurate LOAD requests during peer reconciliation.
    *
    * @param done - Callback with the storage knownState, or undefined if not found in storage
    */
@@ -1927,17 +2006,29 @@ export class CoValueCore {
       return;
     }
 
-    // If already available in memory, return the current knownState
-    if (this.isAvailable()) {
-      done(this.knownState());
+    // If we already have knowledge about this CoValue (in memory or cached), return it
+    // knownState() returns verified state, lastKnownState, or empty state
+    const knownState = this.knownState();
+    if (knownState.header) {
+      done(knownState);
       return;
     }
 
     // Delegate to storage - caching is handled at storage level
-    this.node.storage.loadKnownState(this.id, done);
+    this.node.storage.loadKnownState(this.id, (knownState) => {
+      // The coValue could become available in the meantime.
+      if (knownState && !this.isAvailable()) {
+        // Cache the knownState and mark as onlyKnownState
+        const previousState = this.loadingState;
+        this.#lastKnownStateSource = "onlyKnownState";
+        this.#lastKnownState = knownState;
+        this.updateCounter(previousState);
+      }
+      done(knownState);
+    });
   }
 
-  loadFromPeers(peers: PeerState[]) {
+  loadFromPeers(peers: PeerState[], mode?: LoadMode) {
     if (peers.length === 0) {
       return;
     }
@@ -1947,27 +2038,15 @@ export class CoValueCore {
 
       if (currentState === "unknown" || currentState === "unavailable") {
         this.markPending(peer.id);
-        this.internalLoadFromPeer(peer);
+        this.internalLoadFromPeer(peer, mode);
       }
     }
   }
 
-  private internalLoadFromPeer(peer: PeerState) {
+  private internalLoadFromPeer(peer: PeerState, mode?: LoadMode) {
     if (peer.closed && !peer.persistent) {
       this.markNotFoundInPeer(peer.id);
       return;
-    }
-
-    /**
-     * On reconnection persistent peers will automatically fire the load request
-     * as part of the reconnection process.
-     */
-    if (!peer.closed) {
-      peer.pushOutgoingMessage({
-        action: "load",
-        ...this.knownState(),
-      });
-      peer.trackLoadRequestSent(this.id);
     }
 
     const markNotFound = () => {
@@ -1980,10 +2059,18 @@ export class CoValueCore {
       }
     };
 
-    const timeout = setTimeout(markNotFound, CO_VALUE_LOADING_CONFIG.TIMEOUT);
+    // Close listener for non-persistent peers
     const removeCloseListener = peer.persistent
       ? undefined
       : peer.addCloseListener(markNotFound);
+
+    /**
+     * On reconnection persistent peers will automatically fire the load request
+     * as part of the reconnection process.
+     */
+    if (!peer.closed) {
+      peer.sendLoadRequest(this, mode);
+    }
 
     this.subscribe((state, unsubscribe) => {
       const peerState = state.getLoadingStateForPeer(peer.id);
@@ -1995,7 +2082,6 @@ export class CoValueCore {
       ) {
         unsubscribe();
         removeCloseListener?.();
-        clearTimeout(timeout);
       }
     }, true);
   }

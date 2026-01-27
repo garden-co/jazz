@@ -46,7 +46,13 @@ export async function runBenchmark(
     );
 
     // Perform warmup run (not included in results)
-    await performWarmupRun(browser, scenario, coValueId, baseURL);
+    await performWarmupRun(
+      browser,
+      scenario,
+      coValueId,
+      baseURL,
+      config.timeout,
+    );
 
     // Run the benchmark iterations
     const rawMetrics = await runIterations(
@@ -56,6 +62,7 @@ export async function runBenchmark(
       config.runs,
       baseURL,
       config.coldStorage ?? false,
+      config.timeout,
     );
 
     // Calculate statistics for each metric
@@ -123,11 +130,13 @@ async function performWarmupRun(
   scenario: ScenarioDefinition,
   coValueId: string,
   baseURL: string,
+  timeout?: number,
 ): Promise<void> {
   printWarmupStart();
 
   const startTime = Date.now();
   const context = await browser.newContext({ baseURL });
+  context.setDefaultTimeout(timeout ?? 120000);
 
   try {
     const page = await context.newPage();
@@ -149,6 +158,7 @@ async function runIterations(
   runs: number,
   baseURL: string,
   coldStorage: boolean,
+  timeout?: number,
 ): Promise<Record<string, number[]>> {
   const rawMetrics: Record<string, number[]> = {};
 
@@ -172,6 +182,8 @@ async function runIterations(
             storageState: undefined,
           })
         : sharedContext!;
+
+      context.setDefaultTimeout(timeout ?? 120000);
 
       try {
         const page = await context.newPage();
