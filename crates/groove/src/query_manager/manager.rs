@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::commit::{CommitId, StoredState};
 use crate::object::{BranchName, ObjectId, ObjectState};
 use crate::object_manager::AllObjectUpdate;
+use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::sync_manager::{PendingPermissionCheck, PendingUpdateId, SyncManager};
 
 use super::encoding::{decode_row, encode_row};
@@ -15,7 +16,10 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts, resolve_ses
 use super::policy_graph::PolicyGraph;
 use super::query::{Query, QueryBuilder};
 use super::session::Session;
-use super::types::{Row, RowDelta, RowDescriptor, Schema, TableName, TableSchema, Value};
+use super::types::{
+    ComposedBranchName, Row, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
+    Value,
+};
 
 /// Default row branch name for backward compatibility during migration.
 /// TODO: Remove once all APIs explicitly specify branch.
@@ -174,6 +178,14 @@ pub struct QueryManager {
 
     /// Active policy checks being evaluated.
     active_policy_checks: HashMap<PendingUpdateId, PolicyCheckState>,
+
+    /// Optional schema context for multi-schema queries.
+    /// When present, enables lens transforms for rows from old schema branches.
+    schema_context: Option<SchemaContext>,
+
+    /// Maps branch name to schema hash (derived from schema_context).
+    /// Used to determine which schema a branch uses.
+    branch_schema_map: HashMap<String, SchemaHash>,
 }
 
 impl QueryManager {
@@ -204,6 +216,105 @@ impl QueryManager {
             next_subscription_id: 0,
             update_outbox: Vec::new(),
             active_policy_checks: HashMap::new(),
+            schema_context: None,
+            branch_schema_map: HashMap::new(),
+        }
+    }
+
+    /// Create a new QueryManager with schema context for multi-schema queries.
+    ///
+    /// When schema context is provided:
+    /// - Queries automatically include all live schema branches
+    /// - Rows from old schema branches are transformed via lens
+    /// - Column names are translated for index lookups on old schemas
+    pub fn new_with_schema_context(
+        sync_manager: SyncManager,
+        schema: Schema,
+        schema_context: SchemaContext,
+    ) -> Self {
+        // Initialize indices for all tables on all live branches
+        let mut indices = IndicesMap::default();
+
+        // Build branch -> schema hash map directly from schema context
+        // (Don't parse branch names - that loses the full hash)
+        let mut branch_schema_map = HashMap::new();
+
+        // Current schema branch
+        let current_branch = schema_context.branch_name();
+        branch_schema_map.insert(
+            current_branch.as_str().to_string(),
+            schema_context.current_hash,
+        );
+
+        // Live schema branches
+        for &live_hash in schema_context.live_schemas.keys() {
+            let live_branch = ComposedBranchName::new(
+                &schema_context.env,
+                live_hash,
+                &schema_context.user_branch,
+            )
+            .to_branch_name();
+            branch_schema_map.insert(live_branch.as_str().to_string(), live_hash);
+        }
+
+        // Initialize indices for current schema's branch
+        for (table_name, table_schema) in &schema {
+            // Current schema branch
+            let current_branch = schema_context.branch_name();
+            Self::ensure_table_indices_for_branch(
+                &mut indices,
+                table_name.as_str(),
+                current_branch.as_str(),
+                table_schema,
+            );
+
+            // Live schema branches
+            for (live_hash, live_schema) in &schema_context.live_schemas {
+                let live_branch = ComposedBranchName::new(
+                    &schema_context.env,
+                    *live_hash,
+                    &schema_context.user_branch,
+                )
+                .to_branch_name();
+
+                if let Some(live_table) = live_schema.get(table_name) {
+                    Self::ensure_table_indices_for_branch(
+                        &mut indices,
+                        table_name.as_str(),
+                        live_branch.as_str(),
+                        live_table,
+                    );
+                }
+            }
+        }
+
+        Self {
+            sync_manager,
+            schema: Arc::new(schema),
+            indices,
+            subscriptions: HashMap::new(),
+            next_subscription_id: 0,
+            update_outbox: Vec::new(),
+            active_policy_checks: HashMap::new(),
+            schema_context: Some(schema_context),
+            branch_schema_map,
+        }
+    }
+
+    /// Get the schema context if present.
+    pub fn schema_context(&self) -> Option<&SchemaContext> {
+        self.schema_context.as_ref()
+    }
+
+    /// Get all branches to query for a table (current + live schemas).
+    pub fn all_query_branches(&self) -> Vec<String> {
+        match &self.schema_context {
+            Some(ctx) => ctx
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect(),
+            None => vec![DEFAULT_ROW_BRANCH.to_string()],
         }
     }
 
@@ -288,6 +399,44 @@ impl QueryManager {
         &self,
     ) -> &HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
         &self.subscriptions
+    }
+
+    /// Test accessor for index by key (internal testing only).
+    #[cfg(test)]
+    pub fn test_get_index_mut(
+        &mut self,
+        key: &(String, String, String),
+    ) -> Option<&mut super::index::BTreeIndex> {
+        self.indices.get_mut(key)
+    }
+
+    /// Get all index keys (for testing).
+    #[cfg(test)]
+    pub fn test_all_index_keys(&self) -> Vec<(String, String, String)> {
+        self.indices.keys().cloned().collect()
+    }
+
+    /// Get subscription results as decoded rows (for testing).
+    #[cfg(test)]
+    pub fn get_subscription_results(
+        &self,
+        sub_id: super::graph_nodes::output::QuerySubscriptionId,
+    ) -> Vec<Vec<Value>> {
+        let Some(subscription) = self.subscriptions.get(&sub_id) else {
+            return vec![];
+        };
+
+        let table_schema = match self.schema.get(&subscription.graph.table) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        subscription
+            .graph
+            .current_result()
+            .iter()
+            .filter_map(|row| decode_row(&table_schema.descriptor, &row.data).ok())
+            .collect()
     }
 
     /// Check if a row is indexed on a specific branch (appears in the _id index).
@@ -458,6 +607,84 @@ impl QueryManager {
 
         // Update indices immediately and persist
         self.update_indices_for_insert(table, object_id, &data, &descriptor)?;
+
+        // Mark subscriptions dirty
+        self.mark_subscriptions_dirty(table);
+
+        Ok(InsertHandle {
+            row_id: object_id,
+            row_commit_id,
+        })
+    }
+
+    /// Insert a new row into a table on a specific branch.
+    ///
+    /// Used by SchemaManager for schema-aware inserts.
+    pub fn insert_on_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+    ) -> Result<InsertHandle, QueryError> {
+        self.insert_on_branch_with_session(table, branch, values, None)
+    }
+
+    /// Insert a new row on a specific branch with session-based policy checking.
+    pub fn insert_on_branch_with_session(
+        &mut self,
+        table: &str,
+        branch: &str,
+        values: &[Value],
+        session: Option<&Session>,
+    ) -> Result<InsertHandle, QueryError> {
+        let table_name = TableName::new(table);
+        let table_schema = self
+            .schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
+        let descriptor = table_schema.descriptor.clone();
+        let insert_policy = table_schema.policies.insert.with_check.clone();
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        // Check INSERT WITH CHECK policy
+        if let (Some(session), Some(policy)) = (session, insert_policy)
+            && !self.evaluate_policy_for_values(&policy, values, &descriptor, session, table)
+        {
+            return Err(QueryError::PolicyDenied {
+                table: table_name,
+                operation: Operation::Insert,
+            });
+        }
+
+        // Ensure indices exist for this branch
+        Self::ensure_table_indices_for_branch(&mut self.indices, table, branch, table_schema);
+
+        // Encode to binary
+        let data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
+        // Create object with table metadata
+        let mut metadata = HashMap::new();
+        metadata.insert("table".to_string(), table.to_string());
+
+        let object_id = self.sync_manager.object_manager.create(Some(metadata));
+        let author = object_id; // Self-authored
+
+        // Add commit with row data to specified branch
+        let row_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(object_id, branch, vec![], data.clone(), author, None)
+            .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+
+        // Update indices on specified branch
+        self.update_indices_for_insert_on_branch(table, branch, object_id, &data, &descriptor)?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
@@ -901,6 +1128,83 @@ impl QueryManager {
         })
     }
 
+    /// Soft delete a row on a specific branch.
+    ///
+    /// Used by SchemaManager for schema-aware deletes.
+    pub fn delete_on_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
+        id: ObjectId,
+    ) -> Result<DeleteHandle, QueryError> {
+        // Check for hard delete first (checks default branch)
+        if self.is_hard_deleted(id) {
+            return Err(QueryError::RowHardDeleted(id));
+        }
+
+        let table_name = TableName::new(table);
+
+        // Check if already soft-deleted on this branch
+        if self.row_is_deleted_on_branch(table, branch, id) {
+            return Err(QueryError::RowAlreadyDeleted(id));
+        }
+
+        // Get old data from ObjectManager on this branch
+        let (old_data, _) = self
+            .load_row_from_object_on_branch(id, branch)
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
+        let table_schema = self
+            .schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
+        let descriptor = table_schema.descriptor.clone();
+
+        // Ensure indices exist for this branch
+        Self::ensure_table_indices_for_branch(&mut self.indices, table, branch, table_schema);
+
+        // Get parent commit on this branch
+        let tips = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, branch)
+            .map_err(|_| QueryError::ObjectNotFound(id))?
+            .clone();
+
+        let parents: Vec<_> = tips.into_iter().collect();
+        let author = id;
+
+        // Create delete metadata
+        let mut delete_metadata = std::collections::BTreeMap::new();
+        delete_metadata.insert("delete".to_string(), "soft".to_string());
+
+        // Add commit with preserved content + delete: soft metadata
+        let delete_commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(
+                id,
+                branch,
+                parents,
+                old_data.clone(),
+                author,
+                Some(delete_metadata),
+            )
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Update indices on this branch
+        self.update_indices_for_soft_delete_on_branch(table, branch, id, &old_data, &descriptor)?;
+
+        // Mark subscriptions dirty
+        self.mark_subscriptions_dirty(table);
+        self.mark_row_deleted_in_subscriptions(table, id);
+
+        Ok(DeleteHandle {
+            row_id: id,
+            delete_commit_id,
+        })
+    }
+
     /// Undelete a soft-deleted row.
     ///
     /// Restores a row from the `_id_deleted` index back to the `_id` and column indices.
@@ -1123,34 +1427,76 @@ impl QueryManager {
     }
 
     /// Execute a query and return results (one-shot).
+    ///
+    /// Branches are determined by:
+    /// 1. Explicit branches in query (if any)
+    /// 2. Schema context's live branches (if schema context present)
+    /// 3. Error if neither
     pub fn execute(&mut self, query: Query) -> Result<Vec<Vec<Value>>, QueryError> {
+        let table_name = query.table;
         let table_schema = self
             .schema
-            .get(&query.table)
-            .ok_or(QueryError::TableNotFound(query.table))?;
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
 
-        // Get branches from query (default to "main" for backward compatibility)
-        let branches = if query.branches.is_empty() {
-            vec!["main".to_string()]
-        } else {
+        // Determine branches
+        let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
+        } else if let Some(ctx) = &self.schema_context {
+            ctx.all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        } else {
+            return Err(QueryError::QueryCompilationError(
+                "no branches specified - use .branch() or .branches() on query builder".into(),
+            ));
         };
 
-        let mut graph = QueryGraph::compile(&query, &self.schema)
-            .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        // Compile query graph
+        let mut graph = if let Some(ctx) = &self.schema_context {
+            QueryGraph::compile_with_schema_context(&query, &self.schema, None, ctx).ok_or_else(
+                || QueryError::QueryCompilationError("failed to compile query".into()),
+            )?
+        } else {
+            QueryGraph::compile(&query, &self.schema).ok_or_else(|| {
+                QueryError::QueryCompilationError("failed to compile query".into())
+            })?
+        };
 
-        // Settle the graph - row_loader reads from the query's branches
-        // For multi-branch queries, uses LWW to pick the winning branch
-        // Returns None for empty content (hard delete tombstones) so they're not materialized
-        // Soft deletes have preserved content and can be materialized normally
+        // Get references for the row loader closure
+        let table = table_name.as_str().to_string();
+        let schema_context = self.schema_context.as_ref();
+        let branch_schema_map = &self.branch_schema_map;
+
+        // Row loader with optional lens transform for old schema rows
         let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-            if branches.len() == 1 {
-                self.load_row_from_object_on_branch(id, &branches[0])
+            let (content, commit_id, source_branch) = if branches.len() == 1 {
+                let branch = &branches[0];
+                self.load_row_from_object_on_branch(id, branch)
+                    .map(|(c, cid)| (c, cid, branch.clone()))?
             } else {
-                self.load_row_from_object_multi_branch(id, &branches)
+                self.load_row_from_object_multi_branch_with_source(id, &branches)?
+            };
+
+            if content.is_empty() {
+                return None;
             }
-            .filter(|(data, _)| !data.is_empty())
+
+            // Apply lens transform if needed
+            if let Some(ctx) = schema_context
+                && let Some(&source_hash) = branch_schema_map.get(&source_branch)
+                && source_hash != ctx.current_hash
+            {
+                let transformer = LensTransformer::new(ctx, &table);
+                match transformer.transform(&content, commit_id, source_hash) {
+                    Ok(result) => return Some((result.data, commit_id)),
+                    Err(_) => return Some((content, commit_id)),
+                }
+            }
+
+            Some((content, commit_id))
         };
 
         graph.settle(&self.indices, &self.sync_manager.object_manager, row_loader);
@@ -1174,20 +1520,39 @@ impl QueryManager {
     ///
     /// When a session is provided and the table has a SELECT policy, rows are
     /// filtered based on the policy expression evaluated against the session context.
+    ///
+    /// When schema context is present, uses schema-aware compilation with:
+    /// - Automatic branch expansion to include all live schemas
+    /// - Column name translation for old schema indices
     pub fn subscribe_with_session(
         &mut self,
         query: Query,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
-        // Get branches from query (default to "main" for backward compatibility)
-        let branches = if query.branches.is_empty() {
-            vec!["main".to_string()]
-        } else {
+        // Determine branches
+        let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
+        } else if let Some(ctx) = &self.schema_context {
+            ctx.all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        } else {
+            return Err(QueryError::QueryCompilationError(
+                "no branches specified - use .branch() or .branches() on query builder".into(),
+            ));
         };
 
-        let graph = QueryGraph::compile_with_session(&query, &self.schema, session)
-            .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        // Use schema-aware compilation if schema context is present
+        let graph = if let Some(ctx) = &self.schema_context {
+            QueryGraph::compile_with_schema_context(&query, &self.schema, session, ctx).ok_or_else(
+                || QueryError::QueryCompilationError("failed to compile query".into()),
+            )?
+        } else {
+            QueryGraph::compile_with_session(&query, &self.schema, session).ok_or_else(|| {
+                QueryError::QueryCompilationError("failed to compile query".into())
+            })?
+        };
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -1251,20 +1616,25 @@ impl QueryManager {
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
         let indices = &self.indices;
+        let schema_context = &self.schema_context;
+        let branch_schema_map = &self.branch_schema_map;
 
         for (sub_id, subscription) in &mut self.subscriptions {
             let branches = &subscription.branches;
+            let table = subscription.graph.table.as_str().to_string();
 
             // Row loader returns None for empty content (hard delete tombstones)
             // Soft deletes have preserved content and can be materialized normally
             // For single-branch subscriptions, reads from that branch
             // For multi-branch subscriptions, uses LWW across branches
+            // When schema context is present, applies lens transform for old schema branches
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
                 let state = om.get_state(id)?;
                 match state {
                     ObjectState::Creating(obj) | ObjectState::Available(obj) => {
                         // Find the newest commit across all subscription branches (LWW)
-                        let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                        // Also track which branch it came from for schema transformation
+                        let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
 
                         for branch_name in branches {
                             if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
@@ -1276,15 +1646,17 @@ impl QueryManager {
                                                     commit.timestamp,
                                                     commit.content.clone(),
                                                     tip_id,
+                                                    branch_name.clone(),
                                                 ));
                                             }
-                                            Some((best_ts, _, _))
+                                            Some((best_ts, _, _, _))
                                                 if commit.timestamp > *best_ts =>
                                             {
                                                 best = Some((
                                                     commit.timestamp,
                                                     commit.content.clone(),
                                                     tip_id,
+                                                    branch_name.clone(),
                                                 ));
                                             }
                                             _ => {}
@@ -1295,8 +1667,29 @@ impl QueryManager {
                         }
 
                         // Filter out empty content (hard delete tombstones only)
-                        best.filter(|(_, content, _)| !content.is_empty())
-                            .map(|(_, content, commit_id)| (content, commit_id))
+                        let (_, content, commit_id, source_branch) =
+                            best.filter(|(_, content, _, _)| !content.is_empty())?;
+
+                        // Apply lens transform if row is from an old schema branch
+                        if let Some(ctx) = schema_context
+                            && let Some(&source_hash) = branch_schema_map.get(&source_branch)
+                            && source_hash != ctx.current_hash
+                        {
+                            // Transform the row data using lens
+                            let transformer = LensTransformer::new(ctx, &table);
+                            match transformer.transform(&content, commit_id, source_hash) {
+                                Ok(result) => {
+                                    return Some((result.data, commit_id));
+                                }
+                                Err(_) => {
+                                    // Transform failed - return original data
+                                    // This allows graceful degradation
+                                    return Some((content, commit_id));
+                                }
+                            }
+                        }
+
+                        Some((content, commit_id))
                     }
                     ObjectState::Loading => None,
                 }
@@ -1841,6 +2234,7 @@ impl QueryManager {
     /// the branch with the highest timestamp when the same ObjectId exists on multiple branches.
     ///
     /// Returns the content and commit ID from the branch with the newest commit.
+    #[allow(dead_code)]
     fn load_row_from_object_multi_branch(
         &self,
         row_id: ObjectId,
@@ -1875,6 +2269,54 @@ impl QueryManager {
         }
 
         best.map(|(_, content, commit_id)| (content, commit_id))
+    }
+
+    /// Load a row's data from multiple branches with source branch info.
+    ///
+    /// Same as load_row_from_object_multi_branch but also returns which branch the data came from.
+    fn load_row_from_object_multi_branch_with_source(
+        &self,
+        row_id: ObjectId,
+        branches: &[String],
+    ) -> Option<(Vec<u8>, CommitId, String)> {
+        let state = self.sync_manager.object_manager.get_state(row_id)?;
+        let obj = match state {
+            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
+            ObjectState::Loading => return None,
+        };
+
+        // Collect the newest tip from each branch
+        let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
+
+        for branch_name in branches {
+            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                for &tip_id in &branch.tips {
+                    if let Some(commit) = branch.commits.get(&tip_id) {
+                        match &best {
+                            None => {
+                                best = Some((
+                                    commit.timestamp,
+                                    commit.content.clone(),
+                                    tip_id,
+                                    branch_name.clone(),
+                                ));
+                            }
+                            Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                                best = Some((
+                                    commit.timestamp,
+                                    commit.content.clone(),
+                                    tip_id,
+                                    branch_name.clone(),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, content, commit_id, branch)| (content, commit_id, branch))
     }
 
     /// Handle an object update from the global subscription.

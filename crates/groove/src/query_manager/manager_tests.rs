@@ -58,13 +58,14 @@ fn insert_and_query() {
     .unwrap();
 
     // Query all
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Query with filter
     let query = qm
         .query("users")
+        .branch("main")
         .filter_ge("score", Value::Integer(75))
         .build();
     let results = qm.execute(query).unwrap();
@@ -87,7 +88,12 @@ fn query_with_sort_and_limit() {
     )
     .unwrap();
 
-    let query = qm.query("users").order_by_desc("score").limit(2).build();
+    let query = qm
+        .query("users")
+        .branch("main")
+        .order_by_desc("score")
+        .limit(2)
+        .build();
     let results = qm.execute(query).unwrap();
 
     assert_eq!(results.len(), 2);
@@ -196,7 +202,7 @@ fn can_register_query_immediately() {
     let mut qm = QueryManager::new(sync_manager, schema);
 
     // Can register a query subscription immediately
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query);
     assert!(sub_id.is_ok());
 }
@@ -208,7 +214,7 @@ fn subscription_updates_after_insert_and_process() {
     let mut qm = QueryManager::new(sync_manager, schema);
 
     // Register subscription
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Insert a row
@@ -251,12 +257,17 @@ fn multiple_inserts_all_visible_in_query() {
     assert!(qm.test_get_row_if_loaded(h3.row_id).is_some());
 
     // Query returns all rows
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Sorted query works
-    let query = qm.query("users").order_by_desc("score").limit(2).build();
+    let query = qm
+        .query("users")
+        .branch("main")
+        .order_by_desc("score")
+        .limit(2)
+        .build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
@@ -300,13 +311,14 @@ fn cold_start_loads_persisted_indices_and_rows() {
     assert!(qm2.test_get_row_if_loaded(h2.row_id).is_some());
 
     // Verify queries work
-    let query = qm2.query("users").build();
+    let query = qm2.query("users").branch("main").build();
     let results = qm2.execute(query).unwrap();
     assert_eq!(results.len(), 2);
 
     // Verify filtered query works (proves indices were loaded)
     let query = qm2
         .query("users")
+        .branch("main")
         .filter_ge("score", Value::Integer(75))
         .build();
     let results = qm2.execute(query).unwrap();
@@ -355,6 +367,7 @@ fn cold_start_only_loads_queried_rows() {
     // Query for specific rows (filter: score >= 75)
     let query = qm2
         .query("users")
+        .branch("main")
         .filter_ge("score", Value::Integer(75))
         .build();
     let results = qm2.execute(query).unwrap();
@@ -399,7 +412,11 @@ fn cold_start_with_sorted_query() {
     qm2.load_indices_from_driver(&mut driver);
 
     // Sorted query should work
-    let query = qm2.query("users").order_by_desc("score").build();
+    let query = qm2
+        .query("users")
+        .branch("main")
+        .order_by_desc("score")
+        .build();
     let results = qm2.execute(query).unwrap();
 
     assert_eq!(results.len(), 3);
@@ -425,6 +442,7 @@ fn local_update_updates_all_column_indices() {
     // Query by name="Alice" → finds row
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -433,6 +451,7 @@ fn local_update_updates_all_column_indices() {
     // Query by score=100 → finds row
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(100))
         .build();
     let results = qm.execute(query).unwrap();
@@ -448,6 +467,7 @@ fn local_update_updates_all_column_indices() {
     // Query by name="Alice" → empty (old value removed from index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -460,6 +480,7 @@ fn local_update_updates_all_column_indices() {
     // Query by name="Bob" → finds row (new value in index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Bob".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -468,6 +489,7 @@ fn local_update_updates_all_column_indices() {
     // Query by score=100 → empty (old value removed from index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(100))
         .build();
     let results = qm.execute(query).unwrap();
@@ -480,6 +502,7 @@ fn local_update_updates_all_column_indices() {
     // Query by score=200 → finds row (new value in index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(200))
         .build();
     let results = qm.execute(query).unwrap();
@@ -545,6 +568,7 @@ fn synced_update_updates_column_indices() {
     // Query by name="Alice" → finds row
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -557,6 +581,7 @@ fn synced_update_updates_column_indices() {
     // Query by score=100 → finds row
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(100))
         .build();
     let results = qm.execute(query).unwrap();
@@ -593,6 +618,7 @@ fn synced_update_updates_column_indices() {
     // Query by name="Alice" → empty (old value removed from index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -605,6 +631,7 @@ fn synced_update_updates_column_indices() {
     // Query by name="Bob" → finds row (new value in index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Bob".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -617,6 +644,7 @@ fn synced_update_updates_column_indices() {
     // Query by score=100 → empty (old value removed from index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(100))
         .build();
     let results = qm.execute(query).unwrap();
@@ -629,6 +657,7 @@ fn synced_update_updates_column_indices() {
     // Query by score=200 → finds row (new value in index)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(200))
         .build();
     let results = qm.execute(query).unwrap();
@@ -667,7 +696,7 @@ fn synced_insert_appears_in_subscription_delta() {
     qm.sync_manager_mut().object_manager.subscribe_all();
 
     // NOW subscribe to query (after subscribe_all but before receive_commit)
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Encode the row data (name="SyncedUser", score=42)
@@ -748,6 +777,7 @@ fn synced_update_is_visible_in_query() {
     // Verify initial data is queryable
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -786,6 +816,7 @@ fn synced_update_is_visible_in_query() {
     // Old data should no longer be in index
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -794,6 +825,7 @@ fn synced_update_is_visible_in_query() {
     // New data should be queryable
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("Alice Updated".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -804,6 +836,7 @@ fn synced_update_is_visible_in_query() {
     // Score index should also be updated
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("score", Value::Integer(200))
         .build();
     let results = qm.execute(query).unwrap();
@@ -829,6 +862,7 @@ fn synced_row_visible_in_filtered_subscription() {
     // Subscribe to filtered query: users with score > 25
     let query = qm
         .query("users")
+        .branch("main")
         .filter_gt("score", Value::Integer(25))
         .build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -933,6 +967,7 @@ fn synced_row_visible_in_filtered_subscription() {
     // But verify it's in the index (just not in the filtered subscription)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_eq("name", Value::Text("LowScorer".into()))
         .build();
     let results = qm.execute(query).unwrap();
@@ -960,7 +995,7 @@ fn local_update_emits_subscription_delta() {
         .unwrap();
 
     // Subscribe to all users
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get the initial add
@@ -1028,7 +1063,7 @@ fn synced_update_emits_subscription_delta() {
     let first_commit_id = handle.row_commit_id;
 
     // Subscribe to all users
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get the initial add
@@ -1095,7 +1130,7 @@ fn multiple_updates_same_row_single_delta() {
         .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
         .unwrap();
 
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let _sub_id = qm.subscribe(query).unwrap();
 
     qm.process();
@@ -1152,6 +1187,7 @@ fn update_fails_filter_emits_removal() {
     // Subscribe to score > 50
     let query = qm
         .query("users")
+        .branch("main")
         .filter_gt("score", Value::Integer(50))
         .build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -1200,6 +1236,7 @@ fn update_passes_filter_emits_addition() {
     // Subscribe to score > 50
     let query = qm
         .query("users")
+        .branch("main")
         .filter_gt("score", Value::Integer(50))
         .build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -1244,6 +1281,7 @@ fn update_still_passes_filter_emits_update() {
     // Subscribe to score > 50
     let query = qm
         .query("users")
+        .branch("main")
         .filter_gt("score", Value::Integer(50))
         .build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -1286,6 +1324,7 @@ fn update_to_untracked_row_is_silent() {
     // Subscribe to score > 50
     let query = qm
         .query("users")
+        .branch("main")
         .filter_gt("score", Value::Integer(50))
         .build();
     let _sub_id = qm.subscribe(query).unwrap();
@@ -1322,7 +1361,7 @@ fn insert_then_update_same_cycle() {
     let mut qm = QueryManager::new(sync_manager, schema);
 
     // Subscribe first
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Insert
@@ -1386,7 +1425,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Subscribe to users table
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to initialize (no updates yet)
@@ -1482,7 +1521,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     let first_commit_id = handle.row_commit_id;
 
     // Subscribe to users
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial state
@@ -1559,7 +1598,7 @@ fn two_peer_sync_insert_reaches_subscription() {
 
     // Peer B subscribes to all objects and sets up query subscription
     peer_b.sync_manager_mut().object_manager.subscribe_all();
-    let query = peer_b.query("users").build();
+    let query = peer_b.query("users").branch("main").build();
     let sub_id = peer_b.subscribe(query).unwrap();
 
     // Peer B adds a "server" (representing Peer A)
@@ -1713,7 +1752,7 @@ fn soft_deleted_row_not_in_query_results() {
         .unwrap();
 
     // Verify both rows are visible
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 2);
 
@@ -1721,7 +1760,7 @@ fn soft_deleted_row_not_in_query_results() {
     qm.delete(handle.row_id).unwrap();
 
     // Verify only Bob is visible
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0][0], Value::Text("Bob".into()));
@@ -1881,7 +1920,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     }
 
     // Additionally verify that querying with include_deleted shows the correct content
-    let query = qm.query("users").include_deleted().build();
+    let query = qm.query("users").branch("main").include_deleted().build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0][0], Value::Text("TipB".into()));
@@ -1961,7 +2000,7 @@ fn undelete_row_appears_in_query_results() {
     qm.delete(handle.row_id).unwrap();
 
     // Verify not visible
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 0);
 
@@ -1973,7 +2012,7 @@ fn undelete_row_appears_in_query_results() {
     .unwrap();
 
     // Verify visible again with new values
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0][0], Value::Text("Alice Restored".into()));
@@ -2169,14 +2208,14 @@ fn include_deleted_query_returns_soft_deleted_rows() {
     qm.delete(handle1.row_id).unwrap();
 
     // Normal query - only Bob (Alice is in _id_deleted, not _id)
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0][0], Value::Text("Bob".into()));
 
     // Include deleted query - scans both _id and _id_deleted indices
     // Soft-deleted rows have preserved content, so both Alice and Bob are returned
-    let query = qm.query("users").include_deleted().build();
+    let query = qm.query("users").branch("main").include_deleted().build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 2);
 
@@ -2206,7 +2245,7 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
     qm.hard_delete(handle1.row_id).unwrap();
 
     // Include deleted query - only Bob (Alice is hard deleted)
-    let query = qm.query("users").include_deleted().build();
+    let query = qm.query("users").branch("main").include_deleted().build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0][0], Value::Text("Bob".into()));
@@ -2228,7 +2267,7 @@ fn soft_delete_emits_removal_delta() {
         .unwrap();
 
     // Subscribe to all users
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial delta
@@ -2261,7 +2300,7 @@ fn hard_delete_emits_removal_delta() {
         .unwrap();
 
     // Subscribe to all users
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial delta
@@ -2298,6 +2337,7 @@ fn delete_row_not_in_subscription_no_delta() {
     // Subscribe to users with score >= 75 (only Alice)
     let query = qm
         .query("users")
+        .branch("main")
         .filter_ge("score", Value::Integer(75))
         .build();
     let sub_id = qm.subscribe(query).unwrap();
@@ -2357,6 +2397,7 @@ fn join_compiles_but_not_executed_yet() {
     // Build a join query
     let query = qm
         .query("users")
+        .branch("main")
         .join("posts")
         .on("id", "author_id")
         .build();
@@ -2374,6 +2415,7 @@ fn join_query_with_projection_compiles() {
 
     let query = qm
         .query("users")
+        .branch("main")
         .join("posts")
         .on("id", "author_id")
         .select(&["name", "title"])
@@ -2394,6 +2436,7 @@ fn join_query_with_alias_compiles() {
 
     let query = qm
         .query("users")
+        .branch("main")
         .alias("u")
         .join("posts")
         .alias("p")
@@ -2424,6 +2467,7 @@ fn self_join_query_compiles() {
 
     let query = qm
         .query("employees")
+        .branch("main")
         .alias("e")
         .join("employees")
         .alias("m")
@@ -2471,6 +2515,7 @@ fn multi_join_query_compiles() {
 
     let query = qm
         .query("orders")
+        .branch("main")
         .join("customers")
         .on("customer_id", "id")
         .join("products")
@@ -2498,6 +2543,7 @@ fn join_subscription_marks_dirty_for_joined_table() {
     // Subscribe to a join query: users JOIN posts ON users.id = posts.author_id
     let query = qm
         .query("users")
+        .branch("main")
         .join("posts")
         .on("id", "author_id")
         .build();
@@ -2579,6 +2625,7 @@ fn join_produces_combined_tuples() {
     // Subscribe to a join query
     let query = qm
         .query("users")
+        .branch("main")
         .join("posts")
         .on("id", "author_id")
         .build();
@@ -2647,6 +2694,7 @@ fn join_filter_on_joined_table_column() {
     // against users.id column because evaluate_tuple only looks at element[0]
     let query = qm
         .query("users")
+        .branch("main")
         .join("posts")
         .on("id", "author_id")
         // This filter SHOULD match posts.title containing "Rust"
@@ -2748,6 +2796,7 @@ fn array_subquery_single_user_with_posts() {
     // Query users with their posts as array
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts").correlate("author_id", "users.id")
         })
@@ -2808,6 +2857,7 @@ fn array_subquery_user_with_no_posts() {
 
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts").correlate("author_id", "users.id")
         })
@@ -2873,6 +2923,7 @@ fn array_subquery_multiple_users_correct_correlation() {
 
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts").correlate("author_id", "users.id")
         })
@@ -2955,6 +3006,7 @@ fn array_subquery_delta_on_inner_insert() {
     // Subscribe to users with posts
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts").correlate("author_id", "users.id")
         })
@@ -3071,6 +3123,7 @@ fn array_subquery_delta_on_outer_insert() {
     // Subscribe
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts").correlate("author_id", "users.id")
         })
@@ -3170,6 +3223,7 @@ fn array_subquery_with_order_by() {
     // Query with order_by_desc on id
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts")
                 .correlate("author_id", "users.id")
@@ -3235,6 +3289,7 @@ fn array_subquery_with_limit() {
     // Query with limit 2
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts")
                 .correlate("author_id", "users.id")
@@ -3293,6 +3348,7 @@ fn array_subquery_with_select_columns() {
     // Query selecting only id and title (not author_id)
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts")
                 .correlate("author_id", "users.id")
@@ -3427,6 +3483,7 @@ fn array_subquery_with_join() {
     // This should give us: for each user, an array of (post, comment) pairs
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("post_comments", |sub| {
             sub.from("posts")
                 .join("comments")
@@ -3581,6 +3638,7 @@ fn array_subquery_nested() {
     // Query: users with posts, where each post has its comments
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts")
                 .correlate("author_id", "users.id")
@@ -3771,6 +3829,7 @@ fn array_subquery_multiple_columns() {
     // Query: users with both posts[] and comments[]
     let query = qm
         .query("users")
+        .branch("main")
         .with_array("posts", |sub| {
             sub.from("posts").correlate("author_id", "users.id")
         })
@@ -3915,7 +3974,7 @@ fn policy_filters_select_results() {
     // Alice can see: her own doc + all eng docs = 2 docs
     let alice_session = PolicySession::new("alice").with_claims(json!({"teams": ["eng"]}));
 
-    let query = qm.query("documents").build();
+    let query = qm.query("documents").branch("main").build();
     let sub_id = qm
         .subscribe_with_session(query, Some(alice_session))
         .unwrap();
@@ -3936,7 +3995,7 @@ fn policy_filters_select_results() {
     // Bob on sales team can see: his 2 docs + no team docs (sales only) = 2 docs
     let bob_session = PolicySession::new("bob").with_claims(json!({"teams": ["sales"]}));
 
-    let query2 = qm.query("documents").build();
+    let query2 = qm.query("documents").branch("main").build();
     let sub_id2 = qm
         .subscribe_with_session(query2, Some(bob_session))
         .unwrap();
@@ -3982,7 +4041,7 @@ fn no_session_returns_all_rows() {
     .unwrap();
 
     // Without session, all rows should be returned (policy not applied)
-    let query = qm.query("documents").build();
+    let query = qm.query("documents").branch("main").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     qm.process();
@@ -4013,7 +4072,7 @@ fn table_without_policy_returns_all_rows() {
 
     // Even with session, table without policy returns all rows
     let session = PolicySession::new("some_user");
-    let query = qm.query("users").build();
+    let query = qm.query("users").branch("main").build();
     let sub_id = qm.subscribe_with_session(query, Some(session)).unwrap();
 
     qm.process();
@@ -4097,7 +4156,7 @@ fn query_builder_explicit_main_branch() {
 
     // Explicit .branch("main") should work same as default
     let query_explicit = qm.query("users").branch("main").build();
-    let query_default = qm.query("users").build();
+    let query_default = qm.query("users").branch("main").build();
 
     let results_explicit = qm.execute(query_explicit).unwrap();
     let results_default = qm.execute(query_default).unwrap();
@@ -4123,9 +4182,9 @@ fn query_multi_branch_requires_explicit_branch() {
     assert_eq!(query.branches.len(), 1);
     assert!(!query.is_multi_branch());
 
-    // Default branch
+    // No default branch - build() without .branch() leaves branches empty
     let query = qm.query("users").build();
-    assert_eq!(query.branches, vec!["main".to_string()]);
+    assert!(query.branches.is_empty());
 }
 
 #[test]
