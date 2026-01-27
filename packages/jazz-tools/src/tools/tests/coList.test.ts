@@ -411,10 +411,10 @@ describe("Simple CoList operations", async () => {
         });
 
         // @ts-expect-error - number is not a string
-        list.$jazz.pushLoose(2);
+        list.$jazz.unsafePush(2);
 
         // @ts-expect-error - number is not a string
-        list.$jazz.pushLoose("test", 2);
+        list.$jazz.unsafePush("test", 2);
 
         expect(list).toEqual(["bread", "butter", "onion", 2, "test", 2]);
       });
@@ -511,10 +511,10 @@ describe("Simple CoList operations", async () => {
         });
 
         // @ts-expect-error - number is not a string
-        list.$jazz.unshiftLoose(2);
+        list.$jazz.unsafeUnshift(2);
 
         // @ts-expect-error - number is not a string
-        list.$jazz.unshiftLoose("test", 2);
+        list.$jazz.unsafeUnshift("test", 2);
 
         expect(list).toEqual([2, "test", 2, "bread", "butter", "onion"]);
       });
@@ -632,6 +632,31 @@ describe("Simple CoList operations", async () => {
         );
 
         expect(list).toEqual(["bread", "butter", "onion"]);
+      });
+
+      test("unsafeSplice removes and returns deleted items", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        const deleted = list.$jazz.unsafeSplice(1, 1);
+
+        expect(deleted).toEqual(["butter"]);
+        expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
+      });
+
+      test("unsafeSplice with validation errors with loose validation", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.unsafeSplice(1, 0, 2);
+
+        // @ts-expect-error - number is not a string
+        list.$jazz.unsafeSplice(0, 1, "test", 2);
+
+        expect(list).toEqual(["test", 2, 2, "butter", "onion"]);
       });
     });
 

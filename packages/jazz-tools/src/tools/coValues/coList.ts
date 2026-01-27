@@ -615,7 +615,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         CoListItem<L>
       >[];
     }
-    return this.pushLoose(...items);
+    return this.unsafePush(...items);
   }
 
   /**
@@ -625,7 +625,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    *
    * @category Content
    */
-  pushLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
+  unsafePush(...items: CoFieldInit<CoListItem<L>>[]): number {
     this.raw.appendItems(
       toRawItems(items, this.schema[ItemsSym], this.owner),
       undefined,
@@ -649,7 +649,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         CoListItem<L>
       >[];
     }
-    return this.unshiftLoose(...items);
+    return this.unsafeUnshift(...items);
   }
 
   /**
@@ -659,7 +659,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    *
    * @category Content
    */
-  unshiftLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
+  unsafeUnshift(...items: CoFieldInit<CoListItem<L>>[]): number {
     for (const item of toRawItems(
       items as CoFieldInit<CoListItem<L>>[],
       this.schema[ItemsSym],
@@ -701,6 +701,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
   /**
    * Removes elements from an array and, if necessary, inserts new elements in their place, returning the deleted elements.
+   * Items are validated using the schema.
    * @param start The zero-based location in the array from which to start removing elements.
    * @param deleteCount The number of elements to remove.
    * @param items Elements to insert into the array in place of the deleted elements.
@@ -720,6 +721,24 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         CoListItem<L>
       >[];
     }
+
+    return this.unsafeSplice(start, deleteCount, ...items);
+  }
+
+  /**
+   * Removes elements from an array and, if necessary, inserts new elements in their place, returning the deleted elements.
+   * @param start The zero-based location in the array from which to start removing elements.
+   * @param deleteCount The number of elements to remove.
+   * @param items Elements to insert into the array in place of the deleted elements.
+   * @returns An array containing the elements that were deleted.
+   *
+   * @category Content
+   */
+  unsafeSplice(
+    start: number,
+    deleteCount: number,
+    ...items: CoFieldInit<CoListItem<L>>[]
+  ): CoListItem<L>[] {
     const deleted = this.coList.slice(start, start + deleteCount);
 
     for (
@@ -862,7 +881,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     this.raw.core.pauseNotifyUpdate();
 
     for (const [from, to, insert] of patches.reverse()) {
-      this.splice(from, to - from, ...insert);
+      this.unsafeSplice(from, to - from, ...insert);
     }
 
     this.raw.core.resumeNotifyUpdate();
