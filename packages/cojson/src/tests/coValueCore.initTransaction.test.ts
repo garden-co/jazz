@@ -526,7 +526,7 @@ describe("init transaction meta", () => {
     expect(withInvalid.filter((tx) => !tx.isValid)).toHaveLength(1);
   });
 
-  test("getValidTransactions does not return permission-invalid transactions", async () => {
+  test("getValidTransactions({includeInvalidMetaTransactions: true}) does not return permission-invalid transactions", async () => {
     const { node1, node2 } = await createTwoConnectedNodes("server", "server");
 
     const group = node1.node.createGroup();

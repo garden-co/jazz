@@ -143,7 +143,11 @@ export class VerifiedTransaction {
   validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
-  stage: "to-vaildate" | "validated" | "processed" = "to-vaildate";
+  // Transaction processing stage:
+  // - "to-validate": Transaction is pending validation on permissions checks
+  // - "validated": Transaction has been validated but not yet applied to content
+  // - "processed": Transaction has been validated and applied to content
+  stage: "to-validate" | "validated" | "processed" = "to-validate";
 
   constructor(
     coValueId: RawCoID,
@@ -227,7 +231,7 @@ export class VerifiedTransaction {
     this.isValid = true;
     this.validationErrorMessage = undefined;
 
-    if (this.stage === "to-vaildate") {
+    if (this.stage === "to-validate") {
       this.stage = "validated";
       this.dispatchTransaction(this);
     }
@@ -255,7 +259,7 @@ export class VerifiedTransaction {
       this.dispatchTransaction(this);
     }
 
-    if (this.stage === "to-vaildate") {
+    if (this.stage === "to-validate") {
       this.stage = "validated";
     }
   }
@@ -265,7 +269,7 @@ export class VerifiedTransaction {
   }
 
   markAsToValidate() {
-    this.stage = "to-vaildate";
+    this.stage = "to-validate";
   }
 }
 
@@ -1471,7 +1475,7 @@ export class CoValueCore {
   }
 
   dispatchTransaction = (transaction: VerifiedTransaction) => {
-    if (transaction.stage === "to-vaildate") {
+    if (transaction.stage === "to-validate") {
       this.toValidateTransactions.push(transaction);
       return;
     }
@@ -1545,10 +1549,10 @@ export class CoValueCore {
       const currentWinner = this.#fwwWinners.get(fwwKey);
 
       // First-writer-wins: keep the transaction with the smallest madeAt
-      // compareFWWTransactions returns < 0 if transaction is earlier than currentWinner
+      // compareTransactions returns < 0 if transaction is earlier than currentWinner
       if (
         !currentWinner ||
-        this.compareFWWTransactions(transaction, currentWinner) < 0
+        this.compareTransactions(transaction, currentWinner) < 0
       ) {
         if (currentWinner) {
           currentWinner.markInvalid(
@@ -1887,28 +1891,6 @@ export class CoValueCore {
     }
 
     return 0;
-  }
-
-  /**
-   * Compare two transactions for first-writer-wins conflict resolution.
-   * Uses sessionID as a tiebreaker for deterministic ordering when timestamps are equal.
-   */
-  private compareFWWTransactions(
-    a: Pick<VerifiedTransaction, "madeAt" | "txID">,
-    b: Pick<VerifiedTransaction, "madeAt" | "txID">,
-  ) {
-    // 1. Compare by timestamp
-    if (a.madeAt !== b.madeAt) {
-      return a.madeAt - b.madeAt;
-    }
-
-    // 2. Same session: compare by txIndex
-    if (a.txID.sessionID === b.txID.sessionID) {
-      return a.txID.txIndex - b.txID.txIndex;
-    }
-
-    // 3. Same timestamp, different sessions: use sessionID for determinism
-    return a.txID.sessionID.localeCompare(b.txID.sessionID);
   }
 
   getCurrentReadKey(): {
