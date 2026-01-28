@@ -27,6 +27,7 @@ import {
   x25519DiffieHellman,
   decryptXsalsa20,
   encryptXsalsa20,
+  SessionMap,
 } from '../index';
 
 describe("blake3", () => {
@@ -478,5 +479,733 @@ describe("xsalsa20", () => {
 
     const decrypted = decryptXsalsa20(key, nonceMaterial, tampered);
     expect(Array.from(decrypted)).not.toEqual(Array.from(plaintext));
+  });
+});
+
+describe("SessionMap", () => {
+  const encoder = new TextEncoder();
+
+  // Helper to create a valid CoValueHeader JSON
+  // Note: createdAt should be an ISO string or omitted
+  // RulesetGroup requires: { initialAdmin: "co_...", type: "group" }
+  function createGroupHeader(createdAt?: string) {
+    return JSON.stringify({
+      createdAt: createdAt ?? new Date().toISOString(),
+      meta: null,
+      ruleset: { initialAdmin: "co_zAdmin123", type: "group" },
+      type: "comap",
+      uniqueness: "test-uniqueness-" + Math.random().toString(36).slice(2),
+    });
+  }
+
+  // Helper to create a valid signer secret
+  function createSignerSecret() {
+    const signingKey = newEd25519SigningKey();
+    return "signerSecret_z" + base58.encode(signingKey);
+  }
+
+  // Helper to create a valid key for encryption
+  function createKeySecret() {
+    const key = new Uint8Array(32);
+    crypto.getRandomValues(key);
+    return "keySecret_z" + base58.encode(key);
+  }
+
+  test("create SessionMap with valid header", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+
+    const sessionMap = new SessionMap(coId, header);
+    expect(sessionMap).toBeDefined();
+
+    // Get header should return valid JSON
+    const returnedHeader = sessionMap.getHeader();
+    expect(returnedHeader).toBeDefined();
+    const parsedHeader = JSON.parse(returnedHeader);
+    expect(parsedHeader.type).toBe("comap");
+    expect(parsedHeader.ruleset.type).toBe("group");
+  });
+
+  test("invalid header throws error", () => {
+    const coId = "co_zTestCoValue123";
+    expect(() => new SessionMap(coId, "invalid json")).toThrow();
+    expect(() => new SessionMap(coId, "{}")).toThrow(); // Missing required fields
+  });
+
+  test("get session IDs - empty initially", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+    const sessionMap = new SessionMap(coId, header);
+
+    const sessionIds = JSON.parse(sessionMap.getSessionIds());
+    expect(Array.isArray(sessionIds)).toBe(true);
+    expect(sessionIds.length).toBe(0);
+  });
+
+  test("get transaction count - returns -1 for non-existent session", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+    const sessionMap = new SessionMap(coId, header);
+
+    const count = sessionMap.getTransactionCount("non_existent_session");
+    expect(count).toBe(-1);
+  });
+
+  test("get known state - empty initially", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+    const sessionMap = new SessionMap(coId, header);
+
+    const knownState = JSON.parse(sessionMap.getKnownState());
+    expect(knownState).toBeDefined();
+    expect(knownState.id).toBe(coId);
+    expect(knownState.header).toBe(true);
+    expect(knownState.sessions).toEqual({});
+  });
+
+  test("mark as deleted", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+    const sessionMap = new SessionMap(coId, header);
+
+    expect(sessionMap.isDeleted()).toBe(false);
+    sessionMap.markAsDeleted();
+    expect(sessionMap.isDeleted()).toBe(true);
+  });
+
+  test("set and get streaming known state", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createGroupHeader();
+    const sessionMap = new SessionMap(coId, header);
+
+    // Initially no streaming known state (NAPI returns null for Option::None)
+    expect(sessionMap.getKnownStateWithStreaming()).toBeNull();
+
+    // Set streaming known state
+    const streamingSessions = JSON.stringify({ "session1": 5 });
+    sessionMap.setStreamingKnownState(streamingSessions);
+
+    // Now should have streaming known state
+    const knownStateWithStreaming = sessionMap.getKnownStateWithStreaming();
+    expect(knownStateWithStreaming).toBeDefined();
+    const parsed = JSON.parse(knownStateWithStreaming!);
+    expect(parsed.id).toBe(coId);
+  });
+
+  test("header serialization is stable (alphabetically sorted keys)", () => {
+    const coId = "co_zTestCoValue123";
+    const createdAt = "2023-11-14T22:13:20.000Z";
+    const header = createGroupHeader(createdAt);
+    const sessionMap = new SessionMap(coId, header);
+
+    const returnedHeader = sessionMap.getHeader();
+    const parsedHeader = JSON.parse(returnedHeader);
+
+    // Keys should be in alphabetical order when stringified
+    const keys = Object.keys(parsedHeader);
+    const sortedKeys = [...keys].sort();
+    expect(keys).toEqual(sortedKeys);
+  });
+
+  test("different rulesets", () => {
+    const coId = "co_zTestCoValue123";
+    const now = new Date().toISOString();
+    
+    // Group ruleset - requires initialAdmin field
+    const groupHeader = JSON.stringify({
+      createdAt: now,
+      meta: null,
+      ruleset: { initialAdmin: "co_zAdmin123", type: "group" },
+      type: "comap",
+      uniqueness: "test-group",
+    });
+    const groupSessionMap = new SessionMap(coId, groupHeader);
+    expect(JSON.parse(groupSessionMap.getHeader()).ruleset.type).toBe("group");
+
+    // OwnedByGroup ruleset
+    const ownedByGroupHeader = JSON.stringify({
+      createdAt: now,
+      meta: null,
+      ruleset: { group: "co_zGroupId123", type: "ownedByGroup" },
+      type: "comap",
+      uniqueness: "test-owned",
+    });
+    const ownedSessionMap = new SessionMap(coId, ownedByGroupHeader);
+    const ownedParsed = JSON.parse(ownedSessionMap.getHeader());
+    expect(ownedParsed.ruleset.type).toBe("ownedByGroup");
+    expect(ownedParsed.ruleset.group).toBe("co_zGroupId123");
+
+    // UnsafeAllowAll ruleset
+    const unsafeHeader = JSON.stringify({
+      createdAt: now,
+      meta: null,
+      ruleset: { type: "unsafeAllowAll" },
+      type: "comap",
+      uniqueness: "test-unsafe",
+    });
+    const unsafeSessionMap = new SessionMap(coId, unsafeHeader);
+    expect(JSON.parse(unsafeSessionMap.getHeader()).ruleset.type).toBe("unsafeAllowAll");
+  });
+
+  test("header with meta object", () => {
+    const coId = "co_zTestCoValue123";
+    const headerWithMeta = JSON.stringify({
+      createdAt: new Date().toISOString(),
+      meta: { key: "value", nested: { a: 1 } },
+      ruleset: { initialAdmin: "co_zAdmin123", type: "group" },
+      type: "comap",
+      uniqueness: "test-with-meta",
+    });
+
+    const sessionMap = new SessionMap(coId, headerWithMeta);
+    const returnedHeader = JSON.parse(sessionMap.getHeader());
+    expect(returnedHeader.meta).toEqual({ key: "value", nested: { a: 1 } });
+  });
+
+  test("header uniqueness can be null", () => {
+    const coId = "co_zTestCoValue123";
+    const headerWithNullUniqueness = JSON.stringify({
+      createdAt: new Date().toISOString(),
+      meta: null,
+      ruleset: { initialAdmin: "co_zAdmin123", type: "group" },
+      type: "comap",
+      uniqueness: null,
+    });
+
+    const sessionMap = new SessionMap(coId, headerWithNullUniqueness);
+    const returnedHeader = JSON.parse(sessionMap.getHeader());
+    expect(returnedHeader.uniqueness).toBeNull();
+  });
+});
+
+describe("SessionMap - Transaction Flow", () => {
+  // Helper to create a valid CoValueHeader JSON
+  function createUnsafeHeader() {
+    return JSON.stringify({
+      createdAt: new Date().toISOString(),
+      meta: null,
+      ruleset: { type: "unsafeAllowAll" },
+      type: "comap",
+      uniqueness: "test-uniqueness-" + Math.random().toString(36).slice(2),
+    });
+  }
+
+  // Helper to create a valid signer secret and ID
+  function createSignerKeyPair() {
+    const signingKey = newEd25519SigningKey();
+    const signerSecret = "signerSecret_z" + base58.encode(signingKey);
+    const verifyingKey = ed25519VerifyingKey(signingKey);
+    const signerId = "signer_z" + base58.encode(verifyingKey);
+    return { signerSecret, signerId };
+  }
+
+  // Helper to create a valid key for encryption
+  function createKeyPair() {
+    const key = new Uint8Array(32);
+    crypto.getRandomValues(key);
+    const keyId = "key_z" + base58.encode(key).slice(0, 20);
+    const keySecret = "keySecret_z" + base58.encode(key);
+    return { keyId, keySecret };
+  }
+
+  test("create and retrieve trusting transaction", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret, signerId } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create a trusting transaction
+    const changes = JSON.stringify({ key: "value", number: 42 });
+    const madeAt = Date.now();
+
+    const result = sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changes,
+      null, // no meta
+      madeAt
+    );
+
+    // Result should be JSON with signature and transaction
+    const parsed = JSON.parse(result);
+    expect(parsed.signature).toBeDefined();
+    expect(parsed.signature.startsWith("signature_z")).toBe(true);
+    expect(parsed.transaction).toBeDefined();
+
+    // Session should now exist
+    const sessionIds = JSON.parse(sessionMap.getSessionIds());
+    expect(sessionIds).toContain(sessionId);
+
+    // Transaction count should be 1
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(1);
+
+    // Get the transaction
+    const tx = sessionMap.getTransaction(sessionId, 0);
+    expect(tx).toBeDefined();
+    const txParsed = JSON.parse(tx!);
+    expect(txParsed.changes).toBe(changes);
+    expect(txParsed.madeAt).toBe(madeAt);
+
+    // Known state should reflect the transaction
+    const knownState = JSON.parse(sessionMap.getKnownState());
+    expect(knownState.sessions[sessionId]).toBe(1);
+  });
+
+  test("create and retrieve private (encrypted) transaction", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const { keyId, keySecret } = createKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create a private (encrypted) transaction
+    const changes = JSON.stringify({ secret: "data", count: 100 });
+    const madeAt = Date.now();
+
+    const result = sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changes,
+      keyId,
+      keySecret,
+      null, // no meta
+      madeAt
+    );
+
+    // Result should be JSON with signature and transaction
+    const parsed = JSON.parse(result);
+    expect(parsed.signature).toBeDefined();
+    expect(parsed.transaction).toBeDefined();
+    expect(parsed.transaction.encryptedChanges).toBeDefined();
+    expect(parsed.transaction.keyUsed).toBe(keyId);
+
+    // Session should now exist
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(1);
+
+    // Decrypt the transaction
+    const decrypted = sessionMap.decryptTransaction(sessionId, 0, keySecret);
+    expect(decrypted).toBeDefined();
+    expect(decrypted).toBe(changes);
+  });
+
+  test("multiple transactions in same session", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create multiple transactions
+    for (let i = 0; i < 5; i++) {
+      const changes = JSON.stringify({ index: i });
+      sessionMap.makeNewTrustingTransaction(
+        sessionId,
+        signerSecret,
+        changes,
+        null,
+        Date.now() + i
+      );
+    }
+
+    // Should have 5 transactions
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(5);
+
+    // Verify each transaction
+    for (let i = 0; i < 5; i++) {
+      const tx = sessionMap.getTransaction(sessionId, i);
+      expect(tx).toBeDefined();
+      const txParsed = JSON.parse(tx!);
+      expect(JSON.parse(txParsed.changes).index).toBe(i);
+    }
+
+    // Get all transactions at once
+    const allTx = sessionMap.getSessionTransactions(sessionId, 0);
+    expect(allTx).toBeDefined();
+    const allTxParsed = JSON.parse(allTx!);
+    expect(allTxParsed.length).toBe(5);
+
+    // Get transactions from index 2
+    const partialTx = sessionMap.getSessionTransactions(sessionId, 2);
+    expect(partialTx).toBeDefined();
+    const partialTxParsed = JSON.parse(partialTx!);
+    expect(partialTxParsed.length).toBe(3);
+
+    // Known state should show 5 transactions
+    const knownState = JSON.parse(sessionMap.getKnownState());
+    expect(knownState.sessions[sessionId]).toBe(5);
+  });
+
+  test("multiple sessions in same SessionMap", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+
+    const session1 = `${coId}_session_z1`;
+    const session2 = `${coId}_session_z2`;
+    const session3 = `${coId}_session_z3`;
+
+    // Create transactions in different sessions
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1, tx: 2 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session2, signerSecret, JSON.stringify({ s: 2 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session3, signerSecret, JSON.stringify({ s: 3 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session3, signerSecret, JSON.stringify({ s: 3, tx: 2 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session3, signerSecret, JSON.stringify({ s: 3, tx: 3 }), null, Date.now());
+
+    // Verify session IDs
+    const sessionIds = JSON.parse(sessionMap.getSessionIds());
+    expect(sessionIds).toContain(session1);
+    expect(sessionIds).toContain(session2);
+    expect(sessionIds).toContain(session3);
+    expect(sessionIds.length).toBe(3);
+
+    // Verify transaction counts
+    expect(sessionMap.getTransactionCount(session1)).toBe(2);
+    expect(sessionMap.getTransactionCount(session2)).toBe(1);
+    expect(sessionMap.getTransactionCount(session3)).toBe(3);
+
+    // Known state should reflect all sessions
+    const knownState = JSON.parse(sessionMap.getKnownState());
+    expect(knownState.sessions[session1]).toBe(2);
+    expect(knownState.sessions[session2]).toBe(1);
+    expect(knownState.sessions[session3]).toBe(3);
+  });
+
+  test("get last signature", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // No signature initially
+    expect(sessionMap.getLastSignature(sessionId)).toBeNull();
+
+    // Create a transaction
+    const result = sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      JSON.stringify({ test: 1 }),
+      null,
+      Date.now()
+    );
+    const { signature } = JSON.parse(result);
+
+    // Last signature should be set
+    const lastSig = sessionMap.getLastSignature(sessionId);
+    expect(lastSig).toBe(signature);
+
+    // Add another transaction
+    const result2 = sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      JSON.stringify({ test: 2 }),
+      null,
+      Date.now()
+    );
+    const { signature: signature2 } = JSON.parse(result2);
+
+    // Last signature should update
+    const lastSig2 = sessionMap.getLastSignature(sessionId);
+    expect(lastSig2).toBe(signature2);
+    expect(lastSig2).not.toBe(signature);
+  });
+
+  test("transaction with meta", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create a transaction with meta
+    const changes = JSON.stringify({ key: "value" });
+    const meta = JSON.stringify({ author: "test", priority: 1 });
+    const madeAt = Date.now();
+
+    sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changes,
+      meta,
+      madeAt
+    );
+
+    // Get the transaction and verify meta
+    const tx = sessionMap.getTransaction(sessionId, 0);
+    const txParsed = JSON.parse(tx!);
+    expect(txParsed.meta).toBe(meta);
+  });
+
+  test("private transaction with encrypted meta", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const { keyId, keySecret } = createKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create a private transaction with meta
+    const changes = JSON.stringify({ secret: "data" });
+    const meta = JSON.stringify({ timestamp: Date.now() });
+
+    sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changes,
+      keyId,
+      keySecret,
+      meta,
+      Date.now()
+    );
+
+    // Decrypt the transaction
+    const decryptedChanges = sessionMap.decryptTransaction(sessionId, 0, keySecret);
+    expect(decryptedChanges).toBe(changes);
+
+    // Decrypt the meta
+    const decryptedMeta = sessionMap.decryptTransactionMeta(sessionId, 0, keySecret);
+    expect(decryptedMeta).toBe(meta);
+  });
+
+  test("add transactions from external source (simulating sync)", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    
+    // Simulate two peers with their own SessionMaps
+    const sessionMap1 = new SessionMap(coId, header);
+    const sessionMap2 = new SessionMap(coId, header);
+    
+    const { signerSecret, signerId } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Peer 1 creates transactions
+    const result1 = sessionMap1.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      JSON.stringify({ from: "peer1", tx: 1 }),
+      null,
+      Date.now()
+    );
+    const { transaction: tx1 } = JSON.parse(result1);
+
+    const result2 = sessionMap1.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      JSON.stringify({ from: "peer1", tx: 2 }),
+      null,
+      Date.now()
+    );
+    const { signature: sig2, transaction: tx2 } = JSON.parse(result2);
+
+    // getSessionTransactions returns a JSON array of JSON strings (double-encoded)
+    // For addTransactions, we need a JSON array of Transaction objects
+    // So we need to parse each string and create an array of objects
+    const allTxJsonStrings = sessionMap1.getSessionTransactions(sessionId, 0);
+    expect(allTxJsonStrings).toBeDefined();
+
+    // Parse the array of JSON strings, then parse each string to get objects
+    const txStrings: string[] = JSON.parse(allTxJsonStrings!);
+    const txObjects = txStrings.map((s: string) => JSON.parse(s));
+    const txArrayJson = JSON.stringify(txObjects);
+
+    // Add to peer 2 (skip verification for simplicity in test)
+    sessionMap2.addTransactions(
+      sessionId,
+      signerId,
+      txArrayJson,
+      sig2, // final signature covers all transactions
+      true  // skip verify for test
+    );
+
+    // Peer 2 should now have the same transactions
+    expect(sessionMap2.getTransactionCount(sessionId)).toBe(2);
+
+    // Verify transaction content
+    const tx = sessionMap2.getTransaction(sessionId, 0);
+    expect(tx).toBeDefined();
+    const txParsed = JSON.parse(tx!);
+    expect(JSON.parse(txParsed.changes).from).toBe("peer1");
+  });
+
+  test("streaming known state management", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+
+    const session1 = `${coId}_session_z1`;
+    const session2 = `${coId}_session_z2`;
+
+    // Create some transactions
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1, tx: 2 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session2, signerSecret, JSON.stringify({ s: 2 }), null, Date.now());
+
+    // Base known state
+    const baseKnownState = JSON.parse(sessionMap.getKnownState());
+    expect(baseKnownState.sessions[session1]).toBe(2);
+    expect(baseKnownState.sessions[session2]).toBe(1);
+
+    // Set streaming known state (simulating data being streamed from peer)
+    const streamingSessions = JSON.stringify({ [session1]: 5, [session2]: 3 });
+    sessionMap.setStreamingKnownState(streamingSessions);
+
+    // Known state with streaming should combine both
+    const combinedKnownState = sessionMap.getKnownStateWithStreaming();
+    expect(combinedKnownState).toBeDefined();
+    const combined = JSON.parse(combinedKnownState!);
+    // Streaming state should be additive (max of local and streaming)
+    expect(combined.sessions[session1]).toBe(5); // streaming has more
+    expect(combined.sessions[session2]).toBe(3); // streaming has more
+  });
+
+  test("deletion flow", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create a transaction
+    sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      JSON.stringify({ data: "test" }),
+      null,
+      Date.now()
+    );
+
+    expect(sessionMap.isDeleted()).toBe(false);
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(1);
+
+    // Mark as deleted
+    sessionMap.markAsDeleted();
+    expect(sessionMap.isDeleted()).toBe(true);
+
+    // Transactions should still be accessible
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(1);
+  });
+
+  test("different CoValue types", () => {
+    const coId = "co_zTestCoValue123";
+    const { signerSecret } = createSignerKeyPair();
+
+    // comap
+    const comapHeader = JSON.stringify({
+      createdAt: new Date().toISOString(),
+      meta: null,
+      ruleset: { type: "unsafeAllowAll" },
+      type: "comap",
+      uniqueness: "test-comap",
+    });
+    const comapSession = new SessionMap(coId, comapHeader);
+    expect(JSON.parse(comapSession.getHeader()).type).toBe("comap");
+
+    // colist
+    const colistHeader = JSON.stringify({
+      createdAt: new Date().toISOString(),
+      meta: null,
+      ruleset: { type: "unsafeAllowAll" },
+      type: "colist",
+      uniqueness: "test-colist",
+    });
+    const colistSession = new SessionMap(coId, colistHeader);
+    expect(JSON.parse(colistSession.getHeader()).type).toBe("colist");
+
+    // costream
+    const costreamHeader = JSON.stringify({
+      createdAt: new Date().toISOString(),
+      meta: null,
+      ruleset: { type: "unsafeAllowAll" },
+      type: "costream",
+      uniqueness: "test-costream",
+    });
+    const costreamSession = new SessionMap(coId, costreamHeader);
+    expect(JSON.parse(costreamSession.getHeader()).type).toBe("costream");
+  });
+
+  test("error handling - invalid session for get operations", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+
+    // Non-existent session
+    expect(sessionMap.getTransactionCount("nonexistent")).toBe(-1);
+    expect(sessionMap.getTransaction("nonexistent", 0)).toBeNull();
+    expect(sessionMap.getSessionTransactions("nonexistent", 0)).toBeNull();
+    expect(sessionMap.getLastSignature("nonexistent")).toBeNull();
+  });
+
+  test("error handling - invalid transaction index", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // Create one transaction
+    sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      JSON.stringify({ test: 1 }),
+      null,
+      Date.now()
+    );
+
+    // Valid index
+    expect(sessionMap.getTransaction(sessionId, 0)).toBeDefined();
+
+    // Invalid index (out of bounds)
+    expect(sessionMap.getTransaction(sessionId, 1)).toBeNull();
+    expect(sessionMap.getTransaction(sessionId, 100)).toBeNull();
+  });
+
+  test("in-between signatures are recorded when size exceeds threshold", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+    const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
+
+    // The threshold is 100KB (102400 bytes)
+    // Create transactions that will exceed the threshold
+    // Each transaction has ~1.4KB of data (after JSON serialization with overhead)
+    const value = Buffer.alloc(1024, 'a').toString('base64'); // ~1.4KB when base64 encoded
+    
+    let signatures: string[] = [];
+    
+    // Create 100 transactions - should trigger at least one in-between signature
+    for (let i = 0; i < 100; i++) {
+      const result = sessionMap.makeNewTrustingTransaction(
+        sessionId,
+        signerSecret,
+        JSON.stringify({ key: `key${i}`, value }),
+        null,
+        Date.now()
+      );
+      const { signature } = JSON.parse(result);
+      signatures.push(signature);
+    }
+
+    // Check the last signature checkpoint
+    const lastCheckpoint = sessionMap.getLastSignatureCheckpoint(sessionId);
+    console.log('Last checkpoint:', lastCheckpoint);
+    
+    // Should have at least one checkpoint (around index 72-73 based on threshold)
+    expect(lastCheckpoint).toBeGreaterThanOrEqual(0);
+    
+    // Verify there's a signature at the checkpoint
+    if (lastCheckpoint !== null && lastCheckpoint >= 0) {
+      const sigAtCheckpoint = sessionMap.getSignatureAfter(sessionId, lastCheckpoint);
+      expect(sigAtCheckpoint).toBeDefined();
+      console.log('Signature at checkpoint:', sigAtCheckpoint?.substring(0, 30) + '...');
+    }
+    
+    // Check that we have the expected number of transactions
+    expect(sessionMap.getTransactionCount(sessionId)).toBe(100);
   });
 });

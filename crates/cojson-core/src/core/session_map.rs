@@ -6,15 +6,17 @@
 use crate::core::keys::{CoID, KeyID, KeySecret, Signature, SignerID, SignerSecret};
 use crate::core::session_log::{SessionID, SessionLogInternal, Transaction, TransactionMode};
 use crate::core::CoJsonCoreError;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// SessionMap implementation - one instance per CoValue
 /// Owns the header and all session data for a single CoValue
 pub struct SessionMapImpl {
     co_id: CoID,
     header: CoValueHeader,
-    sessions: HashMap<String, SessionLogInternal>,
+    /// Using IndexMap to preserve session insertion order (matches TypeScript Map behavior)
+    sessions: IndexMap<String, SessionLogInternal>,
     known_state: KnownState,
     known_state_with_streaming: Option<KnownState>,
     streaming_known_state: Option<KnownStateSessions>,
@@ -190,7 +192,7 @@ impl SessionMapImpl {
         Ok(Self {
             co_id: CoID(co_id.to_string()),
             header,
-            sessions: HashMap::new(),
+            sessions: IndexMap::new(),
             known_state: KnownState {
                 header: true,
                 id: co_id.to_string(),
@@ -235,6 +237,16 @@ impl SessionMapImpl {
             )
         });
 
+        // Calculate size of transactions being added (for in-between signature tracking)
+        let mut total_size: usize = 0;
+        for tx in &transactions {
+            let tx_size = match tx {
+                Transaction::Private(private_tx) => private_tx.encrypted_changes.value.len(),
+                Transaction::Trusting(trusting_tx) => trusting_tx.changes.len(),
+            };
+            total_size += tx_size;
+        }
+
         // Add transactions to staging area
         for tx in &transactions {
             match tx {
@@ -260,8 +272,16 @@ impl SessionMapImpl {
         let sig = Signature(signature.to_string());
         session_log.commit_transactions(&sig, skip_verify)?;
 
-        // Update known state
+        // Track size for in-between signatures
+        session_log.add_to_size_tracking(total_size);
+
+        // Record in-between signature if size exceeds threshold
         let tx_count = session_log.transactions_json().len() as u32;
+        if session_log.needs_inbetween_signature() && tx_count > 0 {
+            session_log.record_inbetween_signature(tx_count - 1, signature.to_string());
+        }
+
+        // Update known state
         self.known_state
             .sessions
             .insert(session_id.to_string(), tx_count);
@@ -323,8 +343,21 @@ impl SessionMapImpl {
             meta_json.map(|s| s.to_string()),
         )?;
 
+        // Track size for in-between signatures (use encrypted changes length)
+        let tx_size = match &transaction {
+            Transaction::Private(p) => p.encrypted_changes.value.len(),
+            Transaction::Trusting(t) => t.changes.len(),
+        };
+        session_log.add_to_size_tracking(tx_size);
+
         // Update known state
         let tx_count = session_log.transactions_json().len() as u32;
+
+        // Record in-between signature if size exceeds threshold
+        if session_log.needs_inbetween_signature() && tx_count > 0 {
+            session_log.record_inbetween_signature(tx_count - 1, signature.0.clone());
+        }
+
         self.known_state.sessions.insert(session_id.to_string(), tx_count);
 
         // Update known_state_with_streaming if present
@@ -374,8 +407,21 @@ impl SessionMapImpl {
             meta_json.map(|s| s.to_string()),
         )?;
 
+        // Track size for in-between signatures
+        let tx_size = match &transaction {
+            Transaction::Private(p) => p.encrypted_changes.value.len(),
+            Transaction::Trusting(t) => t.changes.len(),
+        };
+        session_log.add_to_size_tracking(tx_size);
+
         // Update known state
         let tx_count = session_log.transactions_json().len() as u32;
+
+        // Record in-between signature if size exceeds threshold
+        if session_log.needs_inbetween_signature() && tx_count > 0 {
+            session_log.record_inbetween_signature(tx_count - 1, signature.0.clone());
+        }
+
         self.known_state.sessions.insert(session_id.to_string(), tx_count);
 
         // Update known_state_with_streaming if present
