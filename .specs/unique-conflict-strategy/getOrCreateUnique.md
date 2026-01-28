@@ -6,9 +6,10 @@
 
 **Key guarantees:**
 - Deterministic ID generation from uniqueness key
-- First-init-wins conflict resolution for concurrent creation
+- First-writer-wins (FWW) conflict resolution for concurrent creation
 - Automatic merging of subsequent updates
 - Nested CoValues inherit derived uniqueness
+- Multiple FWW keys are resolved independently
 
 ## Conflict Resolution
 
@@ -37,46 +38,35 @@ Alice (offline)                    Bob (offline)
                     ▼
     ┌───────────────────────────────────┐
     │   Conflict Resolution:            │
-    │   Alice's init wins (earlier)     │
+    │   Alice wins FWW (earlier)        │
     │   theme: "dark"                   │
     └───────────────────────────────────┘
 ```
 
-### First-Init-Wins Strategy
+### First-Writer-Wins (FWW) Strategy
 
-The system uses a **first-init-wins** strategy for creation conflicts:
+The system uses a **first-writer-wins (FWW)** strategy for creation conflicts:
 
-1. **Init transactions** are marked with `meta: { init: true }`
-2. When multiple init transactions exist, the one with the earliest `madeAt` timestamp wins
-3. If timestamps are equal, the `sessionID` is used as a deterministic tiebreaker
-4. Losing init transactions are marked as invalid and excluded from content computation
+1. **Init transactions** are marked with `meta: { fww: "init" }` (or a custom FWW key)
+2. When multiple transactions with the same FWW key exist, the one with the earliest `madeAt` timestamp wins
 
-```typescript
-// Internal: How init transactions are compared
-function compareInitTransactions(a, b) {
-  // 1. Earlier timestamp wins
-  if (a.madeAt !== b.madeAt) {
-    return a.madeAt - b.madeAt;
-  }
+3. Losing FWW transactions are marked as invalid and excluded from content computation
+4. Different FWW keys are resolved independently - a late-arriving winner for one key does not affect other keys
 
-  // 2. Same timestamp: use sessionID for determinism
-  return a.txID.sessionID.localeCompare(b.txID.sessionID);
-}
-```
 
 ### What Gets Resolved
 
 | Scenario | Resolution |
 |----------|------------|
 | Different `madeAt` timestamps | Earlier timestamp wins |
-| Same `madeAt`, different sessions | Lexicographically smaller sessionID wins |
 | Same session, same timestamp | Earlier txIndex wins |
+| Multiple FWW keys | Each key resolves independently |
 
 ## Conflict Resolution by Value Type
 
 ### Primitive Fields (strings, numbers, booleans)
 
-Primitive fields use **last-write-wins (LWW)** semantics after the init conflict is resolved.
+Primitive fields use **last-write-wins (LWW)** semantics after the FWW conflict is resolved.
 
 ```typescript
 const Counter = co.map({
@@ -84,14 +74,14 @@ const Counter = co.map({
   lastUpdatedBy: z.string(),
 });
 
-// Alice creates (wins init conflict - earlier timestamp)
+// Alice creates (wins FWW conflict - earlier timestamp)
 const aliceCounter = await Counter.getOrCreateUnique({
   value: { value: 0, lastUpdatedBy: "alice" },
   unique: "shared-counter",
   owner: group,
 });
 
-// Bob creates (loses init conflict - later timestamp)
+// Bob creates (loses FWW conflict - later timestamp)
 // His init values are discarded
 const bobCounter = await Counter.getOrCreateUnique({
   value: { value: 100, lastUpdatedBy: "bob" },  // These values are ignored
@@ -120,7 +110,7 @@ const Profile = co.map({
   avatar: z.string().optional(),
 });
 
-// Both create the same profile (Alice wins init)
+// Both create the same profile (Alice wins FWW)
 const aliceProfile = await Profile.getOrCreateUnique({
   value: { name: "Shared Profile" },
   unique: "profile-123",
@@ -188,8 +178,8 @@ console.log(aliceSettings.$jazz.id === bobSettings.$jazz.id);  // true
 console.log(aliceSettings.notifications.$jazz.id === bobSettings.notifications.$jazz.id);  // true
 
 // After sync:
-// - Parent uses Alice's init values (theme: "dark")
-// - Nested also uses Alice's init values (email: true, push: false, frequency: "daily")
+// - Parent uses Alice's initial values (theme: "dark")
+// - Nested also uses Alice's initial values (email: true, push: false, frequency: "daily")
 
 // Updates to nested values also merge:
 aliceSettings.notifications.$jazz.set("frequency", "instant");
@@ -228,7 +218,7 @@ unique: { userId: "abc", tenantId: "xyz", _field: "notifications/advanced" }
 
 ### CoList Items
 
-CoList items follow the same rules - the list structure itself has init conflict resolution, and subsequent item additions/removals use CRDT semantics:
+CoList items follow the same rules - the list structure itself has FWW conflict resolution, and subsequent item additions/removals use CRDT semantics:
 
 ```typescript
 const Task = co.map({
@@ -238,21 +228,21 @@ const Task = co.map({
 
 const TaskList = co.list(co.ref(Task));
 
-// Alice creates the list (wins init)
+// Alice creates the list (wins FWW)
 const aliceList = await TaskList.getOrCreateUnique({
   value: [Task.create({ title: "Task A", done: false }, { owner: group })],
   unique: "tasks-123",
   owner: group,
 });
 
-// Bob creates the same list (loses init - his initial items are discarded)
+// Bob creates the same list (loses FWW - his initial items are discarded)
 const bobList = await TaskList.getOrCreateUnique({
   value: [Task.create({ title: "Task B", done: false }, { owner: group })],
   unique: "tasks-123",
   owner: group,
 });
 
-// After sync, list only contains "Task A" (from Alice's winning init)
+// After sync, list only contains "Task A" (from Alice's winning FWW)
 
 // But subsequent additions from both are preserved:
 aliceList.push(Task.create({ title: "Task C", done: false }, { owner: group }));
