@@ -268,7 +268,11 @@ export abstract class CryptoProvider<Blake3State = any> {
     signerID?: SignerID,
   ): SessionLogImpl;
 
-  abstract createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl;
+  abstract createSessionMap(
+    coID: RawCoID,
+    headerJson: string,
+    maxTxSize?: number,
+  ): SessionMapImpl;
 }
 
 export type Hash = `hash_z${string}`;

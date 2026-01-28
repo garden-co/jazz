@@ -17,9 +17,10 @@ pub struct SessionMap {
 #[uniffi::export]
 impl SessionMap {
     /// Create a new SessionMap for a CoValue
+    /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
     #[uniffi::constructor]
-    pub fn new(co_id: String, header_json: String) -> Result<Self, SessionMapError> {
-        let internal = SessionMapImpl::new(&co_id, &header_json)
+    pub fn new(co_id: String, header_json: String, max_tx_size: Option<u32>) -> Result<Self, SessionMapError> {
+        let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
             .map_err(|e| SessionMapError::Internal(e.to_string()))?;
         Ok(SessionMap {
             internal: std::sync::Mutex::new(internal),

@@ -35,8 +35,11 @@ export declare class SessionLog {
 }
 
 export declare class SessionMap {
-  /** Create a new SessionMap for a CoValue */
-  constructor(coId: string, headerJson: string)
+  /**
+   * Create a new SessionMap for a CoValue
+   * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   */
+  constructor(coId: string, headerJson: string, maxTxSize?: number | undefined | null)
   /** Get the header as JSON */
   getHeader(): string
   /** Add transactions to a session */

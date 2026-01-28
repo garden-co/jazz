@@ -227,8 +227,14 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
   }
 
-  createSessionMap(coID: RawCoID, headerJson: string): SessionMapImpl {
-    return new SessionMapAdapter(new WasmSessionMap(coID, headerJson));
+  createSessionMap(
+    coID: RawCoID,
+    headerJson: string,
+    maxTxSize?: number,
+  ): SessionMapImpl {
+    return new SessionMapAdapter(
+      new WasmSessionMap(coID, headerJson, maxTxSize),
+    );
   }
 }
 
