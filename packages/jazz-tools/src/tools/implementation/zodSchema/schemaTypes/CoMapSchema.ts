@@ -199,7 +199,7 @@ export class CoMapSchema<
     );
   }
 
-  /** @deprecated Use `getOrCreateUnique` instead. */
+  /** @deprecated Use `loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: string,
