@@ -17,7 +17,6 @@ import { apiKey } from "@/apiKey.ts";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { JazzReactProvider, useSuspenseAccount } from "jazz-tools/react";
 import { onAnonymousAccountDiscarded } from "./4_actions";
-import { KeyboardListener } from "./components/PlayerControls";
 import { useSetupAppState } from "./lib/useSetupAppState";
 
 // Normally profiling is enabled only in development mode
@@ -87,7 +86,6 @@ function AppContent({
   return (
     <>
       <RouterProvider router={router} />
-      <KeyboardListener mediaPlayer={mediaPlayer} />
       <Toaster />
     </>
   );

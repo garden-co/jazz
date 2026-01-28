@@ -11,7 +11,7 @@ export function usePlayMedia() {
     // to avoid to incur into concurrency issues
     await previousMediaLoad.current;
 
-    const promise = audioManager.loadAudio(file);
+    const promise = audioManager.load(file);
 
     previousMediaLoad.current = promise;
 

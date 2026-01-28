@@ -35,3 +35,17 @@ export async function getPrevTrack() {
   const previousIndex = (currentIndex - 1 + tracks.length) % tracks.length;
   return tracks[previousIndex];
 }
+
+export async function getActivePlaylistTitle(): Promise<string> {
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
+    resolve: {
+      root: {
+        activePlaylist: { $onError: "catch" },
+      },
+    },
+  });
+
+  return root.activePlaylist?.$isLoaded
+    ? root.activePlaylist.title
+    : "All tracks";
+}

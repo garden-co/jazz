@@ -1,9 +1,6 @@
 import { MusicaAccount, MusicTrack } from "@/1_schema";
 import { MediaPlayer } from "@/5_useMediaPlayer";
-import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
-import { useMediaSession } from "@/lib/audio/useMediaSession";
-import { usePlayState } from "@/lib/audio/usePlayState";
-import { useKeyboardListener } from "@/lib/useKeyboardListener";
+import { useAudioManager } from "@/lib/audio/AudioManager";
 import { useCoState, useSuspenseAccount } from "jazz-tools/react";
 import {
   ChevronUp,
@@ -13,7 +10,7 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import WaveformCanvas from "./WaveformCanvas";
 import { Button } from "./ui/button";
 import {
@@ -25,8 +22,11 @@ import {
 } from "./ui/drawer";
 
 export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
-  const playState = usePlayState();
-  const isPlaying = playState.value === "play";
+  const audioManager = useAudioManager();
+  const isPlaying = useSyncExternalStore(
+    (callback) => audioManager.on("statusChange", callback),
+    () => audioManager.isPlaying,
+  );
 
   const activePlaylistTitle = useSuspenseAccount(MusicaAccount, {
     select: (me) =>
@@ -59,7 +59,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             </Button>
             <Button
               size="icon"
-              onClick={playState.toggle}
+              onClick={audioManager.togglePlayPause}
               className="bg-blue-600 text-white hover:bg-blue-700"
               aria-label={
                 isPlaying ? "Pause active track" : "Play active track"
@@ -153,7 +153,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             </Button>
             <Button
               size="icon"
-              onClick={playState.toggle}
+              onClick={audioManager.togglePlayPause}
               className="bg-blue-600 text-white hover:bg-blue-700 h-16 w-16"
               aria-label={
                 isPlaying ? "Pause active track" : "Play active track"
@@ -182,35 +182,4 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       </DrawerContent>
     </Drawer>
   );
-}
-
-export function KeyboardListener({
-  mediaPlayer,
-}: {
-  mediaPlayer: MediaPlayer;
-}) {
-  const playState = usePlayState();
-  const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId);
-  const activePlaylistTitle = useSuspenseAccount(MusicaAccount, {
-    select: (me) =>
-      me.root.activePlaylist?.$isLoaded
-        ? (me.root.activePlaylist.title ?? "All tracks")
-        : "All tracks",
-  });
-
-  useMediaSession({
-    trackTitle: activeTrack?.$isLoaded ? activeTrack.title : undefined,
-    playlistTitle: activePlaylistTitle,
-    onPrevTrack: mediaPlayer.playPrevTrack,
-    onNextTrack: mediaPlayer.playNextTrack,
-  });
-
-  useMediaEndListener(mediaPlayer.playNextTrack);
-  useKeyboardListener("Space", () => {
-    if (document.activeElement !== document.body) return;
-
-    playState.toggle();
-  });
-
-  return null;
 }

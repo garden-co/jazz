@@ -12,11 +12,11 @@ import { PlaylistEmptyState } from "./components/PlaylistEmptyState";
 import { SidePanel } from "./components/SidePanel";
 import { Button } from "./components/ui/button";
 import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
-import { usePlayState } from "./lib/audio/usePlayState";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react-core";
 import { useIsMobile } from "./hooks/use-mobile";
 import { Pencil } from "lucide-react";
+import { useAudioManager } from "./lib/audio/AudioManager";
 
 export function PlaylistPage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const params = useParams<{ playlistId: string }>();
@@ -37,7 +37,11 @@ export function PlaylistPage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     select: (me) => me.canManage(playlist),
   });
 
-  const isPlaying = usePlayState().value === "play";
+  const audioManager = useAudioManager();
+  const isPlaying = useSyncExternalStore(
+    (callback) => audioManager.on("statusChange", callback),
+    () => audioManager.isPlaying,
+  );
   const [currentDialog, setCurrentDialog] = useState<
     | { name: "playlist"; section: "details" | "members" }
     | { name: "add-tracks" }
