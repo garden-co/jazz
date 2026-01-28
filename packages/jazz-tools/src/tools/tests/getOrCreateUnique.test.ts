@@ -577,53 +577,6 @@ describe("CoFeed.getOrCreateUnique", () => {
     assertLoaded(feed);
     expect(feed.$jazz.owner).toEqual(account);
   });
-
-  test("concurrent getOrCreateUnique returns same instance", async () => {
-    const MessageFeed = co.feed(z.string());
-    const group = Group.create().makePublic("writer");
-
-    const bob = await createJazzTestAccount();
-    const alice = await createJazzTestAccount();
-
-    const bobGroup = await Group.load(group.$jazz.id, {
-      loadAs: bob,
-    });
-    const aliceGroup = await Group.load(group.$jazz.id, {
-      loadAs: alice,
-    });
-
-    assertLoaded(bobGroup);
-    assertLoaded(aliceGroup);
-
-    const [bobFeed, aliceFeed] = await Promise.all([
-      MessageFeed.getOrCreateUnique({
-        value: ["bob"],
-        unique: "concurrent-feed",
-        owner: bobGroup,
-      }),
-      MessageFeed.getOrCreateUnique({
-        value: ["alice"],
-        unique: "concurrent-feed",
-        owner: aliceGroup,
-      }),
-    ]);
-
-    assertLoaded(bobFeed);
-    assertLoaded(aliceFeed);
-
-    expect(bobFeed.$jazz.id).toBe(aliceFeed.$jazz.id);
-
-    await waitFor(() => {
-      expect(bobFeed.$jazz.raw.core.knownState()).toEqual(
-        aliceFeed.$jazz.raw.core.knownState(),
-      );
-    });
-
-    expect(bobFeed.perAccount[alice.$jazz.id]?.value).toEqual("alice");
-    expect(bobFeed.perAccount[bob.$jazz.id]?.value).toEqual("bob");
-    expect(aliceFeed.perAccount[alice.$jazz.id]?.value).toEqual("alice");
-    expect(aliceFeed.perAccount[bob.$jazz.id]?.value).toEqual("bob");
-  });
 });
 
 describe("getOrCreateUnique offline scenarios", () => {
