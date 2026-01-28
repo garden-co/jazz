@@ -310,11 +310,10 @@ impl SessionMap {
 
     // === Session Queries ===
 
-    /// Get all session IDs as JSON array
+    /// Get all session IDs as native array
     #[wasm_bindgen(js_name = getSessionIds)]
-    pub fn get_session_ids(&self) -> Result<String, CojsonCoreWasmError> {
-        let ids = self.internal.get_session_ids();
-        Ok(serde_json::to_string(&ids)?)
+    pub fn get_session_ids(&self) -> Vec<String> {
+        self.internal.get_session_ids()
     }
 
     /// Get transaction count for a session (returns -1 if session not found)
