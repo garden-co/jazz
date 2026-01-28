@@ -10,28 +10,8 @@ const project = Project.create({});
 const myTask = await Task.load("learning-jazz");
 // #endregion
 
-// #region Create
-// Given the project owner, myTask will have always the same id
-Task.create(
-  {
-    text: "Let's learn some Jazz!",
-  },
-  {
-    unique: "learning-jazz",
-    owner: project.$jazz.owner, // Different owner, different id
-  },
-);
-// #endregion
-
-// #region LoadUnique
-const learnJazzTask = await Task.loadUnique(
-  "learning-jazz",
-  project.$jazz.owner.$jazz.id,
-);
-// #endregion
-
-// #region UpsertUnique
-await Task.upsertUnique({
+// #region GetOrCreateUnique
+await Task.getOrCreateUnique({
   value: {
     text: "Let's learn some Jazz!",
   },

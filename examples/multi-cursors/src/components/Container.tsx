@@ -1,9 +1,12 @@
-import { useAccount, useCoState } from "jazz-tools/react";
-import { CursorAccount, CursorFeed } from "../schema";
+import { CursorAccount } from "../schema";
 import { getColor } from "../utils/getColor.ts";
 import { getName } from "../utils/getName";
 import Canvas from "./Canvas";
-import { useSyncConnectionStatus } from "jazz-tools/react-core";
+import {
+  useSuspenseAccount,
+  useSyncConnectionStatus,
+} from "jazz-tools/react-core";
+import { useCursorsFeed } from "../hooks/useCursorsFeed";
 
 const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
@@ -33,9 +36,9 @@ function Avatar({
 }
 
 /** A higher order component that wraps the canvas. */
-function Container({ cursorFeedID }: { cursorFeedID: string }) {
-  const me = useAccount(CursorAccount, { resolve: { profile: true } });
-  const cursors = useCoState(CursorFeed, cursorFeedID, { resolve: true });
+function Container() {
+  const me = useSuspenseAccount(CursorAccount, { resolve: { profile: true } });
+  const { cursors, error } = useCursorsFeed();
 
   const connected = useSyncConnectionStatus();
 
@@ -54,7 +57,7 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
       active:
         !OLD_CURSOR_AGE_SECONDS ||
         entry.madeAt >= new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS),
-      isMe: me.$isLoaded && entry.tx.sessionID === me.$jazz.sessionID,
+      isMe: entry.tx.sessionID === me.$jazz.sessionID,
     }))
     .sort((a, b) => {
       return b.entry.madeAt.getTime() - a.entry.madeAt.getTime();
@@ -62,6 +65,7 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
 
   return (
     <>
+      {error && <div className="text-red-500">{error}</div>}
       <div className="absolute top-4 right-4 bg-white p-2 rounded-lg shadow">
         <div className="flex items-center gap-1">
           {remoteCursors.slice(0, 5).map(({ name, color, entry, active }) => (
@@ -85,7 +89,7 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
 
       <Canvas
         onCursorMove={(move) => {
-          if (!cursors.$isLoaded || !me.$isLoaded) return;
+          if (!cursors.$isLoaded) return;
 
           cursors.$jazz.push({
             position: {

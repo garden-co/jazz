@@ -137,13 +137,17 @@ export class VerifiedTransaction {
   changes: JsonValue[] | undefined;
   // The decoded meta information of the transaction
   meta: JsonObject | undefined;
-  isValidated: boolean = false;
   // Whether the transaction is valid, as per membership rules
   isValid: boolean = false;
   // The error message that caused the transaction to be invalid
   validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
+  // Transaction processing stage:
+  // - "to-validate": Transaction is pending validation on permissions checks
+  // - "validated": Transaction has been validated but not yet applied to content
+  // - "processed": Transaction has been validated and applied to content
+  stage: "to-validate" | "validated" | "processed" = "to-validate";
 
   constructor(
     coValueId: RawCoID,
@@ -214,18 +218,31 @@ export class VerifiedTransaction {
     return Boolean(this.isValid && this.changes);
   }
 
+  isProcessable(includeInvalidMetaTransactions: boolean): this is {
+    changes: JsonValue[];
+  } {
+    return Boolean(
+      this.changes && (includeInvalidMetaTransactions || this.isValid),
+    );
+  }
+
   markValid() {
+    const validityChanged = this.isValid === false;
     this.isValid = true;
     this.validationErrorMessage = undefined;
 
-    if (!this.isValidated) {
-      this.isValidated = true;
+    if (this.stage === "to-validate") {
+      this.stage = "validated";
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "processed" && validityChanged) {
       this.dispatchTransaction(this);
     }
   }
 
   markInvalid(errorMessage: string, attributes?: Record<string, JsonValue>) {
-    this.isValidated = true;
+    const validityChanged = this.isValid === true;
     this.isValid = false;
 
     this.validationErrorMessage = errorMessage;
@@ -237,6 +254,22 @@ export class VerifiedTransaction {
         ...attributes,
       });
     }
+
+    if (this.stage === "processed" && validityChanged) {
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "to-validate") {
+      this.stage = "validated";
+    }
+  }
+
+  markAsProcessed() {
+    this.stage = "processed";
+  }
+
+  markAsToValidate() {
+    this.stage = "to-validate";
   }
 }
 
@@ -1051,6 +1084,20 @@ export class CoValueCore {
     }
   }
 
+  #isContentRebuildScheduled = false;
+  scheduleContentRebuild() {
+    if (!this._cachedContent || this.#isContentRebuildScheduled) {
+      return;
+    }
+
+    this.#isContentRebuildScheduled = true;
+
+    queueMicrotask(() => {
+      this.#isContentRebuildScheduled = false;
+      this._cachedContent?.rebuildFromCore();
+    });
+  }
+
   #isNotifyUpdatePaused = false;
   pauseNotifyUpdate() {
     this.#isNotifyUpdatePaused = true;
@@ -1319,7 +1366,7 @@ export class CoValueCore {
     // Store the validity of the transactions before resetting the parsed transactions
     const validityBeforeReset = new Array<boolean>(verifiedTransactions.length);
     this.verifiedTransactions.forEach((transaction, index) => {
-      transaction.isValidated = false;
+      transaction.markAsToValidate();
       validityBeforeReset[index] = transaction.isValidTransactionWithChanges();
     });
 
@@ -1327,6 +1374,7 @@ export class CoValueCore {
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
+    this.#fwwWinners.clear();
 
     this.parseNewTransactions(false);
 
@@ -1427,8 +1475,13 @@ export class CoValueCore {
   }
 
   dispatchTransaction = (transaction: VerifiedTransaction) => {
-    if (!transaction.isValidated) {
+    if (transaction.stage === "to-validate") {
       this.toValidateTransactions.push(transaction);
+      return;
+    }
+
+    if (transaction.stage === "processed") {
+      this.scheduleContentRebuild();
       return;
     }
 
@@ -1450,6 +1503,8 @@ export class CoValueCore {
     determineValidTransactions(this);
     this.toValidateTransactions = [];
   }
+
+  #fwwWinners: Map<string, VerifiedTransaction> = new Map();
 
   /**
    * Parses the meta information of a transaction, and set the branchStart and mergeCommits.
@@ -1487,6 +1542,30 @@ export class CoValueCore {
     if ("merged" in transaction.meta) {
       const mergeCommit = transaction.meta as MergeCommit;
       this.mergeCommits.push(mergeCommit);
+    }
+
+    if ("fww" in transaction.meta) {
+      const fwwKey = transaction.meta.fww as string;
+      const currentWinner = this.#fwwWinners.get(fwwKey);
+
+      // First-writer-wins: keep the transaction with the smallest madeAt
+      // compareTransactions returns < 0 if transaction is earlier than currentWinner
+      if (
+        !currentWinner ||
+        this.compareTransactions(transaction, currentWinner) < 0
+      ) {
+        if (currentWinner) {
+          currentWinner.markInvalid(
+            `Transaction is not the first writer for fww key "${fwwKey}"`,
+          );
+        }
+
+        this.#fwwWinners.set(fwwKey, transaction);
+      } else {
+        transaction.markInvalid(
+          `Transaction is not the first writer for fww key "${fwwKey}"`,
+        );
+      }
     }
 
     // Check if the transaction has been merged from a branch
@@ -1570,7 +1649,7 @@ export class CoValueCore {
     from?: CoValueKnownState["sessions"];
     to?: CoValueKnownState["sessions"];
     knownTransactions?: Record<RawCoID, number>;
-
+    includeInvalidMetaTransactions?: boolean;
     // If true, the branch source transactions will be skipped. Used to gather the transactions for the merge operation.
     skipBranchSource?: boolean;
   }): DecryptedTransaction[] {
@@ -1589,6 +1668,11 @@ export class CoValueCore {
 
     const knownTransactions = options?.knownTransactions?.[this.id] ?? 0;
 
+    // Include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    // permission errors are still not included
+    const includeInvalidMetaTransactions =
+      options?.includeInvalidMetaTransactions ?? false;
+
     for (
       let i = knownTransactions;
       i < this.toProcessTransactions.length;
@@ -1596,7 +1680,7 @@ export class CoValueCore {
     ) {
       const transaction = this.toProcessTransactions[i]!;
 
-      if (!transaction.isValidTransactionWithChanges()) {
+      if (!transaction.isProcessable(includeInvalidMetaTransactions)) {
         continue;
       }
 
@@ -1613,6 +1697,7 @@ export class CoValueCore {
         continue;
       }
 
+      transaction.markAsProcessed();
       matchingTransactions.push(transaction);
     }
 
@@ -1623,6 +1708,7 @@ export class CoValueCore {
     // If this is a branch, we load the valid transactions from the source
     if (source && this.branchStart && !options?.skipBranchSource) {
       const sourceTransactions = source.getValidTransactions({
+        includeInvalidMetaTransactions,
         knownTransactions: options?.knownTransactions,
         to: this.branchStart,
         ignorePrivateTransactions: options?.ignorePrivateTransactions ?? false,
@@ -1781,6 +1867,9 @@ export class CoValueCore {
 
     // The transactions that have already been processed, used for the incremental builds of the content views
     knownTransactions?: Record<RawCoID, number>;
+
+    // Whether to include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    includeInvalidMetaTransactions?: boolean;
   }): DecryptedTransaction[] {
     const allTransactions = this.getValidTransactions(options);
 
