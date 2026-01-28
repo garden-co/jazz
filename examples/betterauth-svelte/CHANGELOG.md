@@ -1,5 +1,11 @@
 # betterauth-svelte
 
+## 0.0.44
+
+### Patch Changes
+
+- jazz-tools@0.20.7
+
 ## 0.0.43
 
 ### Patch Changes
