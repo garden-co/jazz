@@ -730,7 +730,7 @@ export class CoValueCore {
 
     return {
       sessionID,
-      txIndex: this.verified.sessions.get(sessionID)?.transactions.length || 0,
+      txIndex: this.verified.sessions.getTransactionsCount(sessionID) || 0,
     };
   }
 
@@ -762,7 +762,7 @@ export class CoValueCore {
 
     if (isDeleteSessionID(sessionID)) {
       const txCount =
-        this.verified.sessions.get(sessionID)?.transactions.length ?? 0;
+        this.verified.sessions.getTransactionsCount(sessionID) ?? 0;
       if (txCount > 0 || newTransactions.length > 1) {
         return {
           value: true,

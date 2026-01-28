@@ -173,6 +173,17 @@ function takeFromExternrefTable0(idx) {
     return value;
 }
 
+function getArrayJsValueFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    const mem = getDataViewMemory0();
+    const result = [];
+    for (let i = ptr; i < ptr + 4 * len; i += 4) {
+        result.push(wasm.__wbindgen_export_4.get(mem.getUint32(i, true)));
+    }
+    wasm.__externref_drop_slice(ptr, len);
+    return result;
+}
+
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
@@ -1251,7 +1262,7 @@ export class SessionMap {
      * Get transactions for a session from index (returns undefined if session not found)
      * @param {string} session_id
      * @param {number} from_index
-     * @returns {string | undefined}
+     * @returns {string[] | undefined}
      */
     getSessionTransactions(session_id, from_index) {
         const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1259,8 +1270,8 @@ export class SessionMap {
         const ret = wasm.sessionmap_getSessionTransactions(this.__wbg_ptr, ptr0, len0, from_index);
         let v2;
         if (ret[0] !== 0) {
-            v2 = getStringFromWasm0(ret[0], ret[1]).slice();
-            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+            v2 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         }
         return v2;
     }

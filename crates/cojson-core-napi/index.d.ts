@@ -61,7 +61,7 @@ export declare class SessionMap {
   /** Get single transaction by index (returns undefined if not found) */
   getTransaction(sessionId: string, txIndex: number): string | null
   /** Get transactions for a session from index (returns undefined if session not found) */
-  getSessionTransactions(sessionId: string, fromIndex: number): string | null
+  getSessionTransactions(sessionId: string, fromIndex: number): Array<string> | null
   /** Get last signature for a session (returns undefined if session not found) */
   getLastSignature(sessionId: string): string | null
   /** Get signature after specific transaction index */

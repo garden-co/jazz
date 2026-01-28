@@ -37,6 +37,7 @@ import {
   type UniffiRustArcPtr,
   type UnsafeMutableRawPointer,
   AbstractFfiConverterByteArray,
+  FfiConverterArray,
   FfiConverterArrayBuffer,
   FfiConverterBool,
   FfiConverterFloat64,
@@ -2297,7 +2298,7 @@ export interface SessionMapInterface {
   getSessionTransactions(
     sessionId: string,
     fromIndex: /*u32*/ number
-  ) /*throws*/ : string | undefined;
+  ) /*throws*/ : Array<string> | undefined;
   /**
    * Get signature after specific transaction index
    */
@@ -2603,8 +2604,8 @@ export class SessionMap
   public getSessionTransactions(
     sessionId: string,
     fromIndex: /*u32*/ number
-  ): string | undefined /*throws*/ {
-    return FfiConverterOptionalString.lift(
+  ): Array<string> | undefined /*throws*/ {
+    return FfiConverterOptionalArrayString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
           FfiConverterTypeSessionMapError
@@ -2913,6 +2914,14 @@ const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
 
 // FfiConverter for /*u32*/number | undefined
 const FfiConverterOptionalUInt32 = new FfiConverterOptional(FfiConverterUInt32);
+
+// FfiConverter for Array<string>
+const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
+
+// FfiConverter for Array<string> | undefined
+const FfiConverterOptionalArrayString = new FfiConverterOptional(
+  FfiConverterArrayString
+);
 
 /**
  * This should be called before anything else.
@@ -3292,7 +3301,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions() !==
-    8465
+    15103
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions'

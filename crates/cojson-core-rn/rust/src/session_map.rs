@@ -131,7 +131,7 @@ impl SessionMap {
     }
 
     /// Get transactions for a session from index (returns None if session not found)
-    pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Result<Option<String>, SessionMapError> {
+    pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Result<Option<Vec<String>>, SessionMapError> {
         let internal = self.internal.lock().map_err(|_| SessionMapError::LockError)?;
         Ok(internal.get_session_transactions(&session_id, from_index))
     }

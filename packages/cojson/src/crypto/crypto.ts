@@ -363,7 +363,7 @@ export interface SessionMapImpl {
   getSessionTransactions(
     sessionId: string,
     fromIndex: number,
-  ): string | undefined;
+  ): string[] | undefined;
   getLastSignature(sessionId: string): string | undefined;
   getSignatureAfter(sessionId: string, txIndex: number): string | undefined;
   getLastSignatureCheckpoint(sessionId: string): number | undefined; // -1 if no checkpoints, undefined if session not found
