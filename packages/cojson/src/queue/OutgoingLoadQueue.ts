@@ -271,8 +271,11 @@ export class OutgoingLoadQueue {
       this.timeoutHandle = null;
     }
     this.inFlightLoads.clear();
-    this.highPriorityPending = new LinkedList();
-    this.lowPriorityPending = new LinkedList();
+
+    // Drain existing queues to balance push/pull metrics
+    while (this.highPriorityPending.shift()) {}
+    while (this.lowPriorityPending.shift()) {}
+
     this.highPriorityNodes.clear();
     this.lowPriorityNodes.clear();
   }
