@@ -378,17 +378,19 @@ class SessionMapAdapter implements SessionMapImpl {
     return this.sessionMap.getTransactionCount(sessionId);
   }
 
-  getTransaction(sessionId: string, txIndex: number): string | undefined {
-    return this.sessionMap.getTransaction(sessionId, txIndex) ?? undefined;
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return result as unknown as Transaction;
   }
 
   getSessionTransactions(
     sessionId: string,
     fromIndex: number,
-  ): string[] | undefined {
-    return (
-      this.sessionMap.getSessionTransactions(sessionId, fromIndex) ?? undefined
-    );
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result as unknown as Transaction[];
   }
 
   getLastSignature(sessionId: string): string | undefined {

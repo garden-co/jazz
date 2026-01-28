@@ -329,13 +329,13 @@ impl SessionMap {
             .unwrap_or(-1)
     }
 
-    /// Get single transaction by index (returns undefined if not found)
+    /// Get single transaction by index as JSON string (returns undefined if not found)
     #[wasm_bindgen(js_name = getTransaction)]
     pub fn get_transaction(&self, session_id: String, tx_index: u32) -> Option<String> {
         self.internal.get_transaction(&session_id, tx_index)
     }
 
-    /// Get transactions for a session from index (returns undefined if session not found)
+    /// Get transactions for a session from index as JSON strings (returns undefined if session not found)
     #[wasm_bindgen(js_name = getSessionTransactions)]
     pub fn get_session_transactions(
         &self,

@@ -48,8 +48,37 @@ import {
   Blake3Hasher,
   SessionLog,
   SessionMap as RNSessionMap,
+  Transaction as RNTransaction,
+  Transaction_Tags,
+  PrivateTransaction as RNPrivateTransaction,
+  TrustingTransaction as RNTrustingTransaction,
 } from "cojson-core-rn";
 import { WasmCrypto } from "./WasmCrypto.js";
+
+/**
+ * Convert a Uniffi Transaction enum to the TypeScript Transaction type.
+ * Uniffi enums have a `tag` property and `inner` containing the data.
+ */
+function convertRNTransaction(rnTx: RNTransaction): Transaction {
+  if (rnTx.tag === Transaction_Tags.Private) {
+    const inner = rnTx.inner.tx as RNPrivateTransaction;
+    return {
+      privacy: "private",
+      madeAt: inner.madeAt,
+      keyUsed: inner.keyUsed as KeyID,
+      encryptedChanges: inner.encryptedChanges,
+      meta: inner.meta,
+    } as PrivateTransaction;
+  } else {
+    const inner = rnTx.inner.tx as RNTrustingTransaction;
+    return {
+      privacy: "trusting",
+      madeAt: inner.madeAt,
+      changes: inner.changes as Stringified<JsonValue[]>,
+      meta: inner.meta as Stringified<JsonObject> | undefined,
+    } as TrustingTransaction;
+  }
+}
 
 type Blake3State = Blake3Hasher;
 
@@ -407,17 +436,19 @@ class SessionMapAdapter implements SessionMapImpl {
     return this.sessionMap.getTransactionCount(sessionId);
   }
 
-  getTransaction(sessionId: string, txIndex: number): string | undefined {
-    return this.sessionMap.getTransaction(sessionId, txIndex) ?? undefined;
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return convertRNTransaction(result);
   }
 
   getSessionTransactions(
     sessionId: string,
     fromIndex: number,
-  ): string[] | undefined {
-    return (
-      this.sessionMap.getSessionTransactions(sessionId, fromIndex) ?? undefined
-    );
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result.map(convertRNTransaction);
   }
 
   getLastSignature(sessionId: string): string | undefined {

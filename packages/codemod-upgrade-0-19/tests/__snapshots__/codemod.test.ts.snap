@@ -6,9 +6,7 @@ exports[`runTransform 1`] = `
 // Test file demonstrating Jazz hook patterns that will be migrated
 // This file shows examples of what the codemod will transform
 
-import {
-  useAccount,
-  useCoState, useAgent, useLogOut } from "jazz-tools/react";
+import { useAccount, useCoState, useAgent, useLogOut } from "jazz-tools/react";
 import { co, Account, z } from "jazz-tools";
 
 const TodoItem = co.map({
@@ -32,9 +30,14 @@ const MyAccount = co
 // $onError: 'catch' should become $onError: 'catch'
 function ExampleOnErrorNull() {
   const me = useAccount(MyAccount, {
-    resolve: { root: { todos: { $each: { $onError: 'catch' } } } },
-      select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null
-});
+    resolve: { root: { todos: { $each: { $onError: "catch" } } } },
+    select: (me) =>
+      me.$isLoaded
+        ? me
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
 
   return <div>{me?.root.todos[0]?.text}</div>;
 }
@@ -44,7 +47,12 @@ function ExampleCoState({ todoId }: { todoId: string }) {
   // Should be transformed to useCoState
   const todo = useCoState(TodoItem, todoId, {
     resolve: { text: true, done: true },
-    select: (todo) => todo.$isLoaded ? todo : todo.$jazz.loadingState === "loading" ? undefined : null,
+    select: (todo) =>
+      todo.$isLoaded
+        ? todo
+        : todo.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
   });
 
   return (
@@ -59,8 +67,13 @@ function ExampleCoState({ todoId }: { todoId: string }) {
 function ExampleAccount() {
   // Should be transformed to useAccount
   const todos = useAccount(MyAccount, {
-    resolve: { root: { todos: { $each: { $onError: 'catch' } } } },
-    select: (me) => me.$isLoaded ? me.root.todos : me.$jazz.loadingState === "loading" ? undefined : null,
+    resolve: { root: { todos: { $each: { $onError: "catch" } } } },
+    select: (me) =>
+      me.$isLoaded
+        ? me.root.todos
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
   });
 
   return (
@@ -77,13 +90,23 @@ function ComplexComponent({ itemId }: { itemId: string }) {
   // Should be transformed to useCoState
   const item = useCoState(TodoItem, itemId, {
     resolve: { text: true },
-    select: (item) => item.$isLoaded ? item : item.$jazz.loadingState === "loading" ? undefined : null,
+    select: (item) =>
+      item.$isLoaded
+        ? item
+        : item.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
   });
 
   // Should be transformed to useAccount
   const account = useAccount(MyAccount, {
     resolve: { root: true },
-    select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null,
+    select: (me) =>
+      me.$isLoaded
+        ? me
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
   });
 
   return (
@@ -99,7 +122,14 @@ function OldUseAccountPattern() {
   // const me = useAccount();
   // const agent = useAgent();
   // const logOut = useLogOut();
-  const me = useAccount(undefined, { select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null });
+  const me = useAccount(undefined, {
+    select: (me) =>
+      me.$isLoaded
+        ? me
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
   const agent = useAgent();
   const logOut = useLogOut();
 
@@ -116,7 +146,14 @@ function OldUseAccountPattern() {
 function PartialUseAccountPattern() {
   // const me = useAccount();
   // const logOut = useLogOut();
-  const me = useAccount(undefined, { select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null });
+  const me = useAccount(undefined, {
+    select: (me) =>
+      me.$isLoaded
+        ? me
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
   const logOut = useLogOut();
 
   return (
@@ -130,7 +167,14 @@ function PartialUseAccountPattern() {
 // Old useAccount pattern with only me
 function OnlyMePattern() {
   // const me = useAccount();
-  const me = useAccount(undefined, { select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null });
+  const me = useAccount(undefined, {
+    select: (me) =>
+      me.$isLoaded
+        ? me
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
 
   return <div>{me?.profile?.name}</div>;
 }
@@ -139,7 +183,14 @@ function OnlyMePattern() {
 function AliasedPattern() {
   // const currentUser = useAccount();
   // const myAgent = useAgent();
-  const currentUser = useAccount(undefined, { select: (currentUser) => currentUser.$isLoaded ? currentUser : currentUser.$jazz.loadingState === "loading" ? undefined : null });
+  const currentUser = useAccount(undefined, {
+    select: (currentUser) =>
+      currentUser.$isLoaded
+        ? currentUser
+        : currentUser.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
   const myAgent = useAgent();
 
   return (
@@ -155,7 +206,14 @@ function NoDestructuringWithAccountAgentLogOut() {
   // const account = useAccount();
   // const agent = useAgent();
   // const logOut = useLogOut();
-  const account = useAccount(undefined, { select: (account) => account.$isLoaded ? account : account.$jazz.loadingState === "loading" ? undefined : null });
+  const account = useAccount(undefined, {
+    select: (account) =>
+      account.$isLoaded
+        ? account
+        : account.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
   const agent = useAgent();
   const logOut = useLogOut();
 
@@ -183,8 +241,13 @@ function HookWithoutExistingSelector() {
   // });
   const account = useAccount(MyAccount, {
     resolve: { profile: true },
-      select: (account) => account.$isLoaded ? account : account.$jazz.loadingState === "loading" ? undefined : null
-});
+    select: (account) =>
+      account.$isLoaded
+        ? account
+        : account.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
 
   return <div>{account?.profile?.name}</div>;
 }
@@ -201,7 +264,12 @@ function HookWithExistingExpressionSelector() {
   // });
   const profileName = useAccount(MyAccount, {
     resolve: { profile: true },
-    select: (account) => account.$isLoaded ? account.profile?.name : account.$jazz.loadingState === "loading" ? undefined : null,
+    select: (account) =>
+      account.$isLoaded
+        ? account.profile?.name
+        : account.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
   });
 
   return <div>{profileName}</div>;
@@ -223,7 +291,14 @@ function HookWithExistingBlockSelector() {
 // Hook with no options argument at all
 function HookWithNoOptions() {
   // Should add: useAccount() -> useAccount(undefined, { select: (me) => ... })
-  const me = useAccount(undefined, { select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null });
+  const me = useAccount(undefined, {
+    select: (me) =>
+      me.$isLoaded
+        ? me
+        : me.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
 
   return <div>{me?.profile?.name}</div>;
 }
@@ -231,7 +306,14 @@ function HookWithNoOptions() {
 // Hook with schema but no options
 function HookWithSchemaNoOptions() {
   // Should add: useAccount(MyAccount) -> useAccount(undefined, { select: (account) => ... })
-  const account = useAccount(MyAccount, { select: (account) => account.$isLoaded ? account : account.$jazz.loadingState === "loading" ? undefined : null });
+  const account = useAccount(MyAccount, {
+    select: (account) =>
+      account.$isLoaded
+        ? account
+        : account.$jazz.loadingState === "loading"
+          ? undefined
+          : null,
+  });
 
   return <div>{account?.profile?.name}</div>;
 }

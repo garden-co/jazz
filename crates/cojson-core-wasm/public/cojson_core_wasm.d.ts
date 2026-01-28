@@ -232,7 +232,7 @@ export class SessionMap {
    */
   getSessionIds(): string[];
   /**
-   * Get single transaction by index (returns undefined if not found)
+   * Get single transaction by index as JSON string (returns undefined if not found)
    */
   getTransaction(session_id: string, tx_index: number): string | undefined;
   /**
@@ -264,7 +264,7 @@ export class SessionMap {
    */
   decryptTransactionMeta(session_id: string, tx_index: number, key_secret: string): string | undefined;
   /**
-   * Get transactions for a session from index (returns undefined if session not found)
+   * Get transactions for a session from index as JSON strings (returns undefined if session not found)
    */
   getSessionTransactions(session_id: string, from_index: number): string[] | undefined;
   /**
