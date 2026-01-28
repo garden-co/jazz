@@ -1,6 +1,6 @@
 use crate::hash::blake3::generate_nonce;
-use wasm_bindgen::prelude::*;
 use cojson_core::crypto::xsalsa20 as xsalsa20_crypto;
+use wasm_bindgen::prelude::*;
 
 /// WASM-exposed function for XSalsa20 encryption without authentication.
 /// - `key`: 32-byte key for encryption
@@ -15,7 +15,9 @@ pub fn encrypt_xsalsa20(
     plaintext: &[u8],
 ) -> Result<Box<[u8]>, JsError> {
     let nonce = generate_nonce(nonce_material);
-    Ok(xsalsa20_crypto::encrypt_xsalsa20_raw(key, &nonce, plaintext)?)
+    Ok(xsalsa20_crypto::encrypt_xsalsa20_raw(
+        key, &nonce, plaintext,
+    )?)
 }
 
 /// WASM-exposed function for XSalsa20 decryption without authentication.
@@ -31,5 +33,7 @@ pub fn decrypt_xsalsa20(
     ciphertext: &[u8],
 ) -> Result<Box<[u8]>, JsError> {
     let nonce = generate_nonce(nonce_material);
-    Ok(xsalsa20_crypto::decrypt_xsalsa20_raw(key, &nonce, ciphertext)?)
+    Ok(xsalsa20_crypto::decrypt_xsalsa20_raw(
+        key, &nonce, ciphertext,
+    )?)
 }

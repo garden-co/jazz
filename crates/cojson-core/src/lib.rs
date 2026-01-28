@@ -3,14 +3,14 @@
 pub use lzy;
 
 pub mod core {
+    pub mod keys;
     pub mod nonce;
     pub mod session_log;
     pub mod session_map;
-    pub mod keys;
+    pub use keys::*;
+    pub use nonce::*;
     pub use session_log::*;
     pub use session_map::*;
-    pub use nonce::*;
-    pub use keys::*;
     pub mod cache;
     pub use cache::*;
     pub mod error;
@@ -25,17 +25,17 @@ pub mod hash {
 }
 pub mod crypto {
     pub mod ed25519;
-    pub mod x25519;
-    pub mod seal;
     pub mod encrypt;
+    pub mod seal;
     pub mod signature;
+    pub mod x25519;
     pub mod xsalsa20;
 
     pub use ed25519::*;
-    pub use x25519::*;
-    pub use seal::*;
     pub use encrypt::*;
+    pub use seal::*;
     pub use signature::*;
+    pub use x25519::*;
     pub use xsalsa20::*;
     pub mod error;
     pub use error::*;

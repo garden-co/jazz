@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use cojson_core::crypto::encrypt as encrypt_crypto;
+use wasm_bindgen::prelude::*;
 
 /// WASM-exposed function to encrypt bytes with a key secret and nonce material.
 /// - `value`: The raw bytes to encrypt
@@ -26,5 +26,9 @@ pub fn decrypt(
     key_secret: &str,
     nonce_material: &[u8],
 ) -> Result<Box<[u8]>, JsError> {
-    Ok(encrypt_crypto::decrypt(ciphertext, key_secret, nonce_material)?)
+    Ok(encrypt_crypto::decrypt(
+        ciphertext,
+        key_secret,
+        nonce_material,
+    )?)
 }

@@ -1,5 +1,5 @@
-use cojson_core::crypto::seal as seal_crypto;
 use super::ed25519::CryptoErrorUniffi;
+use cojson_core::crypto::seal as seal_crypto;
 
 /// Uniffi-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
 /// Provides authenticated encryption with perfect forward secrecy.
@@ -43,4 +43,3 @@ pub fn unseal(
     .map(|unsealed| unsealed.into())
     .map_err(Into::into)
 }
-
