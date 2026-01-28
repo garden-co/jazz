@@ -223,7 +223,11 @@ impl SessionMap {
     /// Create a new SessionMap for a CoValue
     /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
     #[wasm_bindgen(constructor)]
-    pub fn new(co_id: String, header_json: String, max_tx_size: Option<u32>) -> Result<SessionMap, CojsonCoreWasmError> {
+    pub fn new(
+        co_id: String,
+        header_json: String,
+        max_tx_size: Option<u32>,
+    ) -> Result<SessionMap, CojsonCoreWasmError> {
         let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
             .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))?;
         Ok(SessionMap { internal })
@@ -333,8 +337,13 @@ impl SessionMap {
 
     /// Get transactions for a session from index (returns undefined if session not found)
     #[wasm_bindgen(js_name = getSessionTransactions)]
-    pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Option<Vec<String>> {
-        self.internal.get_session_transactions(&session_id, from_index)
+    pub fn get_session_transactions(
+        &self,
+        session_id: String,
+        from_index: u32,
+    ) -> Option<Vec<String>> {
+        self.internal
+            .get_session_transactions(&session_id, from_index)
     }
 
     /// Get last signature for a session (returns undefined if session not found)
@@ -362,7 +371,9 @@ impl SessionMap {
     pub fn get_known_state(&self) -> JsValue {
         // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
         let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        self.internal.get_known_state().serialize(&serializer)
+        self.internal
+            .get_known_state()
+            .serialize(&serializer)
             .expect("KnownState serialization should not fail")
     }
 
@@ -372,17 +383,21 @@ impl SessionMap {
         match self.internal.get_known_state_with_streaming() {
             Some(ks) => {
                 // Use serialize_maps_as_objects to convert BTreeMap to JS object instead of Map
-                let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+                let serializer =
+                    serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
                 ks.serialize(&serializer)
                     .expect("KnownState serialization should not fail")
-            },
+            }
             None => JsValue::undefined(),
         }
     }
 
     /// Set streaming known state
     #[wasm_bindgen(js_name = setStreamingKnownState)]
-    pub fn set_streaming_known_state(&mut self, streaming_json: String) -> Result<(), CojsonCoreWasmError> {
+    pub fn set_streaming_known_state(
+        &mut self,
+        streaming_json: String,
+    ) -> Result<(), CojsonCoreWasmError> {
         self.internal
             .set_streaming_known_state(&streaming_json)
             .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))

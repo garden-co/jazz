@@ -1,7 +1,7 @@
 use cojson_core::core::{
-  CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, SessionMapImpl,
-  Signature, SignerID, SignerSecret, Transaction, TransactionMode,
-  KnownState as RustKnownState,
+  CoID, CoJsonCoreError, KeyID, KeySecret, KnownState as RustKnownState, SessionID,
+  SessionLogInternal, SessionMapImpl, Signature, SignerID, SignerSecret, Transaction,
+  TransactionMode,
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -252,7 +252,11 @@ impl SessionMap {
   /// Create a new SessionMap for a CoValue
   /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
   #[napi(constructor)]
-  pub fn new(co_id: String, header_json: String, max_tx_size: Option<u32>) -> napi::Result<SessionMap> {
+  pub fn new(
+    co_id: String,
+    header_json: String,
+    max_tx_size: Option<u32>,
+  ) -> napi::Result<SessionMap> {
     let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
     Ok(SessionMap { internal })
@@ -366,8 +370,14 @@ impl SessionMap {
 
   /// Get transactions for a session from index (returns undefined if session not found)
   #[napi]
-  pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Option<Vec<String>> {
-    self.internal.get_session_transactions(&session_id, from_index)
+  pub fn get_session_transactions(
+    &self,
+    session_id: String,
+    from_index: u32,
+  ) -> Option<Vec<String>> {
+    self
+      .internal
+      .get_session_transactions(&session_id, from_index)
   }
 
   /// Get last signature for a session (returns undefined if session not found)
@@ -399,7 +409,10 @@ impl SessionMap {
   /// Get the known state with streaming as a native JavaScript object
   #[napi]
   pub fn get_known_state_with_streaming(&self) -> Option<KnownState> {
-    self.internal.get_known_state_with_streaming().map(|ks| ks.clone().into())
+    self
+      .internal
+      .get_known_state_with_streaming()
+      .map(|ks| ks.clone().into())
   }
 
   /// Set streaming known state

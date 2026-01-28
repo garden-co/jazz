@@ -371,7 +371,8 @@ impl SessionLogInternal {
         }
 
         // Add new transactions to the session log.
-        self.transactions_json.extend(self.pending_transactions.drain(..));
+        self.transactions_json
+            .extend(self.pending_transactions.drain(..));
 
         // Update the last signature.
         self.last_signature = Some(new_signature.clone());
@@ -556,11 +557,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         assert!(session.has_pending());
@@ -598,11 +595,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         // Create a wrong signature
@@ -636,11 +629,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         // Use a completely wrong signature but skip validation
@@ -666,11 +655,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         let mut csprng = OsRng;
@@ -981,9 +966,7 @@ mod tests {
                 }
             }
         }
-        session
-            .commit_transactions(&new_signature, true)
-            .unwrap();
+        session.commit_transactions(&new_signature, true).unwrap();
 
         let key_secret = KeySecret(root.known_keys[0].secret.clone());
 
@@ -1061,9 +1044,7 @@ mod tests {
                 }
             }
         }
-        session
-            .commit_transactions(&new_signature, true)
-            .unwrap();
+        session.commit_transactions(&new_signature, true).unwrap();
 
         let key_secret = KeySecret(root.known_keys[0].secret.clone());
 
@@ -1223,7 +1204,6 @@ mod tests {
             Err(CoJsonCoreError::InvalidEncryptedPrefix)
         ));
     }
-
 
     #[test]
     fn test_trusting_transaction_mode() {
@@ -1543,18 +1523,10 @@ mod tests {
 
         // Add multiple transactions using direct calls
         test_session
-            .add_existing_trusting_transaction(
-                r#"{"test":"data1"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test":"data1"}"#.to_string(), 1234567890, None)
             .unwrap();
         test_session
-            .add_existing_trusting_transaction(
-                r#"{"test":"data2"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test":"data2"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         let signature: Signature = SigningKey::generate(&mut OsRng).sign(b"test").into();

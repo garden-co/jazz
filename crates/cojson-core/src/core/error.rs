@@ -20,13 +20,13 @@ pub enum CoJsonCoreError {
     #[error("Signature verification failed: (hash: {0})")]
     SignatureVerification(String),
 
-    #[error("Invalid decoding prefix")] 
+    #[error("Invalid decoding prefix")]
     InvalidDecodingPrefix,
 
-    #[error("Invalid key length")] 
+    #[error("Invalid key length")]
     InvalidKeyLength(usize, usize),
 
-    #[error("Invalid base58")] 
+    #[error("Invalid base58")]
     InvalidBase58(#[from] bs58::decode::Error),
 
     #[error("Transaction too large to be synced: {0} bytes > {1} bytes limit")]

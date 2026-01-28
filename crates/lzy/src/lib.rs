@@ -116,11 +116,14 @@ impl Compressor {
                 let match_pos = self.hash_table[h] as usize;
 
                 if match_pos < cursor && cursor - match_pos < u16::MAX as usize {
-                    if self.history.get(match_pos..match_pos + MIN_MATCH_LEN) == Some(&self.history[cursor..cursor + MIN_MATCH_LEN]) {
+                    if self.history.get(match_pos..match_pos + MIN_MATCH_LEN)
+                        == Some(&self.history[cursor..cursor + MIN_MATCH_LEN])
+                    {
                         let mut match_len = MIN_MATCH_LEN;
                         while cursor + match_len < self.history.len()
                             && match_len < MAX_MATCH_LEN
-                            && self.history.get(match_pos + match_len) == self.history.get(cursor + match_len)
+                            && self.history.get(match_pos + match_len)
+                                == self.history.get(cursor + match_len)
                         {
                             match_len += 1;
                         }
@@ -157,7 +160,11 @@ mod tests {
     fn test_simple_roundtrip() {
         let data = b"hello world, hello people";
         let compressed = compress(data);
-        println!("Compressed '{}': {:x?}", std::str::from_utf8(data).unwrap(), compressed);
+        println!(
+            "Compressed '{}': {:x?}",
+            std::str::from_utf8(data).unwrap(),
+            compressed
+        );
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(data, decompressed.as_slice());
     }
@@ -166,7 +173,11 @@ mod tests {
     fn test_long_literals() {
         let data = b"abcdefghijklmnopqrstuvwxyz";
         let compressed = compress(data);
-        println!("Compressed '{}': {:x?}", std::str::from_utf8(data).unwrap(), compressed);
+        println!(
+            "Compressed '{}': {:x?}",
+            std::str::from_utf8(data).unwrap(),
+            compressed
+        );
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(data, decompressed.as_slice());
     }
@@ -184,13 +195,21 @@ mod tests {
     fn test_overlapping_match() {
         let data = b"abcdeabcdeabcdeabcde"; // repeating sequence
         let compressed = compress(data);
-        println!("Compressed '{}': {:x?}", std::str::from_utf8(data).unwrap(), compressed);
+        println!(
+            "Compressed '{}': {:x?}",
+            std::str::from_utf8(data).unwrap(),
+            compressed
+        );
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(data, decompressed.as_slice());
 
         let data2 = b"abababababababababab";
         let compressed2 = compress(data2);
-        println!("Compressed '{}': {:x?}", std::str::from_utf8(data2).unwrap(), compressed2);
+        println!(
+            "Compressed '{}': {:x?}",
+            std::str::from_utf8(data2).unwrap(),
+            compressed2
+        );
         let decompressed2 = decompress(&compressed2).unwrap();
         assert_eq!(data2, decompressed2.as_slice());
     }
@@ -302,8 +321,14 @@ mod tests {
         println!("Plaintext size: {} bytes", plaintext_len);
         println!("Total JSON size: {} bytes", total_json_len);
         println!("Compressed log size: {} bytes", compressed_len);
-        println!("Compression ratio (compressed/json): {:.4}", compression_ratio);
-        println!("Overhead ratio (compressed/plaintext): {:.4}", overhead_ratio);
+        println!(
+            "Compression ratio (compressed/json): {:.4}",
+            compression_ratio
+        );
+        println!(
+            "Overhead ratio (compressed/plaintext): {:.4}",
+            overhead_ratio
+        );
         println!("--- End of Test ---");
     }
 
@@ -341,8 +366,14 @@ mod tests {
         println!("Plaintext size: {} bytes", plaintext_len);
         println!("Total JSON size: {} bytes", total_json_len);
         println!("Compressed log size: {} bytes", compressed_len);
-        println!("Compression ratio (compressed/json): {:.4}", compression_ratio);
-        println!("Overhead ratio (compressed/plaintext): {:.4}", overhead_ratio);
+        println!(
+            "Compression ratio (compressed/json): {:.4}",
+            compression_ratio
+        );
+        println!(
+            "Overhead ratio (compressed/plaintext): {:.4}",
+            overhead_ratio
+        );
         println!("--- End of Test ---");
     }
 }

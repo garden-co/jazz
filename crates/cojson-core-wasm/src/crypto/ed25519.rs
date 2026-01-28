@@ -1,11 +1,11 @@
-use wasm_bindgen::prelude::*;
 use cojson_core::crypto::ed25519;
+use wasm_bindgen::prelude::*;
 
 /// Generate a new Ed25519 signing key using secure random number generation.
 /// Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
 #[wasm_bindgen(js_name = newEd25519SigningKey)]
 pub fn new_ed25519_signing_key() -> Box<[u8]> {
-  ed25519::new_ed25519_signing_key()
+    ed25519::new_ed25519_signing_key()
 }
 
 /// WASM-exposed function to derive an Ed25519 verifying key from a signing key.

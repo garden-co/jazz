@@ -192,7 +192,11 @@ impl SessionMapImpl {
 
     /// Create a new SessionMap for a CoValue
     /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
-    pub fn new(co_id: &str, header_json: &str, max_tx_size: Option<u32>) -> Result<Self, SessionMapError> {
+    pub fn new(
+        co_id: &str,
+        header_json: &str,
+        max_tx_size: Option<u32>,
+    ) -> Result<Self, SessionMapError> {
         let header: CoValueHeader = serde_json::from_str(header_json)
             .map_err(|e| SessionMapError::InvalidHeader(e.to_string()))?;
 
@@ -208,7 +212,9 @@ impl SessionMapImpl {
             known_state_with_streaming: None,
             streaming_known_state: None,
             is_deleted: false,
-            max_tx_size: max_tx_size.map(|s| s as usize).unwrap_or(Self::DEFAULT_MAX_TX_SIZE),
+            max_tx_size: max_tx_size
+                .map(|s| s as usize)
+                .unwrap_or(Self::DEFAULT_MAX_TX_SIZE),
         })
     }
 
@@ -237,13 +243,16 @@ impl SessionMapImpl {
         let transactions: Vec<Transaction> = serde_json::from_str(transactions_json)?;
 
         // Get or create session log
-        let session_log = self.sessions.entry(session_id.to_string()).or_insert_with(|| {
-            SessionLogInternal::new(
-                self.co_id.clone(),
-                SessionID(session_id.to_string()),
-                signer_id.map(|s| SignerID(s.to_string())),
-            )
-        });
+        let session_log = self
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| {
+                SessionLogInternal::new(
+                    self.co_id.clone(),
+                    SessionID(session_id.to_string()),
+                    signer_id.map(|s| SignerID(s.to_string())),
+                )
+            });
 
         // Calculate size of transactions being added (for in-between signature tracking)
         let mut total_size: usize = 0;
@@ -331,13 +340,16 @@ impl SessionMapImpl {
         }
 
         // Get or create session log
-        let session_log = self.sessions.entry(session_id.to_string()).or_insert_with(|| {
-            SessionLogInternal::new(
-                self.co_id.clone(),
-                SessionID(session_id.to_string()),
-                None, // signerID derived from secret
-            )
-        });
+        let session_log = self
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| {
+                SessionLogInternal::new(
+                    self.co_id.clone(),
+                    SessionID(session_id.to_string()),
+                    None, // signerID derived from secret
+                )
+            });
 
         // Add new transaction
         let (signature, transaction) = session_log.add_new_transaction(
@@ -366,11 +378,15 @@ impl SessionMapImpl {
             session_log.record_inbetween_signature(tx_count - 1, signature.0.clone());
         }
 
-        self.known_state.sessions.insert(session_id.to_string(), tx_count);
+        self.known_state
+            .sessions
+            .insert(session_id.to_string(), tx_count);
 
         // Update known_state_with_streaming if present
         if let Some(ref mut ks_streaming) = self.known_state_with_streaming {
-            ks_streaming.sessions.insert(session_id.to_string(), tx_count);
+            ks_streaming
+                .sessions
+                .insert(session_id.to_string(), tx_count);
         }
 
         // Build result JSON
@@ -398,13 +414,16 @@ impl SessionMapImpl {
         }
 
         // Get or create session log
-        let session_log = self.sessions.entry(session_id.to_string()).or_insert_with(|| {
-            SessionLogInternal::new(
-                self.co_id.clone(),
-                SessionID(session_id.to_string()),
-                None, // signerID derived from secret
-            )
-        });
+        let session_log = self
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| {
+                SessionLogInternal::new(
+                    self.co_id.clone(),
+                    SessionID(session_id.to_string()),
+                    None, // signerID derived from secret
+                )
+            });
 
         // Add new transaction
         let (signature, transaction) = session_log.add_new_transaction(
@@ -430,11 +449,15 @@ impl SessionMapImpl {
             session_log.record_inbetween_signature(tx_count - 1, signature.0.clone());
         }
 
-        self.known_state.sessions.insert(session_id.to_string(), tx_count);
+        self.known_state
+            .sessions
+            .insert(session_id.to_string(), tx_count);
 
         // Update known_state_with_streaming if present
         if let Some(ref mut ks_streaming) = self.known_state_with_streaming {
-            ks_streaming.sessions.insert(session_id.to_string(), tx_count);
+            ks_streaming
+                .sessions
+                .insert(session_id.to_string(), tx_count);
         }
 
         // Build result JSON
@@ -470,7 +493,11 @@ impl SessionMapImpl {
     }
 
     /// Get transactions for a session from index
-    pub fn get_session_transactions(&self, session_id: &str, from_index: u32) -> Option<Vec<String>> {
+    pub fn get_session_transactions(
+        &self,
+        session_id: &str,
+        from_index: u32,
+    ) -> Option<Vec<String>> {
         let session_log = self.sessions.get(session_id)?;
         let transactions = session_log.transactions_json();
 
@@ -572,9 +599,10 @@ impl SessionMapImpl {
         // Only keep delete session counts in known state
         for (session_id, session_log) in &self.sessions {
             if is_delete_session_id(session_id) {
-                new_known_state
-                    .sessions
-                    .insert(session_id.clone(), session_log.transactions_json().len() as u32);
+                new_known_state.sessions.insert(
+                    session_id.clone(),
+                    session_log.transactions_json().len() as u32,
+                );
             }
         }
 
@@ -715,7 +743,7 @@ mod tests {
     #[test]
     fn test_mark_as_deleted() {
         let mut session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
-        
+
         session_map.mark_as_deleted();
         assert!(session_map.is_deleted());
     }
