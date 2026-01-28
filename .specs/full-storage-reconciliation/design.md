@@ -8,40 +8,50 @@ The key mechanism is a new `skipSubscription` flag on load messages that tells t
 
 ## Implementation Steps
 
-### 1. Enumerating all CoValues
+### 1. Enumerating CoValues (batched)
 
 #### 1.1. Add Storage API Method
 
 **File:** `packages/cojson/src/storage/types.ts`
 
-Add a new method to `StorageAPI` interface:
+Add a batched method to `StorageAPI`:
 
 ```typescript
 /**
- * Get all CoValue IDs currently stored in storage.
- * Used for full storage reconciliation.
+ * Get a batch of CoValue IDs from storage.
+ * Used for full storage reconciliation. Call repeatedly with increasing offset
+ * until the returned batch has length < limit (or 0) to enumerate all IDs.
+ * @param limit - Max number of IDs to return (e.g. 100).
+ * @param offset - Number of IDs to skip (0 for first batch).
+ * @param callback - Called with the batch. Ordering must be stable (e.g. by id).
  */
-getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void;
+getCoValueIDs(
+  limit: number,
+  offset: number,
+  callback: (batch: { id: RawCoID }[]) => void,
+): void;
 ```
 
 Also add to `DBClientInterfaceSync` and `DBClientInterfaceAsync`:
 
 ```typescript
-getAllCoValueIDs(): { id: RawCoID}[];  // sync
-getAllCoValueIDs(): Promise<{ id: RawCoID }[]>;  // async
+getCoValueIDs(limit: number, offset: number): { id: RawCoID }[];  // sync
+getCoValueIDs(limit: number, offset: number): Promise<{ id: RawCoID }[]>;  // async
 ```
 
-#### 1.2. Implement getAllCoValueIDs in Storage Backends
+#### 1.2. Implement getCoValueIDs in Storage Backends
+
+Implementations must use stable ordering (e.g. by `id`) and never load the full ID list into memory.
 
 ##### SQLite Sync Client
 
 **File:** `packages/cojson/src/storage/sqlite/client.ts`
 
 ```typescript
-getAllCoValueIDs(): { id: RawCoID }[] {
+getCoValueIDs(limit: number, offset: number): { id: RawCoID }[] {
   return this.db.query<{ id: RawCoID }>(
-    "SELECT id FROM coValues",
-    [],
+    "SELECT id FROM coValues ORDER BY id LIMIT ? OFFSET ?",
+    [limit, offset],
   );
 }
 ```
@@ -51,10 +61,10 @@ getAllCoValueIDs(): { id: RawCoID }[] {
 **File:** `packages/cojson/src/storage/sqliteAsync/client.ts`
 
 ```typescript
-async getAllCoValueIDs(): Promise<{ id: RawCoID }[]> {
+async getCoValueIDs(limit: number, offset: number): Promise<{ id: RawCoID }[]> {
   return this.db.query<{ id: RawCoID }>(
-    "SELECT id FROM coValues",
-    [],
+    "SELECT id FROM coValues ORDER BY id LIMIT ? OFFSET ?",
+    [limit, offset],
   );
 }
 ```
@@ -66,16 +76,24 @@ async getAllCoValueIDs(): Promise<{ id: RawCoID }[]> {
 - `packages/cojson/src/storage/storageAsync.ts`
 
 ```typescript
-getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void {
-  const ids = this.dbClient.getAllCoValueIDs();
-  callback(ids);
+getCoValueIDs(
+  limit: number,
+  offset: number,
+  callback: (batch: { id: RawCoID }[]) => void,
+): void {
+  const batch = this.dbClient.getCoValueIDs(limit, offset);
+  callback(batch);
 }
 ```
 
 For async:
 ```typescript
-getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void {
-  this.dbClient.getAllCoValueIDs().then(callback);
+getCoValueIDs(
+  limit: number,
+  offset: number,
+  callback: (batch: { id: RawCoID }[]) => void,
+): void {
+  this.dbClient.getCoValueIDs(limit, offset).then(callback);
 }
 ```
 
@@ -84,11 +102,15 @@ getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void {
 **File:** `packages/cojson-storage-indexeddb/src/idbClient.ts`
 
 ```typescript
-async getAllCoValueIDs(): Promise<{ id: RawCoID }[]> {
+async getAllCoValueIDs(
+  limit: number,
+  offset: number
+): Promise<{ id: RawCoID }[]> {
   return queryIndexedDbStore<StoredCoValueRow[]>(
     this.db,
     "coValues",
-    (store) => store.getAll(),
+    // Include upper bound but not lower bound (offset starts at 0)
+    (store) => store.getAll(IDBKeyRange.bound(offset, offset + limit, true, false)),
   );
 }
 ```
@@ -250,60 +272,68 @@ sendLoadRequest(
 Add new method to `SyncManager`:
 
 ```typescript
+const RECONCILIATION_BATCH_SIZE = 100;
+
 /**
  * Ensures all CoValues (both in memory and in storage) are synced to server peers.
  * This checks known states and uploads local content to servers without
  * subscribing to server changes.
+ * Processes CoValues in batches of RECONCILIATION_BATCH_SIZE
  */
 ensureCoValuesSync(): void {
   const processedIds = new Set<RawCoID>();
+  const batchSize = RECONCILIATION_BATCH_SIZE;
 
-  // Process CoValues in memory first
-  for (const coValue of this.local.allCoValues()) {
-    if (coValue.isAvailable()) {
-      this.processCoValueForSync(coValue);
+  // 1. Process CoValues in memory in batches of 100
+  const inMemory = Array.from(this.local.allCoValues()).filter((c) => c.isAvailable());
+  for (let i = 0; i < inMemory.length; i += batchSize) {
+    const batch = inMemory.slice(i, i + batchSize);
+    for (const coValue of batch) {
+      this.processCoValueForSync(coValue.id, coValue.knownState());
       processedIds.add(coValue.id);
     }
   }
 
-  // Then process CoValues from storage
-  this.local.storage?.getAllCoValueIDs((allIds) => {
-    for (const { id } of allIds) {
-      // Skip if already processed from memory
-      if (processedIds.has(id)) {
-        continue;
-      }
+  // 2. Process CoValues from storage in batches of 100 (do not fetch all IDs at once)
+  if (!this.local.storage) return;
 
-      const coValue = this.local.getCoValue(id);
-      
-      // Load known state from storage without loading full content
-      coValue.getKnownStateFromStorage((storageKnownState) => {
-        if (!storageKnownState) {
-          return;
-        }
-        
-        this.processCoValueForSync(id, storageKnownState);
-      });
-    }
-  });
+  const processStorageBatch = (offset: number) => {
+    this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
+      for (const { id } of batch) {
+        if (processedIds.has(id)) continue;
+
+        const coValue = this.local.getCoValue(id);
+        coValue.getKnownStateFromStorage((storageKnownState) => {
+          if (!storageKnownState) return;
+          processedIds.add(id);
+          this.processCoValueForSync(id, storageKnownState);
+        });
+      }
+      // If we got a full batch, there may be more; request next batch
+      if (batch.length >= batchSize) {
+        processStorageBatch(offset + batchSize);
+      }
+    });
+  };
+  processStorageBatch(0);
 }
 
 /**
  * Helper to process a single CoValue for sync with server peers.
  */
-private processCoValueForSync(coValue: CoValueCore): void {
-  const serverPeers = this.getPersistentServerPeers(coValue.id);
+private processCoValueForSync(id: RawCoID, localKnownState: CoValueKnownState): void {
+  const serverPeers = this.getPersistentServerPeers(id);
   for (const peer of serverPeers) {
-    const isSynced = this.syncState.isSynced(peer, coValue.id);
-    
+    const isSynced = this.syncState.isSynced(peer, id);
     if (!isSynced) {
-      // Send load request with skipSubscription to get server's known state,
-      // once it's received, we'll send the missing content if necessary
+      const coValue = this.local.getCoValue(id);
       peer.sendLoadRequest(coValue, "low-priority", true);
     }
   }
 }
 ```
+
+**Note:** In-memory batch processing runs synchronously (slice + loop). Storage batch processing is asynchronous: each batch is requested only after the previous batch has been handled; the next batch is requested when `batch.length >= batchSize`. This avoids loading all IDs from storage at once.
 
 ### 4. Handle Known State Response from skipSubscription Load
 
@@ -320,7 +350,7 @@ after receiving the known state from the server.
 
 3. **Loading Strategy**: For CoValues not in memory, we use `getKnownStateFromStorage` to avoid full loads. Only load full content when we need to send it to the server.
 
-4. **Performance**: For large databases, consider batching the processing of CoValues to avoid blocking.
+4. **Batching**: CoValues are processed in batches of 100 (in memory: slice and loop; from storage: `getCoValueIDs(100, offset, ...)`). Storage never returns all IDs in one call, so large databases do not load the full ID list into memory or block on a single large query.
 
 ## Testing
 
