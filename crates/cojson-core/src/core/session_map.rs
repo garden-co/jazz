@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_session_map_creation() {
-        let session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
+        let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
 
         assert_eq!(session_map.co_id.0, "co_test");
         assert!(!session_map.is_deleted());
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_header_round_trip() {
-        let session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
+        let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
 
         let header_json = session_map.get_header();
         // Parse back to verify
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn test_known_state() {
-        let session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
+        let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
 
         let known_state_json = session_map.get_known_state();
         let known_state: KnownState = serde_json::from_str(&known_state_json).unwrap();
@@ -717,8 +717,8 @@ mod tests {
 
     #[test]
     fn test_mark_as_deleted() {
-        let mut session_map = SessionMapImpl::new("co_test", TEST_HEADER).unwrap();
-
+        let mut session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
+        
         session_map.mark_as_deleted();
         assert!(session_map.is_deleted());
     }
