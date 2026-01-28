@@ -21,6 +21,9 @@ pub struct SessionMapImpl {
     known_state_with_streaming: Option<KnownState>,
     streaming_known_state: Option<KnownStateSessions>,
     is_deleted: bool,
+    /// Max recommended transaction size threshold for in-between signatures
+    /// Matches TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE from TypeScript
+    max_tx_size: usize,
 }
 
 // ============================================================================
@@ -184,8 +187,12 @@ pub enum SessionMapError {
 // ============================================================================
 
 impl SessionMapImpl {
+    /// Default max transaction size (100KB) - matches TypeScript default
+    pub const DEFAULT_MAX_TX_SIZE: usize = 100 * 1024;
+
     /// Create a new SessionMap for a CoValue
-    pub fn new(co_id: &str, header_json: &str) -> Result<Self, SessionMapError> {
+    /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+    pub fn new(co_id: &str, header_json: &str, max_tx_size: Option<u32>) -> Result<Self, SessionMapError> {
         let header: CoValueHeader = serde_json::from_str(header_json)
             .map_err(|e| SessionMapError::InvalidHeader(e.to_string()))?;
 
@@ -201,6 +208,7 @@ impl SessionMapImpl {
             known_state_with_streaming: None,
             streaming_known_state: None,
             is_deleted: false,
+            max_tx_size: max_tx_size.map(|s| s as usize).unwrap_or(Self::DEFAULT_MAX_TX_SIZE),
         })
     }
 
@@ -277,7 +285,7 @@ impl SessionMapImpl {
 
         // Record in-between signature if size exceeds threshold
         let tx_count = session_log.transactions_json().len() as u32;
-        if session_log.needs_inbetween_signature() && tx_count > 0 {
+        if session_log.cumulative_tx_size() > self.max_tx_size && tx_count > 0 {
             session_log.record_inbetween_signature(tx_count - 1, signature.to_string());
         }
 
@@ -354,7 +362,7 @@ impl SessionMapImpl {
         let tx_count = session_log.transactions_json().len() as u32;
 
         // Record in-between signature if size exceeds threshold
-        if session_log.needs_inbetween_signature() && tx_count > 0 {
+        if session_log.cumulative_tx_size() > self.max_tx_size && tx_count > 0 {
             session_log.record_inbetween_signature(tx_count - 1, signature.0.clone());
         }
 
@@ -418,7 +426,7 @@ impl SessionMapImpl {
         let tx_count = session_log.transactions_json().len() as u32;
 
         // Record in-between signature if size exceeds threshold
-        if session_log.needs_inbetween_signature() && tx_count > 0 {
+        if session_log.cumulative_tx_size() > self.max_tx_size && tx_count > 0 {
             session_log.record_inbetween_signature(tx_count - 1, signature.0.clone());
         }
 

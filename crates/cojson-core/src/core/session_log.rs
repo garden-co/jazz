@@ -509,10 +509,10 @@ impl SessionLogInternal {
         self.tx_size_since_last_inbetween_signature += size;
     }
 
-    /// Check if we need an in-between signature (exceeds 100KB threshold)
-    /// Matches TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE (100 * 1024 = 102400)
-    pub fn needs_inbetween_signature(&self) -> bool {
-        self.tx_size_since_last_inbetween_signature > 100 * 1024
+    /// Get the cumulative transaction size since the last in-between signature
+    /// Used by SessionMapImpl to check against configurable threshold
+    pub fn cumulative_tx_size(&self) -> usize {
+        self.tx_size_since_last_inbetween_signature
     }
 
     /// Get the signature_after map (for iteration in newContentSince)

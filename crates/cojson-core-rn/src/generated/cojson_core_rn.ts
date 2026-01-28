@@ -2363,8 +2363,13 @@ export class SessionMap
   readonly [pointerLiteralSymbol]: UnsafeMutableRawPointer;
   /**
    * Create a new SessionMap for a CoValue
+   * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
    */
-  constructor(coId: string, headerJson: string) /*throws*/ {
+  constructor(
+    coId: string,
+    headerJson: string,
+    maxTxSize: /*u32*/ number | undefined
+  ) /*throws*/ {
     super();
     const pointer = uniffiCaller.rustCallWithError(
       /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
@@ -2374,6 +2379,7 @@ export class SessionMap
         return nativeModule().ubrn_uniffi_cojson_core_rn_fn_constructor_sessionmap_new(
           FfiConverterString.lower(coId),
           FfiConverterString.lower(headerJson),
+          FfiConverterOptionalUInt32.lower(maxTxSize),
           callStatus
         );
       },
@@ -2905,6 +2911,9 @@ const FfiConverterOptionalInt32 = new FfiConverterOptional(FfiConverterInt32);
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
 
+// FfiConverter for /*u32*/number | undefined
+const FfiConverterOptionalUInt32 = new FfiConverterOptional(FfiConverterUInt32);
+
 /**
  * This should be called before anything else.
  *
@@ -3371,7 +3380,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_constructor_sessionmap_new() !==
-    1018
+    17124
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_constructor_sessionmap_new'

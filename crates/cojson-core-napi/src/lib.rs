@@ -225,9 +225,10 @@ pub struct SessionMap {
 #[napi]
 impl SessionMap {
   /// Create a new SessionMap for a CoValue
+  /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
   #[napi(constructor)]
-  pub fn new(co_id: String, header_json: String) -> napi::Result<SessionMap> {
-    let internal = SessionMapImpl::new(&co_id, &header_json)
+  pub fn new(co_id: String, header_json: String, max_tx_size: Option<u32>) -> napi::Result<SessionMap> {
+    let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
     Ok(SessionMap { internal })
   }

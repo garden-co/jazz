@@ -1,4 +1,5 @@
 import { ControlledAccountOrAgent } from "../coValues/account.js";
+import { TRANSACTION_CONFIG } from "../config.js";
 import type {
   CryptoProvider,
   KeyID,
@@ -51,9 +52,13 @@ export class SessionMap {
     this.id = id;
     this.crypto = crypto;
 
-    // Create the Rust SessionMapImpl with the header
+    // Create the Rust SessionMapImpl with the header and max tx size threshold
     const headerJson = stableStringify(header);
-    this.impl = crypto.createSessionMap(id, headerJson);
+    this.impl = crypto.createSessionMap(
+      id,
+      headerJson,
+      TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE,
+    );
 
     // Set streaming known state if provided
     if (streamingKnownState) {

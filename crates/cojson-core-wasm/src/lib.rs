@@ -221,9 +221,10 @@ pub struct SessionMap {
 #[wasm_bindgen]
 impl SessionMap {
     /// Create a new SessionMap for a CoValue
+    /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
     #[wasm_bindgen(constructor)]
-    pub fn new(co_id: String, header_json: String) -> Result<SessionMap, CojsonCoreWasmError> {
-        let internal = SessionMapImpl::new(&co_id, &header_json)
+    pub fn new(co_id: String, header_json: String, max_tx_size: Option<u32>) -> Result<SessionMap, CojsonCoreWasmError> {
+        let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
             .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))?;
         Ok(SessionMap { internal })
     }

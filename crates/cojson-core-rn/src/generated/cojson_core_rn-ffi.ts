@@ -127,6 +127,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_fn_constructor_sessionmap_new(
     coId: Uint8Array,
     headerJson: Uint8Array,
+    maxTxSize: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
   ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_add_transactions(

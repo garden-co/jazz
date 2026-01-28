@@ -291,8 +291,9 @@ export class SessionMap {
   getKnownStateWithStreaming(): string | undefined;
   /**
    * Create a new SessionMap for a CoValue
+   * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
    */
-  constructor(co_id: string, header_json: string);
+  constructor(co_id: string, header_json: string, max_tx_size?: number | null);
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -327,7 +328,7 @@ export interface InitOutput {
   readonly sessionmap_makeNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number, number, number];
   readonly sessionmap_makeNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
   readonly sessionmap_markAsDeleted: (a: number) => void;
-  readonly sessionmap_new: (a: number, b: number, c: number, d: number) => [number, number, number];
+  readonly sessionmap_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
   readonly sessionmap_setStreamingKnownState: (a: number, b: number, c: number) => [number, number];
   readonly getSignerId: (a: number, b: number) => [number, number, number, number];
   readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
