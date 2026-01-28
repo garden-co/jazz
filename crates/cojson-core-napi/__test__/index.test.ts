@@ -556,7 +556,7 @@ describe("SessionMap", () => {
     const header = createGroupHeader();
     const sessionMap = new SessionMap(coId, header);
 
-    const knownState = JSON.parse(sessionMap.getKnownState());
+    const knownState = sessionMap.getKnownState();
     expect(knownState).toBeDefined();
     expect(knownState.id).toBe(coId);
     expect(knownState.header).toBe(true);
@@ -588,8 +588,7 @@ describe("SessionMap", () => {
     // Now should have streaming known state
     const knownStateWithStreaming = sessionMap.getKnownStateWithStreaming();
     expect(knownStateWithStreaming).toBeDefined();
-    const parsed = JSON.parse(knownStateWithStreaming!);
-    expect(parsed.id).toBe(coId);
+    expect(knownStateWithStreaming!.id).toBe(coId);
   });
 
   test("header serialization is stable (alphabetically sorted keys)", () => {
@@ -748,7 +747,7 @@ describe("SessionMap - Transaction Flow", () => {
     expect(txParsed.madeAt).toBe(madeAt);
 
     // Known state should reflect the transaction
-    const knownState = JSON.parse(sessionMap.getKnownState());
+    const knownState = sessionMap.getKnownState();
     expect(knownState.sessions[sessionId]).toBe(1);
   });
 
@@ -831,7 +830,7 @@ describe("SessionMap - Transaction Flow", () => {
     expect(partialTx!.length).toBe(3);
 
     // Known state should show 5 transactions
-    const knownState = JSON.parse(sessionMap.getKnownState());
+    const knownState = sessionMap.getKnownState();
     expect(knownState.sessions[sessionId]).toBe(5);
   });
 
@@ -866,7 +865,7 @@ describe("SessionMap - Transaction Flow", () => {
     expect(sessionMap.getTransactionCount(session3)).toBe(3);
 
     // Known state should reflect all sessions
-    const knownState = JSON.parse(sessionMap.getKnownState());
+    const knownState = sessionMap.getKnownState();
     expect(knownState.sessions[session1]).toBe(2);
     expect(knownState.sessions[session2]).toBe(1);
     expect(knownState.sessions[session3]).toBe(3);
@@ -1043,7 +1042,7 @@ describe("SessionMap - Transaction Flow", () => {
     sessionMap.makeNewTrustingTransaction(session2, signerSecret, JSON.stringify({ s: 2 }), null, Date.now());
 
     // Base known state
-    const baseKnownState = JSON.parse(sessionMap.getKnownState());
+    const baseKnownState = sessionMap.getKnownState();
     expect(baseKnownState.sessions[session1]).toBe(2);
     expect(baseKnownState.sessions[session2]).toBe(1);
 
@@ -1052,12 +1051,70 @@ describe("SessionMap - Transaction Flow", () => {
     sessionMap.setStreamingKnownState(streamingSessions);
 
     // Known state with streaming should combine both
-    const combinedKnownState = sessionMap.getKnownStateWithStreaming();
-    expect(combinedKnownState).toBeDefined();
-    const combined = JSON.parse(combinedKnownState!);
+    const combined = sessionMap.getKnownStateWithStreaming();
+    expect(combined).toBeDefined();
     // Streaming state should be additive (max of local and streaming)
-    expect(combined.sessions[session1]).toBe(5); // streaming has more
-    expect(combined.sessions[session2]).toBe(3); // streaming has more
+    expect(combined!.sessions[session1]).toBe(5); // streaming has more
+    expect(combined!.sessions[session2]).toBe(3); // streaming has more
+  });
+
+  test("getKnownState returns native JS object", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+
+    const session1 = `${coId}_session_z1`;
+    const session2 = `${coId}_session_z2`;
+
+    // Create some transactions
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1, tx: 2 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session2, signerSecret, JSON.stringify({ s: 2 }), null, Date.now());
+
+    // Get known state (returns native object, no JSON parsing needed)
+    const knownState = sessionMap.getKnownState();
+    
+    // Verify it's a native object with correct structure
+    expect(typeof knownState).toBe("object");
+    expect(knownState.id).toBe(coId);
+    expect(knownState.header).toBe(true);
+    expect(typeof knownState.sessions).toBe("object");
+    expect(knownState.sessions[session1]).toBe(2);
+    expect(knownState.sessions[session2]).toBe(1);
+  });
+
+  test("getKnownStateWithStreaming returns native JS object", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header);
+    const { signerSecret } = createSignerKeyPair();
+
+    const session1 = `${coId}_session_z1`;
+    const session2 = `${coId}_session_z2`;
+
+    // Create some transactions
+    sessionMap.makeNewTrustingTransaction(session1, signerSecret, JSON.stringify({ s: 1 }), null, Date.now());
+    sessionMap.makeNewTrustingTransaction(session2, signerSecret, JSON.stringify({ s: 2 }), null, Date.now());
+
+    // Initially no streaming state (NAPI returns null for Option::None)
+    const noStreaming = sessionMap.getKnownStateWithStreaming();
+    expect(noStreaming).toBeNull();
+
+    // Set streaming known state
+    const streamingSessions = JSON.stringify({ [session1]: 5, [session2]: 3 });
+    sessionMap.setStreamingKnownState(streamingSessions);
+
+    // Get known state with streaming (returns native object)
+    const knownStateWithStreaming = sessionMap.getKnownStateWithStreaming();
+    
+    // Verify it's a native object with correct structure
+    expect(knownStateWithStreaming).toBeDefined();
+    expect(typeof knownStateWithStreaming).toBe("object");
+    expect(knownStateWithStreaming!.id).toBe(coId);
+    expect(knownStateWithStreaming!.header).toBe(true);
+    expect(knownStateWithStreaming!.sessions[session1]).toBe(5);
+    expect(knownStateWithStreaming!.sessions[session2]).toBe(3);
   });
 
   test("deletion flow", () => {

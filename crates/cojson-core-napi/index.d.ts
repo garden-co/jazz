@@ -68,10 +68,10 @@ export declare class SessionMap {
   getSignatureAfter(sessionId: string, txIndex: number): string | null
   /** Get the last signature checkpoint index (-1 if no checkpoints, undefined if session not found) */
   getLastSignatureCheckpoint(sessionId: string): number | null
-  /** Get the known state as JSON */
-  getKnownState(): string
-  /** Get the known state with streaming as JSON (returns undefined if no streaming) */
-  getKnownStateWithStreaming(): string | null
+  /** Get the known state as a native JavaScript object */
+  getKnownState(): KnownState
+  /** Get the known state with streaming as a native JavaScript object */
+  getKnownStateWithStreaming(): KnownState | null
   /** Set streaming known state */
   setStreamingKnownState(streamingJson: string): void
   /** Mark this CoValue as deleted */
@@ -220,6 +220,13 @@ export declare function getSealerId(secret: Uint8Array): string
  * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
  */
 export declare function getSignerId(secret: Uint8Array): string
+
+/** KnownState as a native JavaScript object (no JSON serialization needed) */
+export interface KnownState {
+  id: string
+  header: boolean
+  sessions: Record<string, number>
+}
 
 /**
  * Generate a new Ed25519 signing key using secure random number generation.

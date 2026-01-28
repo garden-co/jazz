@@ -369,8 +369,14 @@ export interface SessionMapImpl {
   getLastSignatureCheckpoint(sessionId: string): number | undefined; // -1 if no checkpoints, undefined if session not found
 
   // === Known State ===
-  getKnownState(): string;
-  getKnownStateWithStreaming(): string | undefined;
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  };
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined;
   setStreamingKnownState(streamingJson: string): void;
 
   // === Deletion ===
