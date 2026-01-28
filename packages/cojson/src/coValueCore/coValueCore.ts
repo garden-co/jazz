@@ -614,7 +614,7 @@ export class CoValueCore {
       this.id,
       this.node.crypto,
       header,
-      new SessionMap(this.id, this.node.crypto, streamingKnownState),
+      new SessionMap(this.id, this.node.crypto, header, streamingKnownState),
     );
     // Clean up if transitioning from garbageCollected/onlyKnownState
     if (this.isAvailable()) {
