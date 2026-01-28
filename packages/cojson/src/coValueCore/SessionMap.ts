@@ -151,6 +151,65 @@ export class SessionMap {
     this.cachedImmutableKnownStateWithStreaming = undefined;
   }
 
+  /**
+   * Update the session log cache directly when adding transactions.
+   * This avoids round-trips to Rust on subsequent reads.
+   */
+  private updateSessionLogCache(
+    sessionID: SessionID,
+    signerID: SignerID | undefined,
+    newTransactions: Transaction[],
+    newSignature: Signature,
+  ) {
+    const cached = this.sessionLogCache.get(sessionID);
+    const currentTxCount = this.impl.getTransactionCount(sessionID);
+
+    if (cached) {
+      // Append to existing cache
+      cached.transactions.push(...newTransactions);
+      cached.lastSignature = newSignature;
+      if (signerID) {
+        cached.signerID = signerID;
+      }
+      // Check if we need to update signatureAfter (in-between signature)
+      const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+      if (
+        lastCheckpoint !== undefined &&
+        lastCheckpoint !== null &&
+        lastCheckpoint >= 0
+      ) {
+        const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
+        if (sig) {
+          cached.signatureAfter[lastCheckpoint] = sig as Signature;
+        }
+      }
+      this.sessionLogCacheValid.set(sessionID, currentTxCount);
+    } else {
+      // Create new cache entry
+      const sessionLog: SessionLog = {
+        signerID,
+        transactions: [...newTransactions],
+        lastSignature: newSignature,
+        signatureAfter: {},
+        sessionID,
+      };
+      // Check for in-between signature
+      const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+      if (
+        lastCheckpoint !== undefined &&
+        lastCheckpoint !== null &&
+        lastCheckpoint >= 0
+      ) {
+        const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
+        if (sig) {
+          sessionLog.signatureAfter[lastCheckpoint] = sig as Signature;
+        }
+      }
+      this.sessionLogCache.set(sessionID, sessionLog);
+      this.sessionLogCacheValid.set(sessionID, currentTxCount);
+    }
+  }
+
   private getSessionLog(sessionID: SessionID): SessionLog {
     const currentTxCount = this.impl.getTransactionCount(sessionID);
     const cachedTxCount = this.sessionLogCacheValid.get(sessionID);
@@ -233,9 +292,13 @@ export class SessionMap {
       skipVerify,
     );
 
-    // Invalidate cache for this session
-    this.sessionLogCacheValid.delete(sessionID);
-    this.sessionLogCache.delete(sessionID);
+    // Update cache directly instead of invalidating
+    this.updateSessionLogCache(
+      sessionID,
+      signerID,
+      newTransactions,
+      newSignature,
+    );
     // Invalidate immutable known state caches
     this.cachedImmutableKnownState = undefined;
     this.cachedImmutableKnownStateWithStreaming = undefined;
@@ -275,15 +338,21 @@ export class SessionMap {
       transaction: Transaction;
     };
 
-    // Invalidate cache for this session
-    this.sessionLogCacheValid.delete(sessionID);
-    this.sessionLogCache.delete(sessionID);
+    const signature = result.signature as Signature;
+
+    // Update cache directly instead of invalidating
+    this.updateSessionLogCache(
+      sessionID,
+      signerAgent.id as unknown as SignerID,
+      [result.transaction],
+      signature,
+    );
     // Invalidate immutable known state caches
     this.cachedImmutableKnownState = undefined;
     this.cachedImmutableKnownStateWithStreaming = undefined;
 
     return {
-      signature: result.signature as Signature,
+      signature,
       transaction: result.transaction,
     };
   }
@@ -318,15 +387,21 @@ export class SessionMap {
       transaction: Transaction;
     };
 
-    // Invalidate cache for this session
-    this.sessionLogCacheValid.delete(sessionID);
-    this.sessionLogCache.delete(sessionID);
+    const signature = result.signature as Signature;
+
+    // Update cache directly instead of invalidating
+    this.updateSessionLogCache(
+      sessionID,
+      signerAgent.id as unknown as SignerID,
+      [result.transaction],
+      signature,
+    );
     // Invalidate immutable known state caches
     this.cachedImmutableKnownState = undefined;
     this.cachedImmutableKnownStateWithStreaming = undefined;
 
     return {
-      signature: result.signature as Signature,
+      signature,
       transaction: result.transaction,
     };
   }
