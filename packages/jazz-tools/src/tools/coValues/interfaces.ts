@@ -584,7 +584,29 @@ export async function unstable_loadUnique<
   },
 ): Promise<MaybeLoaded<Loaded<S, R>>> {
   const cls = coValueClassFromCoValueClassOrSchema(schema);
+  const headerType = getUniqueHeaderType(schema);
 
+  // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
+  return internalLoadUnique(cls, {
+    type: headerType,
+    unique: options.unique,
+    onCreateWhenMissing: options.onCreateWhenMissing,
+    onUpdateWhenFound: options.onUpdateWhenFound,
+    owner: options.owner,
+    resolve: options.resolve,
+  }) as unknown as MaybeLoaded<Loaded<S, R>>;
+}
+
+export type CoValueHeaderType = "comap" | "colist" | "costream" | "coplaintext";
+
+/**
+ * Get the CoValueHeaderType from a CoValue class.
+ * Throws for unsupported types (Group, Account, BinaryCoStream).
+ */
+export function getUniqueHeaderType(
+  schema: CoValueClassOrSchema,
+): CoValueHeaderType {
+  const cls = coValueClassFromCoValueClassOrSchema(schema);
   const typeSym = cls.prototype[TypeSym] as string | undefined;
   if (!typeSym) {
     throw new Error(`Cannot determine CoValue type from class: ${cls.name}`);
@@ -598,18 +620,8 @@ export async function unstable_loadUnique<
     );
   }
 
-  // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
-  return internalLoadUnique(cls, {
-    type: headerType,
-    unique: options.unique,
-    onCreateWhenMissing: options.onCreateWhenMissing,
-    onUpdateWhenFound: options.onUpdateWhenFound,
-    owner: options.owner,
-    resolve: options.resolve,
-  }) as unknown as MaybeLoaded<Loaded<S, R>>;
+  return headerType;
 }
-
-type CoValueHeaderType = "comap" | "colist" | "costream" | "coplaintext";
 
 /**
  * Generate a unique header for a CoValue class.
