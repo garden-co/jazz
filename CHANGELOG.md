@@ -1,3 +1,9 @@
+Released Jazz 0.20.7:
+- Bugfix: fixed a memory leak in the WebSocket outgoing queue introduced in 0.20.1 and improved queue close management
+
+Released Jazz 0.20.6:
+- Improved performance of read key lookups in groups by using cached indices instead of iterating through all keys
+
 Released Jazz 0.20.5:
 - Bugfix: fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
 - Bugfix: fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
