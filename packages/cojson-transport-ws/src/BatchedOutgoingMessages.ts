@@ -63,12 +63,14 @@ export class BatchedOutgoingMessages
       return;
     }
 
-    this.queue.push(msg);
-
+    // If already processing, queue the message for later
     if (this.processing) {
+      this.queue.push(msg);
       return;
     }
 
+    // Fast path: send directly without touching the queue
+    // This avoids push/pull counter mismatch when WebSocket is ready
     if (
       isWebSocketOpen(this.websocket) &&
       !hasWebSocketTooMuchBufferedData(this.websocket)
@@ -77,6 +79,8 @@ export class BatchedOutgoingMessages
       return;
     }
 
+    // Slow path: queue and process asynchronously
+    this.queue.push(msg);
     this.processQueue().catch((e) => {
       logger.error("Error while processing sendMessage queue", { err: e });
     });
