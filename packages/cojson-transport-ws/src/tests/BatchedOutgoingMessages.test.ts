@@ -142,6 +142,8 @@ describe("BatchedOutgoingMessages", () => {
         { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
       );
       expect(pushed).toEqual(pulled);
+      // Verify we're actually bypassing the queue
+      expect(pushed).toBe(0);
     });
 
     test("slow path: should push to queue when WebSocket is not ready", async () => {
@@ -193,20 +195,18 @@ describe("BatchedOutgoingMessages", () => {
       // All messages should be sent directly
       expect(mockWebSocket.send).toHaveBeenCalledTimes(3);
 
-      // Queue backlog (pushed - pulled) should be 0
-      const pushed =
-        (await metricReader.getMetricValue(
-          "jazz.messagequeue.outgoing.pushed",
-          { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
-        )) ?? 0;
-      const pulled =
-        (await metricReader.getMetricValue(
-          "jazz.messagequeue.outgoing.pulled",
-          { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
-        )) ?? 0;
+      // Queue should not be used (both 0)
+      const pushed = await metricReader.getMetricValue(
+        "jazz.messagequeue.outgoing.pushed",
+        { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
+      );
+      const pulled = await metricReader.getMetricValue(
+        "jazz.messagequeue.outgoing.pulled",
+        { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
+      );
 
-      // Both should be equal (no backlog)
-      expect(Number(pushed) - Number(pulled)).toBe(0);
+      expect(pushed).toBe(pulled);
+      expect(pushed).toBe(0);
     });
 
     test("should queue second message when first is being processed", async () => {
@@ -271,30 +271,26 @@ describe("BatchedOutgoingMessages", () => {
       expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
 
       // Queue metrics should be balanced (no messages queued after close)
-      const pushedHigh =
-        (await metricReader.getMetricValue(
-          "jazz.messagequeue.outgoing.pushed",
-          { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
-        )) ?? 0;
-      const pulledHigh =
-        (await metricReader.getMetricValue(
-          "jazz.messagequeue.outgoing.pulled",
-          { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
-        )) ?? 0;
-      const pushedMedium =
-        (await metricReader.getMetricValue(
-          "jazz.messagequeue.outgoing.pushed",
-          { priority: CO_VALUE_PRIORITY.MEDIUM, peerRole: "client" },
-        )) ?? 0;
-      const pulledMedium =
-        (await metricReader.getMetricValue(
-          "jazz.messagequeue.outgoing.pulled",
-          { priority: CO_VALUE_PRIORITY.MEDIUM, peerRole: "client" },
-        )) ?? 0;
+      const pushedHigh = await metricReader.getMetricValue(
+        "jazz.messagequeue.outgoing.pushed",
+        { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
+      );
+      const pulledHigh = await metricReader.getMetricValue(
+        "jazz.messagequeue.outgoing.pulled",
+        { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
+      );
+      const pushedMedium = await metricReader.getMetricValue(
+        "jazz.messagequeue.outgoing.pushed",
+        { priority: CO_VALUE_PRIORITY.MEDIUM, peerRole: "client" },
+      );
+      const pulledMedium = await metricReader.getMetricValue(
+        "jazz.messagequeue.outgoing.pulled",
+        { priority: CO_VALUE_PRIORITY.MEDIUM, peerRole: "client" },
+      );
 
       // All queues should be balanced
-      expect(Number(pushedHigh) - Number(pulledHigh)).toBe(0);
-      expect(Number(pushedMedium) - Number(pulledMedium)).toBe(0);
+      expect(pushedHigh).toBe(pulledHigh);
+      expect(pushedMedium).toBe(pulledMedium);
     });
   });
 });

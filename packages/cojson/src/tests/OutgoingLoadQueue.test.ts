@@ -766,8 +766,6 @@ describe("OutgoingLoadQueue", () => {
 
         expect(pushedBefore).toBe(4);
         expect(pulledBefore).toBe(1);
-        // 3 items still pending (not balanced)
-        expect(Number(pushedBefore ?? 0) - Number(pulledBefore ?? 0)).toBe(3);
 
         // Clear the queue - this should drain pending items, incrementing pulled counter
         queue.clear();
