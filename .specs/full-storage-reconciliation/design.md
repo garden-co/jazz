@@ -21,14 +21,14 @@ Add a new method to `StorageAPI` interface:
  * Get all CoValue IDs currently stored in storage.
  * Used for full storage reconciliation.
  */
-getAllCoValueIDs(callback: (ids: RawCoID[]) => void): void;
+getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void;
 ```
 
 Also add to `DBClientInterfaceSync` and `DBClientInterfaceAsync`:
 
 ```typescript
-getAllCoValueIDs(): RawCoID[];  // sync
-getAllCoValueIDs(): Promise<RawCoID[]>;  // async
+getAllCoValueIDs(): { id: RawCoID}[];  // sync
+getAllCoValueIDs(): Promise<{ id: RawCoID }[]>;  // async
 ```
 
 #### 1.2. Implement getAllCoValueIDs in Storage Backends
@@ -38,12 +38,11 @@ getAllCoValueIDs(): Promise<RawCoID[]>;  // async
 **File:** `packages/cojson/src/storage/sqlite/client.ts`
 
 ```typescript
-getAllCoValueIDs(): RawCoID[] {
-  const rows = this.db.query<{ id: RawCoID }>(
+getAllCoValueIDs(): { id: RawCoID }[] {
+  return this.db.query<{ id: RawCoID }>(
     "SELECT id FROM coValues",
     [],
   );
-  return rows.map((row) => row.id);
 }
 ```
 
@@ -52,12 +51,11 @@ getAllCoValueIDs(): RawCoID[] {
 **File:** `packages/cojson/src/storage/sqliteAsync/client.ts`
 
 ```typescript
-async getAllCoValueIDs(): Promise<RawCoID[]> {
-  const rows = await this.db.query<{ id: RawCoID }>(
+async getAllCoValueIDs(): Promise<{ id: RawCoID }[]> {
+  return this.db.query<{ id: RawCoID }>(
     "SELECT id FROM coValues",
     [],
   );
-  return rows.map((row) => row.id);
 }
 ```
 
@@ -68,7 +66,7 @@ async getAllCoValueIDs(): Promise<RawCoID[]> {
 - `packages/cojson/src/storage/storageAsync.ts`
 
 ```typescript
-getAllCoValueIDs(callback: (ids: RawCoID[]) => void): void {
+getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void {
   const ids = this.dbClient.getAllCoValueIDs();
   callback(ids);
 }
@@ -76,7 +74,7 @@ getAllCoValueIDs(callback: (ids: RawCoID[]) => void): void {
 
 For async:
 ```typescript
-getAllCoValueIDs(callback: (ids: RawCoID[]) => void): void {
+getAllCoValueIDs(callback: (ids: { id: RawCoID }[]) => void): void {
   this.dbClient.getAllCoValueIDs().then(callback);
 }
 ```
@@ -86,11 +84,11 @@ getAllCoValueIDs(callback: (ids: RawCoID[]) => void): void {
 **File:** `packages/cojson-storage-indexeddb/src/idbClient.ts`
 
 ```typescript
-async getAllCoValueIDs(): Promise<RawCoID[]> {
-  return queryIndexedDbStore<RawCoID[]>(
+async getAllCoValueIDs(): Promise<{ id: RawCoID }[]> {
+  return queryIndexedDbStore<StoredCoValueRow[]>(
     this.db,
     "coValues",
-    (store) => store.index("coValuesById").getAllKeys(),
+    (store) => store.getAll(),
   );
 }
 ```
@@ -270,7 +268,7 @@ ensureCoValuesSync(): void {
 
   // Then process CoValues from storage
   this.local.storage?.getAllCoValueIDs((allIds) => {
-    for (const id of allIds) {
+    for (const { id } of allIds) {
       // Skip if already processed from memory
       if (processedIds.has(id)) {
         continue;
