@@ -63,6 +63,11 @@ export class BatchedOutgoingMessages
       return;
     }
 
+    // Don't accept messages after close - they would be queued but never pulled
+    if (this.closed) {
+      return;
+    }
+
     // If already processing, queue the message for later
     if (this.processing) {
       this.queue.push(msg);

@@ -242,5 +242,59 @@ describe("BatchedOutgoingMessages", () => {
         }),
       ).toBe(1);
     });
+
+    test("should discard messages pushed after close to prevent push/pull mismatch", async () => {
+      const metricReader = createTestMetricReader();
+      const mockWebSocket = createMockWebSocket({
+        readyState: 1, // OPEN
+        bufferedAmount: 0,
+      });
+
+      const outgoing = new BatchedOutgoingMessages(
+        mockWebSocket,
+        false,
+        "client",
+      );
+
+      // Send a message normally
+      outgoing.push(createTestMessage(CO_VALUE_PRIORITY.HIGH));
+      expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
+
+      // Close the channel
+      outgoing.close();
+
+      // Try to send more messages after close
+      outgoing.push(createTestMessage(CO_VALUE_PRIORITY.HIGH));
+      outgoing.push(createTestMessage(CO_VALUE_PRIORITY.MEDIUM));
+
+      // Messages after close should be discarded, not sent
+      expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
+
+      // Queue metrics should be balanced (no messages queued after close)
+      const pushedHigh =
+        (await metricReader.getMetricValue(
+          "jazz.messagequeue.outgoing.pushed",
+          { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
+        )) ?? 0;
+      const pulledHigh =
+        (await metricReader.getMetricValue(
+          "jazz.messagequeue.outgoing.pulled",
+          { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
+        )) ?? 0;
+      const pushedMedium =
+        (await metricReader.getMetricValue(
+          "jazz.messagequeue.outgoing.pushed",
+          { priority: CO_VALUE_PRIORITY.MEDIUM, peerRole: "client" },
+        )) ?? 0;
+      const pulledMedium =
+        (await metricReader.getMetricValue(
+          "jazz.messagequeue.outgoing.pulled",
+          { priority: CO_VALUE_PRIORITY.MEDIUM, peerRole: "client" },
+        )) ?? 0;
+
+      // All queues should be balanced
+      expect(Number(pushedHigh) - Number(pulledHigh)).toBe(0);
+      expect(Number(pushedMedium) - Number(pulledMedium)).toBe(0);
+    });
   });
 });
