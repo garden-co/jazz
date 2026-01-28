@@ -1,4 +1,6 @@
-import { co } from "jazz-tools";
+import { co, setDefaultValidationMode } from "jazz-tools";
+
+setDefaultValidationMode("strict");
 
 export const Message = co.map({
   text: co.plainText(),

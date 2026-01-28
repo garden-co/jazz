@@ -26,6 +26,9 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
+import { generateValidationSchemaFromItem } from "./schemaValidators.js";
+import { type LocalValidationMode } from "../validationSettings.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -51,6 +54,18 @@ export class CoFeedSchema<
     return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
   }
 
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z
+      .instanceof(CoFeed)
+      .or(z.array(generateValidationSchemaFromItem(this.element)));
+    return this.#validationSchema;
+  };
+
   constructor(
     public element: T,
     private coValueClass: typeof CoFeed,
@@ -58,16 +73,22 @@ export class CoFeedSchema<
 
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Group } | Group,
+    options?: { owner?: Group; validation?: LocalValidationMode } | Group,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner?: Account | Group; validation?: LocalValidationMode }
+      | Account
+      | Group,
   ): CoFeedInstance<T>;
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner?: Account | Group; validation?: LocalValidationMode }
+      | Account
+      | Group,
   ): CoFeedInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
@@ -225,6 +246,7 @@ export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
     builtin: "CoFeed" as const,
     element,
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 

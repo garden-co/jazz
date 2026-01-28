@@ -55,6 +55,32 @@ export class CoDiscriminatedUnionSchema<
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
+  getValidationSchema = () => {
+    const { discriminator, options } = this.getDefinition();
+    return z.discriminatedUnion(
+      discriminator,
+      // @ts-expect-error
+      options.map((schema) => {
+        const validationSchema = schema.getValidationSchema();
+
+        if (validationSchema.def.type === "union") {
+          const def = validationSchema.def as
+            | z.core.$ZodUnionDef<z.core.$ZodType[]>
+            | z.core.$ZodDiscriminatedUnionDef<z.core.$ZodType[]>;
+          // in case of nested co.discriminatedUnion
+          // the nested `validationSchema` is already a z.discriminatedUnion
+          if ("discriminator" in def) {
+            return validationSchema;
+          }
+
+          return def.options[1];
+        }
+
+        throw new Error("Invalid schema type");
+      }),
+    );
+  };
+
   /**
    * Default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.
@@ -224,6 +250,7 @@ export function createCoreCoDiscriminatedUnionSchema<
   return {
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
+    getValidationSchema: () => z.any(),
     getDefinition: () => ({
       discriminator,
       get discriminatorMap() {

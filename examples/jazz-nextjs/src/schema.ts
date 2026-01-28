@@ -1,4 +1,6 @@
-import { co, Group, Loaded, z } from "jazz-tools";
+import { co, Group, Loaded, z, setDefaultValidationMode } from "jazz-tools";
+
+setDefaultValidationMode("strict");
 
 export const TodoProfile = co
   .profile({

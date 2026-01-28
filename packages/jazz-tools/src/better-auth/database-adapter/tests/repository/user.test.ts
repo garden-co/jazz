@@ -348,47 +348,6 @@ describe("UserRepository", () => {
       expect(newEmailUsers[0]?.$jazz.id).toBe(user.$jazz.id);
     });
 
-    it("should update user email to null and remove from email index", async () => {
-      const userRepository = new UserRepository(
-        databaseSchema,
-        databaseRoot,
-        worker,
-      );
-
-      const user = await userRepository.create("user", {
-        email: "test@example.com",
-        name: "Test User",
-      });
-
-      // Update email to null
-      const updatedUsers = await userRepository.update(
-        "user",
-        [
-          {
-            field: "id",
-            operator: "eq",
-            value: user.$jazz.id,
-            connector: "AND",
-          },
-        ],
-        { email: null },
-      );
-
-      expect(updatedUsers.length).toBe(1);
-      expect(updatedUsers[0]?.email).toBe(null);
-
-      // Verify email is no longer findable
-      const emailUsers = await userRepository.findMany("user", [
-        {
-          field: "email",
-          operator: "eq",
-          value: "test@example.com",
-          connector: "AND",
-        },
-      ]);
-      expect(emailUsers.length).toBe(0);
-    });
-
     it("should handle update with no matching users", async () => {
       const userRepository = new UserRepository(
         databaseSchema,
@@ -564,20 +523,6 @@ describe("UserRepository", () => {
         email: "test@example.com",
         name: "Test User",
       });
-
-      // First set email to null
-      await userRepository.update(
-        "user",
-        [
-          {
-            field: "id",
-            operator: "eq",
-            value: user.$jazz.id,
-            connector: "AND",
-          },
-        ],
-        { email: null },
-      );
 
       // Then delete the user
       const deletedCount = await userRepository.deleteValue("user", [

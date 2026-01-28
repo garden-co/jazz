@@ -1,5 +1,7 @@
-import { co, z } from "jazz-tools";
+import { co, z, setDefaultValidationMode } from "jazz-tools";
 import { getRandomUsername } from "./util";
+
+setDefaultValidationMode("strict");
 
 export const Project = co
   .map({
