@@ -1,5 +1,5 @@
-use cojson_core::crypto::signature;
 use super::ed25519::CryptoErrorUniffi;
+use cojson_core::crypto::signature;
 
 /// Uniffi-exposed function to sign a message using Ed25519.
 /// - `message`: Raw bytes to sign
@@ -27,4 +27,3 @@ pub fn verify(signature: String, message: &[u8], id: String) -> Result<bool, Cry
 pub fn get_signer_id(secret: String) -> Result<String, CryptoErrorUniffi> {
     signature::get_signer_id(&secret).map_err(Into::into)
 }
-

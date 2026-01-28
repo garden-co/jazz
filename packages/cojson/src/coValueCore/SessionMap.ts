@@ -1,172 +1,276 @@
 import { ControlledAccountOrAgent } from "../coValues/account.js";
+import { TRANSACTION_CONFIG } from "../config.js";
 import type {
   CryptoProvider,
   KeyID,
   KeySecret,
-  SessionLogImpl,
+  SessionMapImpl,
   Signature,
   SignerID,
 } from "../crypto/crypto.js";
 import { isDeleteSessionID, RawCoID, SessionID } from "../ids.js";
-import { parseJSON, Stringified } from "../jsonStringify.js";
+import { parseJSON, stableStringify, Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
-import { TryAddTransactionsError } from "./coValueCore.js";
-import { Transaction } from "./verifiedState.js";
-import { exceedsRecommendedSize } from "../coValueContentMessage.js";
+import { Transaction, CoValueHeader } from "./verifiedState.js";
 import {
   CoValueKnownState,
   KnownStateSessions,
-  updateSessionCounter,
   cloneKnownState,
-  combineKnownStateSessions,
-  isKnownStateSubsetOf,
-  getKnownStateToSend,
 } from "../knownState.js";
 
 export type SessionLog = {
   signerID?: SignerID;
-  impl: SessionLogImpl;
   transactions: Transaction[];
   lastSignature: Signature | undefined;
   signatureAfter: { [txIdx: number]: Signature | undefined };
-  txSizeSinceLastInbetweenSignature: number;
   sessionID: SessionID;
 };
 
+/**
+ * SessionMap wraps the Rust SessionMapImpl and provides a TypeScript-friendly interface.
+ * All transaction storage and crypto operations are delegated to Rust.
+ */
 export class SessionMap {
-  private isDeleted: boolean = false;
-  sessions: Map<SessionID, SessionLog> = new Map();
+  private readonly impl: SessionMapImpl;
+  private readonly id: RawCoID;
+  private readonly crypto: CryptoProvider;
 
-  // Known state related properies, mutated when adding transactions to the session map
-  knownState: CoValueKnownState;
-  knownStateWithStreaming: CoValueKnownState | undefined;
-  // The immutable version of the known statuses, to get a different reference when the known state is updated
-  private immutableKnownState: CoValueKnownState | undefined;
-  private immutableKnownStateWithStreaming: CoValueKnownState | undefined;
-  streamingKnownState?: KnownStateSessions;
+  // Cache for SessionLog objects to avoid re-parsing on every access
+  private sessionLogCache: Map<SessionID, SessionLog> = new Map();
+  private sessionLogCacheValid: Map<SessionID, number> = new Map(); // txCount when cached
+
+  // Cache for immutable known state (same reference until invalidated)
+  private cachedImmutableKnownState: CoValueKnownState | undefined;
+  private cachedImmutableKnownStateWithStreaming: CoValueKnownState | undefined;
 
   constructor(
-    private readonly id: RawCoID,
-    private readonly crypto: CryptoProvider,
+    id: RawCoID,
+    crypto: CryptoProvider,
+    header: CoValueHeader,
     streamingKnownState?: KnownStateSessions,
   ) {
-    this.knownState = { id: this.id, header: true, sessions: {} };
+    this.id = id;
+    this.crypto = crypto;
+
+    // Create the Rust SessionMapImpl with the header and max tx size threshold
+    const headerJson = stableStringify(header);
+    this.impl = crypto.createSessionMap(
+      id,
+      headerJson,
+      TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE,
+    );
+
+    // Set streaming known state if provided
     if (streamingKnownState) {
-      this.streamingKnownState = { ...streamingKnownState };
-      this.knownStateWithStreaming = {
-        id: this.id,
-        header: true,
-        sessions: { ...streamingKnownState },
-      };
+      this.impl.setStreamingKnownState(JSON.stringify(streamingKnownState));
     }
   }
 
+  // Private constructor for cloning
+  private static fromImpl(
+    id: RawCoID,
+    crypto: CryptoProvider,
+    impl: SessionMapImpl,
+  ): SessionMap {
+    const instance = Object.create(SessionMap.prototype) as SessionMap;
+    (instance as any).id = id;
+    (instance as any).crypto = crypto;
+    (instance as any).impl = impl;
+    (instance as any).sessionLogCache = new Map();
+    (instance as any).sessionLogCacheValid = new Map();
+    return instance;
+  }
+
   markAsDeleted() {
-    this.isDeleted = true;
+    this.impl.markAsDeleted();
+    this.invalidateCache();
+  }
 
-    // We reset the known state to report only the deleted session/transaction
-    this.knownState = { id: this.id, header: true, sessions: {} };
-
-    // We remove the streaming statuses, because once deleted we don't need
-    // to wait for any streaming to be completed
-    this.knownStateWithStreaming = undefined;
-    this.streamingKnownState = undefined;
-    this.invalidateKnownStateCache();
-
-    for (const [sessionID, sessionLog] of this.sessions.entries()) {
-      if (!isDeleteSessionID(sessionID)) {
-        continue;
-      }
-
-      this.knownState.sessions[sessionID] = sessionLog.transactions.length;
-    }
+  get isDeleted(): boolean {
+    return this.impl.isDeleted();
   }
 
   setStreamingKnownState(streamingKnownState: KnownStateSessions) {
     if (this.isDeleted) {
       return;
     }
-
-    // if the streaming known state is a subset of the current known state, we can skip the update
-    if (isKnownStateSubsetOf(streamingKnownState, this.knownState.sessions)) {
-      return;
-    }
-
-    const actualStreamingKnownState = getKnownStateToSend(
-      streamingKnownState,
-      this.knownState.sessions,
-    );
-
-    if (this.streamingKnownState) {
-      combineKnownStateSessions(
-        this.streamingKnownState,
-        actualStreamingKnownState,
-      );
-    } else {
-      this.streamingKnownState = actualStreamingKnownState;
-    }
-
-    if (!this.knownStateWithStreaming) {
-      this.knownStateWithStreaming = cloneKnownState(this.knownState);
-    }
-
-    combineKnownStateSessions(
-      this.knownStateWithStreaming.sessions,
-      actualStreamingKnownState,
-    );
+    this.impl.setStreamingKnownState(JSON.stringify(streamingKnownState));
   }
 
-  invalidateKnownStateCache() {
-    this.immutableKnownState = undefined;
-    this.immutableKnownStateWithStreaming = undefined;
+  get knownState(): CoValueKnownState {
+    // Native object returned directly from Rust
+    return this.impl.getKnownState() as CoValueKnownState;
+  }
+
+  get knownStateWithStreaming(): CoValueKnownState | undefined {
+    // Native object returned directly from Rust
+    const result = this.impl.getKnownStateWithStreaming();
+    if (!result || result === undefined) return undefined;
+    return result as CoValueKnownState;
   }
 
   getImmutableKnownState(): CoValueKnownState {
-    if (!this.immutableKnownState) {
-      this.immutableKnownState = cloneKnownState(this.knownState);
+    if (!this.cachedImmutableKnownState) {
+      this.cachedImmutableKnownState = cloneKnownState(this.knownState);
     }
-    return this.immutableKnownState;
+    return this.cachedImmutableKnownState;
   }
 
   getImmutableKnownStateWithStreaming(): CoValueKnownState {
-    if (!this.knownStateWithStreaming) {
+    const withStreaming = this.knownStateWithStreaming;
+    if (!withStreaming) {
       return this.getImmutableKnownState();
     }
-
-    if (!this.immutableKnownStateWithStreaming) {
-      this.immutableKnownStateWithStreaming = cloneKnownState(
-        this.knownStateWithStreaming,
-      );
+    if (!this.cachedImmutableKnownStateWithStreaming) {
+      this.cachedImmutableKnownStateWithStreaming =
+        cloneKnownState(withStreaming);
     }
-    return this.immutableKnownStateWithStreaming;
+    return this.cachedImmutableKnownStateWithStreaming;
   }
 
   get(sessionID: SessionID): SessionLog | undefined {
-    return this.sessions.get(sessionID);
+    const txCount = this.impl.getTransactionCount(sessionID);
+    if (txCount === -1) {
+      return undefined;
+    }
+    return this.getSessionLog(sessionID);
   }
 
-  private getOrCreateSessionLog(
+  getTransactionsCount(sessionID: SessionID): number | undefined {
+    const txCount = this.impl.getTransactionCount(sessionID);
+    if (txCount === -1) {
+      return undefined;
+    }
+    return txCount;
+  }
+
+  private invalidateCache() {
+    this.sessionLogCache.clear();
+    this.sessionLogCacheValid.clear();
+    // Invalidate immutable known state caches
+    this.cachedImmutableKnownState = undefined;
+    this.cachedImmutableKnownStateWithStreaming = undefined;
+  }
+
+  /**
+   * Update the session log cache directly when adding transactions.
+   * This avoids round-trips to Rust on subsequent reads.
+   */
+  private updateSessionLogCache(
     sessionID: SessionID,
-    signerID?: SignerID,
-  ): SessionLog {
-    let sessionLog = this.sessions.get(sessionID);
-    if (!sessionLog) {
-      sessionLog = {
+    signerID: SignerID | undefined,
+    newTransactions: Transaction[],
+    newSignature: Signature,
+  ) {
+    const cached = this.sessionLogCache.get(sessionID);
+    const currentTxCount = this.impl.getTransactionCount(sessionID);
+
+    if (cached) {
+      // Append to existing cache
+      cached.transactions.push(...newTransactions);
+      cached.lastSignature = newSignature;
+      if (signerID) {
+        cached.signerID = signerID;
+      }
+      // Check if we need to update signatureAfter (in-between signature)
+      const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+      if (
+        lastCheckpoint !== undefined &&
+        lastCheckpoint !== null &&
+        lastCheckpoint >= 0
+      ) {
+        const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
+        if (sig) {
+          cached.signatureAfter[lastCheckpoint] = sig as Signature;
+        }
+      }
+      this.sessionLogCacheValid.set(sessionID, currentTxCount);
+    } else {
+      // Create new cache entry
+      const sessionLog: SessionLog = {
         signerID,
-        impl: this.crypto.createSessionLog(this.id, sessionID, signerID),
-        transactions: [],
-        lastSignature: undefined,
+        transactions: [...newTransactions],
+        lastSignature: newSignature,
         signatureAfter: {},
-        txSizeSinceLastInbetweenSignature: 0,
         sessionID,
       };
-      this.sessions.set(sessionID, sessionLog);
+      // Check for in-between signature
+      const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+      if (
+        lastCheckpoint !== undefined &&
+        lastCheckpoint !== null &&
+        lastCheckpoint >= 0
+      ) {
+        const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
+        if (sig) {
+          sessionLog.signatureAfter[lastCheckpoint] = sig as Signature;
+        }
+      }
+      this.sessionLogCache.set(sessionID, sessionLog);
+      this.sessionLogCacheValid.set(sessionID, currentTxCount);
     }
+  }
+
+  private getSessionLog(sessionID: SessionID): SessionLog {
+    const currentTxCount = this.impl.getTransactionCount(sessionID);
+    const cachedTxCount = this.sessionLogCacheValid.get(sessionID);
+
+    // Check if cache is valid
+    if (cachedTxCount === currentTxCount) {
+      const cached = this.sessionLogCache.get(sessionID);
+      if (cached) return cached;
+    }
+
+    // Build fresh SessionLog from Rust data
+    const signatureAfter: { [txIdx: number]: Signature | undefined } = {};
+
+    // Fetch all transactions - may return JSON strings (WASM) or native objects (NAPI/RN)
+    const rawTransactions =
+      currentTxCount > 0
+        ? this.impl.getSessionTransactions(sessionID, 0)
+        : undefined;
+
+    const transactions: Transaction[] = rawTransactions
+      ? rawTransactions.map((tx) =>
+          typeof tx === "string" ? (JSON.parse(tx) as Transaction) : tx,
+        )
+      : [];
+
+    // Build signatureAfter map
+    const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+    if (
+      lastCheckpoint !== undefined &&
+      lastCheckpoint !== null &&
+      lastCheckpoint >= 0
+    ) {
+      // We need to find all checkpoints - iterate from 0 to lastCheckpoint
+      for (let i = 0; i <= lastCheckpoint; i++) {
+        const sig = this.impl.getSignatureAfter(sessionID, i);
+        if (sig) {
+          signatureAfter[i] = sig as Signature;
+        }
+      }
+    }
+
+    const lastSignature = this.impl.getLastSignature(sessionID) as
+      | Signature
+      | undefined;
+
+    const sessionLog: SessionLog = {
+      signerID: undefined, // We don't track this in Rust currently
+      transactions,
+      lastSignature,
+      signatureAfter,
+      sessionID,
+    };
+
+    // Cache the result
+    this.sessionLogCache.set(sessionID, sessionLog);
+    this.sessionLogCacheValid.set(sessionID, currentTxCount);
 
     return sessionLog;
   }
 
-  signerID: SignerID | undefined;
   addTransaction(
     sessionID: SessionID,
     signerID: SignerID | undefined,
@@ -178,11 +282,27 @@ export class SessionMap {
       throw new Error("Cannot add transactions to a deleted coValue");
     }
 
-    const sessionLog = this.getOrCreateSessionLog(sessionID, signerID);
+    // Convert transactions to JSON array
+    const txJson = JSON.stringify(newTransactions);
 
-    sessionLog.impl.tryAdd(newTransactions, newSignature, skipVerify);
+    this.impl.addTransactions(
+      sessionID,
+      signerID,
+      txJson,
+      newSignature,
+      skipVerify,
+    );
 
-    this.addTransactionsToJsLog(sessionLog, newTransactions, newSignature);
+    // Update cache directly instead of invalidating
+    this.updateSessionLogCache(
+      sessionID,
+      signerID,
+      newTransactions,
+      newSignature,
+    );
+    // Invalidate immutable known state caches
+    this.cachedImmutableKnownState = undefined;
+    this.cachedImmutableKnownStateWithStreaming = undefined;
   }
 
   makeNewPrivateTransaction(
@@ -200,27 +320,42 @@ export class SessionMap {
       );
     }
 
-    const sessionLog = this.getOrCreateSessionLog(
-      sessionID,
-      signerAgent.currentSignerID(),
-    );
+    const changesJson = JSON.stringify(changes);
+    const metaJson = meta ? JSON.stringify(meta) : undefined;
+    const signerSecret = signerAgent.currentSignerSecret();
 
-    const result = sessionLog.impl.addNewPrivateTransaction(
-      signerAgent,
-      changes,
+    const resultJson = this.impl.makeNewPrivateTransaction(
+      sessionID,
+      signerSecret,
+      changesJson,
       keyID,
       keySecret,
+      metaJson,
       madeAt,
-      meta,
     );
 
-    this.addTransactionsToJsLog(
-      sessionLog,
+    const result = JSON.parse(resultJson) as {
+      signature: string;
+      transaction: Transaction;
+    };
+
+    const signature = result.signature as Signature;
+
+    // Update cache directly instead of invalidating
+    this.updateSessionLogCache(
+      sessionID,
+      signerAgent.id as unknown as SignerID,
       [result.transaction],
-      result.signature,
+      signature,
     );
+    // Invalidate immutable known state caches
+    this.cachedImmutableKnownState = undefined;
+    this.cachedImmutableKnownStateWithStreaming = undefined;
 
-    return result;
+    return {
+      signature,
+      transaction: result.transaction,
+    };
   }
 
   makeNewTrustingTransaction(
@@ -236,79 +371,40 @@ export class SessionMap {
       );
     }
 
-    const sessionLog = this.getOrCreateSessionLog(
+    const changesJson = JSON.stringify(changes);
+    const metaJson = meta ? JSON.stringify(meta) : undefined;
+    const signerSecret = signerAgent.currentSignerSecret();
+
+    const resultJson = this.impl.makeNewTrustingTransaction(
       sessionID,
-      signerAgent.currentSignerID(),
-    );
-
-    const result = sessionLog.impl.addNewTrustingTransaction(
-      signerAgent,
-      changes,
+      signerSecret,
+      changesJson,
+      metaJson,
       madeAt,
-      meta,
     );
 
-    this.addTransactionsToJsLog(
-      sessionLog,
+    const result = JSON.parse(resultJson) as {
+      signature: string;
+      transaction: Transaction;
+    };
+
+    const signature = result.signature as Signature;
+
+    // Update cache directly instead of invalidating
+    this.updateSessionLogCache(
+      sessionID,
+      signerAgent.id as unknown as SignerID,
       [result.transaction],
-      result.signature,
+      signature,
     );
+    // Invalidate immutable known state caches
+    this.cachedImmutableKnownState = undefined;
+    this.cachedImmutableKnownStateWithStreaming = undefined;
 
-    return result;
-  }
-
-  private addTransactionsToJsLog(
-    sessionLog: SessionLog,
-    newTransactions: Transaction[],
-    signature: Signature,
-  ) {
-    for (const tx of newTransactions) {
-      sessionLog.transactions.push(tx);
-    }
-    sessionLog.lastSignature = signature;
-
-    sessionLog.txSizeSinceLastInbetweenSignature += newTransactions.reduce(
-      (sum, tx) =>
-        sum +
-        (tx.privacy === "private"
-          ? tx.encryptedChanges.length
-          : tx.changes.length),
-      0,
-    );
-
-    const transactionsCount = sessionLog.transactions.length;
-
-    if (exceedsRecommendedSize(sessionLog.txSizeSinceLastInbetweenSignature)) {
-      sessionLog.signatureAfter[transactionsCount - 1] = signature;
-      sessionLog.txSizeSinceLastInbetweenSignature = 0;
-    }
-
-    // Update the known state with the new transactions count
-    updateSessionCounter(
-      this.knownState.sessions,
-      sessionLog.sessionID,
-      transactionsCount,
-    );
-
-    // Check if the updated session matched the streaming state
-    if (
-      this.streamingKnownState &&
-      isKnownStateSubsetOf(this.streamingKnownState, this.knownState.sessions)
-    ) {
-      this.streamingKnownState = undefined;
-      this.knownStateWithStreaming = undefined;
-    }
-
-    if (this.knownStateWithStreaming) {
-      // Update the streaming known state with the new transactions count
-      updateSessionCounter(
-        this.knownStateWithStreaming.sessions,
-        sessionLog.sessionID,
-        transactionsCount,
-      );
-    }
-
-    this.invalidateKnownStateCache();
+    return {
+      signature,
+      transaction: result.transaction,
+    };
   }
 
   decryptTransaction(
@@ -316,18 +412,15 @@ export class SessionMap {
     txIndex: number,
     keySecret: KeySecret,
   ): JsonValue[] | undefined {
-    const sessionLog = this.sessions.get(sessionID);
-    if (!sessionLog) {
-      return undefined;
-    }
-    const decrypted = sessionLog.impl.decryptNextTransactionChangesJson(
+    const decrypted = this.impl.decryptTransaction(
+      sessionID,
       txIndex,
       keySecret,
     );
     if (!decrypted) {
       return undefined;
     }
-    return parseJSON(decrypted as Stringified<JsonValue[] | undefined>);
+    return parseJSON(decrypted as Stringified<JsonValue[]>);
   }
 
   decryptTransactionMeta(
@@ -335,59 +428,122 @@ export class SessionMap {
     txIndex: number,
     keySecret: KeySecret,
   ): JsonObject | undefined {
-    const sessionLog = this.sessions.get(sessionID);
+    const sessionLog = this.get(sessionID);
     if (!sessionLog?.transactions[txIndex]?.meta) {
       return undefined;
     }
-    const decrypted = sessionLog.impl.decryptNextTransactionMetaJson(
+    const decrypted = this.impl.decryptTransactionMeta(
+      sessionID,
       txIndex,
       keySecret,
     );
     if (!decrypted) {
       return undefined;
     }
-    return parseJSON(decrypted as Stringified<JsonObject | undefined>);
+    return parseJSON(decrypted as Stringified<JsonObject>);
   }
 
-  get size() {
-    return this.sessions.size;
+  get size(): number {
+    return this.impl.getSessionIds().length;
   }
 
-  entries() {
-    return this.sessions.entries();
+  get sessions(): Map<SessionID, SessionLog> {
+    // Build a Map from all sessions
+    const map = new Map<SessionID, SessionLog>();
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
+    for (const sessionID of sessionIds) {
+      map.set(sessionID, this.getSessionLog(sessionID));
+    }
+    return map;
   }
 
-  values() {
-    return this.sessions.values();
+  *entries(): IterableIterator<[SessionID, SessionLog]> {
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
+    for (const sessionID of sessionIds) {
+      yield [sessionID, this.getSessionLog(sessionID)];
+    }
   }
 
-  keys() {
-    return this.sessions.keys();
+  *values(): IterableIterator<SessionLog> {
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
+    for (const sessionID of sessionIds) {
+      yield this.getSessionLog(sessionID);
+    }
+  }
+
+  *keys(): IterableIterator<SessionID> {
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
+    for (const sessionID of sessionIds) {
+      yield sessionID;
+    }
   }
 
   clone(): SessionMap {
-    const clone = new SessionMap(this.id, this.crypto);
+    // For cloning, we need to create a new SessionMap with the same state
+    // Since Rust SessionMapImpl doesn't have a clone method exposed,
+    // we need to recreate the state
 
-    for (const [sessionID, sessionLog] of this.sessions) {
-      clone.sessions.set(sessionID, {
-        impl: sessionLog.impl.clone(),
-        transactions: sessionLog.transactions.slice(),
-        lastSignature: sessionLog.lastSignature,
-        signatureAfter: { ...sessionLog.signatureAfter },
-        txSizeSinceLastInbetweenSignature:
-          sessionLog.txSizeSinceLastInbetweenSignature,
-        signerID: sessionLog.signerID,
-        sessionID,
-      });
+    // Get header from Rust
+    const headerJson = this.impl.getHeader();
+    const header = JSON.parse(headerJson) as CoValueHeader;
+
+    // Get streaming known state
+    const knownStateWithStreaming = this.knownStateWithStreaming;
+    let streamingKnownState: KnownStateSessions | undefined;
+    if (knownStateWithStreaming) {
+      // Calculate streaming state as difference between withStreaming and base
+      const baseKnownState = this.knownState;
+      streamingKnownState = {};
+      for (const [sessionId, count] of Object.entries(
+        knownStateWithStreaming.sessions,
+      )) {
+        const baseCount = baseKnownState.sessions[sessionId as SessionID] ?? 0;
+        if (count > baseCount) {
+          streamingKnownState[sessionId as SessionID] = count;
+        }
+      }
     }
 
-    clone.streamingKnownState = this.streamingKnownState
-      ? { ...this.streamingKnownState }
-      : undefined;
-    clone.knownState = cloneKnownState(this.knownState);
-    clone.knownStateWithStreaming = this.knownStateWithStreaming
-      ? cloneKnownState(this.knownStateWithStreaming)
-      : undefined;
+    // Create new SessionMap
+    const clone = new SessionMap(
+      this.id,
+      this.crypto,
+      header,
+      streamingKnownState,
+    );
+
+    // Copy all sessions with their transactions
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
+    for (const sessionID of sessionIds) {
+      const txCount = this.impl.getTransactionCount(sessionID);
+      if (txCount > 0) {
+        // getSessionTransactions may return JSON strings (WASM) or native objects (NAPI/RN)
+        const rawTransactions = this.impl.getSessionTransactions(sessionID, 0);
+        if (rawTransactions) {
+          // Convert to Transaction objects if needed, then stringify for addTransactions
+          const transactions = rawTransactions.map((tx) =>
+            typeof tx === "string" ? JSON.parse(tx) : tx,
+          );
+          const lastSignature = this.impl.getLastSignature(sessionID) as
+            | Signature
+            | undefined;
+          if (lastSignature) {
+            clone.impl.addTransactions(
+              sessionID,
+              undefined, // signerID not tracked
+              JSON.stringify(transactions),
+              lastSignature,
+              true, // skip verify since we're cloning valid data
+            );
+          }
+        }
+      }
+    }
+
+    // Copy deletion state
+    if (this.isDeleted) {
+      clone.markAsDeleted();
+    }
 
     return clone;
   }

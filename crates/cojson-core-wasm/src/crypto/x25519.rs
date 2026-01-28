@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use cojson_core::crypto::x25519;
+use wasm_bindgen::prelude::*;
 /// Generate a new X25519 private key using secure random number generation.
 /// Returns 32 bytes of raw key material suitable for use with other X25519 functions.
 /// This key can be reused for multiple Diffie-Hellman exchanges.

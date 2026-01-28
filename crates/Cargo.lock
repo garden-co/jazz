@@ -510,6 +510,7 @@ dependencies = [
  "cargo-tarpaulin",
  "crypto_secretbox",
  "ed25519-dalek",
+ "indexmap 2.11.4",
  "lru",
  "lzy",
  "rand",

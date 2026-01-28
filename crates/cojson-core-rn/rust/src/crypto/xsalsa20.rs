@@ -1,6 +1,6 @@
+use super::ed25519::CryptoErrorUniffi;
 use crate::hash::blake3::generate_nonce;
 use cojson_core::crypto::xsalsa20;
-use super::ed25519::CryptoErrorUniffi;
 
 /// Uniffi-exposed function for XSalsa20 encryption without authentication.
 /// - `key`: 32-byte key for encryption
@@ -37,4 +37,3 @@ pub fn decrypt_xsalsa20(
         .map(|v| v.into())
         .map_err(Into::into)
 }
-

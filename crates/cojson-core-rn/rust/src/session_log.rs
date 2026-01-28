@@ -215,4 +215,3 @@ impl SessionLog {
         }
     }
 }
-

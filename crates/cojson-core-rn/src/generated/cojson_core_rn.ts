@@ -37,22 +37,26 @@ import {
   type UniffiRustArcPtr,
   type UnsafeMutableRawPointer,
   AbstractFfiConverterByteArray,
+  FfiConverterArray,
   FfiConverterArrayBuffer,
   FfiConverterBool,
   FfiConverterFloat64,
   FfiConverterInt32,
+  FfiConverterMap,
   FfiConverterObject,
   FfiConverterOptional,
   FfiConverterUInt32,
   FfiConverterUInt64,
   RustBuffer,
   UniffiAbstractObject,
+  UniffiEnum,
   UniffiError,
   UniffiInternalError,
   UniffiRustCaller,
   destructorGuardSymbol,
   pointerLiteralSymbol,
   uniffiCreateFfiConverterString,
+  uniffiCreateRecord,
   uniffiTypeNameSymbol,
   variantOrdinalSymbol,
 } from 'uniffi-bindgen-react-native';
@@ -686,6 +690,213 @@ export function x25519PublicKey(
     )
   );
 }
+
+/**
+ * KnownState as a native Record (no JSON serialization needed)
+ */
+export type KnownState = {
+  id: string;
+  header: boolean;
+  sessions: Map<string, /*u32*/ number>;
+};
+
+/**
+ * Generated factory for {@link KnownState} record objects.
+ */
+export const KnownState = (() => {
+  const defaults = () => ({});
+  const create = (() => {
+    return uniffiCreateRecord<KnownState, ReturnType<typeof defaults>>(
+      defaults
+    );
+  })();
+  return Object.freeze({
+    /**
+     * Create a frozen instance of {@link KnownState}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    create,
+
+    /**
+     * Create a frozen instance of {@link KnownState}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    new: create,
+
+    /**
+     * Defaults specified in the {@link cojson_core_rn} crate.
+     */
+    defaults: () => Object.freeze(defaults()) as Partial<KnownState>,
+  });
+})();
+
+const FfiConverterTypeKnownState = (() => {
+  type TypeName = KnownState;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      return {
+        id: FfiConverterString.read(from),
+        header: FfiConverterBool.read(from),
+        sessions: FfiConverterMapStringUInt32.read(from),
+      };
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      FfiConverterString.write(value.id, into);
+      FfiConverterBool.write(value.header, into);
+      FfiConverterMapStringUInt32.write(value.sessions, into);
+    }
+    allocationSize(value: TypeName): number {
+      return (
+        FfiConverterString.allocationSize(value.id) +
+        FfiConverterBool.allocationSize(value.header) +
+        FfiConverterMapStringUInt32.allocationSize(value.sessions)
+      );
+    }
+  }
+  return new FFIConverter();
+})();
+
+/**
+ * PrivateTransaction as a native Record
+ */
+export type PrivateTransaction = {
+  privacy: string;
+  madeAt: /*f64*/ number;
+  keyUsed: string;
+  encryptedChanges: string;
+  meta: string | undefined;
+};
+
+/**
+ * Generated factory for {@link PrivateTransaction} record objects.
+ */
+export const PrivateTransaction = (() => {
+  const defaults = () => ({});
+  const create = (() => {
+    return uniffiCreateRecord<PrivateTransaction, ReturnType<typeof defaults>>(
+      defaults
+    );
+  })();
+  return Object.freeze({
+    /**
+     * Create a frozen instance of {@link PrivateTransaction}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    create,
+
+    /**
+     * Create a frozen instance of {@link PrivateTransaction}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    new: create,
+
+    /**
+     * Defaults specified in the {@link cojson_core_rn} crate.
+     */
+    defaults: () => Object.freeze(defaults()) as Partial<PrivateTransaction>,
+  });
+})();
+
+const FfiConverterTypePrivateTransaction = (() => {
+  type TypeName = PrivateTransaction;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      return {
+        privacy: FfiConverterString.read(from),
+        madeAt: FfiConverterFloat64.read(from),
+        keyUsed: FfiConverterString.read(from),
+        encryptedChanges: FfiConverterString.read(from),
+        meta: FfiConverterOptionalString.read(from),
+      };
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      FfiConverterString.write(value.privacy, into);
+      FfiConverterFloat64.write(value.madeAt, into);
+      FfiConverterString.write(value.keyUsed, into);
+      FfiConverterString.write(value.encryptedChanges, into);
+      FfiConverterOptionalString.write(value.meta, into);
+    }
+    allocationSize(value: TypeName): number {
+      return (
+        FfiConverterString.allocationSize(value.privacy) +
+        FfiConverterFloat64.allocationSize(value.madeAt) +
+        FfiConverterString.allocationSize(value.keyUsed) +
+        FfiConverterString.allocationSize(value.encryptedChanges) +
+        FfiConverterOptionalString.allocationSize(value.meta)
+      );
+    }
+  }
+  return new FFIConverter();
+})();
+
+/**
+ * TrustingTransaction as a native Record
+ */
+export type TrustingTransaction = {
+  privacy: string;
+  madeAt: /*f64*/ number;
+  changes: string;
+  meta: string | undefined;
+};
+
+/**
+ * Generated factory for {@link TrustingTransaction} record objects.
+ */
+export const TrustingTransaction = (() => {
+  const defaults = () => ({});
+  const create = (() => {
+    return uniffiCreateRecord<TrustingTransaction, ReturnType<typeof defaults>>(
+      defaults
+    );
+  })();
+  return Object.freeze({
+    /**
+     * Create a frozen instance of {@link TrustingTransaction}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    create,
+
+    /**
+     * Create a frozen instance of {@link TrustingTransaction}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    new: create,
+
+    /**
+     * Defaults specified in the {@link cojson_core_rn} crate.
+     */
+    defaults: () => Object.freeze(defaults()) as Partial<TrustingTransaction>,
+  });
+})();
+
+const FfiConverterTypeTrustingTransaction = (() => {
+  type TypeName = TrustingTransaction;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      return {
+        privacy: FfiConverterString.read(from),
+        madeAt: FfiConverterFloat64.read(from),
+        changes: FfiConverterString.read(from),
+        meta: FfiConverterOptionalString.read(from),
+      };
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      FfiConverterString.write(value.privacy, into);
+      FfiConverterFloat64.write(value.madeAt, into);
+      FfiConverterString.write(value.changes, into);
+      FfiConverterOptionalString.write(value.meta, into);
+    }
+    allocationSize(value: TypeName): number {
+      return (
+        FfiConverterString.allocationSize(value.privacy) +
+        FfiConverterFloat64.allocationSize(value.madeAt) +
+        FfiConverterString.allocationSize(value.changes) +
+        FfiConverterOptionalString.allocationSize(value.meta)
+      );
+    }
+  }
+  return new FFIConverter();
+})();
 
 const stringConverter = {
   stringToBytes: (s: string) =>
@@ -1570,6 +1781,291 @@ const FfiConverterTypeSessionLogError = (() => {
   return new FFIConverter();
 })();
 
+// Error type: SessionMapError
+
+// Enum: SessionMapError
+export enum SessionMapError_Tags {
+  Internal = 'Internal',
+  LockError = 'LockError',
+}
+export const SessionMapError = (() => {
+  type Internal__interface = {
+    tag: SessionMapError_Tags.Internal;
+    inner: Readonly<[string]>;
+  };
+
+  class Internal_ extends UniffiError implements Internal__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'SessionMapError';
+    readonly tag = SessionMapError_Tags.Internal;
+    readonly inner: Readonly<[string]>;
+    constructor(v0: string) {
+      super('SessionMapError', 'Internal');
+      this.inner = Object.freeze([v0]);
+    }
+
+    static new(v0: string): Internal_ {
+      return new Internal_(v0);
+    }
+
+    static instanceOf(obj: any): obj is Internal_ {
+      return obj.tag === SessionMapError_Tags.Internal;
+    }
+
+    static hasInner(obj: any): obj is Internal_ {
+      return Internal_.instanceOf(obj);
+    }
+
+    static getInner(obj: Internal_): Readonly<[string]> {
+      return obj.inner;
+    }
+  }
+
+  type LockError__interface = {
+    tag: SessionMapError_Tags.LockError;
+  };
+
+  class LockError_ extends UniffiError implements LockError__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'SessionMapError';
+    readonly tag = SessionMapError_Tags.LockError;
+    constructor() {
+      super('SessionMapError', 'LockError');
+    }
+
+    static new(): LockError_ {
+      return new LockError_();
+    }
+
+    static instanceOf(obj: any): obj is LockError_ {
+      return obj.tag === SessionMapError_Tags.LockError;
+    }
+
+    static hasInner(obj: any): obj is LockError_ {
+      return false;
+    }
+  }
+
+  function instanceOf(obj: any): obj is SessionMapError {
+    return obj[uniffiTypeNameSymbol] === 'SessionMapError';
+  }
+
+  return Object.freeze({
+    instanceOf,
+    Internal: Internal_,
+    LockError: LockError_,
+  });
+})();
+
+export type SessionMapError = InstanceType<
+  (typeof SessionMapError)[keyof Omit<typeof SessionMapError, 'instanceOf'>]
+>;
+
+// FfiConverter for enum SessionMapError
+const FfiConverterTypeSessionMapError = (() => {
+  const ordinalConverter = FfiConverterInt32;
+  type TypeName = SessionMapError;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      switch (ordinalConverter.read(from)) {
+        case 1:
+          return new SessionMapError.Internal(FfiConverterString.read(from));
+        case 2:
+          return new SessionMapError.LockError();
+        default:
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      switch (value.tag) {
+        case SessionMapError_Tags.Internal: {
+          ordinalConverter.write(1, into);
+          const inner = value.inner;
+          FfiConverterString.write(inner[0], into);
+          return;
+        }
+        case SessionMapError_Tags.LockError: {
+          ordinalConverter.write(2, into);
+          return;
+        }
+        default:
+          // Throwing from here means that SessionMapError_Tags hasn't matched an ordinal.
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+    allocationSize(value: TypeName): number {
+      switch (value.tag) {
+        case SessionMapError_Tags.Internal: {
+          const inner = value.inner;
+          let size = ordinalConverter.allocationSize(1);
+          size += FfiConverterString.allocationSize(inner[0]);
+          return size;
+        }
+        case SessionMapError_Tags.LockError: {
+          return ordinalConverter.allocationSize(2);
+        }
+        default:
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+  }
+  return new FFIConverter();
+})();
+
+// Enum: Transaction
+export enum Transaction_Tags {
+  Private = 'Private',
+  Trusting = 'Trusting',
+}
+/**
+ * Transaction enum - either Private or Trusting
+ */
+export const Transaction = (() => {
+  type Private__interface = {
+    tag: Transaction_Tags.Private;
+    inner: Readonly<{ tx: PrivateTransaction }>;
+  };
+
+  class Private_ extends UniffiEnum implements Private__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'Transaction';
+    readonly tag = Transaction_Tags.Private;
+    readonly inner: Readonly<{ tx: PrivateTransaction }>;
+    constructor(inner: { tx: PrivateTransaction }) {
+      super('Transaction', 'Private');
+      this.inner = Object.freeze(inner);
+    }
+
+    static new(inner: { tx: PrivateTransaction }): Private_ {
+      return new Private_(inner);
+    }
+
+    static instanceOf(obj: any): obj is Private_ {
+      return obj.tag === Transaction_Tags.Private;
+    }
+  }
+
+  type Trusting__interface = {
+    tag: Transaction_Tags.Trusting;
+    inner: Readonly<{ tx: TrustingTransaction }>;
+  };
+
+  class Trusting_ extends UniffiEnum implements Trusting__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'Transaction';
+    readonly tag = Transaction_Tags.Trusting;
+    readonly inner: Readonly<{ tx: TrustingTransaction }>;
+    constructor(inner: { tx: TrustingTransaction }) {
+      super('Transaction', 'Trusting');
+      this.inner = Object.freeze(inner);
+    }
+
+    static new(inner: { tx: TrustingTransaction }): Trusting_ {
+      return new Trusting_(inner);
+    }
+
+    static instanceOf(obj: any): obj is Trusting_ {
+      return obj.tag === Transaction_Tags.Trusting;
+    }
+  }
+
+  function instanceOf(obj: any): obj is Transaction {
+    return obj[uniffiTypeNameSymbol] === 'Transaction';
+  }
+
+  return Object.freeze({
+    instanceOf,
+    Private: Private_,
+    Trusting: Trusting_,
+  });
+})();
+
+/**
+ * Transaction enum - either Private or Trusting
+ */
+
+export type Transaction = InstanceType<
+  (typeof Transaction)[keyof Omit<typeof Transaction, 'instanceOf'>]
+>;
+
+// FfiConverter for enum Transaction
+const FfiConverterTypeTransaction = (() => {
+  const ordinalConverter = FfiConverterInt32;
+  type TypeName = Transaction;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      switch (ordinalConverter.read(from)) {
+        case 1:
+          return new Transaction.Private({
+            tx: FfiConverterTypePrivateTransaction.read(from),
+          });
+        case 2:
+          return new Transaction.Trusting({
+            tx: FfiConverterTypeTrustingTransaction.read(from),
+          });
+        default:
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      switch (value.tag) {
+        case Transaction_Tags.Private: {
+          ordinalConverter.write(1, into);
+          const inner = value.inner;
+          FfiConverterTypePrivateTransaction.write(inner.tx, into);
+          return;
+        }
+        case Transaction_Tags.Trusting: {
+          ordinalConverter.write(2, into);
+          const inner = value.inner;
+          FfiConverterTypeTrustingTransaction.write(inner.tx, into);
+          return;
+        }
+        default:
+          // Throwing from here means that Transaction_Tags hasn't matched an ordinal.
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+    allocationSize(value: TypeName): number {
+      switch (value.tag) {
+        case Transaction_Tags.Private: {
+          const inner = value.inner;
+          let size = ordinalConverter.allocationSize(1);
+          size += FfiConverterTypePrivateTransaction.allocationSize(inner.tx);
+          return size;
+        }
+        case Transaction_Tags.Trusting: {
+          const inner = value.inner;
+          let size = ordinalConverter.allocationSize(2);
+          size += FfiConverterTypeTrustingTransaction.allocationSize(inner.tx);
+          return size;
+        }
+        default:
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+  }
+  return new FFIConverter();
+})();
+
+// FfiConverter for Map<string, /*u32*/number>
+const FfiConverterMapStringUInt32 = new FfiConverterMap(
+  FfiConverterString,
+  FfiConverterUInt32
+);
+
 export interface Blake3HasherInterface {
   cloneHasher() /*throws*/ : Blake3HasherInterface;
   finalize() /*throws*/ : ArrayBuffer;
@@ -2101,8 +2597,704 @@ const FfiConverterTypeSessionLog = new FfiConverterObject(
   uniffiTypeSessionLogObjectFactory
 );
 
+export interface SessionMapInterface {
+  /**
+   * Add transactions to a session
+   */
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean
+  ) /*throws*/ : void;
+  /**
+   * Decrypt transaction changes
+   */
+  decryptTransaction(
+    sessionId: string,
+    txIndex: /*u32*/ number,
+    keySecret: string
+  ) /*throws*/ : string | undefined;
+  /**
+   * Decrypt transaction meta
+   */
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: /*u32*/ number,
+    keySecret: string
+  ) /*throws*/ : string | undefined;
+  /**
+   * Get the header as JSON
+   */
+  getHeader() /*throws*/ : string;
+  /**
+   * Get the known state as a native Record
+   */
+  getKnownState() /*throws*/ : KnownState;
+  /**
+   * Get the known state with streaming as a native Record
+   */
+  getKnownStateWithStreaming() /*throws*/ : KnownState | undefined;
+  /**
+   * Get last signature for a session (returns None if session not found)
+   */
+  getLastSignature(sessionId: string) /*throws*/ : string | undefined;
+  /**
+   * Get the last signature checkpoint index (-1 if no checkpoints, None if session not found)
+   */
+  getLastSignatureCheckpoint(
+    sessionId: string
+  ) /*throws*/ : /*i32*/ number | undefined;
+  /**
+   * Get all session IDs as native array
+   */
+  getSessionIds() /*throws*/ : Array<string>;
+  /**
+   * Get transactions for a session from index as native objects (returns None if session not found)
+   */
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: /*u32*/ number
+  ) /*throws*/ : Array<Transaction> | undefined;
+  /**
+   * Get signature after specific transaction index
+   */
+  getSignatureAfter(
+    sessionId: string,
+    txIndex: /*u32*/ number
+  ) /*throws*/ : string | undefined;
+  /**
+   * Get single transaction by index as native object (returns None if not found)
+   */
+  getTransaction(
+    sessionId: string,
+    txIndex: /*u32*/ number
+  ) /*throws*/ : Transaction | undefined;
+  /**
+   * Get transaction count for a session (returns -1 if session not found)
+   */
+  getTransactionCount(sessionId: string) /*throws*/ : /*i32*/ number;
+  /**
+   * Check if this CoValue is deleted
+   */
+  isDeleted() /*throws*/ : boolean;
+  /**
+   * Create new private transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
+   */
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
+    madeAt: /*f64*/ number
+  ) /*throws*/ : string;
+  /**
+   * Create new trusting transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
+   */
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: /*f64*/ number
+  ) /*throws*/ : string;
+  /**
+   * Mark this CoValue as deleted
+   */
+  markAsDeleted() /*throws*/ : void;
+  /**
+   * Set streaming known state
+   */
+  setStreamingKnownState(streamingJson: string) /*throws*/ : void;
+}
+
+export class SessionMap
+  extends UniffiAbstractObject
+  implements SessionMapInterface
+{
+  readonly [uniffiTypeNameSymbol] = 'SessionMap';
+  readonly [destructorGuardSymbol]: UniffiRustArcPtr;
+  readonly [pointerLiteralSymbol]: UnsafeMutableRawPointer;
+  /**
+   * Create a new SessionMap for a CoValue
+   * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   */
+  constructor(
+    coId: string,
+    headerJson: string,
+    maxTxSize: /*u32*/ number | undefined
+  ) /*throws*/ {
+    super();
+    const pointer = uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+        FfiConverterTypeSessionMapError
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_constructor_sessionmap_new(
+          FfiConverterString.lower(coId),
+          FfiConverterString.lower(headerJson),
+          FfiConverterOptionalUInt32.lower(maxTxSize),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+    this[pointerLiteralSymbol] = pointer;
+    this[destructorGuardSymbol] =
+      uniffiTypeSessionMapObjectFactory.bless(pointer);
+  }
+
+  /**
+   * Add transactions to a session
+   */
+  public addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+        FfiConverterTypeSessionMapError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_add_transactions(
+          uniffiTypeSessionMapObjectFactory.clonePointer(this),
+          FfiConverterString.lower(sessionId),
+          FfiConverterOptionalString.lower(signerId),
+          FfiConverterString.lower(transactionsJson),
+          FfiConverterString.lower(signature),
+          FfiConverterBool.lower(skipVerify),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
+   * Decrypt transaction changes
+   */
+  public decryptTransaction(
+    sessionId: string,
+    txIndex: /*u32*/ number,
+    keySecret: string
+  ): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_decrypt_transaction(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterUInt32.lower(txIndex),
+            FfiConverterString.lower(keySecret),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Decrypt transaction meta
+   */
+  public decryptTransactionMeta(
+    sessionId: string,
+    txIndex: /*u32*/ number,
+    keySecret: string
+  ): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_decrypt_transaction_meta(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterUInt32.lower(txIndex),
+            FfiConverterString.lower(keySecret),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get the header as JSON
+   */
+  public getHeader(): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_header(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get the known state as a native Record
+   */
+  public getKnownState(): KnownState /*throws*/ {
+    return FfiConverterTypeKnownState.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_known_state(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get the known state with streaming as a native Record
+   */
+  public getKnownStateWithStreaming(): KnownState | undefined /*throws*/ {
+    return FfiConverterOptionalTypeKnownState.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_known_state_with_streaming(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get last signature for a session (returns None if session not found)
+   */
+  public getLastSignature(sessionId: string): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_last_signature(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get the last signature checkpoint index (-1 if no checkpoints, None if session not found)
+   */
+  public getLastSignatureCheckpoint(
+    sessionId: string
+  ): /*i32*/ number | undefined /*throws*/ {
+    return FfiConverterOptionalInt32.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_last_signature_checkpoint(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get all session IDs as native array
+   */
+  public getSessionIds(): Array<string> /*throws*/ {
+    return FfiConverterArrayString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_session_ids(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get transactions for a session from index as native objects (returns None if session not found)
+   */
+  public getSessionTransactions(
+    sessionId: string,
+    fromIndex: /*u32*/ number
+  ): Array<Transaction> | undefined /*throws*/ {
+    return FfiConverterOptionalArrayTypeTransaction.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_session_transactions(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterUInt32.lower(fromIndex),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get signature after specific transaction index
+   */
+  public getSignatureAfter(
+    sessionId: string,
+    txIndex: /*u32*/ number
+  ): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_signature_after(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterUInt32.lower(txIndex),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get single transaction by index as native object (returns None if not found)
+   */
+  public getTransaction(
+    sessionId: string,
+    txIndex: /*u32*/ number
+  ): Transaction | undefined /*throws*/ {
+    return FfiConverterOptionalTypeTransaction.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_transaction(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterUInt32.lower(txIndex),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Get transaction count for a session (returns -1 if session not found)
+   */
+  public getTransactionCount(sessionId: string): /*i32*/ number /*throws*/ {
+    return FfiConverterInt32.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_transaction_count(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Check if this CoValue is deleted
+   */
+  public isDeleted(): boolean /*throws*/ {
+    return FfiConverterBool.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_deleted(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Create new private transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
+   */
+  public makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
+    madeAt: /*f64*/ number
+  ): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_make_new_private_transaction(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterString.lower(signerSecret),
+            FfiConverterString.lower(changesJson),
+            FfiConverterString.lower(keyId),
+            FfiConverterString.lower(keySecret),
+            FfiConverterOptionalString.lower(metaJson),
+            FfiConverterFloat64.lower(madeAt),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Create new trusting transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
+   */
+  public makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: /*f64*/ number
+  ): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_make_new_trusting_transaction(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            FfiConverterString.lower(sessionId),
+            FfiConverterString.lower(signerSecret),
+            FfiConverterString.lower(changesJson),
+            FfiConverterOptionalString.lower(metaJson),
+            FfiConverterFloat64.lower(madeAt),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Mark this CoValue as deleted
+   */
+  public markAsDeleted(): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+        FfiConverterTypeSessionMapError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_mark_as_deleted(
+          uniffiTypeSessionMapObjectFactory.clonePointer(this),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
+   * Set streaming known state
+   */
+  public setStreamingKnownState(streamingJson: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+        FfiConverterTypeSessionMapError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_set_streaming_known_state(
+          uniffiTypeSessionMapObjectFactory.clonePointer(this),
+          FfiConverterString.lower(streamingJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  /**
+   * {@inheritDoc uniffi-bindgen-react-native#UniffiAbstractObject.uniffiDestroy}
+   */
+  uniffiDestroy(): void {
+    const ptr = (this as any)[destructorGuardSymbol];
+    if (ptr !== undefined) {
+      const pointer = uniffiTypeSessionMapObjectFactory.pointer(this);
+      uniffiTypeSessionMapObjectFactory.freePointer(pointer);
+      uniffiTypeSessionMapObjectFactory.unbless(ptr);
+      delete (this as any)[destructorGuardSymbol];
+    }
+  }
+
+  static instanceOf(obj: any): obj is SessionMap {
+    return uniffiTypeSessionMapObjectFactory.isConcreteType(obj);
+  }
+}
+
+const uniffiTypeSessionMapObjectFactory: UniffiObjectFactory<SessionMapInterface> =
+  (() => {
+    return {
+      create(pointer: UnsafeMutableRawPointer): SessionMapInterface {
+        const instance = Object.create(SessionMap.prototype);
+        instance[pointerLiteralSymbol] = pointer;
+        instance[destructorGuardSymbol] = this.bless(pointer);
+        instance[uniffiTypeNameSymbol] = 'SessionMap';
+        return instance;
+      },
+
+      bless(p: UnsafeMutableRawPointer): UniffiRustArcPtr {
+        return uniffiCaller.rustCall(
+          /*caller:*/ (status) =>
+            nativeModule().ubrn_uniffi_internal_fn_method_sessionmap_ffi__bless_pointer(
+              p,
+              status
+            ),
+          /*liftString:*/ FfiConverterString.lift
+        );
+      },
+
+      unbless(ptr: UniffiRustArcPtr) {
+        ptr.markDestroyed();
+      },
+
+      pointer(obj: SessionMapInterface): UnsafeMutableRawPointer {
+        if ((obj as any)[destructorGuardSymbol] === undefined) {
+          throw new UniffiInternalError.UnexpectedNullPointer();
+        }
+        return (obj as any)[pointerLiteralSymbol];
+      },
+
+      clonePointer(obj: SessionMapInterface): UnsafeMutableRawPointer {
+        const pointer = this.pointer(obj);
+        return uniffiCaller.rustCall(
+          /*caller:*/ (callStatus) =>
+            nativeModule().ubrn_uniffi_cojson_core_rn_fn_clone_sessionmap(
+              pointer,
+              callStatus
+            ),
+          /*liftString:*/ FfiConverterString.lift
+        );
+      },
+
+      freePointer(pointer: UnsafeMutableRawPointer): void {
+        uniffiCaller.rustCall(
+          /*caller:*/ (callStatus) =>
+            nativeModule().ubrn_uniffi_cojson_core_rn_fn_free_sessionmap(
+              pointer,
+              callStatus
+            ),
+          /*liftString:*/ FfiConverterString.lift
+        );
+      },
+
+      isConcreteType(obj: any): obj is SessionMapInterface {
+        return (
+          obj[destructorGuardSymbol] &&
+          obj[uniffiTypeNameSymbol] === 'SessionMap'
+        );
+      },
+    };
+  })();
+// FfiConverter for SessionMapInterface
+const FfiConverterTypeSessionMap = new FfiConverterObject(
+  uniffiTypeSessionMapObjectFactory
+);
+
+// FfiConverter for /*i32*/number | undefined
+const FfiConverterOptionalInt32 = new FfiConverterOptional(FfiConverterInt32);
+
+// FfiConverter for KnownState | undefined
+const FfiConverterOptionalTypeKnownState = new FfiConverterOptional(
+  FfiConverterTypeKnownState
+);
+
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
+
+// FfiConverter for /*u32*/number | undefined
+const FfiConverterOptionalUInt32 = new FfiConverterOptional(FfiConverterUInt32);
+
+// FfiConverter for Array<string>
+const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
+
+// FfiConverter for Transaction | undefined
+const FfiConverterOptionalTypeTransaction = new FfiConverterOptional(
+  FfiConverterTypeTransaction
+);
+
+// FfiConverter for Array<Transaction>
+const FfiConverterArrayTypeTransaction = new FfiConverterArray(
+  FfiConverterTypeTransaction
+);
+
+// FfiConverter for Array<Transaction> | undefined
+const FfiConverterOptionalArrayTypeTransaction = new FfiConverterOptional(
+  FfiConverterArrayTypeTransaction
+);
 
 /**
  * This should be called before anything else.
@@ -2409,6 +3601,150 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_add_transactions() !==
+    19976
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_add_transactions'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_decrypt_transaction() !==
+    17995
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_decrypt_transaction'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_decrypt_transaction_meta() !==
+    47192
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_decrypt_transaction_meta'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_header() !==
+    19592
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_header'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state() !==
+    41174
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state_with_streaming() !==
+    52743
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state_with_streaming'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_last_signature() !==
+    19191
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_last_signature'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_last_signature_checkpoint() !==
+    22828
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_last_signature_checkpoint'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_ids() !==
+    26592
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_ids'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions() !==
+    14061
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_signature_after() !==
+    51130
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_signature_after'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction() !==
+    48857
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction_count() !==
+    15609
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction_count'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_is_deleted() !==
+    27742
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_is_deleted'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_private_transaction() !==
+    13868
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_private_transaction'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_trusting_transaction() !==
+    30612
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_trusting_transaction'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_mark_as_deleted() !==
+    57677
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_mark_as_deleted'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_set_streaming_known_state() !==
+    16495
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_set_streaming_known_state'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_constructor_blake3hasher_new() !==
     24312
   ) {
@@ -2424,6 +3760,14 @@ function uniffiEnsureInitialized() {
       'uniffi_cojson_core_rn_checksum_constructor_sessionlog_new'
     );
   }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_constructor_sessionmap_new() !==
+    17124
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_constructor_sessionmap_new'
+    );
+  }
 }
 
 export default Object.freeze({
@@ -2432,7 +3776,13 @@ export default Object.freeze({
     FfiConverterTypeBlake3Error,
     FfiConverterTypeBlake3Hasher,
     FfiConverterTypeCryptoErrorUniffi,
+    FfiConverterTypeKnownState,
+    FfiConverterTypePrivateTransaction,
     FfiConverterTypeSessionLog,
     FfiConverterTypeSessionLogError,
+    FfiConverterTypeSessionMap,
+    FfiConverterTypeSessionMapError,
+    FfiConverterTypeTransaction,
+    FfiConverterTypeTrustingTransaction,
   },
 });

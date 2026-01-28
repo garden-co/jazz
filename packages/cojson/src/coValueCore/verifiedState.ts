@@ -87,7 +87,7 @@ export class VerifiedState {
     this.id = id;
     this.crypto = crypto;
     this.header = header;
-    this.sessions = sessions ?? new SessionMap(id, crypto);
+    this.sessions = sessions ?? new SessionMap(id, crypto, header);
     this.branchSourceId = header.meta?.source as RawCoID | undefined;
     this.branchName = header.meta?.branch as string | undefined;
   }

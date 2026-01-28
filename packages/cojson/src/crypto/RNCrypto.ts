@@ -25,6 +25,7 @@ import {
   SealerID,
   SealerSecret,
   SessionLogImpl,
+  SessionMapImpl,
   Signature,
   SignerID,
   SignerSecret,
@@ -46,8 +47,38 @@ import {
   unseal,
   Blake3Hasher,
   SessionLog,
+  SessionMap as RNSessionMap,
+  Transaction as RNTransaction,
+  Transaction_Tags,
+  PrivateTransaction as RNPrivateTransaction,
+  TrustingTransaction as RNTrustingTransaction,
 } from "cojson-core-rn";
 import { WasmCrypto } from "./WasmCrypto.js";
+
+/**
+ * Convert a Uniffi Transaction enum to the TypeScript Transaction type.
+ * Uniffi enums have a `tag` property and `inner` containing the data.
+ */
+function convertRNTransaction(rnTx: RNTransaction): Transaction {
+  if (rnTx.tag === Transaction_Tags.Private) {
+    const inner = rnTx.inner.tx as RNPrivateTransaction;
+    return {
+      privacy: "private",
+      madeAt: inner.madeAt,
+      keyUsed: inner.keyUsed as KeyID,
+      encryptedChanges: inner.encryptedChanges,
+      meta: inner.meta,
+    } as PrivateTransaction;
+  } else {
+    const inner = rnTx.inner.tx as RNTrustingTransaction;
+    return {
+      privacy: "trusting",
+      madeAt: inner.madeAt,
+      changes: inner.changes as Stringified<JsonValue[]>,
+      meta: inner.meta as Stringified<JsonObject> | undefined,
+    } as TrustingTransaction;
+  }
+}
 
 type Blake3State = Blake3Hasher;
 
@@ -143,6 +174,14 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     signerID?: SignerID,
   ): SessionLogImpl {
     return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
+  }
+
+  createSessionMap(
+    coID: RawCoID,
+    headerJson: string,
+    maxTxSize?: number,
+  ): SessionMapImpl {
+    return new SessionMapAdapter(new RNSessionMap(coID, headerJson, maxTxSize));
   }
 
   static async create(): Promise<RNCrypto> {
@@ -320,6 +359,180 @@ class SessionLogAdapter implements SessionLogImpl {
   clone(): SessionLogImpl {
     return new SessionLogAdapter(
       this.sessionLog.cloneSessionLog() as SessionLog,
+    );
+  }
+}
+
+/**
+ * Adapter wrapping RNSessionMap to implement SessionMapImpl interface
+ */
+class SessionMapAdapter implements SessionMapImpl {
+  constructor(private readonly sessionMap: RNSessionMap) {}
+
+  // === Header ===
+  getHeader(): string {
+    return this.sessionMap.getHeader();
+  }
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean,
+  ): void {
+    this.sessionMap.addTransactions(
+      sessionId,
+      signerId,
+      transactionsJson,
+      signature,
+      skipVerify,
+    );
+  }
+
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      keyId,
+      keySecret,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  // === Session Queries ===
+  getSessionIds(): string[] {
+    return this.sessionMap.getSessionIds();
+  }
+
+  getTransactionCount(sessionId: string): number {
+    return this.sessionMap.getTransactionCount(sessionId);
+  }
+
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return convertRNTransaction(result);
+  }
+
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result.map(convertRNTransaction);
+  }
+
+  getLastSignature(sessionId: string): string | undefined {
+    return this.sessionMap.getLastSignature(sessionId) ?? undefined;
+  }
+
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined {
+    return this.sessionMap.getSignatureAfter(sessionId, txIndex) ?? undefined;
+  }
+
+  getLastSignatureCheckpoint(sessionId: string): number | undefined {
+    return this.sessionMap.getLastSignatureCheckpoint(sessionId) ?? undefined;
+  }
+
+  // === Known State ===
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  } {
+    // Uniffi returns a Record with Map<string, number> for sessions
+    // Convert Map to Record for consistency
+    // Type assertion needed until Uniffi types are regenerated
+    const ks = this.sessionMap.getKnownState() as unknown as {
+      id: string;
+      header: boolean;
+      sessions: Map<string, number>;
+    };
+    return {
+      id: ks.id,
+      header: ks.header,
+      sessions: Object.fromEntries(ks.sessions),
+    };
+  }
+
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined {
+    // Uniffi returns a Record with Map<string, number> for sessions
+    // Type assertion needed until Uniffi types are regenerated
+    const ks = this.sessionMap.getKnownStateWithStreaming() as unknown as
+      | { id: string; header: boolean; sessions: Map<string, number> }
+      | undefined;
+    if (!ks || ks === undefined) return undefined;
+    return {
+      id: ks.id,
+      header: ks.header,
+      sessions: Object.fromEntries(ks.sessions),
+    };
+  }
+
+  setStreamingKnownState(streamingJson: string): void {
+    this.sessionMap.setStreamingKnownState(streamingJson);
+  }
+
+  // === Deletion ===
+  markAsDeleted(): void {
+    this.sessionMap.markAsDeleted();
+  }
+
+  isDeleted(): boolean {
+    return this.sessionMap.isDeleted();
+  }
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransaction(sessionId, txIndex, keySecret) ??
+      undefined
+    );
+  }
+
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransactionMeta(sessionId, txIndex, keySecret) ??
+      undefined
     );
   }
 }

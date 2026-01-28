@@ -1,5 +1,6 @@
 import {
   SessionLog,
+  SessionMap as NativeSessionMap,
   Blake3Hasher,
   blake3HashOnce,
   blake3HashOnceWithContext,
@@ -27,6 +28,7 @@ import {
   Sealed,
   SealerID,
   SealerSecret,
+  SessionMapImpl,
   Signature,
   SignerID,
   SignerSecret,
@@ -179,6 +181,16 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
   createSessionLog(coID: RawCoID, sessionID: SessionID, signerID?: SignerID) {
     return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
   }
+
+  createSessionMap(
+    coID: RawCoID,
+    headerJson: string,
+    maxTxSize?: number,
+  ): SessionMapImpl {
+    return new SessionMapAdapter(
+      new NativeSessionMap(coID, headerJson, maxTxSize),
+    );
+  }
 }
 
 class SessionLogAdapter {
@@ -290,5 +302,169 @@ class SessionLogAdapter {
 
   clone(): SessionLogAdapter {
     return new SessionLogAdapter(this.sessionLog.clone());
+  }
+}
+
+/**
+ * Adapter wrapping NativeSessionMap to implement SessionMapImpl interface
+ */
+class SessionMapAdapter implements SessionMapImpl {
+  constructor(private readonly sessionMap: NativeSessionMap) {}
+
+  // === Header ===
+  getHeader(): string {
+    return this.sessionMap.getHeader();
+  }
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
+    skipVerify: boolean,
+  ): void {
+    this.sessionMap.addTransactions(
+      sessionId,
+      signerId,
+      transactionsJson,
+      signature,
+      skipVerify,
+    );
+  }
+
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      keyId,
+      keySecret,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  // === Session Queries ===
+  getSessionIds(): string[] {
+    return this.sessionMap.getSessionIds();
+  }
+
+  getTransactionCount(sessionId: string): number {
+    return this.sessionMap.getTransactionCount(sessionId);
+  }
+
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return result as unknown as Transaction;
+  }
+
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result as unknown as Transaction[];
+  }
+
+  getLastSignature(sessionId: string): string | undefined {
+    return this.sessionMap.getLastSignature(sessionId) ?? undefined;
+  }
+
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined {
+    return this.sessionMap.getSignatureAfter(sessionId, txIndex) ?? undefined;
+  }
+
+  getLastSignatureCheckpoint(sessionId: string): number | undefined {
+    return this.sessionMap.getLastSignatureCheckpoint(sessionId) ?? undefined;
+  }
+
+  // === Known State ===
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  } {
+    // NAPI returns a native JS object via #[napi(object)]
+    return this.sessionMap.getKnownState() as {
+      id: string;
+      header: boolean;
+      sessions: Record<string, number>;
+    };
+  }
+
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined {
+    // NAPI returns a native JS object via #[napi(object)], or undefined
+    const result = this.sessionMap.getKnownStateWithStreaming();
+    if (!result || result === undefined) return undefined;
+    return result as {
+      id: string;
+      header: boolean;
+      sessions: Record<string, number>;
+    };
+  }
+
+  setStreamingKnownState(streamingJson: string): void {
+    this.sessionMap.setStreamingKnownState(streamingJson);
+  }
+
+  // === Deletion ===
+  markAsDeleted(): void {
+    this.sessionMap.markAsDeleted();
+  }
+
+  isDeleted(): boolean {
+    return this.sessionMap.isDeleted();
+  }
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransaction(sessionId, txIndex, keySecret) ??
+      undefined
+    );
+  }
+
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransactionMeta(sessionId, txIndex, keySecret) ??
+      undefined
+    );
   }
 }
