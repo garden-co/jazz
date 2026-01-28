@@ -5,7 +5,11 @@ import {
 } from "../config.js";
 import { OutgoingLoadQueue } from "../queue/OutgoingLoadQueue.js";
 import type { PeerID } from "../sync.js";
-import { createTestNode } from "./testUtils.js";
+import {
+  createTestMetricReader,
+  createTestNode,
+  tearDownTestMetricReader,
+} from "./testUtils.js";
 
 const TEST_PEER_ID = "test-peer" as PeerID;
 
@@ -723,6 +727,68 @@ describe("OutgoingLoadQueue", () => {
       expect(coValue.getLoadingStateForPeer(TEST_PEER_ID)).not.toBe(
         "unavailable",
       );
+    });
+
+    test("should balance push/pull metrics when clearing pending items", async () => {
+      const metricReader = createTestMetricReader();
+
+      try {
+        setMaxInFlightLoadsPerPeer(1);
+        const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+        const node = createTestNode();
+        const group = node.createGroup();
+
+        // Block the queue first (this item is pushed then immediately shifted to go in-flight)
+        const blockerMap = group.createMap();
+        queue.enqueue(blockerMap.core, () => {});
+
+        // Enqueue multiple items that will be pending
+        const map1 = group.createMap();
+        const map2 = group.createMap();
+        const map3 = group.createMap();
+
+        queue.enqueue(map1.core, () => {});
+        queue.enqueue(map2.core, () => {});
+        queue.enqueue(map3.core, () => {});
+
+        expect(queue.pendingCount).toBe(3);
+
+        // Get metrics before clear
+        // 4 items pushed (blocker + 3 pending), 1 pulled (blocker was shifted to go in-flight)
+        const pushedBefore = await metricReader.getMetricValue(
+          "jazz.messagequeue.load-requests-queue.pushed",
+          { priority: "high" },
+        );
+        const pulledBefore = await metricReader.getMetricValue(
+          "jazz.messagequeue.load-requests-queue.pulled",
+          { priority: "high" },
+        );
+
+        expect(pushedBefore).toBe(4);
+        expect(pulledBefore).toBe(1);
+        // 3 items still pending (not balanced)
+        expect(Number(pushedBefore ?? 0) - Number(pulledBefore ?? 0)).toBe(3);
+
+        // Clear the queue - this should drain pending items, incrementing pulled counter
+        queue.clear();
+
+        // Get metrics after clear - pushed and pulled should now be equal
+        const pushedAfter = await metricReader.getMetricValue(
+          "jazz.messagequeue.load-requests-queue.pushed",
+          { priority: "high" },
+        );
+        const pulledAfter = await metricReader.getMetricValue(
+          "jazz.messagequeue.load-requests-queue.pulled",
+          { priority: "high" },
+        );
+
+        // All 4 pushed items should now be pulled (balanced)
+        expect(pushedAfter).toBe(4);
+        expect(pulledAfter).toBe(4);
+        expect(pushedAfter).toBe(pulledAfter);
+      } finally {
+        tearDownTestMetricReader();
+      }
     });
   });
 
