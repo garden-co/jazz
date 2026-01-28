@@ -98,14 +98,15 @@ export class SessionMap {
   }
 
   get knownState(): CoValueKnownState {
-    const json = this.impl.getKnownState();
-    return parseJSON(json as Stringified<CoValueKnownState>);
+    // Native object returned directly from Rust
+    return this.impl.getKnownState() as CoValueKnownState;
   }
 
   get knownStateWithStreaming(): CoValueKnownState | undefined {
-    const json = this.impl.getKnownStateWithStreaming();
-    if (!json) return undefined;
-    return parseJSON(json as Stringified<CoValueKnownState>);
+    // Native object returned directly from Rust
+    const result = this.impl.getKnownStateWithStreaming();
+    if (!result || result === undefined) return undefined;
+    return result as CoValueKnownState;
   }
 
   getImmutableKnownState(): CoValueKnownState {

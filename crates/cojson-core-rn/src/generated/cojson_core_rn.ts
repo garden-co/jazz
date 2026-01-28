@@ -42,6 +42,7 @@ import {
   FfiConverterBool,
   FfiConverterFloat64,
   FfiConverterInt32,
+  FfiConverterMap,
   FfiConverterObject,
   FfiConverterOptional,
   FfiConverterUInt32,
@@ -54,6 +55,7 @@ import {
   destructorGuardSymbol,
   pointerLiteralSymbol,
   uniffiCreateFfiConverterString,
+  uniffiCreateRecord,
   uniffiTypeNameSymbol,
   variantOrdinalSymbol,
 } from 'uniffi-bindgen-react-native';
@@ -687,6 +689,71 @@ export function x25519PublicKey(
     )
   );
 }
+
+/**
+ * KnownState as a native Record (no JSON serialization needed)
+ */
+export type KnownState = {
+  id: string;
+  header: boolean;
+  sessions: Map<string, /*u32*/ number>;
+};
+
+/**
+ * Generated factory for {@link KnownState} record objects.
+ */
+export const KnownState = (() => {
+  const defaults = () => ({});
+  const create = (() => {
+    return uniffiCreateRecord<KnownState, ReturnType<typeof defaults>>(
+      defaults
+    );
+  })();
+  return Object.freeze({
+    /**
+     * Create a frozen instance of {@link KnownState}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    create,
+
+    /**
+     * Create a frozen instance of {@link KnownState}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    new: create,
+
+    /**
+     * Defaults specified in the {@link cojson_core_rn} crate.
+     */
+    defaults: () => Object.freeze(defaults()) as Partial<KnownState>,
+  });
+})();
+
+const FfiConverterTypeKnownState = (() => {
+  type TypeName = KnownState;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      return {
+        id: FfiConverterString.read(from),
+        header: FfiConverterBool.read(from),
+        sessions: FfiConverterMapStringUInt32.read(from),
+      };
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      FfiConverterString.write(value.id, into);
+      FfiConverterBool.write(value.header, into);
+      FfiConverterMapStringUInt32.write(value.sessions, into);
+    }
+    allocationSize(value: TypeName): number {
+      return (
+        FfiConverterString.allocationSize(value.id) +
+        FfiConverterBool.allocationSize(value.header) +
+        FfiConverterMapStringUInt32.allocationSize(value.sessions)
+      );
+    }
+  }
+  return new FFIConverter();
+})();
 
 const stringConverter = {
   stringToBytes: (s: string) =>
@@ -1708,6 +1775,12 @@ const FfiConverterTypeSessionMapError = (() => {
   return new FFIConverter();
 })();
 
+// FfiConverter for Map<string, /*u32*/number>
+const FfiConverterMapStringUInt32 = new FfiConverterMap(
+  FfiConverterString,
+  FfiConverterUInt32
+);
+
 export interface Blake3HasherInterface {
   cloneHasher() /*throws*/ : Blake3HasherInterface;
   finalize() /*throws*/ : ArrayBuffer;
@@ -2271,13 +2344,13 @@ export interface SessionMapInterface {
    */
   getHeader() /*throws*/ : string;
   /**
-   * Get the known state as JSON
+   * Get the known state as a native Record
    */
-  getKnownState() /*throws*/ : string;
+  getKnownState() /*throws*/ : KnownState;
   /**
-   * Get the known state with streaming as JSON (returns None if no streaming)
+   * Get the known state with streaming as a native Record
    */
-  getKnownStateWithStreaming() /*throws*/ : string | undefined;
+  getKnownStateWithStreaming() /*throws*/ : KnownState | undefined;
   /**
    * Get last signature for a session (returns None if session not found)
    */
@@ -2495,10 +2568,10 @@ export class SessionMap
   }
 
   /**
-   * Get the known state as JSON
+   * Get the known state as a native Record
    */
-  public getKnownState(): string /*throws*/ {
-    return FfiConverterString.lift(
+  public getKnownState(): KnownState /*throws*/ {
+    return FfiConverterTypeKnownState.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
           FfiConverterTypeSessionMapError
@@ -2515,10 +2588,10 @@ export class SessionMap
   }
 
   /**
-   * Get the known state with streaming as JSON (returns None if no streaming)
+   * Get the known state with streaming as a native Record
    */
-  public getKnownStateWithStreaming(): string | undefined /*throws*/ {
-    return FfiConverterOptionalString.lift(
+  public getKnownStateWithStreaming(): KnownState | undefined /*throws*/ {
+    return FfiConverterOptionalTypeKnownState.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
           FfiConverterTypeSessionMapError
@@ -2909,6 +2982,11 @@ const FfiConverterTypeSessionMap = new FfiConverterObject(
 // FfiConverter for /*i32*/number | undefined
 const FfiConverterOptionalInt32 = new FfiConverterOptional(FfiConverterInt32);
 
+// FfiConverter for KnownState | undefined
+const FfiConverterOptionalTypeKnownState = new FfiConverterOptional(
+  FfiConverterTypeKnownState
+);
+
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
 
@@ -3261,7 +3339,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state() !==
-    46590
+    41174
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state'
@@ -3269,7 +3347,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state_with_streaming() !==
-    1415
+    52743
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state_with_streaming'
@@ -3403,6 +3481,7 @@ export default Object.freeze({
     FfiConverterTypeBlake3Error,
     FfiConverterTypeBlake3Hasher,
     FfiConverterTypeCryptoErrorUniffi,
+    FfiConverterTypeKnownState,
     FfiConverterTypeSessionLog,
     FfiConverterTypeSessionLogError,
     FfiConverterTypeSessionMap,

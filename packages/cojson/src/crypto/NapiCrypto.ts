@@ -404,12 +404,30 @@ class SessionMapAdapter implements SessionMapImpl {
   }
 
   // === Known State ===
-  getKnownState(): string {
-    return this.sessionMap.getKnownState();
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  } {
+    // NAPI returns a native JS object via #[napi(object)]
+    return this.sessionMap.getKnownState() as {
+      id: string;
+      header: boolean;
+      sessions: Record<string, number>;
+    };
   }
 
-  getKnownStateWithStreaming(): string | undefined {
-    return this.sessionMap.getKnownStateWithStreaming() ?? undefined;
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined {
+    // NAPI returns a native JS object via #[napi(object)], or undefined
+    const result = this.sessionMap.getKnownStateWithStreaming();
+    if (!result || result === undefined) return undefined;
+    return result as {
+      id: string;
+      header: boolean;
+      sessions: Record<string, number>;
+    };
   }
 
   setStreamingKnownState(streamingJson: string): void {

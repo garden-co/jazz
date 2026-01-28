@@ -508,16 +508,14 @@ impl SessionMapImpl {
 
     // === Known State ===
 
-    /// Get the known state as JSON
-    pub fn get_known_state(&self) -> String {
-        serde_json::to_string(&self.known_state).expect("known_state serialization should not fail")
+    /// Get the known state as a native struct
+    pub fn get_known_state(&self) -> &KnownState {
+        &self.known_state
     }
 
-    /// Get the known state with streaming as JSON
-    pub fn get_known_state_with_streaming(&self) -> Option<String> {
-        self.known_state_with_streaming
-            .as_ref()
-            .map(|ks| serde_json::to_string(ks).expect("known_state serialization should not fail"))
+    /// Get the known state with streaming as a native struct
+    pub fn get_known_state_with_streaming(&self) -> Option<&KnownState> {
+        self.known_state_with_streaming.as_ref()
     }
 
     /// Set streaming known state
@@ -707,8 +705,7 @@ mod tests {
     fn test_known_state() {
         let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
 
-        let known_state_json = session_map.get_known_state();
-        let known_state: KnownState = serde_json::from_str(&known_state_json).unwrap();
+        let known_state = session_map.get_known_state();
 
         assert!(known_state.header);
         assert_eq!(known_state.id, "co_test");

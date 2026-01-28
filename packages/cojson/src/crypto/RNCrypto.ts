@@ -433,12 +433,40 @@ class SessionMapAdapter implements SessionMapImpl {
   }
 
   // === Known State ===
-  getKnownState(): string {
-    return this.sessionMap.getKnownState();
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  } {
+    // Uniffi returns a Record with Map<string, number> for sessions
+    // Convert Map to Record for consistency
+    // Type assertion needed until Uniffi types are regenerated
+    const ks = this.sessionMap.getKnownState() as unknown as {
+      id: string;
+      header: boolean;
+      sessions: Map<string, number>;
+    };
+    return {
+      id: ks.id,
+      header: ks.header,
+      sessions: Object.fromEntries(ks.sessions),
+    };
   }
 
-  getKnownStateWithStreaming(): string | undefined {
-    return this.sessionMap.getKnownStateWithStreaming() ?? undefined;
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined {
+    // Uniffi returns a Record with Map<string, number> for sessions
+    // Type assertion needed until Uniffi types are regenerated
+    const ks = this.sessionMap.getKnownStateWithStreaming() as unknown as
+      | { id: string; header: boolean; sessions: Map<string, number> }
+      | undefined;
+    if (!ks || ks === undefined) return undefined;
+    return {
+      id: ks.id,
+      header: ks.header,
+      sessions: Object.fromEntries(ks.sessions),
+    };
   }
 
   setStreamingKnownState(streamingJson: string): void {

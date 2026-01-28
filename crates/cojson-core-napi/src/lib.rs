@@ -1,10 +1,35 @@
 use cojson_core::core::{
   CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, SessionMapImpl,
   Signature, SignerID, SignerSecret, Transaction, TransactionMode,
+  KnownState as RustKnownState,
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use thiserror::Error;
+
+// ============================================================================
+// KnownState - Native JavaScript Object
+// ============================================================================
+
+/// KnownState as a native JavaScript object (no JSON serialization needed)
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct KnownState {
+  pub id: String,
+  pub header: bool,
+  pub sessions: HashMap<String, u32>,
+}
+
+impl From<RustKnownState> for KnownState {
+  fn from(ks: RustKnownState) -> Self {
+    KnownState {
+      id: ks.id,
+      header: ks.header,
+      sessions: ks.sessions.into_iter().collect(),
+    }
+  }
+}
 
 pub mod hash {
   pub mod blake3;
@@ -367,16 +392,16 @@ impl SessionMap {
 
   // === Known State ===
 
-  /// Get the known state as JSON
+  /// Get the known state as a native JavaScript object
   #[napi]
-  pub fn get_known_state(&self) -> String {
-    self.internal.get_known_state()
+  pub fn get_known_state(&self) -> KnownState {
+    self.internal.get_known_state().clone().into()
   }
 
-  /// Get the known state with streaming as JSON (returns undefined if no streaming)
+  /// Get the known state with streaming as a native JavaScript object
   #[napi]
-  pub fn get_known_state_with_streaming(&self) -> Option<String> {
-    self.internal.get_known_state_with_streaming()
+  pub fn get_known_state_with_streaming(&self) -> Option<KnownState> {
+    self.internal.get_known_state_with_streaming().map(|ks| ks.clone().into())
   }
 
   /// Set streaming known state

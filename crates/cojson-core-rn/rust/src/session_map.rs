@@ -1,4 +1,5 @@
-use cojson_core::core::SessionMapImpl;
+use cojson_core::core::{SessionMapImpl, KnownState as RustKnownState};
+use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Error, Debug, uniffi::Error)]
@@ -7,6 +8,24 @@ pub enum SessionMapError {
     Internal(String),
     #[error("Failed to acquire lock")]
     LockError,
+}
+
+/// KnownState as a native Record (no JSON serialization needed)
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct KnownState {
+    pub id: String,
+    pub header: bool,
+    pub sessions: HashMap<String, u32>,
+}
+
+impl From<&RustKnownState> for KnownState {
+    fn from(ks: &RustKnownState) -> Self {
+        KnownState {
+            id: ks.id.clone(),
+            header: ks.header,
+            sessions: ks.sessions.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        }
+    }
 }
 
 #[derive(uniffi::Object)]
@@ -156,16 +175,16 @@ impl SessionMap {
 
     // === Known State ===
 
-    /// Get the known state as JSON
-    pub fn get_known_state(&self) -> Result<String, SessionMapError> {
+    /// Get the known state as a native Record
+    pub fn get_known_state(&self) -> Result<KnownState, SessionMapError> {
         let internal = self.internal.lock().map_err(|_| SessionMapError::LockError)?;
-        Ok(internal.get_known_state())
+        Ok(internal.get_known_state().into())
     }
 
-    /// Get the known state with streaming as JSON (returns None if no streaming)
-    pub fn get_known_state_with_streaming(&self) -> Result<Option<String>, SessionMapError> {
+    /// Get the known state with streaming as a native Record
+    pub fn get_known_state_with_streaming(&self) -> Result<Option<KnownState>, SessionMapError> {
         let internal = self.internal.lock().map_err(|_| SessionMapError::LockError)?;
-        Ok(internal.get_known_state_with_streaming())
+        Ok(internal.get_known_state_with_streaming().map(|ks| ks.into()))
     }
 
     /// Set streaming known state
