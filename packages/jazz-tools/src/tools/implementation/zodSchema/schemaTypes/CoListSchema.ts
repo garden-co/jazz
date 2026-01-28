@@ -180,7 +180,7 @@ export class CoListSchema<
     return this.coValueClass;
   }
 
-  /** @deprecated Use `getOrCreateUnique` instead. */
+  /** @deprecated Use `loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
