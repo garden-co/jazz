@@ -135,11 +135,17 @@ impl<'a> LensTransformer<'a> {
         let mut values = decode_row(source_desc, data)
             .map_err(|e| TransformError::DecodeError(format!("{:?}", e)))?;
 
-        // Apply each lens in the path
+        // Apply each lens in the path with the appropriate direction
         let mut current_desc = source_desc.clone();
-        for lens in lens_path {
-            // Get the target descriptor for this lens step
-            let next_schema = self.context.get_schema(&lens.target_hash).ok_or({
+        for (lens, direction) in lens_path {
+            // Get the next schema based on direction
+            // Forward: source -> target, Backward: target -> source
+            let next_hash = match direction {
+                Direction::Forward => lens.target_hash,
+                Direction::Backward => lens.source_hash,
+            };
+
+            let next_schema = self.context.get_schema(&next_hash).ok_or({
                 TransformError::NoLensPath {
                     source: lens.source_hash,
                     target: lens.target_hash,
@@ -150,8 +156,8 @@ impl<'a> LensTransformer<'a> {
                 .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
             let next_desc = &next_table.descriptor;
 
-            // Apply lens forward transform
-            values = lens.apply(&values, &current_desc, next_desc, Direction::Forward);
+            // Apply lens with the appropriate direction
+            values = lens.apply(&values, &current_desc, next_desc, direction);
             current_desc = next_desc.clone();
         }
 
@@ -218,13 +224,20 @@ pub fn translate_column_for_index(
         return Some(column.to_string());
     }
 
-    // Get lens path from target to current (we need backward direction)
+    // Get lens path from target to current
     let lens_path = context.lens_path(target_hash).ok()?;
 
-    // Apply translations in reverse (backward direction)
+    // Apply translations in reverse using the opposite direction
+    // If path was found going forward, we translate backward
+    // If path was found going backward, we translate forward
     let mut current_name = column.to_string();
-    for lens in lens_path.iter().rev() {
-        current_name = lens.translate_column(table, &current_name, Direction::Backward)?;
+    for (lens, direction) in lens_path.iter().rev() {
+        // Opposite direction for column translation when reversing the path
+        let translate_direction = match direction {
+            Direction::Forward => Direction::Backward,
+            Direction::Backward => Direction::Forward,
+        };
+        current_name = lens.translate_column(table, &current_name, translate_direction)?;
     }
 
     Some(current_name)

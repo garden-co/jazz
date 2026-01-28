@@ -84,6 +84,10 @@ pub struct SchemaContext {
     pub live_schemas: HashMap<SchemaHash, Schema>,
     /// Registered lenses between schema versions ((source, target) -> lens).
     pub lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
+
+    /// Schemas received via catalogue sync but not yet live (awaiting lens path).
+    /// These become live when a lens path to current_schema becomes available.
+    pub pending_schemas: HashMap<SchemaHash, Schema>,
 }
 
 impl SchemaContext {
@@ -97,6 +101,7 @@ impl SchemaContext {
             user_branch: user_branch.to_string(),
             live_schemas: HashMap::new(),
             lenses: HashMap::new(),
+            pending_schemas: HashMap::new(),
         }
     }
 
@@ -141,38 +146,53 @@ impl SchemaContext {
     }
 
     /// Find the lens path from a source schema to the current schema.
-    /// Returns the sequence of lenses to apply (in order).
-    pub fn lens_path(&self, from: &SchemaHash) -> Result<Vec<&Lens>, SchemaError> {
+    /// Returns the sequence of (lens, direction) pairs to apply (in order).
+    ///
+    /// This traverses both forward and backward lens directions:
+    /// - Forward: lens(A→B) allows A to reach B (use lens.forward transform)
+    /// - Backward: lens(A→B) also allows B to reach A (use lens.backward transform)
+    ///
+    /// The returned path contains lenses paired with the direction to apply.
+    pub fn lens_path(
+        &self,
+        from: &SchemaHash,
+    ) -> Result<Vec<(&Lens, super::lens::Direction)>, SchemaError> {
+        use super::lens::Direction;
+
         if from == &self.current_hash {
             return Ok(Vec::new()); // Already at current
         }
 
-        // Simple BFS to find path (for V1, typically just 1 hop)
+        // BFS to find path, considering both forward and backward lens directions
         let mut visited = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
-        let mut parent: HashMap<SchemaHash, (SchemaHash, &Lens)> = HashMap::new();
+        // Parent map: target -> (previous_node, lens, direction)
+        let mut parent: HashMap<SchemaHash, (SchemaHash, &Lens, Direction)> = HashMap::new();
 
         queue.push_back(*from);
         visited.insert(*from);
 
         while let Some(current) = queue.pop_front() {
-            // Check all lenses from current
+            // Check all lenses - both forward and backward directions
             for ((source, target), lens) in &self.lenses {
+                // Forward direction: source -> target
                 if source == &current && !visited.contains(target) {
                     visited.insert(*target);
-                    parent.insert(*target, (current, lens));
+                    parent.insert(*target, (current, lens, Direction::Forward));
                     queue.push_back(*target);
 
                     if target == &self.current_hash {
-                        // Found path - reconstruct
-                        let mut path = Vec::new();
-                        let mut curr = self.current_hash;
-                        while let Some((prev, lens)) = parent.get(&curr) {
-                            path.push(*lens);
-                            curr = *prev;
-                        }
-                        path.reverse();
-                        return Ok(path);
+                        return self.reconstruct_path(&parent);
+                    }
+                }
+                // Backward direction: target -> source (using backward transform)
+                if target == &current && !visited.contains(source) {
+                    visited.insert(*source);
+                    parent.insert(*source, (current, lens, Direction::Backward));
+                    queue.push_back(*source);
+
+                    if source == &self.current_hash {
+                        return self.reconstruct_path(&parent);
                     }
                 }
             }
@@ -184,11 +204,26 @@ impl SchemaContext {
         })
     }
 
+    /// Reconstruct the lens path from BFS parent map.
+    fn reconstruct_path<'a>(
+        &'a self,
+        parent: &HashMap<SchemaHash, (SchemaHash, &'a Lens, super::lens::Direction)>,
+    ) -> Result<Vec<(&'a Lens, super::lens::Direction)>, SchemaError> {
+        let mut path = Vec::new();
+        let mut curr = self.current_hash;
+        while let Some((prev, lens, direction)) = parent.get(&curr) {
+            path.push((*lens, *direction));
+            curr = *prev;
+        }
+        path.reverse();
+        Ok(path)
+    }
+
     /// Validate the context: ensure no draft lenses in paths to live schemas.
     pub fn validate(&self) -> Result<(), SchemaError> {
         for live_hash in self.live_schemas.keys() {
             let path = self.lens_path(live_hash)?;
-            for lens in path {
+            for (lens, _direction) in path {
                 if lens.is_draft() {
                     return Err(SchemaError::DraftLensInPath {
                         source: lens.source_hash,
@@ -219,6 +254,49 @@ impl SchemaContext {
         let mut hashes = vec![self.current_hash];
         hashes.extend(self.live_schemas.keys().copied());
         hashes
+    }
+
+    /// Add a schema to the pending set (awaiting lens path).
+    ///
+    /// The schema will become live once a lens path to current_schema is available.
+    pub fn add_pending_schema(&mut self, schema: Schema) {
+        let hash = SchemaHash::compute(&schema);
+        // Don't add if already live or current
+        if !self.is_live(&hash) {
+            self.pending_schemas.insert(hash, schema);
+        }
+    }
+
+    /// Check if a schema is pending activation.
+    pub fn is_pending(&self, hash: &SchemaHash) -> bool {
+        self.pending_schemas.contains_key(hash)
+    }
+
+    /// Try to activate pending schemas that now have lens paths to current.
+    ///
+    /// Returns the hashes of newly activated schemas.
+    /// Should be called after registering new lenses.
+    pub fn try_activate_pending(&mut self) -> Vec<SchemaHash> {
+        let mut activated = Vec::new();
+        let pending_hashes: Vec<_> = self.pending_schemas.keys().copied().collect();
+
+        for hash in pending_hashes {
+            // Check if we can now reach current from this pending schema
+            if self.lens_path(&hash).is_ok() {
+                // Move from pending to live
+                if let Some(schema) = self.pending_schemas.remove(&hash) {
+                    self.live_schemas.insert(hash, schema);
+                    activated.push(hash);
+                }
+            }
+        }
+
+        activated
+    }
+
+    /// Get pending schema by hash.
+    pub fn get_pending_schema(&self, hash: &SchemaHash) -> Option<&Schema> {
+        self.pending_schemas.get(hash)
     }
 }
 
@@ -295,7 +373,7 @@ mod tests {
 
         let path = ctx.lens_path(&v1_hash).unwrap();
         assert_eq!(path.len(), 1);
-        assert_eq!(path[0].source_hash, v1_hash);
+        assert_eq!(path[0].0.source_hash, v1_hash);
     }
 
     #[test]
@@ -432,12 +510,12 @@ mod tests {
         assert_eq!(path.len(), 2);
 
         // First hop: v1 -> v2
-        assert_eq!(path[0].source_hash, v1_hash);
-        assert_eq!(path[0].target_hash, v2_hash);
+        assert_eq!(path[0].0.source_hash, v1_hash);
+        assert_eq!(path[0].0.target_hash, v2_hash);
 
         // Second hop: v2 -> v3
-        assert_eq!(path[1].source_hash, v2_hash);
-        assert_eq!(path[1].target_hash, ctx.current_hash);
+        assert_eq!(path[1].0.source_hash, v2_hash);
+        assert_eq!(path[1].0.target_hash, ctx.current_hash);
     }
 
     #[test]
@@ -458,8 +536,8 @@ mod tests {
 
         let path = ctx.lens_path(&v2_hash).unwrap();
         assert_eq!(path.len(), 1);
-        assert_eq!(path[0].source_hash, v2_hash);
-        assert_eq!(path[0].target_hash, ctx.current_hash);
+        assert_eq!(path[0].0.source_hash, v2_hash);
+        assert_eq!(path[0].0.target_hash, ctx.current_hash);
     }
 
     #[test]
@@ -546,8 +624,8 @@ mod tests {
 
         // BFS should find the direct path (1 hop) before the 2-hop path
         assert_eq!(path.len(), 1);
-        assert_eq!(path[0].source_hash, v1_hash);
-        assert_eq!(path[0].target_hash, ctx.current_hash);
+        assert_eq!(path[0].0.source_hash, v1_hash);
+        assert_eq!(path[0].0.target_hash, ctx.current_hash);
     }
 
     #[test]

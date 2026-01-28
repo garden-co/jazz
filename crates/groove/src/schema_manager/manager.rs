@@ -5,6 +5,9 @@
 //! - Lens management for migrations
 //! - Schema-aware branch naming
 //! - Integrated QueryManager for query/insert/update/delete operations
+//! - Catalogue persistence for schema/lens discovery via sync
+
+use std::collections::HashMap;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
@@ -15,7 +18,14 @@ use crate::sync_manager::SyncManager;
 
 use super::auto_lens::generate_lens;
 use super::context::{SchemaContext, SchemaError};
+use super::encoding::{decode_lens_transform, decode_schema, encode_lens_transform, encode_schema};
 use super::lens::Lens;
+use super::types::AppId;
+
+/// Metadata type for catalogue schema objects.
+pub const CATALOGUE_TYPE_SCHEMA: &str = "catalogue_schema";
+/// Metadata type for catalogue lens objects.
+pub const CATALOGUE_TYPE_LENS: &str = "catalogue_lens";
 
 /// SchemaManager coordinates schema evolution with query execution.
 ///
@@ -25,19 +35,26 @@ use super::lens::Lens;
 /// - Lens registration and auto-generation
 /// - Schema-aware branch naming
 /// - Query execution with automatic lens transforms
+/// - Catalogue persistence for schema/lens discovery via sync
 ///
 /// # Example
 ///
 /// ```ignore
+/// let app_id = AppId::from_name("my-app");
 /// let mut manager = SchemaManager::new(
 ///     SyncManager::new(),
 ///     schema,
+///     app_id,
 ///     "dev",
 ///     "main",
 /// )?;
 ///
 /// // Add a previous schema version as "live"
 /// manager.add_live_schema(old_schema)?;
+///
+/// // Persist schema and lens to catalogue for other clients
+/// manager.persist_schema();
+/// manager.persist_lens(&lens);
 ///
 /// // Insert data
 /// let handle = manager.insert("users", &[id, name])?;
@@ -48,13 +65,23 @@ use super::lens::Lens;
 pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
+    app_id: AppId,
 }
 
 impl SchemaManager {
     /// Create a new SchemaManager with integrated QueryManager.
+    ///
+    /// # Arguments
+    ///
+    /// * `sync_manager` - SyncManager for object persistence
+    /// * `schema` - Current schema for this client
+    /// * `app_id` - Application identifier for catalogue queries
+    /// * `env` - Environment (e.g., "dev", "prod")
+    /// * `user_branch` - User-facing branch name (e.g., "main")
     pub fn new(
         sync_manager: SyncManager,
         schema: Schema,
+        app_id: AppId,
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
@@ -64,6 +91,7 @@ impl SchemaManager {
         Ok(Self {
             context,
             query_manager,
+            app_id,
         })
     }
 
@@ -71,9 +99,15 @@ impl SchemaManager {
     pub fn with_defaults(
         sync_manager: SyncManager,
         schema: Schema,
+        app_id: AppId,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        Self::new(sync_manager, schema, "dev", user_branch)
+        Self::new(sync_manager, schema, app_id, "dev", user_branch)
+    }
+
+    /// Get the application ID.
+    pub fn app_id(&self) -> AppId {
+        self.app_id
     }
 
     /// Get the current schema.
@@ -180,7 +214,12 @@ impl SchemaManager {
     }
 
     /// Get the lens path from a live schema to the current schema.
-    pub fn lens_path(&self, from: &SchemaHash) -> Result<Vec<&Lens>, SchemaError> {
+    ///
+    /// Returns pairs of (lens, direction) indicating which transform to use.
+    pub fn lens_path(
+        &self,
+        from: &SchemaHash,
+    ) -> Result<Vec<(&Lens, super::lens::Direction)>, SchemaError> {
         self.context.lens_path(from)
     }
 
@@ -280,6 +319,191 @@ impl SchemaManager {
     }
 
     // =========================================================================
+    // Catalogue Persistence
+    // =========================================================================
+
+    /// Persist the current schema to the catalogue as an Object.
+    ///
+    /// The schema is stored on the "main" branch with metadata identifying it
+    /// as a catalogue schema for this app. Other clients with the same app_id
+    /// will receive this via catalogue sync.
+    ///
+    /// Returns the ObjectId of the stored schema object.
+    pub fn persist_schema(&mut self) -> ObjectId {
+        let schema_hash = self.context.current_hash;
+        let object_id = schema_hash.to_object_id();
+        let content = encode_schema(&self.context.current_schema);
+
+        let metadata = self.schema_metadata(&schema_hash);
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(object_id, metadata, content);
+
+        object_id
+    }
+
+    /// Persist a lens to the catalogue as an Object.
+    ///
+    /// The lens is stored on the "main" branch with metadata identifying it
+    /// as a catalogue lens for this app. Other clients with the same app_id
+    /// will receive this via catalogue sync.
+    ///
+    /// Returns the ObjectId of the stored lens object.
+    pub fn persist_lens(&mut self, lens: &Lens) -> ObjectId {
+        let object_id = lens.object_id();
+        let content = encode_lens_transform(&lens.forward);
+
+        let metadata = self.lens_metadata(lens);
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(object_id, metadata, content);
+
+        object_id
+    }
+
+    /// Build metadata for a schema catalogue object.
+    fn schema_metadata(&self, schema_hash: &SchemaHash) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
+        metadata.insert("app_id".to_string(), self.app_id.uuid().to_string());
+        metadata.insert("schema_hash".to_string(), schema_hash.to_string());
+        metadata
+    }
+
+    /// Build metadata for a lens catalogue object.
+    fn lens_metadata(&self, lens: &Lens) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
+        metadata.insert("app_id".to_string(), self.app_id.uuid().to_string());
+        metadata.insert("source_hash".to_string(), lens.source_hash.to_string());
+        metadata.insert("target_hash".to_string(), lens.target_hash.to_string());
+        metadata
+    }
+
+    /// Process a catalogue update received via sync.
+    ///
+    /// Called when QueryManager receives an object with catalogue metadata
+    /// matching this app_id.
+    ///
+    /// For schemas: stored as pending until a lens path exists.
+    /// For lenses: registered immediately, then pending schemas are checked.
+    pub fn process_catalogue_update(
+        &mut self,
+        _object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let Some(type_str) = metadata.get("type") else {
+            return Ok(()); // Not a catalogue object
+        };
+
+        match type_str.as_str() {
+            CATALOGUE_TYPE_SCHEMA => self.process_catalogue_schema(metadata, content),
+            CATALOGUE_TYPE_LENS => self.process_catalogue_lens(metadata, content),
+            _ => Ok(()), // Unknown type, ignore
+        }
+    }
+
+    fn process_catalogue_schema(
+        &mut self,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        // Verify app_id matches
+        let app_id_str = metadata.get("app_id").map(|s| s.as_str()).unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(()); // Different app, ignore
+        }
+
+        // Decode schema
+        let schema = decode_schema(content)
+            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+
+        let hash = SchemaHash::compute(&schema);
+
+        // Skip if already live or is current
+        if self.context.is_live(&hash) {
+            return Ok(());
+        }
+
+        // Add to pending - will be activated when lens path becomes available
+        self.context.add_pending_schema(schema);
+
+        // Try to activate in case we already have the lens path
+        self.try_activate_pending_schemas();
+
+        Ok(())
+    }
+
+    fn process_catalogue_lens(
+        &mut self,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        // Verify app_id matches
+        let app_id_str = metadata.get("app_id").map(|s| s.as_str()).unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(()); // Different app, ignore
+        }
+
+        // Parse source/target hashes from metadata
+        let source_hex = metadata
+            .get("source_hash")
+            .ok_or_else(|| SchemaError::LensNotFound {
+                source: SchemaHash::from_bytes([0; 32]),
+                target: SchemaHash::from_bytes([0; 32]),
+            })?;
+        let target_hex = metadata
+            .get("target_hash")
+            .ok_or_else(|| SchemaError::LensNotFound {
+                source: SchemaHash::from_bytes([0; 32]),
+                target: SchemaHash::from_bytes([0; 32]),
+            })?;
+
+        let source_hash = parse_schema_hash(source_hex)?;
+        let target_hash = parse_schema_hash(target_hex)?;
+
+        // Skip if we already have this lens (handles duplicate syncs)
+        // Since ObjectId is deterministic from hashes and encoding is deterministic,
+        // the same source/target should always produce identical content.
+        if self.context.get_lens(&source_hash, &target_hash).is_some() {
+            return Ok(());
+        }
+
+        // Decode lens transform
+        let transform = decode_lens_transform(content).map_err(|_| SchemaError::LensNotFound {
+            source: source_hash,
+            target: target_hash,
+        })?;
+
+        // Reconstruct lens (backward is computed from forward)
+        let lens = Lens::new(source_hash, target_hash, transform);
+
+        // Log warning if draft, but still store it
+        // Note: Draft lenses can still be registered but won't be used for activation
+        // unless they're the only path available (which will fail validation)
+        if lens.is_draft() {
+            // TODO: proper logging
+            // Draft lens received via catalogue - storing but not activating schemas through it
+        }
+
+        // Register the lens
+        self.context.register_lens(lens);
+
+        // Try to activate pending schemas that may now be reachable
+        self.try_activate_pending_schemas();
+
+        Ok(())
+    }
+
+    /// Try to activate pending schemas that now have lens paths.
+    ///
+    /// Called after registering new lenses. Returns hashes of newly activated schemas.
+    pub fn try_activate_pending_schemas(&mut self) -> Vec<SchemaHash> {
+        self.context.try_activate_pending()
+    }
+
+    // =========================================================================
     // Query/Write Operations (delegated to QueryManager)
     // =========================================================================
 
@@ -323,8 +547,20 @@ impl SchemaManager {
     }
 
     /// Process pending operations (drives SyncManager).
+    ///
+    /// This also processes any pending catalogue updates (schemas/lenses) that
+    /// were received via sync. Catalogue schemas are stored as pending until
+    /// a lens path exists, then activated.
     pub fn process(&mut self) {
         self.query_manager.process();
+
+        // Process any catalogue updates queued by QueryManager
+        let updates = self.query_manager.take_pending_catalogue_updates();
+        for update in updates {
+            // Ignore errors from individual catalogue updates - they're non-critical
+            let _ =
+                self.process_catalogue_update(update.object_id, &update.metadata, &update.content);
+        }
     }
 
     /// Rebuild QueryManager's schema context after adding live schemas.
@@ -338,10 +574,26 @@ impl SchemaManager {
     }
 }
 
+/// Parse a hex-encoded SchemaHash string.
+fn parse_schema_hash(hex_str: &str) -> Result<SchemaHash, SchemaError> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+    if bytes.len() != 32 {
+        return Err(SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(SchemaHash::from_bytes(arr))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+
+    fn test_app_id() -> AppId {
+        AppId::from_name("test-app")
+    }
 
     fn make_schema_v1() -> Schema {
         SchemaBuilder::new()
@@ -367,16 +619,20 @@ mod tests {
     #[test]
     fn schema_manager_new() {
         let schema = make_schema_v1();
-        let manager = SchemaManager::new(SyncManager::new(), schema, "dev", "main").unwrap();
+        let manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
 
         assert_eq!(manager.env(), "dev");
         assert_eq!(manager.user_branch(), "main");
+        assert_eq!(manager.app_id(), test_app_id());
     }
 
     #[test]
     fn schema_manager_branch_name() {
         let schema = make_schema_v1();
-        let manager = SchemaManager::new(SyncManager::new(), schema, "prod", "feature").unwrap();
+        let manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "prod", "feature")
+                .unwrap();
 
         let branch = manager.branch_name();
         let s = branch.as_str();
@@ -390,7 +646,8 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         let lens = manager.add_live_schema(v1).unwrap();
 
         assert!(!lens.is_draft());
@@ -410,7 +667,8 @@ mod tests {
             )
             .build();
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         let result = manager.add_live_schema(v1);
 
         assert!(matches!(result, Err(SchemaError::DraftLensInPath { .. })));
@@ -438,7 +696,8 @@ mod tests {
         );
         let lens = Lens::new(v1_hash, v2_hash, transform);
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema_with_lens(v1, lens).unwrap();
 
         assert_eq!(manager.all_branches().len(), 2);
@@ -449,7 +708,8 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         // Should pass - no draft lenses
@@ -462,7 +722,8 @@ mod tests {
         let v2 = make_schema_v2();
         let v1_hash = SchemaHash::compute(&v1);
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         let path = manager.lens_path(&v1_hash).unwrap();
@@ -474,7 +735,9 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let manager = SchemaManager::new(SyncManager::new(), v2.clone(), "dev", "main").unwrap();
+        let manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
         let lens = manager.generate_lens(&v1, &v2);
 
         // Generated but not registered
@@ -489,7 +752,8 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         let map = manager.branch_schema_map();
@@ -506,7 +770,8 @@ mod tests {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         let branches = manager.all_branch_strings();
@@ -526,7 +791,8 @@ mod tests {
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema(v1).unwrap();
 
         // V1 has 2 columns (id, name)
@@ -574,7 +840,8 @@ mod tests {
         );
         let lens = Lens::new(v1_hash, v2_hash, transform);
 
-        let mut manager = SchemaManager::new(SyncManager::new(), v2, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
         manager.add_live_schema_with_lens(v1, lens).unwrap();
 
         // Current schema uses "email_address"
@@ -596,7 +863,8 @@ mod tests {
         use crate::object::ObjectId;
 
         let schema = make_schema_v2();
-        let mut manager = SchemaManager::new(SyncManager::new(), schema, "dev", "main").unwrap();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
 
         // Insert a row
         let id = ObjectId::new();
