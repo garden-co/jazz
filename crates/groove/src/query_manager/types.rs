@@ -35,6 +35,14 @@ impl SchemaHash {
         hex::encode(&self.0[..4])
     }
 
+    /// Convert to an ObjectId for storage in the catalogue.
+    ///
+    /// Uses UUIDv5 with DNS namespace over the hash bytes.
+    /// Deterministic: same hash always produces same ObjectId.
+    pub fn to_object_id(&self) -> ObjectId {
+        ObjectId::from_uuid(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, &self.0))
+    }
+
     /// Compute hash for a complete schema (HashMap<TableName, TableSchema>).
     pub fn compute(schema: &Schema) -> Self {
         let mut hasher = blake3::Hasher::new();
@@ -2243,6 +2251,38 @@ mod tests {
 
         assert_eq!(short.len(), 8, "Short hash should be 8 hex chars");
         assert!(short.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn schema_hash_to_object_id_deterministic() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let hash = SchemaHash::compute(&schema);
+        let oid1 = hash.to_object_id();
+        let oid2 = hash.to_object_id();
+
+        assert_eq!(oid1, oid2, "Same hash should produce same ObjectId");
+    }
+
+    #[test]
+    fn schema_hash_to_object_id_different_hashes() {
+        let schema1 = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+        let schema2 = SchemaBuilder::new()
+            .table(TableSchema::builder("posts").column("id", ColumnType::Uuid))
+            .build();
+
+        let hash1 = SchemaHash::compute(&schema1);
+        let hash2 = SchemaHash::compute(&schema2);
+
+        assert_ne!(
+            hash1.to_object_id(),
+            hash2.to_object_id(),
+            "Different hashes should produce different ObjectIds"
+        );
     }
 
     #[test]

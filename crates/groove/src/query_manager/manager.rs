@@ -172,6 +172,19 @@ struct ServerQuerySubscription {
     last_scope: HashSet<(ObjectId, BranchName)>,
 }
 
+/// A catalogue object update received via sync.
+///
+/// Used to pass schema/lens updates from QueryManager to SchemaManager.
+#[derive(Debug, Clone)]
+pub struct CatalogueUpdate {
+    /// The object ID of the catalogue object.
+    pub object_id: ObjectId,
+    /// Metadata from the object (includes type, app_id, etc.).
+    pub metadata: HashMap<String, String>,
+    /// Content from the latest commit.
+    pub content: Vec<u8>,
+}
+
 /// Manages reactive SQL queries over object-based storage.
 ///
 /// No global Setup/Ready state machine - indices and data are loaded lazily
@@ -186,6 +199,10 @@ pub struct QueryManager {
     /// Indices: (table, column, branch) -> BTreeIndex
     /// Each branch maintains its own set of indices.
     indices: IndicesMap,
+
+    /// Pending catalogue updates (schemas/lenses received via sync).
+    /// SchemaManager should call take_pending_catalogue_updates() to process these.
+    pending_catalogue_updates: Vec<CatalogueUpdate>,
 
     /// Active query subscriptions (local)
     subscriptions: HashMap<QuerySubscriptionId, QuerySubscription>,
@@ -237,6 +254,7 @@ impl QueryManager {
             sync_manager,
             schema: Arc::new(schema),
             indices,
+            pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
@@ -322,6 +340,7 @@ impl QueryManager {
             sync_manager,
             schema: Arc::new(schema),
             indices,
+            pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
@@ -1664,6 +1683,14 @@ impl QueryManager {
         std::mem::take(&mut self.update_outbox)
     }
 
+    /// Take pending catalogue updates (schemas/lenses received via sync).
+    ///
+    /// SchemaManager should call this to process new schemas and lenses
+    /// discovered through catalogue sync.
+    pub fn take_pending_catalogue_updates(&mut self) -> Vec<CatalogueUpdate> {
+        std::mem::take(&mut self.pending_catalogue_updates)
+    }
+
     /// Process pending changes and settle all subscription graphs.
     ///
     /// This method drives async progress:
@@ -2528,6 +2555,14 @@ impl QueryManager {
         self.load_row_from_object_on_branch(row_id, DEFAULT_ROW_BRANCH)
     }
 
+    /// Load content from a catalogue object's "main" branch.
+    ///
+    /// Used for loading schema/lens data from catalogue objects.
+    fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
+        self.load_row_from_object_on_branch(object_id, "main")
+            .map(|(content, _)| content)
+    }
+
     /// Load a row's data from multiple branches, using LWW (last-writer-wins) to select
     /// the branch with the highest timestamp when the same ObjectId exists on multiple branches.
     ///
@@ -2619,6 +2654,22 @@ impl QueryManager {
 
     /// Handle an object update from the global subscription.
     fn handle_object_update(&mut self, update: AllObjectUpdate) {
+        // Check if this is a catalogue object (schema or lens)
+        if let Some(type_str) = update.metadata.get("type")
+            && (type_str == "catalogue_schema" || type_str == "catalogue_lens")
+        {
+            // Queue for SchemaManager processing
+            // Load content from the object's latest commit
+            if let Some(content) = self.load_object_content(update.object_id) {
+                self.pending_catalogue_updates.push(CatalogueUpdate {
+                    object_id: update.object_id,
+                    metadata: update.metadata.clone(),
+                    content,
+                });
+            }
+            return;
+        }
+
         // Check if this is a row object
         let table = match update.metadata.get("table") {
             Some(t) => t.clone(),

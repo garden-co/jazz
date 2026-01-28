@@ -9,3 +9,5 @@ When time runs short, prefer leaving functionality incomplete (with clear TODO m
 
 We document internal architecture and plans in /specs as markdown files.
 We document public APIs and user guides in /docs as markdown files.
+
+Tests should err on the side of E2E coverage using high-level abstractions (e.g., SchemaManager, SyncManager) rather than calling internal helpers directly. This catches integration issues and ensures the public API works as intended. The only exception is tiny unit tests for isolated pure functions.

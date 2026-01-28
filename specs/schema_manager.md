@@ -85,6 +85,64 @@ When updating a row that exists in an old schema branch:
 
 Old data remains in old branch - no deletion or in-place modification.
 
+## App ID and Catalogue Discovery
+
+### App ID Concept
+
+An **App ID** is a UUID that identifies an application's schema family. All schemas and lenses for that app reference this ID in their metadata:
+
+```
+App ID: "my-todo-app" → UUIDv5(NAMESPACE_DNS, "my-todo-app")
+```
+
+### Schema/Lens Persistence
+
+Schemas and lenses are persisted as Objects for discovery via sync:
+
+**Schema Object:**
+- `ObjectId = UUIDv5(NAMESPACE_DNS, schema_hash.as_bytes())` - deterministic from content
+- Single commit on branch `"main"`
+- Content = binary-encoded Schema
+- Metadata: `{"type": "catalogue_schema", "app_id": "<uuid>", "schema_hash": "<64-char hex>"}`
+
+**Lens Object:**
+- `ObjectId = UUIDv5(NAMESPACE_DNS, source_hash || target_hash)` - deterministic from endpoints
+- Single commit on branch `"main"`
+- Content = binary-encoded LensTransform
+- Metadata: `{"type": "catalogue_lens", "app_id": "<uuid>", "source_hash": "<hex>", "target_hash": "<hex>"}`
+
+### Catalogue Query
+
+When a client initializes with an app ID, it subscribes to a **catalogue query**. The server sends all matching schema/lens Objects. As new schemas/lenses are persisted, they automatically sync to all subscribed clients.
+
+### Sync Flow: Schema Discovery
+
+```
+[v2 Client]                     [Server]                    [v1 Client]
+     |                              |                             |
+     |--subscribe(app_id)---------->|                             |
+     |                              |<--subscribe(app_id)---------|
+     |                              |                             |
+     |--persist schema v2---------->|--schema v2 (app_id match)-->|
+     |--persist lens(v1->v2)------->|--lens (app_id match)------->|
+     |                              |                             |
+     |                              |           [v1 discovers lens]
+     |                              |           [adds v2 as live]
+     |                              |                             |
+     |--insert row on v2 branch---->|--forward to v1 (in scope)-->|
+     |                              |                             |
+     |                              |     [v1 queries both branches]
+     |                              |     [v2 rows transformed via lens.backward]
+```
+
+When v1 client receives the lens via catalogue sync, it adds v2 as a "live" schema. When querying v2 data, it applies `lens.backward` to transform v2 rows to v1 format.
+
+### Pending Schemas
+
+Schemas received via catalogue without a lens path to current are stored as **pending**. They become live when:
+1. A lens arrives that connects them to the current schema
+2. Multi-hop paths are considered (v1→v2 lens may unlock pending v3 if v2→v3 exists)
+
 ## API Overview
 
 ### Schema Building
@@ -158,10 +216,12 @@ let branches = ctx.all_branch_names();
 ### Integrated SchemaManager
 
 ```rust
-// Create SchemaManager with integrated query support
+// Create SchemaManager with app ID for catalogue discovery
+let app_id = AppId::from_name("my-app");
 let mut manager = SchemaManager::new(
     SyncManager::new(),
     current_schema,
+    app_id,
     "dev",
     "main",
 )?;
@@ -170,9 +230,13 @@ let mut manager = SchemaManager::new(
 manager.add_live_schema(old_schema)?;
 manager.sync_context(); // Update QueryManager
 
+// Persist schema and lens to catalogue for discovery
+manager.persist_schema();
+manager.persist_lens(&lens);
+
 // Insert a row (goes to current schema's branch)
 let handle = manager.insert("users", &[id, name, email])?;
-manager.process();
+manager.process(); // Drives sync and processes catalogue updates
 
 // Query across all live schema versions
 // Rows from old schemas are automatically transformed via lens
@@ -181,22 +245,6 @@ let results = manager.execute(manager.query("users").build())?;
 // Delete a row
 manager.delete("users", object_id)?;
 ```
-
-## Storage Format
-
-### Schemas as Objects
-
-Schemas are stored as Objects with:
-- ObjectId = UUIDv5(content_hash) - deterministic from content
-- Single immutable commit per schema version
-- Content = binary-encoded schema structure
-
-### Lenses as Objects
-
-Lenses are stored as Objects with:
-- ObjectId = UUIDv5(source_hash, target_hash) - deterministic from endpoints
-- Multiple commits allowed (lens evolution)
-- Content = binary-encoded LensTransform
 
 ## Error Handling
 
@@ -209,7 +257,7 @@ Lenses are stored as Objects with:
 
 ## Implementation Status
 
-### Completed (Phases 1-8 + Deep Integration + SchemaManager API)
+### Completed
 - [x] Schema hashing with column/table order independence
 - [x] Composed branch names (env-hash8-userBranch)
 - [x] Lens types and operations (add/remove/rename column/table)
@@ -217,27 +265,57 @@ Lenses are stored as Objects with:
 - [x] Auto-lens generation from schema diffs
 - [x] Draft detection for uncertain operations
 - [x] Schema context with live schema tracking
-- [x] Lens path finding for multi-hop migrations
+- [x] Lens path finding (bidirectional BFS, multi-hop)
 - [x] SchemaManager coordination layer
-- [x] LensTransformer for row transformation
+- [x] LensTransformer for row transformation (direction-aware)
 - [x] Column name translation for index lookups
 - [x] Branch-to-schema mapping helpers
 - [x] CopyOnWriteWriter for cross-schema updates
-- [x] Row write info tracking (source branch, target branch)
 - [x] QueryManager.new_with_schema_context() for schema-aware queries
 - [x] QueryGraph.compile_with_schema_context() for column translation
-- [x] Row loader applies lens transforms for old schema branches
 - [x] Automatic multi-branch query expansion from schema context
-- [x] End-to-end tests with ObjectManager (insert v1 rows, query via v2, verify transform)
-- [x] SchemaManager holds QueryManager (required, not optional)
-- [x] SchemaManager.insert() - insert on schema branch
-- [x] SchemaManager.execute() - query with automatic schema expansion
-- [x] SchemaManager.delete() - soft delete on schema branch
-- [x] SchemaManager.sync_context() - update QueryManager after adding live schemas
-- [x] QueryManager.insert_on_branch() / delete_on_branch() for branch-aware writes
+- [x] AppId type for application identification
+- [x] Schema/Lens binary encoding (deterministic, versioned)
+- [x] SchemaHash::to_object_id() for deterministic ObjectIds
+- [x] Catalogue persistence (persist_schema, persist_lens)
+- [x] Catalogue update processing (process_catalogue_update)
+- [x] Pending schema tracking and activation
+- [x] SchemaManager.process() drains catalogue updates
+- [x] E2E tests for catalogue flow and multi-hop activation
+
+### Known Limitations
+
+1. **Draft lens handling**: Draft lenses are stored via catalogue but a TODO remains for proper logging.
+
+2. **No realistic sync E2E test**: Catalogue tests call `process_catalogue_update()` directly. Full SyncManager wiring test would require `wire_up_sync()` / `pump_sync()` helpers.
 
 ### Future Enhancements
 - [ ] Type change lens operations
-- [x] Multi-hop lens path traversal (v1 → v2 → v3)
-- [ ] Schema/lens persistence as Objects
 - [ ] GC for archived schema versions
+- [ ] Unify QueryManager constructors (see below)
+
+## TODO: Unify QueryManager Constructors
+
+Two QueryManager constructors exist with different behaviors:
+
+1. **`QueryManager::new()`** - Auto-subscribes to all object updates. Sync'd data is automatically indexed.
+
+2. **`QueryManager::new_with_schema_context()`** - Does NOT auto-subscribe because `handle_object_update()` doesn't support multi-schema decoding.
+
+### Fix Required
+
+`handle_object_update()` needs to be schema-aware:
+1. Detect which schema the branch uses (via `branch_schema_map`)
+2. Get the appropriate descriptor for that schema
+3. Decode using that descriptor (or skip indexing and let query-time lens transform handle it)
+
+Once fixed, both constructors should auto-subscribe uniformly.
+
+## Code Quality Notes
+
+Identified during implementation review - non-blocking but worth addressing:
+
+1. **Wrapper delegation** (manager.rs): 9+ one-line delegates to SchemaContext could be reduced
+2. **pending_schemas is public** (context.rs): Lifecycle not enforced; consider event-based activation
+3. **Duplicate metadata building** (manager.rs): schema_metadata/lens_metadata share patterns
+4. **process_catalogue_* duplication**: Similar error handling could be extracted

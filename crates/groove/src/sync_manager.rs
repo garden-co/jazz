@@ -415,6 +415,39 @@ impl SyncManager {
     }
 
     // ========================================================================
+    // Catalogue Object Creation
+    // ========================================================================
+
+    /// Create an object with initial content for catalogue storage.
+    ///
+    /// Creates an object with the specified ID, metadata, and content.
+    /// The content is stored as a commit on the "main" branch.
+    ///
+    /// Used for storing schemas and lenses in the catalogue.
+    pub fn create_object_with_content(
+        &mut self,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        content: Vec<u8>,
+    ) {
+        // Create the object if it doesn't exist
+        if self.object_manager.get(object_id).is_none() {
+            self.object_manager
+                .create_with_id(object_id, Some(metadata));
+        }
+
+        // Add content as a commit on the "main" branch
+        let _ = self.object_manager.add_commit(
+            object_id,
+            "main",
+            Vec::new(), // No parents - root commit
+            content,
+            ObjectId::from_uuid(uuid::Uuid::nil()), // System author
+            None,
+        );
+    }
+
+    // ========================================================================
     // Pending Updates
     // ========================================================================
 
