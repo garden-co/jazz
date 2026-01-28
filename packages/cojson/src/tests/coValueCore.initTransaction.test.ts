@@ -21,14 +21,12 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "hello", value: "world" }],
       "trusting",
-      {
-        init: true,
-      },
+      { fww: "init" },
     );
 
     const transactions = map.core.getValidSortedTransactions();
     expect(transactions).toHaveLength(1);
-    expect(transactions[0]?.meta).toEqual({ init: true });
+    expect(transactions[0]?.meta).toEqual({ fww: "init" });
   });
 
   test("first-init-wins: only the first init transaction is valid", () => {
@@ -42,7 +40,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "first" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -50,7 +48,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "second" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -58,7 +56,7 @@ describe("init transaction meta", () => {
 
     // Only the first init transaction should be valid
     expect(validTransactions).toHaveLength(1);
-    expect(validTransactions[0]?.meta).toEqual({ init: true });
+    expect(validTransactions[0]?.meta).toEqual({ fww: "init" });
 
     // The first transaction (earlier madeAt) should be the valid one
     expect(validTransactions[0]?.madeAt).toBe(earlierTime);
@@ -73,7 +71,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "init" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
     );
 
     // Make a regular transaction (no init meta)
@@ -103,7 +101,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "later" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -116,7 +114,7 @@ describe("init transaction meta", () => {
     mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -156,7 +154,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "later" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -167,7 +165,7 @@ describe("init transaction meta", () => {
     mapOnAliceSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -203,7 +201,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "later" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -215,7 +213,7 @@ describe("init transaction meta", () => {
     mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -244,7 +242,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "first" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -252,7 +250,7 @@ describe("init transaction meta", () => {
     mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "second" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -274,7 +272,7 @@ describe("init transaction meta", () => {
     const secondTx = allTransactions.find((tx) => tx.madeAt === laterTime);
     expect(secondTx?.isValid).toBe(false);
     expect(secondTx?.validationErrorMessage).toBe(
-      "Transaction is not the first init transaction",
+      `Transaction is not the first writer for fww key "init"`,
     );
   });
 
@@ -287,7 +285,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "first" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -295,7 +293,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "second" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -311,7 +309,7 @@ describe("init transaction meta", () => {
     const secondTx = allTransactions.find((tx) => tx.madeAt === laterTime);
     expect(secondTx?.isValid).toBe(false);
     expect(secondTx?.validationErrorMessage).toBe(
-      "Init transaction must be the first transaction in its session",
+      `Transaction is not the first writer for fww key "init"`,
     );
   });
 
@@ -331,7 +329,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "later" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -347,7 +345,7 @@ describe("init transaction meta", () => {
     mapOnClientSession2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -373,7 +371,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "node1" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
     );
 
     await map.core.waitForSync();
@@ -414,14 +412,14 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "node1" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       node1Time,
     );
 
     mapOnNode2.core.makeTransaction(
       [{ op: "set", key: "version", value: "node2" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       node2Time,
     );
 
@@ -449,7 +447,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "later" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -464,7 +462,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -490,7 +488,7 @@ describe("init transaction meta", () => {
     map.core.makeTransaction(
       [{ op: "set", key: "version", value: "later" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       laterTime,
     );
 
@@ -505,7 +503,7 @@ describe("init transaction meta", () => {
     mapOnNode2.core.makeTransaction(
       [{ op: "set", key: "version", value: "earlier" }],
       "trusting",
-      { init: true },
+      { fww: "init" },
       earlierTime,
     );
 
@@ -556,5 +554,129 @@ describe("init transaction meta", () => {
 
     expect(allTx).toHaveLength(1);
     expect(mapOnReader.get("key")).toBe("admin-value");
+  });
+
+  test("different FWW keys are independent", () => {
+    const client = setupTestNode();
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    // Make two FWW transactions with different keys
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "valueA" }],
+      "trusting",
+      { fww: "keyA" },
+    );
+
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyB", value: "valueB" }],
+      "trusting",
+      { fww: "keyB" },
+    );
+
+    const validTransactions = map.core.getValidSortedTransactions();
+
+    // Both transactions should be valid since they have different FWW keys
+    expect(validTransactions).toHaveLength(2);
+    expect(validTransactions[0]?.meta).toEqual({ fww: "keyA" });
+    expect(validTransactions[1]?.meta).toEqual({ fww: "keyB" });
+  });
+
+  test("FWW at non-zero txIndex is valid", () => {
+    const client = setupTestNode();
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    // Make a regular transaction first (no FWW meta)
+    map.core.makeTransaction(
+      [{ op: "set", key: "setup", value: "regular" }],
+      "trusting",
+    );
+
+    // Make an FWW transaction at txIndex > 0
+    map.core.makeTransaction(
+      [{ op: "set", key: "version", value: "init" }],
+      "trusting",
+      { fww: "init" },
+    );
+
+    const validTransactions = map.core.getValidSortedTransactions();
+
+    // Both transactions should be valid
+    expect(validTransactions).toHaveLength(2);
+
+    // The FWW transaction should be valid even though it's not at txIndex 0
+    const fwwTx = validTransactions.find((tx) => tx.meta?.fww === "init");
+    expect(fwwTx).toBeDefined();
+    expect(fwwTx?.isValid).toBe(true);
+  });
+
+  test("multiple FWW keys with different winners", async () => {
+    const client = setupTestNode({ connected: true });
+    const clientSession2 = client.spawnNewSession();
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    const mapOnClientSession2 = await loadCoValueOrFail(
+      clientSession2.node,
+      map.id,
+    );
+
+    const earlierTime = Date.now();
+    const laterTime = earlierTime + 100;
+
+    // Session 1: Make FWW transaction for "keyA" with earlier time
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "session1" }],
+      "trusting",
+      { fww: "keyA" },
+      earlierTime,
+    );
+
+    // Session 1: Make FWW transaction for "keyB" with later time
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyB", value: "session1" }],
+      "trusting",
+      { fww: "keyB" },
+      laterTime,
+    );
+
+    // Session 2: Make FWW transaction for "keyA" with later time
+    mapOnClientSession2.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "session2" }],
+      "trusting",
+      { fww: "keyA" },
+      laterTime,
+    );
+
+    // Session 2: Make FWW transaction for "keyB" with earlier time
+    mapOnClientSession2.core.makeTransaction(
+      [{ op: "set", key: "keyB", value: "session2" }],
+      "trusting",
+      { fww: "keyB" },
+      earlierTime,
+    );
+
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(
+        mapOnClientSession2.core.knownState(),
+      );
+    });
+
+    // Each key should independently pick its winner
+    // keyA: session1 wins (earlier time)
+    // keyB: session2 wins (earlier time)
+    const validTransactions = map.core.getValidSortedTransactions();
+    expect(validTransactions).toHaveLength(2);
+
+    const keyAWinner = validTransactions.find((tx) => tx.meta?.fww === "keyA");
+    const keyBWinner = validTransactions.find((tx) => tx.meta?.fww === "keyB");
+
+    expect(keyAWinner).toBeDefined();
+    expect(keyBWinner).toBeDefined();
+
+    // Verify the correct values are in the map
+    expect(map.get("keyA")).toBe("session1");
+    expect(map.get("keyB")).toBe("session2");
   });
 });

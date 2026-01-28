@@ -1370,7 +1370,7 @@ export class CoValueCore {
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
-    this.#firstInitTransaction = undefined;
+    this.#fwwWinners.clear();
 
     this.parseNewTransactions(false);
 
@@ -1500,7 +1500,7 @@ export class CoValueCore {
     this.toValidateTransactions = [];
   }
 
-  #firstInitTransaction: VerifiedTransaction | undefined;
+  #fwwWinners: Map<string, VerifiedTransaction> = new Map();
 
   /**
    * Parses the meta information of a transaction, and set the branchStart and mergeCommits.
@@ -1540,32 +1540,26 @@ export class CoValueCore {
       this.mergeCommits.push(mergeCommit);
     }
 
-    if ("init" in transaction.meta) {
-      // Init transaction must be the first transaction in its session (txIndex === 0)
-      if (transaction.txID.txIndex !== 0) {
-        transaction.markInvalid(
-          "Init transaction must be the first transaction in its session",
-        );
-        return;
-      }
+    if ("fww" in transaction.meta) {
+      const fwwKey = transaction.meta.fww as string;
+      const currentWinner = this.#fwwWinners.get(fwwKey);
 
-      const firstInitTransaction = this.#firstInitTransaction;
-      // First-init-wins: keep the transaction with the smallest madeAt
-      // compareInitTransactions returns < 0 if transaction is earlier than firstInitTransaction
+      // First-writer-wins: keep the transaction with the smallest madeAt
+      // compareFWWTransactions returns < 0 if transaction is earlier than currentWinner
       if (
-        !firstInitTransaction ||
-        this.compareInitTransactions(transaction, firstInitTransaction) < 0
+        !currentWinner ||
+        this.compareFWWTransactions(transaction, currentWinner) < 0
       ) {
-        if (firstInitTransaction) {
-          firstInitTransaction.markInvalid(
-            "Transaction is not the first init transaction",
+        if (currentWinner) {
+          currentWinner.markInvalid(
+            `Transaction is not the first writer for fww key "${fwwKey}"`,
           );
         }
 
-        this.#firstInitTransaction = transaction;
+        this.#fwwWinners.set(fwwKey, transaction);
       } else {
         transaction.markInvalid(
-          "Transaction is not the first init transaction",
+          `Transaction is not the first writer for fww key "${fwwKey}"`,
         );
       }
     }
@@ -1896,10 +1890,10 @@ export class CoValueCore {
   }
 
   /**
-   * Compare two transactions for init transaction conflict resolution.
+   * Compare two transactions for first-writer-wins conflict resolution.
    * Uses sessionID as a tiebreaker for deterministic ordering when timestamps are equal.
    */
-  private compareInitTransactions(
+  private compareFWWTransactions(
     a: Pick<VerifiedTransaction, "madeAt" | "txID">,
     b: Pick<VerifiedTransaction, "madeAt" | "txID">,
   ) {

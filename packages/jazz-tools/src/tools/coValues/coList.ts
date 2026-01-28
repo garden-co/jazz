@@ -180,7 +180,7 @@ export class CoList<out Item = any>
       $isLoaded: { value: true, enumerable: false },
     });
 
-    const initMeta = firstComesWins ? { init: true } : undefined;
+    const initMeta = firstComesWins ? { fww: "init" } : undefined;
     const raw = owner.$jazz.raw.createList(
       toRawItems(
         items,

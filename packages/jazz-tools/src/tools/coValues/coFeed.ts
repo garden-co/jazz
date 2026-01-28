@@ -233,7 +233,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   ) {
     const { owner, uniqueness, firstComesWins } =
       parseCoValueCreateOptions(options);
-    const initMeta = firstComesWins ? { init: true } : undefined;
+    const initMeta = firstComesWins ? { fww: "init" } : undefined;
 
     const processedInit: JsonValue[] = [];
 

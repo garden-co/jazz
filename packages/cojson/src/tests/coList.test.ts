@@ -1030,14 +1030,14 @@ test("items appended after a losing init transaction are preserved", async () =>
     undefined,
     "trusting",
     undefined,
-    { init: true },
+    { fww: "init" },
   );
 
   await new Promise((resolve) => setTimeout(resolve, 5));
 
   const listOnBob = await loadCoValueOrFail(bob.node, list.id);
 
-  listOnBob.appendItems(["bob-init"], undefined, "trusting", { init: true });
+  listOnBob.appendItems(["bob-init"], undefined, "trusting", { fww: "init" });
   listOnBob.appendItems(["bob-update"], undefined, "trusting");
 
   await waitFor(() => {
