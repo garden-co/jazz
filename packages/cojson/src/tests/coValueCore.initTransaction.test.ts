@@ -679,4 +679,158 @@ describe("init transaction meta", () => {
     expect(map.get("keyA")).toBe("session1");
     expect(map.get("keyB")).toBe("session2");
   });
+
+  test("multiple FWW keys resolve independently across synced nodes", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    group.addMember("everyone", "writer");
+
+    const map = group.createMap();
+
+    await map.core.waitForSync();
+
+    // Load the map on node2
+    const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+    const earlierTime = Date.now();
+    const laterTime = earlierTime + 1000;
+
+    // On node1: create FWW transaction for "keyA" with earlier time, "keyB" with later time
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "node1" }],
+      "trusting",
+      { fww: "keyA" },
+      earlierTime,
+    );
+
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyB", value: "node1" }],
+      "trusting",
+      { fww: "keyB" },
+      laterTime,
+    );
+
+    // On node2: create FWW transaction for "keyA" with later time, "keyB" with earlier time
+    mapOnNode2.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "node2" }],
+      "trusting",
+      { fww: "keyA" },
+      laterTime,
+    );
+
+    mapOnNode2.core.makeTransaction(
+      [{ op: "set", key: "keyB", value: "node2" }],
+      "trusting",
+      { fww: "keyB" },
+      earlierTime,
+    );
+
+    // Wait for sync
+    await map.core.waitForSync();
+    await mapOnNode2.core.waitForSync();
+
+    // Wait for microtasks
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    // Both nodes should converge to the same state
+    // keyA: node1 wins (earlier timestamp)
+    // keyB: node2 wins (earlier timestamp)
+    await waitFor(() => {
+      expect(map.get("keyA")).toBe("node1");
+      expect(map.get("keyB")).toBe("node2");
+      expect(mapOnNode2.get("keyA")).toBe("node1");
+      expect(mapOnNode2.get("keyB")).toBe("node2");
+    });
+
+    // Verify both nodes have exactly 2 valid transactions (one per key)
+    const node1ValidTxs = map.core.getValidSortedTransactions();
+    const node2ValidTxs = mapOnNode2.core.getValidSortedTransactions();
+
+    expect(node1ValidTxs).toHaveLength(2);
+    expect(node2ValidTxs).toHaveLength(2);
+  });
+
+  test("late-arriving winner for one key does not affect other keys", async () => {
+    const client = setupTestNode({ connected: true });
+    const clientSession2 = client.spawnNewSession();
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    const mapOnClientSession2 = await loadCoValueOrFail(
+      clientSession2.node,
+      map.id,
+    );
+
+    const earlierTime = Date.now();
+    const laterTime = earlierTime + 1000;
+
+    // Session 1: Create FWW transaction for "keyA" with later time
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "session1" }],
+      "trusting",
+      { fww: "keyA" },
+      laterTime,
+    );
+
+    // Session 1: Create FWW transaction for "keyB" (any time)
+    map.core.makeTransaction(
+      [{ op: "set", key: "keyB", value: "session1" }],
+      "trusting",
+      { fww: "keyB" },
+      earlierTime,
+    );
+
+    // Verify initial state
+    expect(map.get("keyA")).toBe("session1");
+    expect(map.get("keyB")).toBe("session1");
+
+    // Session 2: Create FWW transaction for "keyA" with earlier time (this should win)
+    mapOnClientSession2.core.makeTransaction(
+      [{ op: "set", key: "keyA", value: "session2" }],
+      "trusting",
+      { fww: "keyA" },
+      earlierTime,
+    );
+
+    await waitFor(() => {
+      expect(map.core.knownState()).toEqual(
+        mapOnClientSession2.core.knownState(),
+      );
+    });
+
+    // After sync:
+    // keyA: session2's transaction wins (earlier timestamp), session1's is invalidated
+    // keyB: session1's transaction remains valid (unaffected)
+    expect(map.get("keyA")).toBe("session2");
+    expect(map.get("keyB")).toBe("session1");
+
+    // Check that both keys have exactly one valid transaction each
+    const allTransactions = map.core.getValidSortedTransactions({
+      includeInvalidMetaTransactions: true,
+      ignorePrivateTransactions: false,
+    });
+
+    // Should have 3 total transactions: 2 for keyA (one invalid), 1 for keyB (valid)
+    expect(allTransactions).toHaveLength(3);
+
+    // keyA transactions
+    const keyATransactions = allTransactions.filter(
+      (tx) => tx.meta?.fww === "keyA",
+    );
+    expect(keyATransactions).toHaveLength(2);
+    expect(keyATransactions.filter((tx) => tx.isValid)).toHaveLength(1);
+    expect(keyATransactions.filter((tx) => !tx.isValid)).toHaveLength(1);
+
+    // The winning keyA transaction should be from session2 (earlier time)
+    const validKeyA = keyATransactions.find((tx) => tx.isValid);
+    expect(validKeyA?.madeAt).toBe(earlierTime);
+
+    // keyB transaction should be valid (unaffected by keyA's late-arriving winner)
+    const keyBTransactions = allTransactions.filter(
+      (tx) => tx.meta?.fww === "keyB",
+    );
+    expect(keyBTransactions).toHaveLength(1);
+    expect(keyBTransactions[0]?.isValid).toBe(true);
+  });
 });
