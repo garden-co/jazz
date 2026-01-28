@@ -470,17 +470,17 @@ impl SessionMapImpl {
     }
 
     /// Get transactions for a session from index
-    pub fn get_session_transactions(&self, session_id: &str, from_index: u32) -> Option<String> {
+    pub fn get_session_transactions(&self, session_id: &str, from_index: u32) -> Option<Vec<String>> {
         let session_log = self.sessions.get(session_id)?;
         let transactions = session_log.transactions_json();
 
-        let slice: Vec<&str> = transactions
-            .iter()
-            .skip(from_index as usize)
-            .map(|s| s.as_str())
-            .collect();
-
-        serde_json::to_string(&slice).ok()
+        Some(
+            transactions
+                .iter()
+                .skip(from_index as usize)
+                .cloned()
+                .collect(),
+        )
     }
 
     /// Get last signature for a session

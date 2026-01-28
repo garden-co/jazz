@@ -135,6 +135,14 @@ export class SessionMap {
     return this.getSessionLog(sessionID);
   }
 
+  getTransactionsCount(sessionID: SessionID): number | undefined {
+    const txCount = this.impl.getTransactionCount(sessionID);
+    if (txCount === -1) {
+      return undefined;
+    }
+    return txCount;
+  }
+
   private invalidateCache() {
     this.sessionLogCache.clear();
     this.sessionLogCacheValid.clear();
@@ -159,10 +167,9 @@ export class SessionMap {
 
     // Fetch all transactions
     if (currentTxCount > 0) {
-      const txJson = this.impl.getSessionTransactions(sessionID, 0);
-      if (txJson) {
-        // getSessionTransactions returns JSON array of JSON strings
-        const txStrings: string[] = JSON.parse(txJson);
+      // getSessionTransactions returns array of JSON strings directly
+      const txStrings = this.impl.getSessionTransactions(sessionID, 0);
+      if (txStrings) {
         for (const txStr of txStrings) {
           transactions.push(JSON.parse(txStr) as Transaction);
         }
@@ -435,9 +442,9 @@ export class SessionMap {
     for (const sessionID of sessionIds) {
       const txCount = this.impl.getTransactionCount(sessionID);
       if (txCount > 0) {
-        const txJson = this.impl.getSessionTransactions(sessionID, 0);
-        if (txJson) {
-          const txStrings: string[] = JSON.parse(txJson);
+        // getSessionTransactions returns string[] directly
+        const txStrings = this.impl.getSessionTransactions(sessionID, 0);
+        if (txStrings) {
           const transactions = txStrings.map(
             (s) => JSON.parse(s) as Transaction,
           );

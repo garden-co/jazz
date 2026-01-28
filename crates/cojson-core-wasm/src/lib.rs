@@ -334,7 +334,7 @@ impl SessionMap {
 
     /// Get transactions for a session from index (returns undefined if session not found)
     #[wasm_bindgen(js_name = getSessionTransactions)]
-    pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Option<String> {
+    pub fn get_session_transactions(&self, session_id: String, from_index: u32) -> Option<Vec<String>> {
         self.internal.get_session_transactions(&session_id, from_index)
     }
 

@@ -823,14 +823,12 @@ describe("SessionMap - Transaction Flow", () => {
     // Get all transactions at once
     const allTx = sessionMap.getSessionTransactions(sessionId, 0);
     expect(allTx).toBeDefined();
-    const allTxParsed = JSON.parse(allTx!);
-    expect(allTxParsed.length).toBe(5);
+    expect(allTx!.length).toBe(5);
 
     // Get transactions from index 2
     const partialTx = sessionMap.getSessionTransactions(sessionId, 2);
     expect(partialTx).toBeDefined();
-    const partialTxParsed = JSON.parse(partialTx!);
-    expect(partialTxParsed.length).toBe(3);
+    expect(partialTx!.length).toBe(3);
 
     // Known state should show 5 transactions
     const knownState = JSON.parse(sessionMap.getKnownState());
@@ -1008,8 +1006,7 @@ describe("SessionMap - Transaction Flow", () => {
     expect(allTxJsonStrings).toBeDefined();
 
     // Parse the array of JSON strings, then parse each string to get objects
-    const txStrings: string[] = JSON.parse(allTxJsonStrings!);
-    const txObjects = txStrings.map((s: string) => JSON.parse(s));
+    const txObjects = allTxJsonStrings!.map((s) => JSON.parse(s));
     const txArrayJson = JSON.stringify(txObjects);
 
     // Add to peer 2 (skip verification for simplicity in test)

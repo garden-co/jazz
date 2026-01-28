@@ -266,7 +266,7 @@ export class SessionMap {
   /**
    * Get transactions for a session from index (returns undefined if session not found)
    */
-  getSessionTransactions(session_id: string, from_index: number): string | undefined;
+  getSessionTransactions(session_id: string, from_index: number): string[] | undefined;
   /**
    * Set streaming known state
    */
@@ -367,6 +367,7 @@ export interface InitOutput {
   readonly __wbindgen_export_4: WebAssembly.Table;
   readonly __externref_table_dealloc: (a: number) => void;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+  readonly __externref_drop_slice: (a: number, b: number) => void;
   readonly __wbindgen_start: () => void;
 }
 

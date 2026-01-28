@@ -318,7 +318,7 @@ class SessionMapAdapter implements SessionMapImpl {
   getSessionTransactions(
     sessionId: string,
     fromIndex: number,
-  ): string | undefined {
+  ): string[] | undefined {
     return (
       this.sessionMap.getSessionTransactions(sessionId, fromIndex) ?? undefined
     );
