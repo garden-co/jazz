@@ -2362,9 +2362,9 @@ export interface SessionMapInterface {
     sessionId: string
   ) /*throws*/ : /*i32*/ number | undefined;
   /**
-   * Get all session IDs as JSON array
+   * Get all session IDs as native array
    */
-  getSessionIds() /*throws*/ : string;
+  getSessionIds() /*throws*/ : Array<string>;
   /**
    * Get transactions for a session from index (returns None if session not found)
    */
@@ -2652,10 +2652,10 @@ export class SessionMap
   }
 
   /**
-   * Get all session IDs as JSON array
+   * Get all session IDs as native array
    */
-  public getSessionIds(): string /*throws*/ {
-    return FfiConverterString.lift(
+  public getSessionIds(): Array<string> /*throws*/ {
+    return FfiConverterArrayString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
           FfiConverterTypeSessionMapError
@@ -3371,7 +3371,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_ids() !==
-    34858
+    26592
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_ids'

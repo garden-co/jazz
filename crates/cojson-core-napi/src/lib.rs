@@ -342,12 +342,10 @@ impl SessionMap {
 
   // === Session Queries ===
 
-  /// Get all session IDs as JSON array
+  /// Get all session IDs as native array
   #[napi]
-  pub fn get_session_ids(&self) -> napi::Result<String> {
-    let ids = self.internal.get_session_ids();
-    serde_json::to_string(&ids)
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  pub fn get_session_ids(&self) -> Vec<String> {
+    self.internal.get_session_ids()
   }
 
   /// Get transaction count for a session (returns -1 if session not found)

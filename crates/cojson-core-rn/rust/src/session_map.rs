@@ -127,11 +127,10 @@ impl SessionMap {
 
     // === Session Queries ===
 
-    /// Get all session IDs as JSON array
-    pub fn get_session_ids(&self) -> Result<String, SessionMapError> {
+    /// Get all session IDs as native array
+    pub fn get_session_ids(&self) -> Result<Vec<String>, SessionMapError> {
         let internal = self.internal.lock().map_err(|_| SessionMapError::LockError)?;
-        let ids = internal.get_session_ids();
-        serde_json::to_string(&ids).map_err(|e| SessionMapError::Internal(e.to_string()))
+        Ok(internal.get_session_ids())
     }
 
     /// Get transaction count for a session (returns -1 if session not found)

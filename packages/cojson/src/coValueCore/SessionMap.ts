@@ -444,14 +444,13 @@ export class SessionMap {
   }
 
   get size(): number {
-    const sessionIds = JSON.parse(this.impl.getSessionIds()) as string[];
-    return sessionIds.length;
+    return this.impl.getSessionIds().length;
   }
 
   get sessions(): Map<SessionID, SessionLog> {
     // Build a Map from all sessions
     const map = new Map<SessionID, SessionLog>();
-    const sessionIds = JSON.parse(this.impl.getSessionIds()) as SessionID[];
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
     for (const sessionID of sessionIds) {
       map.set(sessionID, this.getSessionLog(sessionID));
     }
@@ -459,21 +458,21 @@ export class SessionMap {
   }
 
   *entries(): IterableIterator<[SessionID, SessionLog]> {
-    const sessionIds = JSON.parse(this.impl.getSessionIds()) as SessionID[];
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
     for (const sessionID of sessionIds) {
       yield [sessionID, this.getSessionLog(sessionID)];
     }
   }
 
   *values(): IterableIterator<SessionLog> {
-    const sessionIds = JSON.parse(this.impl.getSessionIds()) as SessionID[];
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
     for (const sessionID of sessionIds) {
       yield this.getSessionLog(sessionID);
     }
   }
 
   *keys(): IterableIterator<SessionID> {
-    const sessionIds = JSON.parse(this.impl.getSessionIds()) as SessionID[];
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
     for (const sessionID of sessionIds) {
       yield sessionID;
     }
@@ -514,7 +513,7 @@ export class SessionMap {
     );
 
     // Copy all sessions with their transactions
-    const sessionIds = JSON.parse(this.impl.getSessionIds()) as SessionID[];
+    const sessionIds = this.impl.getSessionIds() as SessionID[];
     for (const sessionID of sessionIds) {
       const txCount = this.impl.getTransactionCount(sessionID);
       if (txCount > 0) {

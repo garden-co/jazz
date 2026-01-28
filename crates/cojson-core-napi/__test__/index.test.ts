@@ -537,7 +537,7 @@ describe("SessionMap", () => {
     const header = createGroupHeader();
     const sessionMap = new SessionMap(coId, header);
 
-    const sessionIds = JSON.parse(sessionMap.getSessionIds());
+    const sessionIds = sessionMap.getSessionIds();
     expect(Array.isArray(sessionIds)).toBe(true);
     expect(sessionIds.length).toBe(0);
   });
@@ -733,7 +733,7 @@ describe("SessionMap - Transaction Flow", () => {
     expect(parsed.transaction).toBeDefined();
 
     // Session should now exist
-    const sessionIds = JSON.parse(sessionMap.getSessionIds());
+    const sessionIds = sessionMap.getSessionIds();
     expect(sessionIds).toContain(sessionId);
 
     // Transaction count should be 1
@@ -853,7 +853,7 @@ describe("SessionMap - Transaction Flow", () => {
     sessionMap.makeNewTrustingTransaction(session3, signerSecret, JSON.stringify({ s: 3, tx: 3 }), null, Date.now());
 
     // Verify session IDs
-    const sessionIds = JSON.parse(sessionMap.getSessionIds());
+    const sessionIds = sessionMap.getSessionIds();
     expect(sessionIds).toContain(session1);
     expect(sessionIds).toContain(session2);
     expect(sessionIds).toContain(session3);

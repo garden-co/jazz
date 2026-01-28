@@ -399,7 +399,7 @@ class SessionMapAdapter implements SessionMapImpl {
   }
 
   // === Session Queries ===
-  getSessionIds(): string {
+  getSessionIds(): string[] {
     return this.sessionMap.getSessionIds();
   }
 

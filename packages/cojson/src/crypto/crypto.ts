@@ -357,7 +357,7 @@ export interface SessionMapImpl {
   ): string; // Returns JSON: { signature, transaction }
 
   // === Session Queries ===
-  getSessionIds(): string; // Returns JSON array
+  getSessionIds(): string[];
   getTransactionCount(sessionId: string): number; // -1 if not found
   getTransaction(sessionId: string, txIndex: number): string | undefined;
   getSessionTransactions(

@@ -54,8 +54,8 @@ export declare class SessionMap {
    * Returns JSON: { signature: string, transaction: Transaction }
    */
   makeNewTrustingTransaction(sessionId: string, signerSecret: string, changesJson: string, metaJson: string | undefined | null, madeAt: number): string
-  /** Get all session IDs as JSON array */
-  getSessionIds(): string
+  /** Get all session IDs as native array */
+  getSessionIds(): Array<string>
   /** Get transaction count for a session (returns -1 if session not found) */
   getTransactionCount(sessionId: string): number
   /** Get single transaction by index (returns undefined if not found) */
