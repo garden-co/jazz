@@ -837,6 +837,374 @@ describe("getOrCreateUnique offline scenarios", () => {
   });
 });
 
+describe("CoList.getOrCreateUnique offline scenarios", () => {
+  // Helper to disconnect an account from sync server (simulate going offline)
+  function goOffline(
+    account: InstanceType<typeof import("../internal").Account>,
+  ) {
+    Object.values(account.$jazz.localNode.syncManager.peers).forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+  }
+
+  test("two accounts offline create unique list - same IDs", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique list while offline
+    const aliceList = await ItemList.getOrCreateUnique({
+      value: ["alice-item-1", "alice-item-2"],
+      unique: "offline-list",
+      owner: aliceGroup,
+    });
+
+    const bobList = await ItemList.getOrCreateUnique({
+      value: ["bob-item-1", "bob-item-2"],
+      unique: "offline-list",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceList);
+    assertLoaded(bobList);
+
+    // Both should have the same list ID (derived from uniqueness)
+    expect(aliceList.$jazz.id).toBe(bobList.$jazz.id);
+  });
+
+  test("two accounts offline create unique list with nested CoMaps - all values have same IDs", async () => {
+    const Item = co.map({
+      name: z.string(),
+      value: z.number(),
+    });
+
+    const ItemList = co
+      .list(
+        Item.withPermissions({
+          onInlineCreate: "sameAsContainer",
+        }),
+      )
+      .withPermissions({ onInlineCreate: "sameAsContainer" });
+
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique list with nested items while offline
+    const aliceList = await ItemList.getOrCreateUnique({
+      value: [{ name: "Alice Item", value: 100 }],
+      unique: "offline-nested-list",
+      owner: aliceGroup,
+      resolve: { $each: true },
+    });
+
+    const bobList = await ItemList.getOrCreateUnique({
+      value: [{ name: "Bob Item", value: 200 }],
+      unique: "offline-nested-list",
+      owner: bobGroup,
+      resolve: { $each: true },
+    });
+
+    assertLoaded(aliceList);
+    assertLoaded(bobList);
+
+    // Both should have the same list ID (derived from uniqueness)
+    expect(aliceList.$jazz.id).toBe(bobList.$jazz.id);
+
+    // The nested items at the same index should also have the same ID
+    expect(aliceList[0]?.$jazz.id).toBe(bobList[0]?.$jazz.id);
+  });
+
+  test("two accounts offline create unique list and do updates, updates merge after sync", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique list while offline
+    const aliceList = await ItemList.getOrCreateUnique({
+      value: ["initial"],
+      unique: "offline-list-merge",
+      owner: aliceGroup,
+    });
+
+    const bobList = await ItemList.getOrCreateUnique({
+      value: ["initial"],
+      unique: "offline-list-merge",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceList);
+    assertLoaded(bobList);
+
+    // Verify same IDs
+    expect(aliceList.$jazz.id).toBe(bobList.$jazz.id);
+
+    // Alice pushes an item
+    aliceList.$jazz.push("alice-added");
+
+    // Bob pushes a different item
+    bobList.$jazz.push("bob-added");
+
+    // Simulate reconnection by linking accounts directly
+    await linkAccounts(alice, bob);
+
+    // Both lists should now contain items from both users (merged)
+    expect(aliceList.length).toBe(3);
+    expect(bobList.length).toBe(3);
+    expect(aliceList).toContain("initial");
+    expect(aliceList).toContain("alice-added");
+    expect(aliceList).toContain("bob-added");
+    expect(bobList).toContain("initial");
+    expect(bobList).toContain("alice-added");
+    expect(bobList).toContain("bob-added");
+  });
+});
+
+describe("CoFeed.getOrCreateUnique offline scenarios", () => {
+  // Helper to disconnect an account from sync server (simulate going offline)
+  function goOffline(
+    account: InstanceType<typeof import("../internal").Account>,
+  ) {
+    Object.values(account.$jazz.localNode.syncManager.peers).forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+  }
+
+  test("two accounts offline create unique feed - same IDs", async () => {
+    const MessageFeed = co.feed(z.string());
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique feed while offline
+    const aliceFeed = await MessageFeed.getOrCreateUnique({
+      value: ["alice-message"],
+      unique: "offline-feed",
+      owner: aliceGroup,
+    });
+
+    const bobFeed = await MessageFeed.getOrCreateUnique({
+      value: ["bob-message"],
+      unique: "offline-feed",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceFeed);
+    assertLoaded(bobFeed);
+
+    // Both should have the same feed ID (derived from uniqueness)
+    expect(aliceFeed.$jazz.id).toBe(bobFeed.$jazz.id);
+  });
+
+  test("two accounts offline create unique feed with CoMap items - same IDs", async () => {
+    const Message = co.map({
+      text: z.string(),
+      author: z.string(),
+    });
+
+    const MessageFeed = co.feed(
+      Message.withPermissions({
+        onInlineCreate: "sameAsContainer",
+      }),
+    );
+
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique feed with nested messages while offline
+    const aliceFeed = await MessageFeed.getOrCreateUnique({
+      value: [{ text: "Hello from Alice", author: "alice" }],
+      unique: "offline-nested-feed",
+      owner: aliceGroup,
+    });
+
+    const bobFeed = await MessageFeed.getOrCreateUnique({
+      value: [{ text: "Hello from Bob", author: "bob" }],
+      unique: "offline-nested-feed",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceFeed);
+    assertLoaded(bobFeed);
+
+    // Both should have the same feed ID (derived from uniqueness)
+    expect(aliceFeed.$jazz.id).toBe(bobFeed.$jazz.id);
+  });
+
+  test("two accounts offline create unique feed", async () => {
+    const MessageFeed = co.feed(z.string());
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique feed while offline
+    const aliceFeed = await MessageFeed.getOrCreateUnique({
+      value: ["initial"],
+      unique: "offline-feed-merge",
+      owner: aliceGroup,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const bobFeed = await MessageFeed.getOrCreateUnique({
+      value: ["initial"],
+      unique: "offline-feed-merge",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceFeed);
+    assertLoaded(bobFeed);
+
+    // Verify same IDs
+    expect(aliceFeed.$jazz.id).toBe(bobFeed.$jazz.id);
+
+    // Simulate reconnection by linking accounts directly
+    await linkAccounts(alice, bob);
+
+    // CoFeed has per-session entries, so each user's messages appear in their own "lane"
+    // After sync, both feeds should be synced with the same underlying data
+    await waitFor(() => {
+      expect(aliceFeed.$jazz.raw.core.knownState()).toEqual(
+        bobFeed.$jazz.raw.core.knownState(),
+      );
+    });
+
+    // Alice init wins
+    expect(aliceFeed.perAccount[alice.$jazz.id]?.value).toEqual("initial");
+    expect(bobFeed.perAccount[bob.$jazz.id]?.value).toEqual(undefined);
+  });
+
+  test("two accounts offline create unique feed and push updates, updates merge after sync", async () => {
+    const MessageFeed = co.feed(z.string());
+    const group = Group.create().makePublic("writer");
+
+    const alice = await createJazzTestAccount();
+    const bob = await createJazzTestAccount();
+
+    const aliceGroup = await Group.load(group.$jazz.id, { loadAs: alice });
+    const bobGroup = await Group.load(group.$jazz.id, { loadAs: bob });
+
+    assertLoaded(aliceGroup);
+    assertLoaded(bobGroup);
+
+    // Simulate going offline
+    goOffline(alice);
+    goOffline(bob);
+
+    // Both users create the same unique feed while offline
+    const aliceFeed = await MessageFeed.getOrCreateUnique({
+      value: ["initial"],
+      unique: "offline-feed-merge",
+      owner: aliceGroup,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const bobFeed = await MessageFeed.getOrCreateUnique({
+      value: ["initial"],
+      unique: "offline-feed-merge",
+      owner: bobGroup,
+    });
+
+    assertLoaded(aliceFeed);
+    assertLoaded(bobFeed);
+
+    // Verify same IDs
+    expect(aliceFeed.$jazz.id).toBe(bobFeed.$jazz.id);
+
+    // Alice pushes a message (CoFeed uses push method)
+    aliceFeed.$jazz.push("alice-message");
+
+    // Bob pushes a different message
+    bobFeed.$jazz.push("bob-message");
+
+    // Simulate reconnection by linking accounts directly
+    await linkAccounts(alice, bob);
+
+    // CoFeed has per-session entries, so each user's messages appear in their own "lane"
+    // After sync, both feeds should be synced with the same underlying data
+    await waitFor(() => {
+      expect(aliceFeed.$jazz.raw.core.knownState()).toEqual(
+        bobFeed.$jazz.raw.core.knownState(),
+      );
+    });
+
+    expect(aliceFeed.perAccount[alice.$jazz.id]?.value).toEqual(
+      "alice-message",
+    );
+    expect(bobFeed.perAccount[bob.$jazz.id]?.value).toEqual("bob-message");
+  });
+});
+
 describe("getOrCreateUnique vs upsertUnique behavior comparison", () => {
   test("upsertUnique updates existing values, getOrCreateUnique does not", async () => {
     const Settings = co.map({
