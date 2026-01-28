@@ -4254,3 +4254,1054 @@ fn handle_object_update_respects_branch() {
         "Row on draft branch should appear in draft query"
     );
 }
+
+// ============================================================================
+// Contributing ObjectIds Tests
+// ============================================================================
+
+#[test]
+fn contributing_ids_reflect_filter() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut qm = QueryManager::new(sync_manager, schema);
+
+    // Insert 3 rows with different scores
+    let handle1 = qm
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .unwrap();
+    let handle2 = qm
+        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .unwrap();
+    let handle3 = qm
+        .insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+    // Subscribe to query: score > 50
+    let query = qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+    let sub_id = qm.subscribe(query.clone()).unwrap();
+
+    qm.process();
+
+    // Get contributing ObjectIds
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+
+    // Should have 2 rows (Alice: 100, Charlie: 75), not Bob (30)
+    assert_eq!(contributing.len(), 2, "Should have 2 contributing IDs");
+
+    let branch = crate::object::BranchName::new("main");
+    assert!(
+        contributing.contains(&(handle1.row_id, branch)),
+        "Alice should be in contributing set"
+    );
+    assert!(
+        !contributing.contains(&(handle2.row_id, branch)),
+        "Bob should NOT be in contributing set (score < 50)"
+    );
+    assert!(
+        contributing.contains(&(handle3.row_id, branch)),
+        "Charlie should be in contributing set"
+    );
+}
+
+#[test]
+fn contributing_ids_update_reactively() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut qm = QueryManager::new(sync_manager, schema);
+
+    // Insert 2 rows initially
+    let _handle1 = qm
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .unwrap();
+    let handle2 = qm
+        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .unwrap();
+
+    // Subscribe to query: score > 50
+    let query = qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+    let sub_id = qm.subscribe(query.clone()).unwrap();
+
+    qm.process();
+
+    // Initially 1 match (Alice: 100)
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+    assert_eq!(
+        contributing.len(),
+        1,
+        "Should have 1 contributing ID initially"
+    );
+
+    // Insert new row with score > 50
+    let handle3 = qm
+        .insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+
+    qm.process();
+
+    // Now 2 matches
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+    assert_eq!(
+        contributing.len(),
+        2,
+        "Should have 2 contributing IDs after insert"
+    );
+
+    let branch = crate::object::BranchName::new("main");
+    assert!(
+        contributing.contains(&(handle3.row_id, branch)),
+        "Charlie should be in contributing set"
+    );
+
+    // Update Bob's score to > 50
+    qm.update(
+        handle2.row_id,
+        &[Value::Text("Bob".into()), Value::Integer(60)],
+    )
+    .unwrap();
+    qm.process();
+
+    // Now 3 matches
+    let contributing = qm.get_subscription_contributing_ids(sub_id);
+    assert_eq!(
+        contributing.len(),
+        3,
+        "Should have 3 contributing IDs after update"
+    );
+    assert!(
+        contributing.contains(&(handle2.row_id, branch)),
+        "Bob should now be in contributing set"
+    );
+}
+
+// ============================================================================
+// Server-Side Query Subscription Tests
+// ============================================================================
+
+#[test]
+fn server_builds_query_graph_on_subscription() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut server_qm = QueryManager::new(sync_manager, schema);
+
+    // Server has existing data: 3 users, 2 with score > 50
+    let handle1 = server_qm
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .unwrap();
+    let _handle2 = server_qm
+        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .unwrap();
+    let handle3 = server_qm
+        .insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server_qm.process();
+
+    // Add a client
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    // Client sends QuerySubscription for score > 50
+    let query = server_qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query,
+            session: None,
+        },
+    });
+
+    server_qm.process();
+
+    // Server should send ObjectUpdated for matching users (Alice, Charlie)
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+
+    // Filter for ObjectUpdated messages to this client
+    let object_updates: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert_eq!(
+        object_updates.len(),
+        2,
+        "Should send 2 ObjectUpdated messages for matching users"
+    );
+
+    // Verify the correct ObjectIds were sent
+    let sent_ids: std::collections::HashSet<_> = object_updates
+        .iter()
+        .filter_map(|e| {
+            if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
+                Some(*object_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
+    assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn server_pushes_new_matches() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut server_qm = QueryManager::new(sync_manager, schema);
+
+    // Server has 1 user initially
+    let _handle1 = server_qm
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .unwrap();
+    server_qm.process();
+
+    // Add client and subscribe
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    let query = server_qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query,
+            session: None,
+        },
+    });
+
+    server_qm.process();
+
+    // Clear initial outbox
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    // Insert new matching user
+    let handle2 = server_qm
+        .insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server_qm.process();
+
+    // Should send ObjectUpdated for new matching user
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+
+    let object_updates: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert_eq!(
+        object_updates.len(),
+        1,
+        "Should send 1 ObjectUpdated for new matching user"
+    );
+
+    // Verify it's Charlie
+    if let SyncPayload::ObjectUpdated { object_id, .. } = &object_updates[0].payload {
+        assert_eq!(*object_id, handle2.row_id, "Should send Charlie's ObjectId");
+    }
+}
+
+#[test]
+fn server_does_not_push_non_matching() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut server_qm = QueryManager::new(sync_manager, schema);
+
+    // Add client and subscribe to score > 50
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    let query = server_qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query,
+            session: None,
+        },
+    });
+
+    server_qm.process();
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    // Insert non-matching user (score = 30)
+    let _handle = server_qm
+        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .unwrap();
+    server_qm.process();
+
+    // Should NOT send ObjectUpdated for non-matching user
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+
+    let object_updates: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert_eq!(
+        object_updates.len(),
+        0,
+        "Should NOT send ObjectUpdated for non-matching user"
+    );
+}
+
+// ============================================================================
+// Client subscribe_with_sync Tests
+// ============================================================================
+
+#[test]
+fn subscribe_with_sync_sends_to_servers() {
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut client_qm = QueryManager::new(sync_manager, schema);
+
+    // Add a server
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    client_qm.sync_manager_mut().add_server(server_id);
+
+    // Clear initial outbox (full sync to server)
+    let _ = client_qm.sync_manager_mut().take_outbox();
+
+    // Subscribe with sync
+    let query = client_qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let _sub_id = client_qm.subscribe_with_sync(query, None).unwrap();
+
+    // Check outbox for QuerySubscription
+    let outbox = client_qm.sync_manager_mut().take_outbox();
+
+    let query_subs: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        query_subs.len(),
+        1,
+        "Should send QuerySubscription to server"
+    );
+}
+
+#[test]
+fn unsubscribe_with_sync_sends_to_servers() {
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut client_qm = QueryManager::new(sync_manager, schema);
+
+    // Add a server
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    client_qm.sync_manager_mut().add_server(server_id);
+
+    // Subscribe with sync
+    let query = client_qm
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let sub_id = client_qm.subscribe_with_sync(query, None).unwrap();
+
+    // Clear outbox
+    let _ = client_qm.sync_manager_mut().take_outbox();
+
+    // Unsubscribe with sync
+    client_qm.unsubscribe_with_sync(sub_id);
+
+    // Check outbox for QueryUnsubscription
+    let outbox = client_qm.sync_manager_mut().take_outbox();
+
+    let query_unsubs: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QueryUnsubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        query_unsubs.len(),
+        1,
+        "Should send QueryUnsubscription to server"
+    );
+}
+
+// ============================================================================
+// Part 5: Multi-Tier Forwarding Tests
+// ============================================================================
+
+/// Test that a mid-tier server forwards QuerySubscription to upstream servers.
+#[test]
+fn mid_tier_forwards_query_subscription_upstream() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    // Setup mid-tier server with schema
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut mid_tier = QueryManager::new(sync_manager, schema);
+
+    // Add upstream server
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_server(upstream_id);
+
+    // Add downstream client
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_client(client_id);
+
+    // Clear the outbox (add_server queues full sync)
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    // Simulate receiving QuerySubscription from client
+    let query = mid_tier
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query,
+            session: None,
+        },
+    });
+
+    // Process the subscription
+    mid_tier.process();
+
+    // Check that QuerySubscription was forwarded to upstream server
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+
+    let forwarded: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == upstream_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        forwarded.len(),
+        1,
+        "Mid-tier should forward QuerySubscription to upstream server"
+    );
+}
+
+/// Test that a mid-tier server forwards QueryUnsubscription to upstream servers.
+#[test]
+fn mid_tier_forwards_query_unsubscription_upstream() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    // Setup mid-tier server
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut mid_tier = QueryManager::new(sync_manager, schema);
+
+    // Add upstream server and downstream client
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_server(upstream_id);
+    mid_tier.sync_manager_mut().add_client(client_id);
+
+    // First, establish subscription
+    let query = mid_tier
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let query_id = crate::sync_manager::QueryId(42);
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id,
+            query,
+            session: None,
+        },
+    });
+    mid_tier.process();
+
+    // Clear outbox
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    // Now send unsubscription
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription { query_id },
+    });
+    mid_tier.process();
+
+    // Check that QueryUnsubscription was forwarded upstream
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+
+    let forwarded: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == upstream_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QueryUnsubscription { .. }))
+        .collect();
+
+    assert_eq!(
+        forwarded.len(),
+        1,
+        "Mid-tier should forward QueryUnsubscription to upstream server"
+    );
+}
+
+/// Test that objects from upstream are relayed to downstream clients with matching scope.
+#[test]
+fn mid_tier_relays_objects_to_clients_with_matching_scope() {
+    use crate::commit::Commit;
+    use crate::object::ObjectId;
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, ObjectMetadata, ServerId, Source, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    // Setup mid-tier server
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let mut mid_tier = QueryManager::new(sync_manager, schema.clone());
+
+    // Add upstream server and downstream client
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_server(upstream_id);
+    mid_tier.sync_manager_mut().add_client(client_id);
+
+    // Insert a matching row locally first (so it's in scope)
+    let handle = mid_tier
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(75)])
+        .unwrap();
+    mid_tier.process();
+
+    // Establish client subscription
+    let query = mid_tier
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: crate::sync_manager::QueryId(42),
+            query,
+            session: None,
+        },
+    });
+    mid_tier.process();
+
+    // Clear outbox (initial sync messages)
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    // Now receive an update for the existing object from upstream
+    // (simulating upstream sending fresh data)
+    let table_schema = schema.get(&TableName::new("users")).unwrap();
+    let row_data = super::encode_row(
+        &table_schema.descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(80)],
+    )
+    .unwrap();
+
+    let current_tips: smallvec::SmallVec<[_; 2]> = mid_tier
+        .sync_manager()
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&crate::object::BranchName::new("main"))
+        .unwrap()
+        .tips
+        .iter()
+        .copied()
+        .collect();
+
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: current_tips,
+        content: row_data,
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+    };
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(upstream_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: handle.row_id,
+            metadata: Some(ObjectMetadata {
+                id: handle.row_id,
+                metadata: [("table".to_string(), "users".to_string())]
+                    .into_iter()
+                    .collect(),
+            }),
+            branch_name: crate::object::BranchName::new("main"),
+            commits: vec![commit],
+        },
+    });
+    mid_tier.process();
+
+    // Check that the update was forwarded to the client
+    let outbox = mid_tier.sync_manager_mut().take_outbox();
+
+    let relayed: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter(|e| matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id))
+        .collect();
+
+    assert_eq!(
+        relayed.len(),
+        1,
+        "Mid-tier should relay ObjectUpdated from upstream to client with matching scope"
+    );
+}
+
+// ============================================================================
+// Part 6: End-to-End Integration Tests
+// ============================================================================
+
+/// Helper to exchange messages between client and server QueryManagers.
+/// Runs multiple rounds until no more messages are exchanged.
+fn pump_messages(
+    client: &mut QueryManager,
+    server: &mut QueryManager,
+    client_id: crate::sync_manager::ClientId,
+    server_id: crate::sync_manager::ServerId,
+) {
+    use crate::sync_manager::{Destination, InboxEntry, Source};
+
+    for _ in 0..10 {
+        // Client → Server
+        let client_outbox = client.sync_manager_mut().take_outbox();
+        let client_to_server: Vec<_> = client_outbox
+            .into_iter()
+            .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+            .collect();
+
+        for entry in client_to_server {
+            server.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+        server.process();
+
+        // Server → Client
+        let server_outbox = server.sync_manager_mut().take_outbox();
+        let server_to_client: Vec<_> = server_outbox
+            .into_iter()
+            .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+            .collect();
+
+        if server_to_client.is_empty() {
+            break;
+        }
+
+        for entry in server_to_client {
+            client.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+        client.process();
+    }
+}
+
+/// E2E: Client subscribes to query, receives matching data from server.
+#[test]
+fn e2e_client_receives_server_data_via_subscription() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    // Setup server with data
+    let server_sync = SyncManager::new();
+    let mut server = QueryManager::new(server_sync, schema.clone());
+
+    server
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(75)])
+        .unwrap();
+    server
+        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .unwrap();
+    server
+        .insert(
+            "users",
+            &[Value::Text("Charlie".into()), Value::Integer(90)],
+        )
+        .unwrap();
+    server.process();
+
+    // Setup client (no data yet)
+    let client_sync = SyncManager::new();
+    let mut client = QueryManager::new(client_sync, schema.clone());
+
+    // Subscribe to all object updates (needed to receive sync'd data)
+
+    // Connect client to server
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+
+    // Clear initial sync messages (we want query-driven sync)
+    let _ = client.sync_manager_mut().take_outbox();
+
+    // Client subscribes to users with score > 50 (should match Alice and Charlie)
+    let query = client
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None).unwrap();
+
+    // Exchange messages between client and server
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Client should now have the matching rows
+    let results = client.get_subscription_results(sub_id);
+
+    assert_eq!(results.len(), 2, "Client should receive 2 matching users");
+
+    let names: Vec<_> = results
+        .iter()
+        .filter_map(|row| {
+            if let Value::Text(name) = &row[0] {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(names.contains(&"Alice"), "Should contain Alice");
+    assert!(names.contains(&"Charlie"), "Should contain Charlie");
+    assert!(!names.contains(&"Bob"), "Should NOT contain Bob");
+}
+
+/// E2E: Client receives new matching rows as server inserts them.
+#[test]
+fn e2e_client_receives_new_matching_row() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    // Setup server (initially empty)
+    let server_sync = SyncManager::new();
+    let mut server = QueryManager::new(server_sync, schema.clone());
+
+    // Setup client
+    let client_sync = SyncManager::new();
+    let mut client = QueryManager::new(client_sync, schema.clone());
+
+    // Connect
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    // Client subscribes to users with score > 50
+    let query = client
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None).unwrap();
+
+    // Initial sync (empty)
+    pump_messages(&mut client, &mut server, client_id, server_id);
+    assert_eq!(
+        client.get_subscription_results(sub_id).len(),
+        0,
+        "Initially empty"
+    );
+
+    // Server inserts a matching row
+    server
+        .insert("users", &[Value::Text("Alice".into()), Value::Integer(75)])
+        .unwrap();
+    server.process();
+
+    // Exchange messages
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Client should now have Alice
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 1, "Client should receive new matching user");
+    assert_eq!(results[0][0], Value::Text("Alice".into()));
+}
+
+/// E2E: Client does NOT receive rows that don't match the query filter.
+#[test]
+fn e2e_client_does_not_receive_non_matching_row() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    // Setup server and client
+    let server_sync = SyncManager::new();
+    let mut server = QueryManager::new(server_sync, schema.clone());
+
+    let client_sync = SyncManager::new();
+    let mut client = QueryManager::new(client_sync, schema.clone());
+
+    // Connect
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    // Client subscribes to users with score > 50
+    let query = client
+        .query("users")
+        .branch("main")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    let sub_id = client.subscribe_with_sync(query, None).unwrap();
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Server inserts a NON-matching row (score = 30)
+    server
+        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .unwrap();
+    server.process();
+
+    // Exchange messages
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Client should NOT have Bob
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        0,
+        "Client should NOT receive non-matching user"
+    );
+}
+
+/// E2E: Permissions filter what gets synced - client only receives permitted rows.
+#[test]
+fn e2e_permissions_prevent_sync() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    // Create schema with documents table that has owner-based policy
+    // Policy: owner_id must match session.user_id
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema {
+            descriptor: RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
+            ]),
+            policies: TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        },
+    );
+
+    // Setup server with docs owned by different users
+    let server_sync = SyncManager::new();
+    let mut server = QueryManager::new(server_sync, schema.clone());
+
+    server
+        .insert(
+            "documents",
+            &[
+                Value::Text("Alice's doc".into()),
+                Value::Text("alice".into()),
+            ],
+        )
+        .unwrap();
+    server
+        .insert(
+            "documents",
+            &[Value::Text("Bob's doc".into()), Value::Text("bob".into())],
+        )
+        .unwrap();
+    server.process();
+
+    // Setup client
+    let client_sync = SyncManager::new();
+    let mut client = QueryManager::new(client_sync, schema.clone());
+
+    // Connect
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    // Client subscribes as Alice (user_id = "alice")
+    let alice_session = PolicySession::new("alice");
+    let query = client.query("documents").branch("main").build();
+
+    let sub_id = client
+        .subscribe_with_sync(query, Some(alice_session))
+        .unwrap();
+
+    // Exchange messages
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Client should ONLY have Alice's doc
+    let results = client.get_subscription_results(sub_id);
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Client should only receive docs they have permission to see"
+    );
+    assert_eq!(
+        results[0][0],
+        Value::Text("Alice's doc".into()),
+        "Should be Alice's doc"
+    );
+}
+
+/// E2E: New rows that don't match permissions are NOT synced.
+#[test]
+fn e2e_permissions_prevent_new_row_sync() {
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    // Create schema with owner-based policy
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema {
+            descriptor: RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text), // Text to match user_id string
+            ]),
+            policies: TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        },
+    );
+
+    // Setup server and client
+    let server_sync = SyncManager::new();
+    let mut server = QueryManager::new(server_sync, schema.clone());
+
+    let client_sync = SyncManager::new();
+    let mut client = QueryManager::new(client_sync, schema.clone());
+
+    // Connect
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    // Client subscribes as Alice
+    let alice_session = PolicySession::new("alice");
+    let query = client.query("documents").branch("main").build();
+
+    let sub_id = client
+        .subscribe_with_sync(query, Some(alice_session))
+        .unwrap();
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Server inserts Alice's doc
+    server
+        .insert(
+            "documents",
+            &[
+                Value::Text("Alice's doc".into()),
+                Value::Text("alice".into()),
+            ],
+        )
+        .unwrap();
+    server.process();
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    assert_eq!(
+        client.get_subscription_results(sub_id).len(),
+        1,
+        "Client should have Alice's doc"
+    );
+
+    // Server inserts Bob's doc (owner_id = "bob")
+    server
+        .insert(
+            "documents",
+            &[Value::Text("Bob's doc".into()), Value::Text("bob".into())],
+        )
+        .unwrap();
+    server.process();
+    pump_messages(&mut client, &mut server, client_id, server_id);
+
+    // Client should still only have Alice's doc
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 1, "Client should NOT receive Bob's doc");
+    assert_eq!(results[0][0], Value::Text("Alice's doc".into()));
+}

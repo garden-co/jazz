@@ -1,12 +1,12 @@
 use ahash::{AHashMap, AHashSet};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
 use bitvec::prelude::*;
 use smallvec::SmallVec;
 
 use crate::commit::CommitId;
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
@@ -167,6 +167,54 @@ impl QueryGraph {
     /// Get output edges (reverse edges) for a node.
     fn get_outputs(&self, id: NodeId) -> Option<&[NodeId]> {
         self.nodes.get(id.0 as usize).map(|c| c.outputs.as_slice())
+    }
+
+    /// Returns ObjectIds contributing to current result set along with their branches.
+    ///
+    /// These are the objects that, if synced, would affect query results.
+    /// Only includes ObjectIds that:
+    /// 1. Come from an IndexScanNode (source of all objects)
+    /// 2. Survive all filtering/joins to appear in the output
+    ///
+    /// After calling `settle()`, this method returns the (ObjectId, BranchName) pairs
+    /// for all rows currently in the query result.
+    pub fn contributing_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        // Get all ObjectIds in the final output
+        let output_ids: AHashSet<ObjectId> = self
+            .get_node(self.output_node)
+            .and_then(|node| {
+                if let GraphNode::Output(output) = node {
+                    Some(
+                        output
+                            .current_tuples()
+                            .iter()
+                            .flat_map(|t| t.ids())
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        // For each IndexScanNode, find which of its ObjectIds are in the output
+        // and pair them with the scan's branch
+        let mut result = HashSet::new();
+
+        for (node_id, _table, _column) in &self.index_scan_nodes {
+            if let Some(GraphNode::IndexScan(scan)) = self.get_node(*node_id) {
+                let branch = BranchName::new(&scan.branch);
+                for tuple in scan.current_tuples() {
+                    for id in tuple.ids() {
+                        if output_ids.contains(&id) {
+                            result.insert((id, branch));
+                        }
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Compile a query into a graph (without policy filtering).

@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use blake3;
 use internment::Intern;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -244,6 +245,25 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TableName(pub Intern<String>);
 
+impl Serialize for TableName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TableName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(TableName::new(s))
+    }
+}
+
 impl TableName {
     pub fn new(name: impl Into<String>) -> Self {
         Self(Intern::new(name.into()))
@@ -348,6 +368,25 @@ impl ColumnType {
 /// Pointer-sized (8 bytes), Copy, fast equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ColumnName(pub Intern<String>);
+
+impl Serialize for ColumnName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ColumnName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(ColumnName::new(s))
+    }
+}
 
 impl ColumnName {
     pub fn new(name: impl Into<String>) -> Self {
@@ -855,7 +894,7 @@ fn validate_policy_no_cycles(
 
 /// Value type for API boundary (insert input, query output).
 /// Internally, rows are stored as binary.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
