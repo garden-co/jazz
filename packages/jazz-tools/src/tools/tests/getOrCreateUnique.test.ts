@@ -206,6 +206,85 @@ describe("CoMap.getOrCreateUnique", () => {
     expect(result.$jazz.loadingState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 
+  test("unauthorized user offline creates unique value, transaction invalidated after reconnect", async () => {
+    // Helper to disconnect an account from sync server (simulate going offline)
+    function goOffline(
+      account: InstanceType<typeof import("../internal").Account>,
+    ) {
+      Object.values(account.$jazz.localNode.syncManager.peers).forEach(
+        (peer) => {
+          peer.gracefulShutdown();
+        },
+      );
+    }
+
+    const Document = co.map({
+      title: z.string(),
+      content: z.string(),
+    });
+    const owner = activeAccountContext.get();
+
+    // Create Bob and add him as a writer
+    const bob = await createJazzTestAccount();
+    const group = Group.create();
+    group.addMember(bob, "writer");
+
+    // Bob loads the group while online (he has write access)
+    const groupOnBob = await Group.load(group.$jazz.id, { loadAs: bob });
+    assertLoaded(groupOnBob);
+
+    // Both go offline to isolate their states
+    goOffline(owner);
+    goOffline(bob);
+
+    group.addMember(bob, "reader");
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Bob creates a unique value while offline using direct create
+    // His local node thinks he has write access (hasn't seen the removal)
+    const bobDoc = await Document.getOrCreateUnique({
+      value: { title: "Bob's Doc", content: "Bob's content" },
+      unique: "offline-unauthorized-doc",
+      owner: groupOnBob,
+    });
+
+    assertLoaded(bobDoc);
+    // From Bob's local perspective, it succeeds
+    expect(bobDoc.title).toBe("Bob's Doc");
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Owner creates the same unique value (owner has actual write access)
+    const ownerDoc = await Document.getOrCreateUnique({
+      value: { title: "Owner's Doc", content: "Owner's content" },
+      unique: "offline-unauthorized-doc",
+      owner: group,
+    });
+    assertLoaded(ownerDoc);
+    expect(ownerDoc.title).toBe("Owner's Doc");
+
+    // Both documents have the same ID (derived from uniqueness)
+    expect(bobDoc.$jazz.id).toBe(ownerDoc.$jazz.id);
+
+    // Reconnect by linking accounts
+    await linkAccounts(owner, bob);
+
+    // After sync, Bob's transaction should be invalidated because he's no longer authorized
+    await waitFor(() => {
+      expect(bobDoc.$jazz.raw.core.knownState()).toEqual(
+        ownerDoc.$jazz.raw.core.knownState(),
+      );
+    });
+
+    // The owner's version should be the one that persists
+    // (Bob's init transaction should be invalidated due to permission)
+    expect(ownerDoc.title).toBe("Owner's Doc");
+    expect(ownerDoc.content).toBe("Owner's content");
+    expect(bobDoc.title).toBe("Owner's Doc");
+    expect(bobDoc.content).toBe("Owner's content");
+  });
+
   test("reader permission can load but not create", async () => {
     const Document = co.map({
       title: z.string(),
@@ -1202,6 +1281,52 @@ describe("CoFeed.getOrCreateUnique offline scenarios", () => {
       "alice-message",
     );
     expect(bobFeed.perAccount[bob.$jazz.id]?.value).toEqual("bob-message");
+  });
+});
+
+describe("upsertUnique permissions", () => {
+  test("reader permission can load but not update via upsertUnique", async () => {
+    const Document = co.map({
+      title: z.string(),
+      content: z.string(),
+    });
+    const group = Group.create();
+
+    // Create initial document as owner
+    const original = await Document.upsertUnique({
+      value: { title: "Original", content: "Original content" },
+      unique: "reader-upsert-test-doc",
+      owner: group,
+    });
+    assertLoaded(original);
+    expect(original.title).toBe("Original");
+    expect(original.content).toBe("Original content");
+
+    // Create another account with reader access only
+    const reader = await createJazzTestAccount();
+    group.addMember(reader, "reader");
+
+    const readerGroup = await Group.load(group.$jazz.id, {
+      loadAs: reader,
+    });
+    assertLoaded(readerGroup);
+
+    // Reader tries to upsertUnique - should load but NOT update
+    const readerAttempt = await Document.upsertUnique({
+      value: { title: "Reader Attempt", content: "Reader content" },
+      unique: "reader-upsert-test-doc",
+      owner: readerGroup,
+    });
+
+    assertLoaded(readerAttempt);
+    // Should return the original document values, NOT the updated ones
+    expect(readerAttempt.$jazz.id).toBe(original.$jazz.id);
+    expect(readerAttempt.title).toBe("Original");
+    expect(readerAttempt.content).toBe("Original content");
+
+    // Verify the original wasn't modified either
+    expect(original.title).toBe("Original");
+    expect(original.content).toBe("Original content");
   });
 });
 

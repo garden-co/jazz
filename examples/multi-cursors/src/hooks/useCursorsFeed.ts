@@ -33,7 +33,7 @@ async function loadGroup() {
  * This ensures each day gets a fresh cursor feed, preventing accumulation of old
  * cursor data over time.
  */
-export async function loadCursorContainer(date: string): Promise<CursorFeed> {
+export async function loadCursorFeed(date: string): Promise<CursorFeed> {
   const group = await loadGroup();
 
   const feed = await CursorFeed.getOrCreateUnique({
@@ -64,7 +64,7 @@ export function useCursorsFeed() {
   const date = useCurrentDate();
 
   useEffect(() => {
-    loadCursorContainer(date)
+    loadCursorFeed(date)
       .then((feed) => {
         setCursorFeedID(feed.$jazz.id);
       })
