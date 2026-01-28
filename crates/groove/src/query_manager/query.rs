@@ -1,10 +1,12 @@
+use serde::{Deserialize, Serialize};
+
 use crate::query_manager::encoding::encode_value;
 use crate::query_manager::graph_nodes::filter::Predicate;
 use crate::query_manager::graph_nodes::sort::{SortDirection, SortKey};
 use crate::query_manager::types::{RowDescriptor, TableName, Value};
 
 /// A join specification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinSpec {
     /// Table to join.
     pub table: TableName,
@@ -23,7 +25,7 @@ impl JoinSpec {
 }
 
 /// A condition in a WHERE clause.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Condition {
     /// Column equals value.
     Eq { column: String, value: Value },
@@ -124,7 +126,7 @@ impl Condition {
 }
 
 /// A conjunction (AND group) of conditions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conjunction {
     pub conditions: Vec<Condition>,
 }
@@ -212,7 +214,7 @@ impl Conjunction {
 }
 
 /// Specification for an array subquery (correlated subquery producing array column).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArraySubquerySpec {
     /// Name for the output array column.
     pub column_name: String,
@@ -255,7 +257,7 @@ impl ArraySubquerySpec {
 }
 
 /// A query specification (DNF: disjunction of conjunctions).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Query {
     pub table: TableName,
     /// Optional table alias (for self-joins).
@@ -1163,5 +1165,70 @@ mod tests {
         let query = Query::new("users");
 
         assert!(query.branches.is_empty());
+    }
+
+    // ========================================================================
+    // Serialization tests
+    // ========================================================================
+
+    #[test]
+    fn query_round_trip_serialization() {
+        let query = QueryBuilder::new("users")
+            .filter_eq("org_id", Value::Integer(42))
+            .filter_ge("score", Value::Integer(50))
+            .branch("main")
+            .order_by_desc("score")
+            .limit(10)
+            .build();
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_join_serialization() {
+        let query = QueryBuilder::new("users")
+            .alias("u")
+            .join("posts")
+            .alias("p")
+            .on("u.id", "p.author_id")
+            .branch("main")
+            .build();
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_array_subquery_serialization() {
+        let query = QueryBuilder::new("orgs")
+            .branch("main")
+            .with_array("users", |b| b.from("users").correlate("id", "org_id"))
+            .build();
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_disjunction_serialization() {
+        let query = QueryBuilder::new("users")
+            .filter_eq("status", Value::Text("active".into()))
+            .or()
+            .filter_eq("role", Value::Text("admin".into()))
+            .branch("main")
+            .build();
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(query, decoded);
+        assert_eq!(decoded.disjuncts.len(), 2);
     }
 }

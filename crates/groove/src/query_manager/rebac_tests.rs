@@ -111,7 +111,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client_id, QueryId(1), scope);
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content: owner_id = "alice", title = "My Doc", folder_id = NULL
@@ -178,7 +178,7 @@ fn rebac_insert_denied_by_simple_policy() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client_id, QueryId(1), scope);
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content: owner_id = "bob" (different from session user)
@@ -261,7 +261,7 @@ fn rebac_no_session_allows_all_writes() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client_id, QueryId(1), scope);
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content
@@ -335,7 +335,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client_id, QueryId(1), scope);
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content
@@ -400,7 +400,7 @@ fn rebac_non_row_object_allowed() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client_id, QueryId(1), scope);
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Client sends update
@@ -471,12 +471,12 @@ fn rebac_two_clients_different_sessions() {
     let mut scope1 = HashSet::new();
     scope1.insert((obj1, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client1, QueryId(1), scope1);
+        .set_client_query_scope(client1, QueryId(1), scope1, None);
 
     let mut scope2 = HashSet::new();
     scope2.insert((obj2, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client2, QueryId(2), scope2);
+        .set_client_query_scope(client2, QueryId(2), scope2, None);
 
     qm.sync_manager_mut().take_outbox();
 
@@ -615,7 +615,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(client_id, QueryId(1), scope);
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Encode row content
@@ -745,7 +745,7 @@ fn rebac_update_denied_by_using_policy() {
     let mut scope = HashSet::new();
     scope.insert((obj_id, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(bob_client, QueryId(1), scope);
+        .set_client_query_scope(bob_client, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Bob tries to update Alice's document (keeping owner as alice to pass WITH CHECK,
@@ -1014,7 +1014,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     let mut bob_scope = HashSet::new();
     bob_scope.insert((protected_obj, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(bob_client, QueryId(1), bob_scope);
+        .set_client_query_scope(bob_client, QueryId(1), bob_scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Bob tries to update the protected row
@@ -1088,7 +1088,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     let mut alice_scope = HashSet::new();
     alice_scope.insert((protected_obj, "main".into()));
     qm.sync_manager_mut()
-        .add_or_update_query(alice_client, QueryId(2), alice_scope);
+        .set_client_query_scope(alice_client, QueryId(2), alice_scope, None);
     qm.sync_manager_mut().take_outbox();
 
     // Alice tries to update the protected row

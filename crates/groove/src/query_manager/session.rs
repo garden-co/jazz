@@ -4,13 +4,14 @@
 //! - `user_id`: Required unique identifier for the user
 //! - `claims`: Optional JSON object with additional claims (roles, teams, etc.)
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 /// Session context for policy evaluation.
 ///
 /// Contains the authenticated user's identity and claims. Used by policy
 /// expressions to check row access permissions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     /// Required user identifier.
     pub user_id: String,

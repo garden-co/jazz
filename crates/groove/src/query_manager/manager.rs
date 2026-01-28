@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::commit::{CommitId, StoredState};
 use crate::object::{BranchName, ObjectId, ObjectState};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
-use crate::sync_manager::{PendingPermissionCheck, PendingUpdateId, SyncManager};
+use crate::sync_manager::{
+    ClientId, PendingPermissionCheck, PendingUpdateId, QueryId, SyncManager,
+};
 
 use super::encoding::{decode_row, encode_row};
 use super::graph::QueryGraph;
@@ -154,6 +156,22 @@ struct PolicyCheckState {
     pending_check: PendingPermissionCheck,
 }
 
+/// Server-side query subscription state.
+///
+/// When a client sends a QuerySubscription, the server builds a QueryGraph
+/// and tracks contributing ObjectIds. This struct holds that state.
+#[derive(Debug)]
+struct ServerQuerySubscription {
+    /// The original query.
+    query: Query,
+    /// Compiled QueryGraph (with client's session for policy filtering).
+    graph: QueryGraph,
+    /// Client's session for permission evaluation.
+    session: Option<Session>,
+    /// Last computed scope (for detecting changes).
+    last_scope: HashSet<(ObjectId, BranchName)>,
+}
+
 /// Manages reactive SQL queries over object-based storage.
 ///
 /// No global Setup/Ready state machine - indices and data are loaded lazily
@@ -169,7 +187,7 @@ pub struct QueryManager {
     /// Each branch maintains its own set of indices.
     indices: IndicesMap,
 
-    /// Active query subscriptions
+    /// Active query subscriptions (local)
     subscriptions: HashMap<QuerySubscriptionId, QuerySubscription>,
     next_subscription_id: u64,
 
@@ -178,6 +196,10 @@ pub struct QueryManager {
 
     /// Active policy checks being evaluated.
     active_policy_checks: HashMap<PendingUpdateId, PolicyCheckState>,
+
+    /// Server-side query subscriptions from downstream clients.
+    /// Key is (client_id, query_id) to allow multiple queries per client.
+    server_subscriptions: HashMap<(ClientId, QueryId), ServerQuerySubscription>,
 
     /// Optional schema context for multi-schema queries.
     /// When present, enables lens transforms for rows from old schema branches.
@@ -196,7 +218,10 @@ impl QueryManager {
     ///
     /// Row-level security is evaluated via `process()` which handles pending
     /// permission checks from SyncManager.
-    pub fn new(sync_manager: SyncManager, schema: Schema) -> Self {
+    pub fn new(mut sync_manager: SyncManager, schema: Schema) -> Self {
+        // Subscribe to all object updates so we receive sync'd data
+        sync_manager.object_manager.subscribe_all();
+
         // Initialize indices for all tables on the default branch
         let mut indices = IndicesMap::default();
         for (table_name, table_schema) in &schema {
@@ -216,6 +241,7 @@ impl QueryManager {
             next_subscription_id: 0,
             update_outbox: Vec::new(),
             active_policy_checks: HashMap::new(),
+            server_subscriptions: HashMap::new(),
             schema_context: None,
             branch_schema_map: HashMap::new(),
         }
@@ -232,6 +258,10 @@ impl QueryManager {
         schema: Schema,
         schema_context: SchemaContext,
     ) -> Self {
+        // Note: We don't auto-subscribe to object updates here because
+        // handle_object_update doesn't yet support multi-schema decoding.
+        // Callers using schema context should manually subscribe if needed.
+
         // Initialize indices for all tables on all live branches
         let mut indices = IndicesMap::default();
 
@@ -296,6 +326,7 @@ impl QueryManager {
             next_subscription_id: 0,
             update_outbox: Vec::new(),
             active_policy_checks: HashMap::new(),
+            server_subscriptions: HashMap::new(),
             schema_context: Some(schema_context),
             branch_schema_map,
         }
@@ -437,6 +468,18 @@ impl QueryManager {
             .iter()
             .filter_map(|row| decode_row(&table_schema.descriptor, &row.data).ok())
             .collect()
+    }
+
+    /// Get contributing ObjectIds for a subscription (for testing).
+    #[cfg(test)]
+    pub fn get_subscription_contributing_ids(
+        &self,
+        sub_id: super::graph_nodes::output::QuerySubscriptionId,
+    ) -> std::collections::HashSet<(crate::object::ObjectId, crate::object::BranchName)> {
+        self.subscriptions
+            .get(&sub_id)
+            .map(|sub| sub.graph.contributing_object_ids())
+            .unwrap_or_default()
     }
 
     /// Check if a row is indexed on a specific branch (appears in the _id index).
@@ -1574,6 +1617,48 @@ impl QueryManager {
         self.subscriptions.remove(&id);
     }
 
+    /// Subscribe to query results and sync matching objects from servers.
+    ///
+    /// This method:
+    /// 1. Creates a local subscription (like `subscribe_with_session`)
+    /// 2. Sends a QuerySubscription to all connected servers
+    ///
+    /// Servers will evaluate the query against their data and send ObjectUpdated
+    /// messages for all matching objects. As new objects match the query on
+    /// the server, they are automatically synced.
+    ///
+    /// The returned QuerySubscriptionId is used both locally and in the sync protocol.
+    pub fn subscribe_with_sync(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        // Create local subscription
+        let sub_id = self.subscribe_with_session(query.clone(), session.clone())?;
+
+        // Send QuerySubscription to all servers
+        // Use the subscription ID as the query ID for simplicity
+        let query_id = crate::sync_manager::QueryId(sub_id.0);
+        self.sync_manager
+            .send_query_subscription_to_servers(query_id, query, session);
+
+        Ok(sub_id)
+    }
+
+    /// Unsubscribe from a synced query.
+    ///
+    /// This method:
+    /// 1. Removes the local subscription
+    /// 2. Sends a QueryUnsubscription to all connected servers
+    pub fn unsubscribe_with_sync(&mut self, id: QuerySubscriptionId) {
+        self.subscriptions.remove(&id);
+
+        // Send QueryUnsubscription to all servers
+        let query_id = crate::sync_manager::QueryId(id.0);
+        self.sync_manager
+            .send_query_unsubscription_to_servers(query_id);
+    }
+
     /// Take pending query updates.
     pub fn take_updates(&mut self) -> Vec<QueryUpdate> {
         std::mem::take(&mut self.update_outbox)
@@ -1593,7 +1678,13 @@ impl QueryManager {
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox();
 
-        // 2. Pick up new permission check intents from SyncManager
+        // 2. Process pending query subscriptions from downstream clients
+        self.process_pending_query_subscriptions();
+
+        // 2b. Process pending query unsubscriptions from downstream clients
+        self.process_pending_query_unsubscriptions();
+
+        // 3. Pick up new permission check intents from SyncManager
         self.pick_up_pending_permission_checks();
 
         // 3. Settle policy graphs and finalize completed checks
@@ -1704,7 +1795,10 @@ impl QueryManager {
             }
         }
 
-        // 8. Clear index deltas after all subscriptions have settled
+        // 8. Settle server-side subscriptions and update scopes
+        self.settle_server_subscriptions();
+
+        // 9. Clear index deltas after all subscriptions have settled
         // This increments the epoch so the next process() cycle uses fresh deltas
         for index in self.indices.values_mut() {
             if index.has_deltas() {
@@ -1719,6 +1813,210 @@ impl QueryManager {
 
         for check in pending {
             self.evaluate_write_permission(check);
+        }
+    }
+
+    /// Process pending query subscriptions from downstream clients.
+    ///
+    /// For each pending subscription:
+    /// 1. Build a QueryGraph with the client's session
+    /// 2. Settle the graph to get contributing ObjectIds
+    /// 3. Set the scope in SyncManager (which triggers initial sync)
+    fn process_pending_query_subscriptions(&mut self) {
+        let pending = self.sync_manager.take_pending_query_subscriptions();
+
+        for sub in pending {
+            // Build QueryGraph with client's session for policy filtering
+            let graph = if let Some(ref session) = sub.session {
+                QueryGraph::compile_with_session(&sub.query, &self.schema, Some(session.clone()))
+            } else {
+                QueryGraph::compile(&sub.query, &self.schema)
+            };
+
+            let Some(mut graph) = graph else {
+                // Query compilation failed (e.g., missing table)
+                // TODO: Send error back to client
+                continue;
+            };
+
+            // Initial settle to populate the graph
+            let om = &self.sync_manager.object_manager;
+            let indices = &self.indices;
+            let branches = &sub.query.branches;
+
+            // Simple row loader for server-side graphs (no schema transform needed)
+            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+                let state = om.get_state(id)?;
+                match state {
+                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                        let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                        for branch_name in branches {
+                            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                                for &tip_id in &branch.tips {
+                                    if let Some(commit) = branch.commits.get(&tip_id) {
+                                        match &best {
+                                            None => {
+                                                best = Some((
+                                                    commit.timestamp,
+                                                    commit.content.clone(),
+                                                    tip_id,
+                                                ));
+                                            }
+                                            Some((best_ts, _, _))
+                                                if commit.timestamp > *best_ts =>
+                                            {
+                                                best = Some((
+                                                    commit.timestamp,
+                                                    commit.content.clone(),
+                                                    tip_id,
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        best.filter(|(_, content, _)| !content.is_empty())
+                            .map(|(_, content, commit_id)| (content, commit_id))
+                    }
+                    ObjectState::Loading => None,
+                }
+            };
+
+            let _delta = graph.settle(indices, om, row_loader);
+
+            // Get contributing ObjectIds
+            let scope = graph.contributing_object_ids();
+
+            // Set scope in SyncManager (triggers initial sync)
+            self.sync_manager.set_client_query_scope(
+                sub.client_id,
+                sub.query_id,
+                scope.clone(),
+                sub.session.clone(),
+            );
+
+            // Forward QuerySubscription to upstream servers (multi-tier forwarding)
+            // This allows hub servers to know about the query and push matching data
+            self.sync_manager.send_query_subscription_to_servers(
+                sub.query_id,
+                sub.query.clone(),
+                sub.session.clone(),
+            );
+
+            // Store the server subscription for reactive updates
+            self.server_subscriptions.insert(
+                (sub.client_id, sub.query_id),
+                ServerQuerySubscription {
+                    query: sub.query,
+                    graph,
+                    session: sub.session,
+                    last_scope: scope,
+                },
+            );
+        }
+    }
+
+    /// Process pending query unsubscriptions from downstream clients.
+    ///
+    /// For each pending unsubscription:
+    /// 1. Remove the server-side QueryGraph
+    /// 2. Forward the unsubscription to upstream servers
+    fn process_pending_query_unsubscriptions(&mut self) {
+        let pending = self.sync_manager.take_pending_query_unsubscriptions();
+
+        for unsub in pending {
+            // Remove the server subscription
+            self.server_subscriptions
+                .remove(&(unsub.client_id, unsub.query_id));
+
+            // Forward unsubscription to upstream servers
+            self.sync_manager
+                .send_query_unsubscription_to_servers(unsub.query_id);
+        }
+    }
+
+    /// Settle server-side query subscriptions and update scopes.
+    ///
+    /// Called after local data changes to detect when new objects match
+    /// a client's query subscription.
+    #[allow(clippy::type_complexity)]
+    fn settle_server_subscriptions(&mut self) {
+        // Collect updates to avoid borrow issues
+        let mut scope_updates: Vec<(
+            ClientId,
+            QueryId,
+            HashSet<(ObjectId, BranchName)>,
+            Option<Session>,
+        )> = Vec::new();
+
+        let om = &self.sync_manager.object_manager;
+        let indices = &self.indices;
+
+        for ((client_id, query_id), sub) in &mut self.server_subscriptions {
+            let branches = &sub.query.branches;
+
+            // Row loader for this subscription
+            let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+                let state = om.get_state(id)?;
+                match state {
+                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
+                        let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                        for branch_name in branches {
+                            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                                for &tip_id in &branch.tips {
+                                    if let Some(commit) = branch.commits.get(&tip_id) {
+                                        match &best {
+                                            None => {
+                                                best = Some((
+                                                    commit.timestamp,
+                                                    commit.content.clone(),
+                                                    tip_id,
+                                                ));
+                                            }
+                                            Some((best_ts, _, _))
+                                                if commit.timestamp > *best_ts =>
+                                            {
+                                                best = Some((
+                                                    commit.timestamp,
+                                                    commit.content.clone(),
+                                                    tip_id,
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        best.filter(|(_, content, _)| !content.is_empty())
+                            .map(|(_, content, commit_id)| (content, commit_id))
+                    }
+                    ObjectState::Loading => None,
+                }
+            };
+
+            // Settle the graph
+            let _delta = sub.graph.settle(indices, om, row_loader);
+
+            // Check if scope changed
+            let new_scope = sub.graph.contributing_object_ids();
+            if new_scope != sub.last_scope {
+                scope_updates.push((
+                    *client_id,
+                    *query_id,
+                    new_scope.clone(),
+                    sub.session.clone(),
+                ));
+                sub.last_scope = new_scope;
+            }
+        }
+
+        // Apply scope updates
+        for (client_id, query_id, new_scope, session) in scope_updates {
+            self.sync_manager
+                .set_client_query_scope(client_id, query_id, new_scope, session);
         }
     }
 
@@ -2713,10 +3011,19 @@ impl QueryManager {
 
     /// Mark subscriptions dirty for a table.
     /// Checks all tables involved in the subscription (including joined tables).
+    /// Also marks server-side subscriptions for downstream clients.
     fn mark_subscriptions_dirty(&mut self, table: &str) {
+        // Mark local subscriptions dirty
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_dirty_for_table(table);
+            }
+        }
+
+        // Mark server subscriptions dirty (for downstream clients)
+        for server_sub in self.server_subscriptions.values_mut() {
+            if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_dirty_for_table(table);
             }
         }
     }

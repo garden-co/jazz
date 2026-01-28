@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use internment::Intern;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smolset::SmolSet;
 use uuid::Uuid;
 
@@ -10,6 +11,25 @@ use crate::commit::{Commit, CommitId};
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectId(pub Intern<Uuid>);
+
+impl Serialize for ObjectId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.uuid().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let uuid = Uuid::deserialize(deserializer)?;
+        Ok(ObjectId::from_uuid(uuid))
+    }
+}
 
 /// How deeply a branch has been loaded from storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,6 +90,25 @@ impl Ord for ObjectId {
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BranchName(pub Intern<String>);
+
+impl Serialize for BranchName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BranchName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(BranchName::new(s))
+    }
+}
 
 impl BranchName {
     pub fn new(name: impl Into<String>) -> Self {

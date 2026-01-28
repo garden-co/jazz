@@ -1,4 +1,5 @@
 use ahash::AHashSet;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 use crate::query_manager::encoding::compare_column;
@@ -7,7 +8,7 @@ use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescrip
 use super::RowNode;
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SortDirection {
     Ascending,
     Descending,
