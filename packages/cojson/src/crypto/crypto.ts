@@ -359,11 +359,14 @@ export interface SessionMapImpl {
   // === Session Queries ===
   getSessionIds(): string[];
   getTransactionCount(sessionId: string): number; // -1 if not found
-  getTransaction(sessionId: string, txIndex: number): string | undefined;
+  getTransaction(
+    sessionId: string,
+    txIndex: number,
+  ): Transaction | string | undefined;
   getSessionTransactions(
     sessionId: string,
     fromIndex: number,
-  ): string[] | undefined;
+  ): Transaction[] | string[] | undefined;
   getLastSignature(sessionId: string): string | undefined;
   getSignatureAfter(sessionId: string, txIndex: number): string | undefined;
   getLastSignatureCheckpoint(sessionId: string): number | undefined; // -1 if no checkpoints, undefined if session not found

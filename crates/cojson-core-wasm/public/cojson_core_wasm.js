@@ -1104,7 +1104,7 @@ export class SessionMap {
         return v1;
     }
     /**
-     * Get single transaction by index (returns undefined if not found)
+     * Get single transaction by index as JSON string (returns undefined if not found)
      * @param {string} session_id
      * @param {number} tx_index
      * @returns {string | undefined}
@@ -1239,7 +1239,7 @@ export class SessionMap {
         return v3;
     }
     /**
-     * Get transactions for a session from index (returns undefined if session not found)
+     * Get transactions for a session from index as JSON strings (returns undefined if session not found)
      * @param {string} session_id
      * @param {number} from_index
      * @returns {string[] | undefined}

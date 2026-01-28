@@ -222,19 +222,19 @@ export class SessionMap {
     }
 
     // Build fresh SessionLog from Rust data
-    const transactions: Transaction[] = [];
     const signatureAfter: { [txIdx: number]: Signature | undefined } = {};
 
-    // Fetch all transactions
-    if (currentTxCount > 0) {
-      // getSessionTransactions returns array of JSON strings directly
-      const txStrings = this.impl.getSessionTransactions(sessionID, 0);
-      if (txStrings) {
-        for (const txStr of txStrings) {
-          transactions.push(JSON.parse(txStr) as Transaction);
-        }
-      }
-    }
+    // Fetch all transactions - may return JSON strings (WASM) or native objects (NAPI/RN)
+    const rawTransactions =
+      currentTxCount > 0
+        ? this.impl.getSessionTransactions(sessionID, 0)
+        : undefined;
+
+    const transactions: Transaction[] = rawTransactions
+      ? rawTransactions.map((tx) =>
+          typeof tx === "string" ? (JSON.parse(tx) as Transaction) : tx,
+        )
+      : [];
 
     // Build signatureAfter map
     const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
@@ -517,11 +517,12 @@ export class SessionMap {
     for (const sessionID of sessionIds) {
       const txCount = this.impl.getTransactionCount(sessionID);
       if (txCount > 0) {
-        // getSessionTransactions returns string[] directly
-        const txStrings = this.impl.getSessionTransactions(sessionID, 0);
-        if (txStrings) {
-          const transactions = txStrings.map(
-            (s) => JSON.parse(s) as Transaction,
+        // getSessionTransactions may return JSON strings (WASM) or native objects (NAPI/RN)
+        const rawTransactions = this.impl.getSessionTransactions(sessionID, 0);
+        if (rawTransactions) {
+          // Convert to Transaction objects if needed, then stringify for addTransactions
+          const transactions = rawTransactions.map((tx) =>
+            typeof tx === "string" ? JSON.parse(tx) : tx,
           );
           const lastSignature = this.impl.getLastSignature(sessionID) as
             | Signature
