@@ -231,9 +231,17 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
     ) -> Option<Self> {
+        // Get branches (default to "main" if not specified)
+        let default_branches = vec!["main".to_string()];
+        let branches: &[String] = if query.branches.is_empty() {
+            &default_branches
+        } else {
+            &query.branches
+        };
+
         if query.is_join() {
             // TODO: Add policy support for joins
-            return Self::compile_join(query, schema);
+            return Self::compile_join(query, schema, branches);
         }
 
         let table_schema = schema.get(&query.table)?;
@@ -245,13 +253,6 @@ impl QueryGraph {
         // For multi-branch queries, we create scans for each branch and union them
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
         let mut index_columns: Vec<String> = Vec::new();
-
-        // Get branches (default to "main" if not specified)
-        let branches: &[String] = if query.branches.is_empty() {
-            &["main".to_string()]
-        } else {
-            &query.branches
-        };
 
         for branch in branches {
             for disjunct in &query.disjuncts {
@@ -443,8 +444,7 @@ impl QueryGraph {
         };
 
         if query.is_join() {
-            // TODO: Add schema context support for joins
-            return Self::compile_join(query, schema);
+            return Self::compile_join(query, schema, &branches);
         }
 
         let table_schema = schema.get(&query.table)?;
@@ -777,15 +777,14 @@ impl QueryGraph {
     /// Basic joins between different tables work; self-joins with aliases need
     /// AliasNode integration to properly distinguish duplicate table columns.
     /// TODO: Insert AliasNodes when aliases are present to enable self-joins.
-    fn compile_join(query: &Query, schema: &Schema) -> Option<Self> {
+    fn compile_join(query: &Query, schema: &Schema, branches: &[String]) -> Option<Self> {
         let base_table_schema = schema.get(&query.table)?;
         let base_descriptor = base_table_schema.descriptor.clone();
         let mut graph = QueryGraph::new(query.table, base_descriptor.clone());
 
-        // Get branches (default to "main" if not specified)
         // For joins, we use the first branch only for now
         // TODO: Support multi-branch joins with LWW merge
-        let branch = query.branches.first().map(|s| s.as_str()).unwrap_or("main");
+        let branch = branches.first().map(|s| s.as_str()).unwrap_or("main");
 
         // Track all table names and descriptors for TupleDescriptor
         let mut table_names = vec![query.table.as_str().to_string()];

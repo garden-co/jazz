@@ -46,6 +46,7 @@ impl PolicyGraph {
         policy: &PolicyExpr,
         session: &Session,
         schema: &Schema,
+        branch: &str,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.descriptor.clone();
@@ -55,9 +56,10 @@ impl PolicyGraph {
         // IndexScan node: scan _id index for exact match
         let encoded_id = encode_value(&Value::Uuid(object_id));
         let id_column = ColumnName::new("_id");
-        let scan_node = IndexScanNode::new(
+        let scan_node = IndexScanNode::new_with_branch(
             *table,
             id_column,
+            branch,
             ScanCondition::Eq(encoded_id),
             descriptor.clone(),
         );
@@ -70,12 +72,13 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate policy against row
-        let policy_node = PolicyFilterNode::new(
+        let policy_node = PolicyFilterNode::new_with_branch(
             descriptor.clone(),
             policy.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
+            branch,
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -105,9 +108,17 @@ impl PolicyGraph {
         parent_policy: &PolicyExpr,
         session: &Session,
         schema: &Schema,
+        branch: &str,
     ) -> Option<Self> {
         // INHERITS is essentially the same as a USING check on the parent table
-        Self::for_using_check(parent_table, parent_id, parent_policy, session, schema)
+        Self::for_using_check(
+            parent_table,
+            parent_id,
+            parent_policy,
+            session,
+            schema,
+            branch,
+        )
     }
 
     /// Create a graph for EXISTS: does any row in table match condition?
@@ -120,6 +131,7 @@ impl PolicyGraph {
         condition: &PolicyExpr,
         session: &Session,
         schema: &Schema,
+        branch: &str,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.descriptor.clone();
@@ -128,8 +140,13 @@ impl PolicyGraph {
 
         // IndexScan node: full table scan (check all rows)
         let id_column = ColumnName::new("_id");
-        let scan_node =
-            IndexScanNode::new(*table, id_column, ScanCondition::All, descriptor.clone());
+        let scan_node = IndexScanNode::new_with_branch(
+            *table,
+            id_column,
+            branch,
+            ScanCondition::All,
+            descriptor.clone(),
+        );
         let scan_id = graph.add_node_with_id(GraphNode::IndexScan(scan_node));
         graph.index_scan_nodes.push((scan_id, *table, id_column));
 
@@ -139,12 +156,13 @@ impl PolicyGraph {
         graph.add_edge(mat_id, scan_id);
 
         // PolicyFilter node: evaluate condition against each row
-        let policy_node = PolicyFilterNode::new(
+        let policy_node = PolicyFilterNode::new_with_branch(
             descriptor.clone(),
             condition.clone(),
             session.clone(),
             schema.clone(),
             table.as_str(),
+            branch,
         );
         let policy_id = graph.add_node_with_id(GraphNode::PolicyFilter(policy_node));
         graph.add_edge(policy_id, mat_id);
@@ -273,7 +291,7 @@ mod tests {
         let policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
 
         let policy_graph =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema);
+            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main");
 
         assert!(policy_graph.is_some());
 
@@ -292,7 +310,7 @@ mod tests {
         let policy = PolicyExpr::True;
 
         let policy_graph =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema);
+            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main");
 
         assert!(policy_graph.is_none());
     }
@@ -307,7 +325,8 @@ mod tests {
         let policy = PolicyExpr::True;
 
         let pg =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema).unwrap();
+            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
+                .unwrap();
 
         // Before settling, result should be false (no rows yet)
         // But it might be pending since we haven't settled
@@ -325,7 +344,8 @@ mod tests {
         let policy = PolicyExpr::True;
 
         let mut pg =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema).unwrap();
+            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
+                .unwrap();
 
         // With no actual data in the indices/om, the scan will return no rows
         let om = ObjectManager::new();

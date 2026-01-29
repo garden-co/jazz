@@ -23,10 +23,6 @@ use super::types::{
     Value,
 };
 
-/// Default row branch name for backward compatibility during migration.
-/// TODO: Remove once all APIs explicitly specify branch.
-const DEFAULT_ROW_BRANCH: &str = "main";
-
 /// Error types for QueryManager operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryError {
@@ -124,11 +120,18 @@ impl InsertHandle {
 /// Query subscription info.
 #[derive(Debug)]
 pub(crate) struct QuerySubscription {
+    /// Original query for recompilation when schemas change.
+    pub(crate) query: Query,
+    /// Compiled query graph.
     pub(crate) graph: QueryGraph,
     #[allow(dead_code)]
     pub(crate) mode: SubscriptionMode,
-    /// Branches to read from (inherited from query at subscription time).
+    /// Branches to read from (updated on recompile).
     pub(crate) branches: Vec<String>,
+    /// Session for policy filtering (if any).
+    pub(crate) session: Option<Session>,
+    /// Flag indicating this subscription needs recompilation due to schema change.
+    pub(crate) needs_recompile: bool,
 }
 
 /// Subscription mode.
@@ -168,8 +171,12 @@ struct ServerQuerySubscription {
     graph: QueryGraph,
     /// Client's session for permission evaluation.
     session: Option<Session>,
+    /// Resolved branches (from query.branches or schema context at creation time).
+    branches: Vec<String>,
     /// Last computed scope (for detecting changes).
     last_scope: HashSet<(ObjectId, BranchName)>,
+    /// Flag indicating this subscription needs recompilation due to schema change.
+    needs_recompile: bool,
 }
 
 /// A catalogue object update received via sync.
@@ -218,154 +225,234 @@ pub struct QueryManager {
     /// Key is (client_id, query_id) to allow multiple queries per client.
     server_subscriptions: HashMap<(ClientId, QueryId), ServerQuerySubscription>,
 
-    /// Optional schema context for multi-schema queries.
-    /// When present, enables lens transforms for rows from old schema branches.
-    schema_context: Option<SchemaContext>,
+    /// Schema context for multi-schema queries.
+    /// Starts empty; initialized via set_current_schema().
+    /// Enables lens transforms for rows from old schema branches.
+    schema_context: SchemaContext,
 
     /// Maps branch name to schema hash (derived from schema_context).
     /// Used to determine which schema a branch uses.
     branch_schema_map: HashMap<String, SchemaHash>,
+
+    /// Buffered row updates for unknown schema branches.
+    /// These are retried when new schemas activate via try_activate_pending().
+    pending_row_updates: Vec<AllObjectUpdate>,
 }
 
 impl QueryManager {
-    /// Create a new QueryManager with the given schema.
+    /// Create a new QueryManager with empty schema context.
     ///
-    /// Indices are initialized immediately for use. In a real storage scenario,
-    /// metadata would be loaded from storage; here we initialize with empty state.
+    /// Call `set_current_schema()` to initialize the current schema before queries.
+    /// Use `add_live_schema()` and `register_lens()` to add additional schemas.
     ///
     /// Row-level security is evaluated via `process()` which handles pending
     /// permission checks from SyncManager.
-    pub fn new(mut sync_manager: SyncManager, schema: Schema) -> Self {
+    pub fn new(mut sync_manager: SyncManager) -> Self {
         // Subscribe to all object updates so we receive sync'd data
         sync_manager.object_manager.subscribe_all();
 
-        // Initialize indices for all tables on the default branch
-        let mut indices = IndicesMap::default();
-        for (table_name, table_schema) in &schema {
-            Self::ensure_table_indices_for_branch(
-                &mut indices,
-                table_name.as_str(),
-                DEFAULT_ROW_BRANCH,
-                table_schema,
-            );
-        }
-
         Self {
             sync_manager,
-            schema: Arc::new(schema),
-            indices,
+            schema: Arc::new(Schema::new()),
+            indices: IndicesMap::default(),
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
             update_outbox: Vec::new(),
             active_policy_checks: HashMap::new(),
             server_subscriptions: HashMap::new(),
-            schema_context: None,
+            schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
+            pending_row_updates: Vec::new(),
         }
     }
 
-    /// Create a new QueryManager with schema context for multi-schema queries.
+    /// Set the current schema (the one this client writes to).
     ///
-    /// When schema context is provided:
-    /// - Queries automatically include all live schema branches
-    /// - Rows from old schema branches are transformed via lens
-    /// - Column names are translated for index lookups on old schemas
-    pub fn new_with_schema_context(
-        sync_manager: SyncManager,
-        schema: Schema,
-        schema_context: SchemaContext,
-    ) -> Self {
-        // Note: We don't auto-subscribe to object updates here because
-        // handle_object_update doesn't yet support multi-schema decoding.
-        // Callers using schema context should manually subscribe if needed.
+    /// Must be called before queries. Can only be called once.
+    /// Creates indices for the current schema's branch.
+    pub fn set_current_schema(&mut self, schema: Schema, env: &str, user_branch: &str) {
+        self.schema_context
+            .set_current(schema.clone(), env, user_branch);
+        self.schema = Arc::new(schema.clone());
 
-        // Initialize indices for all tables on all live branches
-        let mut indices = IndicesMap::default();
-
-        // Build branch -> schema hash map directly from schema context
-        // (Don't parse branch names - that loses the full hash)
-        let mut branch_schema_map = HashMap::new();
-
-        // Current schema branch
-        let current_branch = schema_context.branch_name();
-        branch_schema_map.insert(
-            current_branch.as_str().to_string(),
-            schema_context.current_hash,
+        // Update branch -> schema hash map
+        let branch = self.schema_context.branch_name();
+        self.branch_schema_map.insert(
+            branch.as_str().to_string(),
+            self.schema_context.current_hash,
         );
 
-        // Live schema branches
-        for &live_hash in schema_context.live_schemas.keys() {
-            let live_branch = ComposedBranchName::new(
-                &schema_context.env,
-                live_hash,
-                &schema_context.user_branch,
-            )
-            .to_branch_name();
-            branch_schema_map.insert(live_branch.as_str().to_string(), live_hash);
-        }
-
-        // Initialize indices for current schema's branch
+        // Create indices for current schema
         for (table_name, table_schema) in &schema {
-            // Current schema branch
-            let current_branch = schema_context.branch_name();
             Self::ensure_table_indices_for_branch(
-                &mut indices,
+                &mut self.indices,
                 table_name.as_str(),
-                current_branch.as_str(),
+                branch.as_str(),
                 table_schema,
             );
+        }
+    }
 
-            // Live schema branches
-            for (live_hash, live_schema) in &schema_context.live_schemas {
-                let live_branch = ComposedBranchName::new(
-                    &schema_context.env,
-                    *live_hash,
-                    &schema_context.user_branch,
-                )
-                .to_branch_name();
+    /// Add a live schema (one we can read from but don't write to).
+    ///
+    /// Creates indices for the schema's branch.
+    /// Marks subscriptions for recompilation to include the new branch.
+    pub fn add_live_schema(&mut self, schema: Schema) {
+        let hash = SchemaHash::compute(&schema);
 
-                if let Some(live_table) = live_schema.get(table_name) {
-                    Self::ensure_table_indices_for_branch(
-                        &mut indices,
-                        table_name.as_str(),
-                        live_branch.as_str(),
-                        live_table,
-                    );
+        // Skip if already live or is current
+        if self.schema_context.is_live(&hash) {
+            return;
+        }
+
+        // Build branch name for this schema
+        let branch = ComposedBranchName::new(
+            &self.schema_context.env,
+            hash,
+            &self.schema_context.user_branch,
+        )
+        .to_branch_name();
+
+        // Add to live_schemas (without lens - caller should register lens separately)
+        self.schema_context
+            .live_schemas
+            .insert(hash, schema.clone());
+
+        // Update branch -> schema hash map
+        self.branch_schema_map
+            .insert(branch.as_str().to_string(), hash);
+
+        // Create indices for this schema's branch
+        for (table_name, table_schema) in &schema {
+            Self::ensure_table_indices_for_branch(
+                &mut self.indices,
+                table_name.as_str(),
+                branch.as_str(),
+                table_schema,
+            );
+        }
+
+        // Mark subscriptions for recompile to pick up new branch
+        self.mark_subscriptions_for_recompile();
+    }
+
+    /// Register a lens between two schemas.
+    ///
+    /// Also attempts to activate any pending schemas that may now be reachable.
+    pub fn register_lens(&mut self, lens: super::super::schema_manager::lens::Lens) {
+        self.schema_context.register_lens(lens);
+
+        // Try to activate pending schemas
+        let activated = self.schema_context.try_activate_pending();
+        if !activated.is_empty() {
+            // New schemas activated - update indices and mark for recompile
+            for hash in activated {
+                if let Some(schema) = self.schema_context.live_schemas.get(&hash).cloned() {
+                    let branch = ComposedBranchName::new(
+                        &self.schema_context.env,
+                        hash,
+                        &self.schema_context.user_branch,
+                    )
+                    .to_branch_name();
+
+                    self.branch_schema_map
+                        .insert(branch.as_str().to_string(), hash);
+
+                    for (table_name, table_schema) in &schema {
+                        Self::ensure_table_indices_for_branch(
+                            &mut self.indices,
+                            table_name.as_str(),
+                            branch.as_str(),
+                            table_schema,
+                        );
+                    }
                 }
+            }
+            self.mark_subscriptions_for_recompile();
+        }
+    }
+
+    /// Mark all subscriptions for recompilation.
+    ///
+    /// Called when live schemas change to ensure subscriptions pick up new branches.
+    fn mark_subscriptions_for_recompile(&mut self) {
+        for sub in self.subscriptions.values_mut() {
+            sub.needs_recompile = true;
+        }
+        for sub in self.server_subscriptions.values_mut() {
+            sub.needs_recompile = true;
+        }
+    }
+
+    /// Recompile subscriptions that are marked as stale.
+    ///
+    /// Called during process() to rebuild QueryGraphs when schemas change.
+    fn recompile_stale_subscriptions(&mut self) {
+        // Recompile local subscriptions
+        for sub in self.subscriptions.values_mut() {
+            if sub.needs_recompile {
+                // Update branches from current schema context
+                sub.branches = self
+                    .schema_context
+                    .all_branch_names()
+                    .into_iter()
+                    .map(|b| b.as_str().to_string())
+                    .collect();
+
+                // Recompile the graph
+                if let Some(new_graph) = QueryGraph::compile_with_schema_context(
+                    &sub.query,
+                    &self.schema,
+                    sub.session.clone(),
+                    &self.schema_context,
+                ) {
+                    sub.graph = new_graph;
+                }
+                sub.needs_recompile = false;
             }
         }
 
-        Self {
-            sync_manager,
-            schema: Arc::new(schema),
-            indices,
-            pending_catalogue_updates: Vec::new(),
-            subscriptions: HashMap::new(),
-            next_subscription_id: 0,
-            update_outbox: Vec::new(),
-            active_policy_checks: HashMap::new(),
-            server_subscriptions: HashMap::new(),
-            schema_context: Some(schema_context),
-            branch_schema_map,
+        // Recompile server-side subscriptions
+        for sub in self.server_subscriptions.values_mut() {
+            if sub.needs_recompile {
+                // Recompile the graph
+                if let Some(new_graph) = QueryGraph::compile_with_schema_context(
+                    &sub.query,
+                    &self.schema,
+                    sub.session.clone(),
+                    &self.schema_context,
+                ) {
+                    sub.graph = new_graph;
+                }
+                sub.needs_recompile = false;
+            }
         }
     }
 
-    /// Get the schema context if present.
-    pub fn schema_context(&self) -> Option<&SchemaContext> {
-        self.schema_context.as_ref()
+    /// Get the schema context.
+    pub fn schema_context(&self) -> &SchemaContext {
+        &self.schema_context
+    }
+
+    /// Get the current branch name for writes.
+    ///
+    /// Returns the branch for the current schema, or "main" if context isn't initialized.
+    fn current_branch(&self) -> String {
+        if self.schema_context.is_initialized() {
+            self.schema_context.branch_name().as_str().to_string()
+        } else {
+            "main".to_string()
+        }
     }
 
     /// Get all branches to query for a table (current + live schemas).
     pub fn all_query_branches(&self) -> Vec<String> {
-        match &self.schema_context {
-            Some(ctx) => ctx
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect(),
-            None => vec![DEFAULT_ROW_BRANCH.to_string()],
-        }
+        self.schema_context
+            .all_branch_names()
+            .into_iter()
+            .map(|b| b.as_str().to_string())
+            .collect()
     }
 
     /// Ensure indices exist for a table on a specific branch.
@@ -509,7 +596,7 @@ impl QueryManager {
 
     /// Check if a row is indexed on the default branch (appears in the _id index).
     pub fn row_is_indexed(&self, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_indexed_on_branch(table, DEFAULT_ROW_BRANCH, row_id)
+        self.row_is_indexed_on_branch(table, &self.current_branch(), row_id)
     }
 
     /// Check if a row is soft-deleted on a specific branch.
@@ -520,7 +607,7 @@ impl QueryManager {
 
     /// Check if a row is soft-deleted (appears in _id_deleted but not _id).
     pub fn row_is_deleted(&self, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_deleted_on_branch(table, DEFAULT_ROW_BRANCH, row_id)
+        self.row_is_deleted_on_branch(table, &self.current_branch(), row_id)
     }
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
@@ -532,7 +619,7 @@ impl QueryManager {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
             ObjectState::Loading => return false,
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH)) else {
+        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -560,7 +647,7 @@ impl QueryManager {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
             ObjectState::Loading => return false,
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH)) else {
+        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -659,7 +746,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 object_id,
-                DEFAULT_ROW_BRANCH,
+                self.current_branch(),
                 vec![],
                 data.clone(),
                 author,
@@ -962,7 +1049,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
+            .get_tip_ids(id, self.current_branch())
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -975,7 +1062,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                DEFAULT_ROW_BRANCH,
+                self.current_branch(),
                 parents,
                 new_data.clone(),
                 author,
@@ -1056,7 +1143,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
+            .get_tip_ids(id, self.current_branch())
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -1074,7 +1161,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                DEFAULT_ROW_BRANCH,
+                self.current_branch(),
                 parents,
                 old_data.clone(), // Preserve content for soft deletes
                 author,
@@ -1151,7 +1238,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
+            .get_tip_ids(id, self.current_branch())
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -1169,7 +1256,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                DEFAULT_ROW_BRANCH,
+                self.current_branch(),
                 parents,
                 old_data.clone(), // Preserve content for soft deletes
                 author,
@@ -1313,7 +1400,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
+            .get_tip_ids(id, self.current_branch())
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -1326,7 +1413,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                DEFAULT_ROW_BRANCH,
+                self.current_branch(),
                 parents,
                 new_data.clone(),
                 author,
@@ -1385,7 +1472,7 @@ impl QueryManager {
         let tips = self
             .sync_manager
             .object_manager
-            .get_tip_ids(id, DEFAULT_ROW_BRANCH)
+            .get_tip_ids(id, self.current_branch())
             .map_err(|_| QueryError::ObjectNotFound(id))?
             .clone();
 
@@ -1402,7 +1489,7 @@ impl QueryManager {
             .object_manager
             .add_commit(
                 id,
-                DEFAULT_ROW_BRANCH,
+                self.current_branch(),
                 parents,
                 vec![], // Empty content for tombstone
                 author,
@@ -1418,10 +1505,10 @@ impl QueryManager {
         // For now, we just record the hard delete tombstone
         let mut tail_ids = std::collections::HashSet::new();
         tail_ids.insert(delete_commit_id);
-        let _ = self
-            .sync_manager
-            .object_manager
-            .truncate_branch(id, DEFAULT_ROW_BRANCH, tail_ids);
+        let _ =
+            self.sync_manager
+                .object_manager
+                .truncate_branch(id, self.current_branch(), tail_ids);
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1492,8 +1579,8 @@ impl QueryManager {
     ///
     /// Branches are determined by:
     /// 1. Explicit branches in query (if any)
-    /// 2. Schema context's live branches (if schema context present)
-    /// 3. Error if neither
+    /// 2. Schema context's live branches (requires initialized context)
+    /// 3. Error if context not initialized and no explicit branches
     pub fn execute(&mut self, query: Query) -> Result<Vec<Vec<Value>>, QueryError> {
         let table_name = query.table;
         let table_schema = self
@@ -1505,34 +1592,33 @@ impl QueryManager {
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
-        } else if let Some(ctx) = &self.schema_context {
-            ctx.all_branch_names()
+        } else if self.schema_context.is_initialized() {
+            self.schema_context
+                .all_branch_names()
                 .into_iter()
                 .map(|b| b.as_str().to_string())
                 .collect()
         } else {
             return Err(QueryError::QueryCompilationError(
-                "no branches specified - use .branch() or .branches() on query builder".into(),
+                "schema context not initialized - call set_current_schema() first".into(),
             ));
         };
 
-        // Compile query graph
-        let mut graph = if let Some(ctx) = &self.schema_context {
-            QueryGraph::compile_with_schema_context(&query, &self.schema, None, ctx).ok_or_else(
-                || QueryError::QueryCompilationError("failed to compile query".into()),
-            )?
-        } else {
-            QueryGraph::compile(&query, &self.schema).ok_or_else(|| {
-                QueryError::QueryCompilationError("failed to compile query".into())
-            })?
-        };
+        // Compile query graph with schema context
+        let mut graph = QueryGraph::compile_with_schema_context(
+            &query,
+            &self.schema,
+            None,
+            &self.schema_context,
+        )
+        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         // Get references for the row loader closure
         let table = table_name.as_str().to_string();
-        let schema_context = self.schema_context.as_ref();
+        let schema_context = &self.schema_context;
         let branch_schema_map = &self.branch_schema_map;
 
-        // Row loader with optional lens transform for old schema rows
+        // Row loader with lens transform for old schema rows
         let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
             let (content, commit_id, source_branch) = if branches.len() == 1 {
                 let branch = &branches[0];
@@ -1547,11 +1633,10 @@ impl QueryManager {
             }
 
             // Apply lens transform if needed
-            if let Some(ctx) = schema_context
-                && let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                && source_hash != ctx.current_hash
+            if let Some(&source_hash) = branch_schema_map.get(&source_branch)
+                && source_hash != schema_context.current_hash
             {
-                let transformer = LensTransformer::new(ctx, &table);
+                let transformer = LensTransformer::new(schema_context, &table);
                 match transformer.transform(&content, commit_id, source_hash) {
                     Ok(result) => return Some((result.data, commit_id)),
                     Err(_) => return Some((content, commit_id)),
@@ -1583,9 +1668,10 @@ impl QueryManager {
     /// When a session is provided and the table has a SELECT policy, rows are
     /// filtered based on the policy expression evaluated against the session context.
     ///
-    /// When schema context is present, uses schema-aware compilation with:
+    /// Uses schema-aware compilation with:
     /// - Automatic branch expansion to include all live schemas
     /// - Column name translation for old schema indices
+    /// - Lens transforms for rows from old schema branches
     pub fn subscribe_with_session(
         &mut self,
         query: Query,
@@ -1594,27 +1680,26 @@ impl QueryManager {
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
-        } else if let Some(ctx) = &self.schema_context {
-            ctx.all_branch_names()
+        } else if self.schema_context.is_initialized() {
+            self.schema_context
+                .all_branch_names()
                 .into_iter()
                 .map(|b| b.as_str().to_string())
                 .collect()
         } else {
             return Err(QueryError::QueryCompilationError(
-                "no branches specified - use .branch() or .branches() on query builder".into(),
+                "schema context not initialized - call set_current_schema() first".into(),
             ));
         };
 
-        // Use schema-aware compilation if schema context is present
-        let graph = if let Some(ctx) = &self.schema_context {
-            QueryGraph::compile_with_schema_context(&query, &self.schema, session, ctx).ok_or_else(
-                || QueryError::QueryCompilationError("failed to compile query".into()),
-            )?
-        } else {
-            QueryGraph::compile_with_session(&query, &self.schema, session).ok_or_else(|| {
-                QueryError::QueryCompilationError("failed to compile query".into())
-            })?
-        };
+        // Compile query graph with schema context
+        let graph = QueryGraph::compile_with_schema_context(
+            &query,
+            &self.schema,
+            session.clone(),
+            &self.schema_context,
+        )
+        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -1622,9 +1707,12 @@ impl QueryManager {
         self.subscriptions.insert(
             id,
             QuerySubscription {
+                query,
                 graph,
                 mode: SubscriptionMode::Delta,
                 branches,
+                session,
+                needs_recompile: false,
             },
         );
 
@@ -1691,6 +1779,56 @@ impl QueryManager {
         std::mem::take(&mut self.pending_catalogue_updates)
     }
 
+    /// Retry processing buffered row updates.
+    ///
+    /// Call this after activating new schemas (via try_activate_pending_schemas)
+    /// and updating the schema context (via sync_context). Rows that arrived
+    /// before their schema was known will be reprocessed.
+    pub fn retry_pending_row_updates(&mut self) {
+        let pending = std::mem::take(&mut self.pending_row_updates);
+        for update in pending {
+            self.handle_object_update(update);
+        }
+    }
+
+    /// Take all pending row updates (used by sync_context to preserve across rebuild).
+    pub fn take_pending_row_updates(&mut self) -> Vec<AllObjectUpdate> {
+        std::mem::take(&mut self.pending_row_updates)
+    }
+
+    /// Restore pending row updates (used by sync_context after rebuild).
+    pub fn restore_pending_row_updates(&mut self, updates: Vec<AllObjectUpdate>) {
+        self.pending_row_updates = updates;
+    }
+
+    /// Update the branch_schema_map from the current schema context.
+    ///
+    /// Called internally after schema changes to ensure the map
+    /// includes all live schemas.
+    pub fn update_branch_schema_map(&mut self) {
+        if !self.schema_context.is_initialized() {
+            return;
+        }
+
+        // Current schema branch
+        self.branch_schema_map.insert(
+            self.schema_context.branch_name().as_str().to_string(),
+            self.schema_context.current_hash,
+        );
+
+        // Live schema branches
+        for &live_hash in self.schema_context.live_schemas.keys() {
+            let live_branch = ComposedBranchName::new(
+                &self.schema_context.env,
+                live_hash,
+                &self.schema_context.user_branch,
+            )
+            .to_branch_name();
+            self.branch_schema_map
+                .insert(live_branch.as_str().to_string(), live_hash);
+        }
+    }
+
     /// Process pending changes and settle all subscription graphs.
     ///
     /// This method drives async progress:
@@ -1729,6 +1867,9 @@ impl QueryManager {
         // 6. Mark subscriptions dirty if they have pending IDs that might now be available
         // This ensures settle() will be called to check pending rows
         self.mark_subscriptions_with_pending_dirty();
+
+        // 6b. Recompile any subscriptions marked as stale due to schema changes
+        self.recompile_stale_subscriptions();
 
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
@@ -1789,12 +1930,11 @@ impl QueryManager {
                             best.filter(|(_, content, _, _)| !content.is_empty())?;
 
                         // Apply lens transform if row is from an old schema branch
-                        if let Some(ctx) = schema_context
-                            && let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                            && source_hash != ctx.current_hash
+                        if let Some(&source_hash) = branch_schema_map.get(&source_branch)
+                            && source_hash != schema_context.current_hash
                         {
                             // Transform the row data using lens
-                            let transformer = LensTransformer::new(ctx, &table);
+                            let transformer = LensTransformer::new(schema_context, &table);
                             match transformer.transform(&content, commit_id, source_hash) {
                                 Ok(result) => {
                                     return Some((result.data, commit_id));
@@ -1853,12 +1993,13 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_subscriptions();
 
         for sub in pending {
-            // Build QueryGraph with client's session for policy filtering
-            let graph = if let Some(ref session) = sub.session {
-                QueryGraph::compile_with_session(&sub.query, &self.schema, Some(session.clone()))
-            } else {
-                QueryGraph::compile(&sub.query, &self.schema)
-            };
+            // Build QueryGraph with client's session for policy filtering (schema-aware)
+            let graph = QueryGraph::compile_with_schema_context(
+                &sub.query,
+                &self.schema,
+                sub.session.clone(),
+                &self.schema_context,
+            );
 
             let Some(mut graph) = graph else {
                 // Query compilation failed (e.g., missing table)
@@ -1869,7 +2010,17 @@ impl QueryManager {
             // Initial settle to populate the graph
             let om = &self.sync_manager.object_manager;
             let indices = &self.indices;
-            let branches = &sub.query.branches;
+
+            // Resolve branches: use explicit branches or fall back to schema context
+            let branches: Vec<String> = if sub.query.branches.is_empty() {
+                self.schema_context
+                    .all_branch_names()
+                    .into_iter()
+                    .map(|b| b.as_str().to_string())
+                    .collect()
+            } else {
+                sub.query.branches.clone()
+            };
 
             // Simple row loader for server-side graphs (no schema transform needed)
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
@@ -1877,7 +2028,7 @@ impl QueryManager {
                 match state {
                     ObjectState::Creating(obj) | ObjectState::Available(obj) => {
                         let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
-                        for branch_name in branches {
+                        for branch_name in &branches {
                             if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
                                 for &tip_id in &branch.tips {
                                     if let Some(commit) = branch.commits.get(&tip_id) {
@@ -1939,7 +2090,9 @@ impl QueryManager {
                     query: sub.query,
                     graph,
                     session: sub.session,
+                    branches,
                     last_scope: scope,
+                    needs_recompile: false,
                 },
             );
         }
@@ -1982,7 +2135,7 @@ impl QueryManager {
         let indices = &self.indices;
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
-            let branches = &sub.query.branches;
+            let branches = &sub.branches;
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
@@ -2311,6 +2464,7 @@ impl QueryManager {
         session: &Session,
     ) -> Vec<PolicyGraph> {
         let mut graphs = Vec::new();
+        let branch = self.current_branch();
 
         for clause in clauses {
             match clause {
@@ -2370,15 +2524,20 @@ impl QueryManager {
                         parent_policy,
                         session,
                         &self.schema,
+                        &branch,
                     ) {
                         graphs.push(graph);
                     }
                 }
                 ComplexClause::Exists { table, condition } => {
                     let target_table = TableName::new(table);
-                    if let Some(graph) =
-                        PolicyGraph::for_exists(&target_table, condition, session, &self.schema)
-                    {
+                    if let Some(graph) = PolicyGraph::for_exists(
+                        &target_table,
+                        condition,
+                        session,
+                        &self.schema,
+                        &branch,
+                    ) {
                         graphs.push(graph);
                     }
                 }
@@ -2397,6 +2556,7 @@ impl QueryManager {
         // Create row loader for settling
         let om = &self.sync_manager.object_manager;
         let indices = &self.indices;
+        let current_branch = self.current_branch();
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
@@ -2404,7 +2564,7 @@ impl QueryManager {
                 let obj_state = om.get_state(id)?;
                 match obj_state {
                     ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        let branch = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH))?;
+                        let branch = obj.branches.get(&BranchName::new(&current_branch))?;
                         let tip_id = branch.tips.iter().next()?;
                         let commit = branch.commits.get(tip_id)?;
                         if commit.content.is_empty() {
@@ -2494,11 +2654,7 @@ impl QueryManager {
                 StorageRequest::LoadIndexMeta { table, column } => {
                     // New index - return None (index will initialize empty)
                     // Try default branch first
-                    let key: IndexKey = (
-                        table.clone(),
-                        column.clone(),
-                        DEFAULT_ROW_BRANCH.to_string(),
-                    );
+                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
                     if let Some(index) = self.indices.get_mut(&key) {
                         index.process_meta_load(None);
                     }
@@ -2509,11 +2665,7 @@ impl QueryManager {
                     page_id,
                 } => {
                     // Page doesn't exist - return None (index will create new page)
-                    let key: IndexKey = (
-                        table.clone(),
-                        column.clone(),
-                        DEFAULT_ROW_BRANCH.to_string(),
-                    );
+                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
                     if let Some(index) = self.indices.get_mut(&key) {
                         index.process_page_load(PageId(page_id), None);
                     }
@@ -2552,7 +2704,7 @@ impl QueryManager {
 
     /// Load a row's data from ObjectManager using the default branch.
     fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
-        self.load_row_from_object_on_branch(row_id, DEFAULT_ROW_BRANCH)
+        self.load_row_from_object_on_branch(row_id, &self.current_branch())
     }
 
     /// Load content from a catalogue object's "main" branch.
@@ -2677,12 +2829,41 @@ impl QueryManager {
         };
 
         let table_name = TableName::new(&table);
-        let table_schema = match self.schema.get(&table_name) {
-            Some(schema) => schema.clone(),
-            None => return,
-        };
-        let descriptor = table_schema.descriptor.clone();
         let branch = update.branch_name.as_str();
+
+        // Look up the correct schema for this branch
+        let schema_hash = match self.branch_schema_map.get(branch) {
+            Some(&hash) => hash,
+            None => {
+                // Unknown branch - buffer for retry when schema activates
+                self.pending_row_updates.push(update);
+                return;
+            }
+        };
+
+        // Get the correct schema for this branch
+        let table_schema = if schema_hash == self.schema_context.current_hash {
+            // Current schema - use self.schema
+            match self.schema.get(&table_name) {
+                Some(schema) => schema.clone(),
+                None => return,
+            }
+        } else {
+            // Live schema - get from context
+            match self.schema_context.get_schema(&schema_hash) {
+                Some(schema) => match schema.get(&table_name) {
+                    Some(table_schema) => table_schema.clone(),
+                    None => return,
+                },
+                None => {
+                    // Schema not in context yet - buffer for retry
+                    self.pending_row_updates.push(update);
+                    return;
+                }
+            }
+        };
+
+        let descriptor = table_schema.descriptor.clone();
 
         // Ensure indices exist for this branch
         Self::ensure_table_indices_for_branch(&mut self.indices, &table, branch, &table_schema);
@@ -2793,7 +2974,7 @@ impl QueryManager {
             ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
             ObjectState::Loading => return false,
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(DEFAULT_ROW_BRANCH)) else {
+        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -2849,7 +3030,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         self.update_indices_for_insert_on_branch(
             table,
-            DEFAULT_ROW_BRANCH,
+            &self.current_branch(),
             object_id,
             data,
             descriptor,
@@ -2900,7 +3081,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         self.update_indices_for_update_on_branch(
             table,
-            DEFAULT_ROW_BRANCH,
+            &self.current_branch(),
             object_id,
             old_data,
             new_data,
@@ -2950,7 +3131,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         self.update_indices_for_soft_delete_on_branch(
             table,
-            DEFAULT_ROW_BRANCH,
+            &self.current_branch(),
             object_id,
             old_data,
             descriptor,
@@ -3004,7 +3185,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         self.update_indices_for_hard_delete_on_branch(
             table,
-            DEFAULT_ROW_BRANCH,
+            &self.current_branch(),
             object_id,
             old_data,
             descriptor,
@@ -3053,7 +3234,7 @@ impl QueryManager {
     ) -> Result<(), QueryError> {
         self.update_indices_for_undelete_on_branch(
             table,
-            DEFAULT_ROW_BRANCH,
+            &self.current_branch(),
             object_id,
             new_data,
             descriptor,
@@ -3173,11 +3354,7 @@ impl QueryManager {
                     column,
                     result,
                 } => {
-                    let key: IndexKey = (
-                        table.clone(),
-                        column.clone(),
-                        DEFAULT_ROW_BRANCH.to_string(),
-                    );
+                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
                     if let Some(index) = self.indices.get_mut(&key) {
                         index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
                     }
@@ -3188,11 +3365,7 @@ impl QueryManager {
                     page_id,
                     result,
                 } => {
-                    let key: IndexKey = (
-                        table.clone(),
-                        column.clone(),
-                        DEFAULT_ROW_BRANCH.to_string(),
-                    );
+                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
                     if let Some(index) = self.indices.get_mut(&key) {
                         index.process_page_load(
                             PageId(*page_id),

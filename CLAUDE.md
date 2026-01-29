@@ -11,3 +11,5 @@ We document internal architecture and plans in /specs as markdown files.
 We document public APIs and user guides in /docs as markdown files.
 
 Tests should err on the side of E2E coverage using high-level abstractions (e.g., SchemaManager, SyncManager) rather than calling internal helpers directly. This catches integration issues and ensures the public API works as intended. The only exception is tiny unit tests for isolated pure functions.
+
+When writing tests or implementing features, if you discover that functionality doesn't work as expected, STOP and surface the issue immediately. Do not write workarounds, ignore the test, or make it look like things pass when they don't. The gap between "what we thought worked" and "what actually works" is critical information.

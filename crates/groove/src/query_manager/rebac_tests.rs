@@ -22,6 +22,18 @@ use super::types::{
     Value,
 };
 
+/// Helper to create QueryManager with schema on default branch.
+fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema, "dev", "main");
+    qm
+}
+
+/// Get the schema context's branch name.
+fn get_branch(qm: &QueryManager) -> String {
+    qm.schema_context().branch_name().as_str().to_string()
+}
+
 /// Schema for ReBAC tests: documents with owner_id policy + folders for INHERITS
 fn rebac_test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -93,7 +105,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     // Setup
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -160,7 +172,7 @@ fn rebac_insert_denied_by_simple_policy() {
     // Setup
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -244,7 +256,7 @@ fn rebac_no_session_allows_all_writes() {
     // Setup without session
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add a client WITHOUT session
     let client_id = ClientId::new();
@@ -315,7 +327,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     );
 
     let sync_manager = SyncManager::new();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -385,7 +397,7 @@ fn rebac_non_row_object_allowed() {
     // Setup
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -443,7 +455,7 @@ fn rebac_two_clients_different_sessions() {
     // Setup
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Client 1: alice
     let client1 = ClientId::new();
@@ -593,7 +605,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     );
 
     let sync_manager = SyncManager::new();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add a client with session for non-admin user
     let client_id = ClientId::new();
@@ -710,7 +722,7 @@ fn rebac_update_denied_by_using_policy() {
     );
 
     let sync_manager = SyncManager::new();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Create Alice's document first (as server/no session)
     let mut metadata = std::collections::HashMap::new();
@@ -875,7 +887,7 @@ fn rebac_inherits_filters_select_query_results() {
     );
 
     let sync_manager = SyncManager::new();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Create Alice's folder
     let mut folder_meta = std::collections::HashMap::new();
@@ -984,7 +996,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     );
 
     let sync_manager = SyncManager::new();
-    let mut qm = QueryManager::new(sync_manager, schema);
+    let mut qm = create_query_manager(sync_manager, schema);
 
     // Add Alice as admin (using insert to properly index the row)
     let _alice_admin = qm.insert("admins", &[Value::Text("alice".into())]).unwrap();
@@ -1005,6 +1017,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         .unwrap_or_default();
 
     // ---- Bob (non-admin) tries to update ----
+    let branch = get_branch(&qm);
     let bob_client = ClientId::new();
     qm.sync_manager_mut().add_client(bob_client);
     qm.sync_manager_mut()
@@ -1012,7 +1025,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // Register query scope for Bob
     let mut bob_scope = HashSet::new();
-    bob_scope.insert((protected_obj, "main".into()));
+    bob_scope.insert((protected_obj, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(bob_client, QueryId(1), bob_scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -1040,7 +1053,7 @@ fn rebac_update_denied_by_using_exists_policy() {
                 id: protected_obj,
                 metadata: protected_metadata.clone(),
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![bob_commit.clone()],
         },
     });
@@ -1071,7 +1084,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(protected_obj, "main")
+        .get_tip_ids(protected_obj, &branch)
         .unwrap();
     assert!(
         !tips.contains(&bob_commit.id()),
@@ -1086,7 +1099,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // Register query scope for Alice
     let mut alice_scope = HashSet::new();
-    alice_scope.insert((protected_obj, "main".into()));
+    alice_scope.insert((protected_obj, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(alice_client, QueryId(2), alice_scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -1114,7 +1127,7 @@ fn rebac_update_denied_by_using_exists_policy() {
                 id: protected_obj,
                 metadata: protected_metadata.clone(),
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![alice_commit.clone()],
         },
     });
@@ -1142,7 +1155,7 @@ fn rebac_update_denied_by_using_exists_policy() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(protected_obj, "main")
+        .get_tip_ids(protected_obj, &branch)
         .unwrap();
     assert!(
         tips.contains(&alice_commit.id()),

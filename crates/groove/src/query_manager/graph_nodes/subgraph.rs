@@ -137,6 +137,9 @@ impl SubgraphTemplate {
 
         let mut query = query_builder.build();
 
+        // Copy branches from base query (important for schema-aware branch names)
+        query.branches = self.base_query.branches.clone();
+
         // Copy nested array subqueries from base query
         query.array_subqueries = self.base_query.array_subqueries.clone();
 
