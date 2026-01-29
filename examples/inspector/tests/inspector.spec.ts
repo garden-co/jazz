@@ -27,7 +27,7 @@ test("should add and delete account in dropdown", async ({ page }) => {
     page.getByText("Select an account to connect to the inspector."),
   ).toBeVisible();
   await expect(
-    page.getByText(`Inspector test account <${accountID}>`),
+    page.getByText(`👤Inspector test account <${accountID}>`),
   ).not.toBeVisible();
 });
 
