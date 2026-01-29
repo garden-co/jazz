@@ -15,7 +15,45 @@ Follow these steps in order. **Do not skip steps.** Always ask for explicit appr
 
 Create a feature directory under `.specs/{feature_name}` using kebab-case for the name.
 
-### Step 2: Create Design Document
+### Step 2 (Optional): Create Requirements Document
+
+**This step is opt-in and must be explicitly requested by the user.**
+
+If the user requests requirements, create `requirements.md` in the feature directory with:
+
+- **Introduction** - Brief context and purpose of the feature
+- **User Stories & Acceptance Criteria** - Written in EARS (Easy Approach to Requirements Syntax) style
+
+Example EARS patterns:
+- **Ubiquitous**: "The [system] shall [action]"
+- **Event-driven**: "When [event], the [system] shall [action]"
+- **State-driven**: "While [state], the [system] shall [action]"
+- **Optional**: "Where [condition], the [system] shall [action]"
+- **Unwanted behavior**: "If [condition], then the [system] shall [action]"
+
+Example structure:
+```markdown
+# Requirements
+
+## Introduction
+
+[Brief context about what this feature addresses and why it's needed]
+
+## User Stories & Acceptance Criteria
+
+### US-1: [User Story Title]
+
+**As a** [role], **I want** [goal], **so that** [benefit].
+
+**Acceptance Criteria:**
+- When [user action], the system shall [expected behavior]
+- While [state], the system shall [maintain condition]
+- Where [optional condition], the system shall [handle appropriately]
+```
+
+If requirements are created, get approval before proceeding to the design document.
+
+### Step 3: Create Design Document
 
 Create `design.md` in the feature directory with:
 
@@ -28,13 +66,13 @@ Show the code snippets of the core parts of the implementation in the design.
 
 We prioritize integration testing, and show a couple of test snippets as example of testing strategy.
 
-### Step 3: First Approval Gate
+### Step 4: Design Approval Gate
 
 Ask the user: **"Does the design look good? If so, we can move on to the implementation plan."**
 
 Wait for explicit approval before proceeding.
 
-### Step 4: Create Tasks Document
+### Step 5: Create Tasks Document
 
 Once design is approved, create `tasks.md` in the feature directory with:
 
@@ -55,13 +93,13 @@ Example structure:
 - [ ] 5. Add integration tests for [feature]
 ```
 
-### Step 5: Second Approval Gate
+### Step 6: Tasks Approval Gate
 
 Ask the user: **"Do the tasks look good?"**
 
 Wait for explicit approval.
 
-### Step 6: Stop
+### Step 7: Stop
 
 **Do not implement any code.** The workflow ends here. Implementation should be a separate activity initiated by the user.
 
