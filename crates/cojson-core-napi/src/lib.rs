@@ -89,7 +89,10 @@ impl From<RustTransaction> for Transaction {
 }
 
 impl ToNapiValue for Transaction {
-  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+  unsafe fn to_napi_value(
+    env: napi::sys::napi_env,
+    val: Self,
+  ) -> napi::Result<napi::sys::napi_value> {
     match val {
       Transaction::Private(p) => PrivateTransaction::to_napi_value(env, p),
       Transaction::Trusting(t) => TrustingTransaction::to_napi_value(env, t),
