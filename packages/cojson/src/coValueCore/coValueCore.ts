@@ -42,7 +42,6 @@ import {
   Uniqueness,
   VerifiedState,
 } from "./verifiedState.js";
-import { SessionMap } from "./SessionMap.js";
 import {
   MergeCommit,
   BranchPointerCommit,
@@ -605,7 +604,7 @@ export class CoValueCore {
 
     this.addDependencyFromHeader(header);
 
-    if (this._verified?.sessions.size) {
+    if (this._verified?.sessionCount) {
       throw new Error(
         "CoValueCore: provideHeader called on coValue with verified sessions present!",
       );
@@ -614,7 +613,7 @@ export class CoValueCore {
       this.id,
       this.node.crypto,
       header,
-      new SessionMap(this.id, this.node.crypto, header, streamingKnownState),
+      streamingKnownState,
     );
     // Clean up if transitioning from garbageCollected/onlyKnownState
     if (this.isAvailable()) {
@@ -730,7 +729,7 @@ export class CoValueCore {
 
     return {
       sessionID,
-      txIndex: this.verified.sessions.getTransactionsCount(sessionID) || 0,
+      txIndex: this.verified.getTransactionsCount(sessionID) || 0,
     };
   }
 
@@ -761,8 +760,7 @@ export class CoValueCore {
     let deleteTransaction: Transaction | undefined = undefined;
 
     if (isDeleteSessionID(sessionID)) {
-      const txCount =
-        this.verified.sessions.getTransactionsCount(sessionID) ?? 0;
+      const txCount = this.verified.getTransactionsCount(sessionID) ?? 0;
       if (txCount > 0 || newTransactions.length > 1) {
         return {
           value: true,
@@ -1378,7 +1376,7 @@ export class CoValueCore {
 
     const isBranched = this.isBranched();
 
-    for (const [sessionID, sessionLog] of this.verified.sessions.entries()) {
+    for (const [sessionID, sessionLog] of this.verified.sessionEntries()) {
       const count = this.verifiedTransactionsKnownSessions[sessionID] ?? 0;
 
       for (
@@ -1903,7 +1901,7 @@ export class CoValueCore {
   }
 
   getTx(txID: TransactionID): Transaction | undefined {
-    return this.verified?.sessions.get(txID.sessionID)?.transactions[
+    return this.verified?.getSession(txID.sessionID)?.transactions[
       txID.txIndex
     ];
   }

@@ -183,7 +183,7 @@ describe("WasmCrypto", () => {
     const mapInOtherSession = await loadCoValueOrFail(session2.node, map.id);
 
     const transferredMeta = JSON.parse(
-      mapInOtherSession.core.verified.sessions.get(client.node.currentSessionID)
+      mapInOtherSession.core.verified.getSession(client.node.currentSessionID)
         ?.transactions[0]?.meta!,
     );
 
