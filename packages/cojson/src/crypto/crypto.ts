@@ -262,12 +262,6 @@ export abstract class CryptoProvider<Blake3State = any> {
     return `${accountID}_session_d${randomPart}$`;
   }
 
-  abstract createSessionLog(
-    coID: RawCoID,
-    sessionID: SessionID,
-    signerID?: SignerID,
-  ): SessionLogImpl;
-
   abstract createSessionMap(
     coID: RawCoID,
     headerJson: string,
@@ -288,38 +282,6 @@ export type KeySecret = `keySecret_z${string}`;
 export type KeyID = `key_z${string}`;
 
 export const secretSeedLength = 32;
-
-export interface SessionLogImpl {
-  clone(): SessionLogImpl;
-  tryAdd(
-    transactions: Transaction[],
-    newSignature: Signature,
-    skipVerify: boolean,
-  ): void;
-  addNewPrivateTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    keyID: KeyID,
-    keySecret: KeySecret,
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: PrivateTransaction };
-  addNewTrustingTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: TrustingTransaction };
-  decryptNextTransactionChangesJson(
-    tx_index: number,
-    key_secret: KeySecret,
-  ): string;
-  free(): void;
-  decryptNextTransactionMetaJson(
-    tx_index: number,
-    key_secret: KeySecret,
-  ): string | undefined;
-}
 
 /**
  * SessionMapImpl - Native implementation of SessionMap

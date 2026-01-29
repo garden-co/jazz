@@ -24,7 +24,6 @@ import {
   Sealed,
   SealerID,
   SealerSecret,
-  SessionLogImpl,
   SessionMapImpl,
   Signature,
   SignerID,
@@ -46,7 +45,6 @@ import {
   seal,
   unseal,
   Blake3Hasher,
-  SessionLog,
   SessionMap as RNSessionMap,
   Transaction as RNTransaction,
   Transaction_Tags,
@@ -168,14 +166,6 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
       return undefined;
     }
   }
-  createSessionLog(
-    coID: RawCoID,
-    sessionID: SessionID,
-    signerID?: SignerID,
-  ): SessionLogImpl {
-    return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
-  }
-
   createSessionMap(
     coID: RawCoID,
     headerJson: string,
@@ -250,116 +240,6 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     ) as Stringified<T>;
 
     return decrypted;
-  }
-}
-
-class SessionLogAdapter implements SessionLogImpl {
-  constructor(private readonly sessionLog: SessionLog) {}
-
-  tryAdd(
-    transactions: Transaction[],
-    newSignature: Signature,
-    skipVerify: boolean,
-  ): void {
-    // Use direct calls instead of JSON.stringify for better performance
-    for (const tx of transactions) {
-      if (tx.privacy === "private") {
-        this.sessionLog.addExistingPrivateTransaction(
-          tx.encryptedChanges,
-          tx.keyUsed,
-          tx.madeAt,
-          tx.meta,
-        );
-      } else {
-        this.sessionLog.addExistingTrustingTransaction(
-          tx.changes,
-          tx.madeAt,
-          tx.meta,
-        );
-      }
-    }
-    this.sessionLog.commitTransactions(newSignature, skipVerify);
-  }
-
-  addNewPrivateTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    keyID: KeyID,
-    keySecret: KeySecret,
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ) {
-    const output = this.sessionLog.addNewPrivateTransaction(
-      // We can avoid stableStringify because it will be encrypted.
-      JSON.stringify(changes),
-      signerAgent.currentSignerSecret(),
-      keySecret,
-      keyID,
-      madeAt,
-      // We can avoid stableStringify because it will be encrypted.
-      meta ? JSON.stringify(meta) : undefined,
-    );
-    const parsedOutput = JSON.parse(output);
-    const transaction: PrivateTransaction = {
-      privacy: "private",
-      madeAt,
-      encryptedChanges: parsedOutput.encrypted_changes,
-      keyUsed: keyID,
-      meta: parsedOutput.meta,
-    };
-    return { signature: parsedOutput.signature as Signature, transaction };
-  }
-
-  addNewTrustingTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ) {
-    // We can avoid stableStringify because the changes will be in a string format already.
-    const stringifiedChanges = JSON.stringify(changes);
-    // We can avoid stableStringify because the meta will be in a string format already.
-    const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
-    const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
-      signerAgent.currentSignerSecret(),
-      madeAt,
-      stringifiedMeta,
-    );
-    const transaction: TrustingTransaction = {
-      privacy: "trusting",
-      madeAt,
-      changes: stringifiedChanges as Stringified<JsonValue[]>,
-      meta: stringifiedMeta as Stringified<JsonObject> | undefined,
-    };
-    return { signature: output as Signature, transaction };
-  }
-
-  decryptNextTransactionChangesJson(
-    txIndex: number,
-    keySecret: KeySecret,
-  ): string {
-    return this.sessionLog.decryptNextTransactionChangesJson(
-      txIndex,
-      keySecret,
-    );
-  }
-
-  decryptNextTransactionMetaJson(
-    txIndex: number,
-    keySecret: KeySecret,
-  ): string | undefined {
-    return this.sessionLog.decryptNextTransactionMetaJson(txIndex, keySecret);
-  }
-
-  free(): void {
-    this.sessionLog.uniffiDestroy();
-  }
-
-  clone(): SessionLogImpl {
-    return new SessionLogAdapter(
-      this.sessionLog.cloneSessionLog() as SessionLog,
-    );
   }
 }
 

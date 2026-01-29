@@ -193,28 +193,4 @@ describe("WasmCrypto", () => {
       },
     });
   });
-
-  it("fails to verify signatures without a signer ID", async () => {
-    const agentSecret = wasmCrypto.newRandomAgentSecret();
-    const sessionID = wasmCrypto.newRandomSessionID(
-      wasmCrypto.getAgentID(agentSecret),
-    );
-
-    const sessionLog = wasmCrypto.createSessionLog("co_z12345678", sessionID);
-    expect(() =>
-      sessionLog.tryAdd(
-        [
-          {
-            privacy: "trusting",
-            changes: JSON.stringify([
-              { op: "set", key: "count", value: 1 },
-            ]) as Stringified<JsonValue[]>,
-            madeAt: Date.now(),
-          },
-        ],
-        "signature_z12345678",
-        false,
-      ),
-    ).toThrow(expect.stringContaining("Signature verification failed"));
-  });
 });

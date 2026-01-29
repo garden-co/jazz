@@ -7,33 +7,6 @@ export declare class Blake3Hasher {
   clone(): Blake3Hasher
 }
 
-export declare class SessionLog {
-  constructor(coId: string, sessionId: string, signerId?: string | undefined | null)
-  clone(): SessionLog
-  addNewPrivateTransaction(changesJson: string, signerSecret: string, encryptionKey: string, keyId: string, madeAt: number, meta?: string | undefined | null): string
-  addNewTrustingTransaction(changesJson: string, signerSecret: string, madeAt: number, meta?: string | undefined | null): string
-  /**
-   * Add an existing private transaction to the staging area.
-   * The transaction is NOT committed until commitTransactions() succeeds.
-   * Note: made_at uses f64 because JavaScript's number type is f64.
-   */
-  addExistingPrivateTransaction(encryptedChanges: string, keyUsed: string, madeAt: number, meta?: string | undefined | null): void
-  /**
-   * Add an existing trusting transaction to the staging area.
-   * The transaction is NOT committed until commitTransactions() succeeds.
-   * Note: made_at uses f64 because JavaScript's number type is f64.
-   */
-  addExistingTrustingTransaction(changes: string, madeAt: number, meta?: string | undefined | null): void
-  /**
-   * Commit pending transactions to the main state.
-   * If skip_validate is false, validates the signature first.
-   * If skip_validate is true, commits without validation.
-   */
-  commitTransactions(newSignatureStr: string, skipValidate: boolean): void
-  decryptNextTransactionChangesJson(txIndex: number, encryptionKey: string): string
-  decryptNextTransactionMetaJson(txIndex: number, encryptionKey: string): string | null
-}
-
 export declare class SessionMap {
   /**
    * Create a new SessionMap for a CoValue

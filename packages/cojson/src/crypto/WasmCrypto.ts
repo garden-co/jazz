@@ -1,5 +1,4 @@
 import {
-  SessionLog,
   SessionMap as WasmSessionMap,
   initialize,
   initializeSync,
@@ -223,10 +222,6 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     }
   }
 
-  createSessionLog(coID: RawCoID, sessionID: SessionID, signerID?: SignerID) {
-    return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
-  }
-
   createSessionMap(
     coID: RawCoID,
     headerJson: string,
@@ -397,114 +392,5 @@ class SessionMapAdapter implements SessionMapImpl {
       this.sessionMap.decryptTransactionMeta(sessionId, txIndex, keySecret) ??
       undefined
     );
-  }
-}
-
-class SessionLogAdapter {
-  constructor(private readonly sessionLog: SessionLog) {}
-
-  tryAdd(
-    transactions: Transaction[],
-    newSignature: Signature,
-    skipVerify: boolean,
-  ): void {
-    // Use direct calls instead of JSON.stringify for better performance
-    for (const tx of transactions) {
-      if (tx.privacy === "private") {
-        this.sessionLog.addExistingPrivateTransaction(
-          tx.encryptedChanges,
-          tx.keyUsed,
-          tx.madeAt,
-          tx.meta,
-        );
-      } else {
-        this.sessionLog.addExistingTrustingTransaction(
-          tx.changes,
-          tx.madeAt,
-          tx.meta,
-        );
-      }
-    }
-    this.sessionLog.commitTransactions(newSignature, skipVerify);
-  }
-
-  addNewPrivateTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    keyID: KeyID,
-    keySecret: KeySecret,
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: PrivateTransaction } {
-    const output = this.sessionLog.addNewPrivateTransaction(
-      // We can avoid stableStringify because it will be encrypted.
-      JSON.stringify(changes),
-      signerAgent.currentSignerSecret(),
-      keySecret,
-      keyID,
-      madeAt,
-      // We can avoid stableStringify because it will be encrypted.
-      meta ? JSON.stringify(meta) : undefined,
-    );
-    const parsedOutput = JSON.parse(output);
-    const transaction: PrivateTransaction = {
-      privacy: "private",
-      madeAt,
-      encryptedChanges: parsedOutput.encrypted_changes,
-      keyUsed: keyID,
-      meta: parsedOutput.meta,
-    };
-    return { signature: parsedOutput.signature, transaction };
-  }
-
-  addNewTrustingTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: TrustingTransaction } {
-    // We can avoid stableStringify because the changes will be in a string format already.
-    const stringifiedChanges = JSON.stringify(changes);
-    // We can avoid stableStringify because the meta will be in a string format already.
-    const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
-    const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
-      signerAgent.currentSignerSecret(),
-      madeAt,
-      stringifiedMeta,
-    );
-    const transaction: TrustingTransaction = {
-      privacy: "trusting",
-      madeAt,
-      changes: stringifiedChanges as Stringified<JsonValue[]>,
-      meta: stringifiedMeta as Stringified<JsonObject> | undefined,
-    };
-    return { signature: output as Signature, transaction };
-  }
-
-  decryptNextTransactionChangesJson(
-    txIndex: number,
-    keySecret: KeySecret,
-  ): string {
-    const output = this.sessionLog.decryptNextTransactionChangesJson(
-      txIndex,
-      keySecret,
-    );
-    return output;
-  }
-
-  decryptNextTransactionMetaJson(
-    txIndex: number,
-    keySecret: KeySecret,
-  ): string | undefined {
-    return this.sessionLog.decryptNextTransactionMetaJson(txIndex, keySecret);
-  }
-
-  free() {
-    this.sessionLog.free();
-  }
-
-  clone(): SessionLogAdapter {
-    return new SessionLogAdapter(this.sessionLog.clone());
   }
 }
