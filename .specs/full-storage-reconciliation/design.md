@@ -4,31 +4,46 @@
 
 Full Storage Reconciliation ensures all local CoValue content (both in memory and in storage) is uploaded to the server peers. It's implemented by adding a new `SyncManager.ensureCoValuesSync()` function. This is separate from peer reconciliation and focuses on uploading local changes to servers, without subscribing to peer changes.
 
-The key mechanism is a new **"reconcile"** message. The client sends a batch of `[coValueId, sessionsHash]` pairs; the server checks for each whether it is missing that CoValue or has different `KnownStateSessions`. When it does, it responds with a "known" message (its known state for that CoValue), so that the client can upload content as needed.
+The key mechanism is a new **"reconcile"** message. The client sends a batch of `[coValueId, sessionsHash]` pairs; the server checks for each whether it is missing that CoValue or has different `KnownStateSessions`. When it does, it responds with a "known" message (its known state for that CoValue), so that the client can upload content as needed. The server then sends a **"reconcile-ack"** message with the same batch `id` so the client knows when processing of that batch is complete.
 
-## Reconcile Message
+## Reconcile Messages
 
-**Shape:**
+**Reconcile (client → server):**
 
 ```ts
-{
-  type: "reconcile",
-  values: [coValue: string, sessionsHash: string][],
-}
+export type ReconcileMessage = {
+  action: "reconcile";
+  id: string;
+  values: [coValue: RawCoID, sessionsHash: string][];
+};
 ```
 
+- **id**: Unique batch id for this reconcile message (e.g. UUID or monotonic string). Used to correlate the **reconcile-ack** response.
 - **coValue**: CoValue ID (`RawCoID`).
 - **sessionsHash**: Hash of that CoValue's **KnownStateSessions** (the `sessions` field of `CoValueKnownState`: `{ [sessionID]: number }`). Use `CryptoProvider.shortHash(sessions)` so client and server hashes are comparable.
+
+**Reconcile-ack (server → client):**
+
+```ts
+export type ReconcileAckMessage = {
+  action: "reconcile-ack";
+  id: string;
+};
+```
+
+- **id**: Same value as the `id` from the **reconcile** message that was just processed.
 
 **Server behavior:**
 
 - For each `[coValue, sessionsHash]` in `values`:
   - If the server does **not** have that CoValue, or its own hash of its known state's sessions differs from `sessionsHash`, the server sends back a **"known"** message with its known state for that CoValue (same format as today).
+- After processing all entries in the batch, the server sends a **"reconcile-ack"** message with the same `id` as the reconcile message.
 - No subscription is created; the server does not push new content for these CoValues.
 
 **Client behavior:**
 
-- `ensureCoValuesSync` collects local known state (in memory and from storage in batches), computes `sessionsHash` for each CoValue, and sends one or more "reconcile" messages (e.g. batched by 100).
+- `ensureCoValuesSync` collects local known state (in memory and from storage in batches), computes `sessionsHash` for each CoValue, and sends one or more "reconcile" messages (e.g. batched by 100), each with a unique `id`.
+- The client tracks pending acks in `pendingReconciliationAck` (e.g. a set of `"batchId#peerId"`). When it sends a reconcile message with `id` to a peer, it adds `"id#peerId"` to the set; when it receives a **reconcile-ack** with that `id` from that peer, it removes `"id#peerId"` in the handler. This lets the client know when each batch has been fully acknowledged by each server peer.
 - When the client receives a "known" message in response to a reconcile, it uses the existing `handleKnownState` logic: compare with local known state and upload content if the client is ahead.
 
 ## Implementation Steps
@@ -142,17 +157,31 @@ async getAllCoValueIDs(
 
 ### 2. Reconcile Message and Handler
 
-#### 2.1. Add ReconcileMessage type and hash helper
+#### 2.1. Add ReconcileMessage, ReconcileAckMessage types and hash helper
 
 **File:** `packages/cojson/src/sync.ts` (or message types module)
 
-Add the new message type:
+Add the new message types:
 
 ```typescript
 export type ReconcileMessage = {
-  type: "reconcile";
+  action: "reconcile";
+  id: string;
   values: [coValue: RawCoID, sessionsHash: string][];
 };
+
+export type ReconcileAckMessage = {
+  action: "reconcile-ack";
+  id: string;
+};
+
+export type SyncMessage =
+  | LoadMessage
+  | KnownStateMessage
+  | NewContentMessage
+  | DoneMessage
+  | ReconcileMessage
+  | ReconcileAckMessage;
 ```
 
 #### 2.2. Server: handle reconcile messages
@@ -180,26 +209,52 @@ handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
       this.trySendToPeer(peer, { action: "known", ...knownState });
     }
   }
+  // Signal that this batch is done so the client can clear the pending ack
+  this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
 }
 ```
 
-#### 2.3. Wire reconcile into message dispatch
+#### 2.3. Wire reconcile and reconcile-ack into message dispatch
 
-Ensure that when a message with `type: "reconcile"` (or `action: "reconcile"`) is received, `handleReconcile(msg, peer)` is called. The existing "known" response is handled by the current `handleKnownState` on the client; no change there.
+At the start of `handleSyncMessage`, handle both reconcile and reconcile-ack before the `msg.id` (CoValue id) check, since these messages use `id` for the batch, not a CoValue id:
+
+- When `msg.action === "reconcile"`, call `handleReconcile(msg, peer)` and return.
+- When `msg.action === "reconcile-ack"`, call `handleReconcileAck(msg, peer)` and return.
+
+The existing "known" response is handled by the current `handleKnownState` on the client; no change there.
+
+#### 2.4. Client: handle reconcile-ack messages
+
+**File:** `packages/cojson/src/sync.ts`
+
+Add a handler for incoming "reconcile-ack" messages. Remove the corresponding entry from `pendingReconciliationAck` so the client knows this batch has been acknowledged by this peer:
+
+```typescript
+handleReconcileAck(msg: ReconcileAckMessage, peer: PeerState): void {
+  const key = `${msg.id}#${peer.id}`;
+  this.pendingReconciliationAck.delete(key);
+}
+```
+
+Wire this in the same message dispatch: when `msg.action === "reconcile-ack"`, call `handleReconcileAck(msg, peer)`.
 
 ### 3. Implement ensureCoValuesSync (client sends reconcile)
 
 **File:** `packages/cojson/src/sync.ts`
 
-Add new method to `SyncManager`:
+Add a field on `SyncManager` to track pending reconcile acks (e.g. per batch per peer), and add the method:
 
 ```typescript
+// On SyncManager: track pending reconcile acks so we know when each batch is acked by each peer
+pendingReconciliationAck: Set<string> = new Set(); // entries are "batchId#peerId"
+
 const RECONCILIATION_BATCH_SIZE = 100;
 
 /**
  * Ensures all CoValues (both in memory and in storage) are synced to server peers.
  * Sends "reconcile" message(s) with [coValueId, sessionsHash] for each CoValue.
- * Server responds with "known" message only where it is missing the CoValue or has different sessions.
+ * Server responds with "known" only where it is missing the CoValue or has different sessions,
+ * then sends "reconcile-ack" with the batch id so the client knows the batch is done.
  * Processes CoValues in batches of RECONCILIATION_BATCH_SIZE.
  */
 ensureCoValuesSync(): void {
@@ -211,8 +266,10 @@ ensureCoValuesSync(): void {
 
   const sendReconcileBatch = (entries: [RawCoID, string][]) => {
     if (entries.length === 0) return;
-    const msg: ReconcileMessage = { type: "reconcile", values: entries };
+    const batchId = this.local.crypto.randomUUID(); // or another unique id
+    const msg: ReconcileMessage = { action: "reconcile", id: batchId, values: entries };
     for (const peer of serverPeers) {
+      this.pendingReconciliationAck.add(`${batchId}#${peer.id}`);
       this.trySendToPeer(peer, msg);
     }
   };
@@ -259,7 +316,7 @@ ensureCoValuesSync(): void {
 }
 ```
 
-**Note:** In-memory batch: build `[id, sessionsHash]` and send one "reconcile" per batch to each persistent server peer. Storage: fetch IDs in batches, load known state from storage for each, then send reconcile batch(es). No subscription is created; server only responds with "known" where state differs or CoValue is missing.
+**Note:** In-memory batch: build `[id, sessionsHash]` and send one "reconcile" per batch to each persistent server peer; each message gets a unique `id` and each (batchId, peer) is added to `pendingReconciliationAck`. Storage: fetch IDs in batches, load known state from storage for each, then send reconcile batch(es). No subscription is created; server responds with "known" where state differs or CoValue is missing, then with "reconcile-ack" for that batch. The client removes from `pendingReconciliationAck` in `handleReconcileAck`.
 
 ### 4. Handle "known" response from reconcile
 
@@ -279,9 +336,13 @@ The existing `handleKnownState` method is used unchanged. When the client receiv
 
 5. **Batching**: CoValues are processed in batches of 100. Reconcile messages are sent per batch (one message per batch per peer). Storage never returns all IDs in one call.
 
+6. **Completion signal**: The server sends a **reconcile-ack** with the same batch `id` after processing each reconcile message. The client tracks pending acks in `pendingReconciliationAck` (e.g. `"batchId#peerId"`) so it knows when each batch has been acknowledged by each server peer. Callers can use this to run logic after reconciliation (e.g. when `pendingReconciliationAck` is empty for a given run).
+
 ## Testing
 
 - Test `ensureCoValuesSync` with CoValues only in storage
 - Test with CoValues already in memory
 - Test with mixed scenarios (some synced, some not)
 - Verify that client correctly uploads content when needed after receiving "known" messages
+- Verify that server sends "reconcile-ack" with the same `id` after processing each "reconcile" batch
+- Verify that client removes entries from `pendingReconciliationAck` when it receives "reconcile-ack" (e.g. one ack per peer per batch)
