@@ -1150,16 +1150,21 @@ export class SessionMap {
     /**
      * Create a new SessionMap for a CoValue
      * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+     * Create a new SessionMap for a CoValue.
+     * Validates the header and verifies that `co_id` matches the hash of the header.
+     * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+     * `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
      * @param {string} co_id
      * @param {string} header_json
      * @param {number | null} [max_tx_size]
+     * @param {boolean | null} [skip_verify]
      */
-    constructor(co_id, header_json, max_tx_size) {
+    constructor(co_id, header_json, max_tx_size, skip_verify) {
         const ptr0 = passStringToWasm0(co_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(header_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.sessionmap_new(ptr0, len0, ptr1, len1, isLikeNone(max_tx_size) ? 0x100000001 : (max_tx_size) >>> 0);
+        const ret = wasm.sessionmap_new(ptr0, len0, ptr1, len1, isLikeNone(max_tx_size) ? 0x100000001 : (max_tx_size) >>> 0, isLikeNone(skip_verify) ? 0xFFFFFF : skip_verify ? 1 : 0);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }

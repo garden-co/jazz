@@ -505,7 +505,7 @@ describe("SessionMap", () => {
     const coId = "co_zTestCoValue123";
     const header = createGroupHeader();
 
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     expect(sessionMap).toBeDefined();
 
     // Get header should return valid JSON
@@ -518,14 +518,14 @@ describe("SessionMap", () => {
 
   test("invalid header throws error", () => {
     const coId = "co_zTestCoValue123";
-    expect(() => new SessionMap(coId, "invalid json")).toThrow();
-    expect(() => new SessionMap(coId, "{}")).toThrow(); // Missing required fields
+    expect(() => new SessionMap(coId, "invalid json", undefined, true)).toThrow();
+    expect(() => new SessionMap(coId, "{}", undefined, true)).toThrow(); // Missing required fields
   });
 
   test("get session IDs - empty initially", () => {
     const coId = "co_zTestCoValue123";
     const header = createGroupHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     const sessionIds = sessionMap.getSessionIds();
     expect(Array.isArray(sessionIds)).toBe(true);
@@ -535,7 +535,7 @@ describe("SessionMap", () => {
   test("get transaction count - returns -1 for non-existent session", () => {
     const coId = "co_zTestCoValue123";
     const header = createGroupHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     const count = sessionMap.getTransactionCount("non_existent_session");
     expect(count).toBe(-1);
@@ -544,7 +544,7 @@ describe("SessionMap", () => {
   test("get known state - empty initially", () => {
     const coId = "co_zTestCoValue123";
     const header = createGroupHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     const knownState = sessionMap.getKnownState();
     expect(knownState).toBeDefined();
@@ -556,7 +556,7 @@ describe("SessionMap", () => {
   test("mark as deleted", () => {
     const coId = "co_zTestCoValue123";
     const header = createGroupHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     expect(sessionMap.isDeleted()).toBe(false);
     sessionMap.markAsDeleted();
@@ -566,7 +566,7 @@ describe("SessionMap", () => {
   test("set and get streaming known state", () => {
     const coId = "co_zTestCoValue123";
     const header = createGroupHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     // Initially no streaming known state (WASM returns undefined for Option::None)
     expect(sessionMap.getKnownStateWithStreaming()).toBeUndefined();
@@ -585,7 +585,7 @@ describe("SessionMap", () => {
     const coId = "co_zTestCoValue123";
     const createdAt = "2023-11-14T22:13:20.000Z";
     const header = createGroupHeader(createdAt);
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     const returnedHeader = sessionMap.getHeader();
     const parsedHeader = JSON.parse(returnedHeader);
@@ -608,7 +608,7 @@ describe("SessionMap", () => {
       type: "comap",
       uniqueness: "test-group",
     });
-    const groupSessionMap = new SessionMap(coId, groupHeader);
+    const groupSessionMap = new SessionMap(coId, groupHeader, undefined, true);
     expect(JSON.parse(groupSessionMap.getHeader()).ruleset.type).toBe("group");
 
     // OwnedByGroup ruleset
@@ -619,7 +619,7 @@ describe("SessionMap", () => {
       type: "comap",
       uniqueness: "test-owned",
     });
-    const ownedSessionMap = new SessionMap(coId, ownedByGroupHeader);
+    const ownedSessionMap = new SessionMap(coId, ownedByGroupHeader, undefined, true);
     const ownedParsed = JSON.parse(ownedSessionMap.getHeader());
     expect(ownedParsed.ruleset.type).toBe("ownedByGroup");
     expect(ownedParsed.ruleset.group).toBe("co_zGroupId123");
@@ -632,7 +632,7 @@ describe("SessionMap", () => {
       type: "comap",
       uniqueness: "test-unsafe",
     });
-    const unsafeSessionMap = new SessionMap(coId, unsafeHeader);
+    const unsafeSessionMap = new SessionMap(coId, unsafeHeader, undefined, true);
     expect(JSON.parse(unsafeSessionMap.getHeader()).ruleset.type).toBe("unsafeAllowAll");
   });
 
@@ -646,7 +646,7 @@ describe("SessionMap", () => {
       uniqueness: "test-with-meta",
     });
 
-    const sessionMap = new SessionMap(coId, headerWithMeta);
+    const sessionMap = new SessionMap(coId, headerWithMeta, undefined, true);
     const returnedHeader = JSON.parse(sessionMap.getHeader());
     expect(returnedHeader.meta).toEqual({ key: "value", nested: { a: 1 } });
   });
@@ -661,7 +661,7 @@ describe("SessionMap", () => {
       uniqueness: null,
     });
 
-    const sessionMap = new SessionMap(coId, headerWithNullUniqueness);
+    const sessionMap = new SessionMap(coId, headerWithNullUniqueness, undefined, true);
     const returnedHeader = JSON.parse(sessionMap.getHeader());
     expect(returnedHeader.uniqueness).toBeNull();
   });
@@ -700,7 +700,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("create and retrieve trusting transaction", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret, signerId } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
 
@@ -744,7 +744,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("create and retrieve private (encrypted) transaction", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const { keyId, keySecret } = createKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
@@ -782,7 +782,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("multiple transactions in same session", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
 
@@ -827,7 +827,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("multiple sessions in same SessionMap", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
 
     const session1 = `${coId}_session_z1`;
@@ -864,7 +864,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("get last signature", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
 
@@ -904,7 +904,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("transaction with meta", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
 
@@ -930,7 +930,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("private transaction with encrypted meta", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const { keyId, keySecret } = createKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
@@ -963,8 +963,8 @@ describe("SessionMap - Transaction Flow", () => {
     const header = createUnsafeHeader();
     
     // Simulate two peers with their own SessionMaps
-    const sessionMap1 = new SessionMap(coId, header);
-    const sessionMap2 = new SessionMap(coId, header);
+    const sessionMap1 = new SessionMap(coId, header, undefined, true);
+    const sessionMap2 = new SessionMap(coId, header, undefined, true);
     
     const { signerSecret, signerId } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
@@ -1018,7 +1018,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("streaming known state management", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
 
     const session1 = `${coId}_session_z1`;
@@ -1048,7 +1048,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("getKnownState returns native JS object", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
 
     const session1 = `${coId}_session_z1`;
@@ -1074,7 +1074,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("getKnownStateWithStreaming returns native JS object", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
 
     const session1 = `${coId}_session_z1`;
@@ -1107,7 +1107,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("deletion flow", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
 
@@ -1142,7 +1142,7 @@ describe("SessionMap - Transaction Flow", () => {
       type: "comap",
       uniqueness: "test-comap",
     });
-    const comapSession = new SessionMap(coId, comapHeader);
+    const comapSession = new SessionMap(coId, comapHeader, undefined, true);
     expect(JSON.parse(comapSession.getHeader()).type).toBe("comap");
 
     // colist
@@ -1153,7 +1153,7 @@ describe("SessionMap - Transaction Flow", () => {
       type: "colist",
       uniqueness: "test-colist",
     });
-    const colistSession = new SessionMap(coId, colistHeader);
+    const colistSession = new SessionMap(coId, colistHeader, undefined, true);
     expect(JSON.parse(colistSession.getHeader()).type).toBe("colist");
 
     // costream
@@ -1164,14 +1164,14 @@ describe("SessionMap - Transaction Flow", () => {
       type: "costream",
       uniqueness: "test-costream",
     });
-    const costreamSession = new SessionMap(coId, costreamHeader);
+    const costreamSession = new SessionMap(coId, costreamHeader, undefined, true);
     expect(JSON.parse(costreamSession.getHeader()).type).toBe("costream");
   });
 
   test("error handling - invalid session for get operations", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
 
     // Non-existent session
     expect(sessionMap.getTransactionCount("nonexistent")).toBe(-1);
@@ -1183,7 +1183,7 @@ describe("SessionMap - Transaction Flow", () => {
   test("error handling - invalid transaction index", () => {
     const coId = "co_zTestCoValue123";
     const header = createUnsafeHeader();
-    const sessionMap = new SessionMap(coId, header);
+    const sessionMap = new SessionMap(coId, header, undefined, true);
     const { signerSecret } = createSignerKeyPair();
     const sessionId = `${coId}_session_z${Math.random().toString(36).slice(2)}`;
 

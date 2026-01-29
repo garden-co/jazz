@@ -175,9 +175,10 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
     coID: RawCoID,
     headerJson: string,
     maxTxSize?: number,
+    skipVerify?: boolean,
   ): SessionMapImpl {
     return new SessionMapAdapter(
-      new NativeSessionMap(coID, headerJson, maxTxSize),
+      new NativeSessionMap(coID, headerJson, maxTxSize, skipVerify),
     );
   }
 }

@@ -261,6 +261,7 @@ export abstract class CryptoProvider<Blake3State = any> {
     coID: RawCoID,
     headerJson: string,
     maxTxSize?: number,
+    skipVerify?: boolean,
   ): SessionMapImpl;
 }
 

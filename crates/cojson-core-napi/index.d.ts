@@ -9,10 +9,12 @@ export declare class Blake3Hasher {
 
 export declare class SessionMap {
   /**
-   * Create a new SessionMap for a CoValue
+   * Create a new SessionMap for a CoValue.
+   * Validates the header and verifies that `co_id` matches the hash of the header.
    * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   * `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
    */
-  constructor(coId: string, headerJson: string, maxTxSize?: number | undefined | null)
+  constructor(coId: string, headerJson: string, maxTxSize?: number | undefined | null, skipVerify?: boolean | undefined | null)
   /** Get the header as JSON */
   getHeader(): string
   /** Add transactions to a session */

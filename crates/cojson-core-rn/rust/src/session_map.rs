@@ -92,15 +92,20 @@ pub struct SessionMap {
 #[uniffi::export]
 impl SessionMap {
     /// Create a new SessionMap for a CoValue
+    /// Create a new SessionMap for a CoValue.
+    /// Validates the header and verifies that `co_id` matches the hash of the header.
     /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+    /// `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
     #[uniffi::constructor]
     pub fn new(
         co_id: String,
         header_json: String,
         max_tx_size: Option<u32>,
+        skip_verify: Option<bool>,
     ) -> Result<Self, SessionMapError> {
-        let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
-            .map_err(|e| SessionMapError::Internal(e.to_string()))?;
+        let internal =
+            SessionMapImpl::new_with_skip_verify(&co_id, &header_json, max_tx_size, skip_verify.unwrap_or(false))
+                .map_err(|e| SessionMapError::Internal(e.to_string()))?;
         Ok(SessionMap {
             internal: std::sync::Mutex::new(internal),
         })

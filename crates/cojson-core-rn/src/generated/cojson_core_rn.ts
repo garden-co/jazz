@@ -2117,12 +2117,16 @@ export class SessionMap
   readonly [pointerLiteralSymbol]: UnsafeMutableRawPointer;
   /**
    * Create a new SessionMap for a CoValue
+   * Create a new SessionMap for a CoValue.
+   * Validates the header and verifies that `co_id` matches the hash of the header.
    * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   * `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
    */
   constructor(
     coId: string,
     headerJson: string,
-    maxTxSize: /*u32*/ number | undefined
+    maxTxSize: /*u32*/ number | undefined,
+    skipVerify: boolean | undefined
   ) /*throws*/ {
     super();
     const pointer = uniffiCaller.rustCallWithError(
@@ -2134,6 +2138,7 @@ export class SessionMap
           FfiConverterString.lower(coId),
           FfiConverterString.lower(headerJson),
           FfiConverterOptionalUInt32.lower(maxTxSize),
+          FfiConverterOptionalBool.lower(skipVerify),
           callStatus
         );
       },
@@ -2659,6 +2664,9 @@ const FfiConverterTypeSessionMap = new FfiConverterObject(
   uniffiTypeSessionMapObjectFactory
 );
 
+// FfiConverter for boolean | undefined
+const FfiConverterOptionalBool = new FfiConverterOptional(FfiConverterBool);
+
 // FfiConverter for /*i32*/number | undefined
 const FfiConverterOptionalInt32 = new FfiConverterOptional(FfiConverterInt32);
 
@@ -3085,7 +3093,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_constructor_sessionmap_new() !==
-    17124
+    2008
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_constructor_sessionmap_new'

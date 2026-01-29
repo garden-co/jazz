@@ -145,16 +145,20 @@ pub struct SessionMap {
 
 #[napi]
 impl SessionMap {
-  /// Create a new SessionMap for a CoValue
+  /// Create a new SessionMap for a CoValue.
+  /// Validates the header and verifies that `co_id` matches the hash of the header.
   /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+  /// `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
   #[napi(constructor)]
   pub fn new(
     co_id: String,
     header_json: String,
     max_tx_size: Option<u32>,
+    skip_verify: Option<bool>,
   ) -> napi::Result<SessionMap> {
-    let internal = SessionMapImpl::new(&co_id, &header_json, max_tx_size)
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+    let internal =
+      SessionMapImpl::new_with_skip_verify(&co_id, &header_json, max_tx_size, skip_verify.unwrap_or(false))
+        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
     Ok(SessionMap { internal })
   }
 

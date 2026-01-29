@@ -265,8 +265,12 @@ export class SessionMap {
   /**
    * Create a new SessionMap for a CoValue
    * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   * Create a new SessionMap for a CoValue.
+   * Validates the header and verifies that `co_id` matches the hash of the header.
+   * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   * `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
    */
-  constructor(co_id: string, header_json: string, max_tx_size?: number | null);
+  constructor(co_id: string, header_json: string, max_tx_size?: number | null, skip_verify?: boolean | null);
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -291,7 +295,7 @@ export interface InitOutput {
   readonly sessionmap_makeNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number, number, number];
   readonly sessionmap_makeNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
   readonly sessionmap_markAsDeleted: (a: number) => void;
-  readonly sessionmap_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+  readonly sessionmap_new: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly sessionmap_setStreamingKnownState: (a: number, b: number, c: number) => [number, number];
   readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

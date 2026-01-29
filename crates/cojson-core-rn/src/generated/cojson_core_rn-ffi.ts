@@ -59,6 +59,7 @@ interface NativeModuleInterface {
     coId: Uint8Array,
     headerJson: Uint8Array,
     maxTxSize: Uint8Array,
+    skipVerify: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
   ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_add_transactions(

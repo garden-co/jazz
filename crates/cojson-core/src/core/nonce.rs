@@ -1,7 +1,7 @@
 use crate::core::{CoID, SessionID};
 use serde_json::Value as JsonValue;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NonceGenerator {
     co_id: CoID,
     session_id: SessionID,

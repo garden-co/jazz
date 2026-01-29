@@ -167,8 +167,11 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     coID: RawCoID,
     headerJson: string,
     maxTxSize?: number,
+    skipVerify?: boolean,
   ): SessionMapImpl {
-    return new SessionMapAdapter(new RNSessionMap(coID, headerJson, maxTxSize));
+    return new SessionMapAdapter(
+      new RNSessionMap(coID, headerJson, maxTxSize, skipVerify),
+    );
   }
 
   static async create(): Promise<RNCrypto> {

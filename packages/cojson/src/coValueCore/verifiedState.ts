@@ -4,7 +4,6 @@ import {
   exceedsRecommendedSize,
   getTransactionSize,
   addTransactionToContentMessage,
-  knownStateFromContent,
 } from "../coValueContentMessage.js";
 import {
   CryptoProvider,
@@ -21,7 +20,7 @@ import {
   SessionID,
   TransactionID,
 } from "../ids.js";
-import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
+import { Stringified, parseJSON } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { NewContentMessage } from "../sync.js";
@@ -101,6 +100,7 @@ export class VerifiedState {
     crypto: CryptoProvider,
     header: CoValueHeader,
     streamingKnownState?: KnownStateSessions,
+    skipVerify?: boolean,
   ) {
     this.id = id;
     this.crypto = crypto;
@@ -108,12 +108,11 @@ export class VerifiedState {
     this.branchSourceId = header.meta?.source as RawCoID | undefined;
     this.branchName = header.meta?.branch as string | undefined;
 
-    // Create the Rust SessionMapImpl with the header and max tx size threshold
-    const headerJson = stableStringify(header);
     this.impl = crypto.createSessionMap(
       id,
-      headerJson,
+      JSON.stringify(header),
       TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE,
+      skipVerify,
     );
 
     // Set streaming known state if provided

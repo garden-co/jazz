@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 /// SessionMap implementation - one instance per CoValue
 /// Owns the header and all session data for a single CoValue
+#[derive(Debug)]
 pub struct SessionMapImpl {
     co_id: CoID,
     header: CoValueHeader,
@@ -43,14 +44,78 @@ pub enum JsonValue {
     Object(BTreeMap<String, JsonValue>), // Sorted keys!
 }
 
+/// Nullable string field that can be:
+/// - Missing (None) - skipped during serialization
+/// - Present as null - serialized as `null`
+/// - Present as a string - serialized as `"..."`
+///
+/// This is needed because TypeScript's `createdAt?: string | null` can be:
+/// - undefined (missing from JSON)
+/// - null (explicitly null)
+/// - a string
+#[derive(Clone, Debug, PartialEq)]
+pub enum NullableString {
+    Missing,
+    Null,
+    Value(String),
+}
+
+impl Serialize for NullableString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            NullableString::Missing => {
+                // This shouldn't happen if skip_serializing_if is used correctly
+                serializer.serialize_none()
+            }
+            NullableString::Null => serializer.serialize_none(),
+            NullableString::Value(s) => serializer.serialize_str(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NullableString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // This is called when the field IS present in JSON
+        // If it's null, we get None from Option<String>::deserialize
+        // If it's a string, we get Some(string)
+        let value: Option<String> = Option::deserialize(deserializer)?;
+        match value {
+            None => Ok(NullableString::Null),
+            Some(s) => Ok(NullableString::Value(s)),
+        }
+    }
+}
+
+impl NullableString {
+    fn is_missing(&self) -> bool {
+        matches!(self, NullableString::Missing)
+    }
+}
+
+impl Default for NullableString {
+    fn default() -> Self {
+        NullableString::Missing
+    }
+}
+
 /// Header matching TypeScript CoValueHeader
 /// CRITICAL: Fields MUST be in alphabetical order to match stableStringify!
 /// serde serializes struct fields in definition order.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CoValueHeader {
     // Fields in alphabetical order: createdAt, meta, ruleset, type, uniqueness
-    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
+    #[serde(
+        rename = "createdAt",
+        skip_serializing_if = "NullableString::is_missing",
+        default
+    )]
+    pub created_at: NullableString,
     pub meta: Option<JsonValue>,
     pub ruleset: RulesetDef,
     #[serde(rename = "type")]
@@ -172,6 +237,12 @@ pub enum SessionMapError {
     #[error("Invalid header JSON: {0}")]
     InvalidHeader(String),
 
+    #[error("Invalid uniqueness: {0}")]
+    InvalidUniqueness(String),
+
+    #[error("CoValue ID mismatch: expected {expected}, got {actual}")]
+    IdMismatch { expected: String, actual: String },
+
     #[error("Cannot add to deleted CoValue: {0}")]
     DeletedCoValue(String),
 
@@ -183,6 +254,57 @@ pub enum SessionMapError {
 }
 
 // ============================================================================
+// Header Validation
+// ============================================================================
+
+/// The length of the short hash used for CoValue IDs (19 bytes before base58 encoding)
+const SHORT_HASH_LENGTH: usize = 19;
+
+/// Validate the uniqueness field of a header.
+/// Returns Ok(()) if valid, Err with message if invalid.
+fn validate_uniqueness(uniqueness: &Uniqueness) -> Result<(), SessionMapError> {
+    match uniqueness {
+        Uniqueness::String(_) | Uniqueness::Bool(_) | Uniqueness::Null => Ok(()),
+        Uniqueness::Integer(_) => {
+            // Integers are allowed (TS allows integers but not floats, Rust i64 is always integer)
+            Ok(())
+        }
+        Uniqueness::Object(map) => {
+            // Object values must all be strings - already enforced by BTreeMap<String, String>
+            // But we validate the map is not empty or has valid structure
+            for (key, _value) in map {
+                if key.is_empty() {
+                    return Err(SessionMapError::InvalidUniqueness(
+                        "Object keys cannot be empty".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Compute the expected CoValue ID from a header.
+/// This mirrors TypeScript's `idforHeader` function:
+/// 1. Serialize header to stable JSON (sorted keys)
+/// 2. BLAKE3 hash the JSON bytes
+/// 3. Take first 19 bytes, base58 encode
+/// 4. Prefix with "co_z"
+fn compute_co_id_from_header(header: &CoValueHeader) -> Result<String, SessionMapError> {
+    // Serialize header to JSON - serde_json with BTreeMap gives sorted keys
+    let header_json = serde_json::to_string(header)?;
+
+    // BLAKE3 hash the JSON bytes
+    let hash = crate::hash::blake3::blake3_hash_once(header_json.as_bytes());
+
+    // Take first SHORT_HASH_LENGTH bytes and base58 encode
+    let short_hash = &hash[..SHORT_HASH_LENGTH];
+    let encoded = bs58::encode(short_hash).into_string();
+
+    Ok(format!("co_z{}", encoded))
+}
+
+// ============================================================================
 // SessionMapImpl Implementation
 // ============================================================================
 
@@ -190,15 +312,52 @@ impl SessionMapImpl {
     /// Default max transaction size (100KB) - matches TypeScript default
     pub const DEFAULT_MAX_TX_SIZE: usize = 100 * 1024;
 
-    /// Create a new SessionMap for a CoValue
+    /// Create a new SessionMap for a CoValue.
+    /// Validates the header and verifies that `co_id` matches the hash of the header.
     /// `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
     pub fn new(
         co_id: &str,
         header_json: &str,
         max_tx_size: Option<u32>,
     ) -> Result<Self, SessionMapError> {
+        Self::new_internal(co_id, header_json, max_tx_size, false)
+    }
+
+    /// Create a new SessionMap for a CoValue, optionally skipping validation.
+    /// When `skip_verify` is true, uniqueness and ID validation are skipped.
+    /// This is used for storage shards where we trust the data.
+    pub fn new_with_skip_verify(
+        co_id: &str,
+        header_json: &str,
+        max_tx_size: Option<u32>,
+        skip_verify: bool,
+    ) -> Result<Self, SessionMapError> {
+        Self::new_internal(co_id, header_json, max_tx_size, skip_verify)
+    }
+
+    fn new_internal(
+        co_id: &str,
+        header_json: &str,
+        max_tx_size: Option<u32>,
+        skip_verify: bool,
+    ) -> Result<Self, SessionMapError> {
+        // Parse the header JSON
         let header: CoValueHeader = serde_json::from_str(header_json)
             .map_err(|e| SessionMapError::InvalidHeader(e.to_string()))?;
+
+        if !skip_verify {
+            // Validate uniqueness
+            validate_uniqueness(&header.uniqueness)?;
+
+            // Verify co_id matches the header hash
+            let expected_id = compute_co_id_from_header(&header)?;
+            if co_id != expected_id {
+                return Err(SessionMapError::IdMismatch {
+                    expected: expected_id,
+                    actual: co_id.to_string(),
+                });
+            }
+        }
 
         Ok(Self {
             co_id: CoID(co_id.to_string()),
@@ -710,9 +869,14 @@ mod tests {
     const TEST_HEADER: &str =
         r#"{"meta":null,"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":"test"}"#;
 
+    /// Helper to create a session map without validation (for tests that don't care about id matching)
+    fn create_test_session_map(co_id: &str, header_json: &str) -> SessionMapImpl {
+        SessionMapImpl::new_with_skip_verify(co_id, header_json, None, true).unwrap()
+    }
+
     #[test]
     fn test_session_map_creation() {
-        let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
+        let session_map = create_test_session_map("co_test", TEST_HEADER);
 
         assert_eq!(session_map.co_id.0, "co_test");
         assert!(!session_map.is_deleted());
@@ -721,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_header_round_trip() {
-        let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
+        let session_map = create_test_session_map("co_test", TEST_HEADER);
 
         let header_json = session_map.get_header();
         // Parse back to verify
@@ -731,7 +895,7 @@ mod tests {
 
     #[test]
     fn test_known_state() {
-        let session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
+        let session_map = create_test_session_map("co_test", TEST_HEADER);
 
         let known_state = session_map.get_known_state();
 
@@ -742,7 +906,7 @@ mod tests {
 
     #[test]
     fn test_mark_as_deleted() {
-        let mut session_map = SessionMapImpl::new("co_test", TEST_HEADER, None).unwrap();
+        let mut session_map = create_test_session_map("co_test", TEST_HEADER);
 
         session_map.mark_as_deleted();
         assert!(session_map.is_deleted());
@@ -771,7 +935,7 @@ mod tests {
     #[test]
     fn test_header_serialization_alphabetical_order() {
         let header = CoValueHeader {
-            created_at: None,
+            created_at: NullableString::Missing,
             meta: None,
             ruleset: RulesetDef::unsafe_allow_all(),
             co_type: "comap".to_string(),
@@ -780,7 +944,7 @@ mod tests {
 
         let json = serde_json::to_string(&header).unwrap();
         // Fields should be in alphabetical order: meta, ruleset, type, uniqueness
-        // (createdAt is skipped because it's None)
+        // (createdAt is skipped because it's Missing)
         assert_eq!(
             json,
             r#"{"meta":null,"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":"test"}"#
@@ -792,5 +956,256 @@ mod tests {
         assert!(is_delete_session_id("co_test_session_dabc123$"));
         assert!(!is_delete_session_id("co_test_session_zabc123"));
         assert!(!is_delete_session_id("co_test_session_dabc123")); // missing $
+    }
+
+    // ========================================================================
+    // Header Serialization Tests (verifying serde matches stableStringify)
+    // ========================================================================
+
+    #[test]
+    fn test_serde_roundtrip_preserves_json() {
+        // This JSON is what TypeScript's stableStringify produces
+        // Keys are in alphabetical order
+        let ts_json = r#"{"meta":null,"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":"test"}"#;
+
+        // Parse and re-serialize
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        // They should be identical
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_created_at() {
+        let ts_json = r#"{"createdAt":"2024-01-01T00:00:00.000Z","meta":null,"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":"test"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_group_ruleset() {
+        let ts_json = r#"{"meta":null,"ruleset":{"initialAdmin":"co_zadmin123","type":"group"},"type":"comap","uniqueness":"zABC123"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_realistic_account_header() {
+        // This is what TypeScript produces for a real account header
+        // Fields: createdAt, meta, ruleset (with initialAdmin + type), type, uniqueness
+        let ts_json = r#"{"createdAt":"2024-01-15T10:30:00.000Z","meta":null,"ruleset":{"initialAdmin":"co_z8mWmSe2pxfZjL6Vqx5gYy2wX","type":"group"},"type":"comap","uniqueness":"z8mWmSe2pxfZjL6Vqx5gYy2wXabc"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_id_validation_with_realistic_header() {
+        // Create a realistic header and compute its ID
+        let header = CoValueHeader {
+            created_at: NullableString::Value("2024-01-15T10:30:00.000Z".to_string()),
+            meta: Some(JsonValue::Null),
+            ruleset: RulesetDef::group("co_z8mWmSe2pxfZjL6Vqx5gYy2wX"),
+            co_type: "comap".to_string(),
+            uniqueness: Uniqueness::String("z8mWmSe2pxfZjL6Vqx5gYy2wXabc".to_string()),
+        };
+
+        let header_json = serde_json::to_string(&header).unwrap();
+        let expected_id = compute_co_id_from_header(&header).unwrap();
+
+        println!("Header JSON: {}", header_json);
+        println!("Expected ID: {}", expected_id);
+
+        // Validation should succeed
+        let result = SessionMapImpl::new(&expected_id, &header_json, None);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_created_at_null_handling() {
+        // TypeScript can pass "createdAt":null - what happens?
+        let ts_json_with_null = r#"{"createdAt":null,"meta":null,"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":"test"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json_with_null).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        println!("Input:  {}", ts_json_with_null);
+        println!("Output: {}", rust_json);
+        println!("created_at: {:?}", header.created_at);
+
+        assert_eq!(
+            ts_json_with_null, rust_json,
+            "\nTypeScript passes: {}\nRust produces:     {}",
+            ts_json_with_null, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_owned_by_group_ruleset() {
+        let ts_json = r#"{"meta":null,"ruleset":{"group":"co_zgroup123","type":"ownedByGroup"},"type":"colist","uniqueness":"zXYZ789"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_nested_meta() {
+        // Meta with nested object - keys should be sorted
+        let ts_json = r#"{"meta":{"alpha":"first","beta":"second","gamma":{"nested":"value"}},"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":"test"}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    #[test]
+    fn test_serde_roundtrip_with_uniqueness_object() {
+        let ts_json = r#"{"meta":null,"ruleset":{"type":"unsafeAllowAll"},"type":"comap","uniqueness":{"key1":"value1","key2":"value2"}}"#;
+
+        let header: CoValueHeader = serde_json::from_str(ts_json).unwrap();
+        let rust_json = serde_json::to_string(&header).unwrap();
+
+        assert_eq!(
+            ts_json, rust_json,
+            "\nTypeScript stableStringify: {}\nRust serde:                 {}",
+            ts_json, rust_json
+        );
+    }
+
+    // ========================================================================
+    // Header Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_compute_co_id_from_header() {
+        let header = CoValueHeader {
+            created_at: NullableString::Missing,
+            meta: None,
+            ruleset: RulesetDef::unsafe_allow_all(),
+            co_type: "comap".to_string(),
+            uniqueness: Uniqueness::String("test".to_string()),
+        };
+
+        let co_id = compute_co_id_from_header(&header).unwrap();
+        assert!(co_id.starts_with("co_z"));
+        // The ID should be deterministic
+        let co_id2 = compute_co_id_from_header(&header).unwrap();
+        assert_eq!(co_id, co_id2);
+    }
+
+    #[test]
+    fn test_validation_with_matching_id() {
+        let header = CoValueHeader {
+            created_at: NullableString::Missing,
+            meta: None,
+            ruleset: RulesetDef::unsafe_allow_all(),
+            co_type: "comap".to_string(),
+            uniqueness: Uniqueness::String("test".to_string()),
+        };
+
+        let header_json = serde_json::to_string(&header).unwrap();
+        let expected_id = compute_co_id_from_header(&header).unwrap();
+
+        // Should succeed with matching ID
+        let result = SessionMapImpl::new(&expected_id, &header_json, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validation_fails_with_mismatched_id() {
+        // Should fail with mismatched ID
+        let result = SessionMapImpl::new("co_wrong_id", TEST_HEADER, None);
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            SessionMapError::IdMismatch { expected, actual } => {
+                assert!(expected.starts_with("co_z"));
+                assert_eq!(actual, "co_wrong_id");
+            }
+            e => panic!("Expected IdMismatch error, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_validation_skip_verify_allows_mismatched_id() {
+        // Should succeed with skip_verify = true even with mismatched ID
+        let result = SessionMapImpl::new_with_skip_verify("co_wrong_id", TEST_HEADER, None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_uniqueness_string() {
+        let uniqueness = Uniqueness::String("test".to_string());
+        assert!(validate_uniqueness(&uniqueness).is_ok());
+    }
+
+    #[test]
+    fn test_validate_uniqueness_bool() {
+        let uniqueness = Uniqueness::Bool(true);
+        assert!(validate_uniqueness(&uniqueness).is_ok());
+    }
+
+    #[test]
+    fn test_validate_uniqueness_null() {
+        let uniqueness = Uniqueness::Null;
+        assert!(validate_uniqueness(&uniqueness).is_ok());
+    }
+
+    #[test]
+    fn test_validate_uniqueness_integer() {
+        let uniqueness = Uniqueness::Integer(42);
+        assert!(validate_uniqueness(&uniqueness).is_ok());
+    }
+
+    #[test]
+    fn test_validate_uniqueness_object() {
+        let mut map = BTreeMap::new();
+        map.insert("key".to_string(), "value".to_string());
+        let uniqueness = Uniqueness::Object(map);
+        assert!(validate_uniqueness(&uniqueness).is_ok());
+    }
+
+    #[test]
+    fn test_validate_uniqueness_object_empty_key_rejected() {
+        let mut map = BTreeMap::new();
+        map.insert("".to_string(), "value".to_string());
+        let uniqueness = Uniqueness::Object(map);
+        assert!(validate_uniqueness(&uniqueness).is_err());
     }
 }

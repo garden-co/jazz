@@ -67,7 +67,7 @@ pub enum TransactionMode {
     Trusting,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionLogInternal {
     public_key: Option<VerifyingKey>,
     hasher: blake3::Hasher,

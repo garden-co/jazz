@@ -220,9 +220,10 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     coID: RawCoID,
     headerJson: string,
     maxTxSize?: number,
+    skipVerify?: boolean,
   ): SessionMapImpl {
     return new SessionMapAdapter(
-      new WasmSessionMap(coID, headerJson, maxTxSize),
+      new WasmSessionMap(coID, headerJson, maxTxSize, skipVerify),
     );
   }
 }
