@@ -88,9 +88,28 @@ pub struct SchemaContext {
     /// Schemas received via catalogue sync but not yet live (awaiting lens path).
     /// These become live when a lens path to current_schema becomes available.
     pub pending_schemas: HashMap<SchemaHash, Schema>,
+
+    /// Whether set_current() has been called (guards against double initialization).
+    is_initialized: bool,
 }
 
 impl SchemaContext {
+    /// Create an empty context (no current schema yet).
+    ///
+    /// Call `set_current()` to initialize the current schema before use.
+    pub fn empty() -> Self {
+        Self {
+            current_schema: Schema::new(),
+            current_hash: SchemaHash::from_bytes([0; 32]), // Sentinel value
+            env: String::new(),
+            user_branch: String::new(),
+            live_schemas: HashMap::new(),
+            lenses: HashMap::new(),
+            pending_schemas: HashMap::new(),
+            is_initialized: false,
+        }
+    }
+
     /// Create a new context with only the current schema (no live schemas).
     pub fn new(schema: Schema, env: &str, user_branch: &str) -> Self {
         let hash = SchemaHash::compute(&schema);
@@ -102,12 +121,34 @@ impl SchemaContext {
             live_schemas: HashMap::new(),
             lenses: HashMap::new(),
             pending_schemas: HashMap::new(),
+            is_initialized: true,
         }
     }
 
     /// Create with default environment ("dev").
     pub fn with_defaults(schema: Schema, user_branch: &str) -> Self {
         Self::new(schema, "dev", user_branch)
+    }
+
+    /// Set the current schema (can only be called once).
+    ///
+    /// # Panics
+    /// Panics if called more than once.
+    pub fn set_current(&mut self, schema: Schema, env: &str, user_branch: &str) {
+        assert!(
+            !self.is_initialized,
+            "set_current() called on already-initialized SchemaContext"
+        );
+        self.current_schema = schema;
+        self.current_hash = SchemaHash::compute(&self.current_schema);
+        self.env = env.to_string();
+        self.user_branch = user_branch.to_string();
+        self.is_initialized = true;
+    }
+
+    /// Check if this context has been initialized with a current schema.
+    pub fn is_initialized(&self) -> bool {
+        self.is_initialized
     }
 
     /// Get the composed branch name for the current schema.

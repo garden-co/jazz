@@ -86,8 +86,11 @@ impl SchemaManager {
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
         let context = SchemaContext::new(schema.clone(), env, user_branch);
-        let query_manager =
-            QueryManager::new_with_schema_context(sync_manager, schema, context.clone());
+
+        // Create QueryManager with empty context, then set current schema
+        let mut query_manager = QueryManager::new(sync_manager);
+        query_manager.set_current_schema(schema, env, user_branch);
+
         Ok(Self {
             context,
             query_manager,
@@ -145,7 +148,7 @@ impl SchemaManager {
     /// The lens is automatically generated from the schema diff.
     /// Returns error if the generated lens is a draft (needs manual review).
     ///
-    /// Note: Call `sync_context()` after adding live schemas to update QueryManager.
+    /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
         let lens = generate_lens(&old_schema, &self.context.current_schema);
 
@@ -157,7 +160,14 @@ impl SchemaManager {
         }
 
         let source_hash = lens.source_hash;
-        self.context.add_live_schema(old_schema, lens);
+
+        // Update context
+        self.context
+            .add_live_schema(old_schema.clone(), lens.clone());
+
+        // Update QueryManager (indices, branch map, subscriptions)
+        self.query_manager.add_live_schema(old_schema);
+        self.query_manager.register_lens(lens);
 
         // Return reference to the registered lens
         self.context
@@ -173,7 +183,7 @@ impl SchemaManager {
     /// Use this when auto-generated lens needs customization or
     /// when adding a schema with a manual migration.
     ///
-    /// Note: Call `sync_context()` after adding live schemas to update QueryManager.
+    /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema_with_lens(
         &mut self,
         old_schema: Schema,
@@ -185,11 +195,21 @@ impl SchemaManager {
                 target: lens.target_hash,
             });
         }
-        self.context.add_live_schema(old_schema, lens);
+
+        // Update context
+        self.context
+            .add_live_schema(old_schema.clone(), lens.clone());
+
+        // Update QueryManager
+        self.query_manager.add_live_schema(old_schema);
+        self.query_manager.register_lens(lens);
+
         Ok(())
     }
 
     /// Register a lens between two schemas.
+    ///
+    /// Also registers the lens in QueryManager and tries to activate pending schemas.
     pub fn register_lens(&mut self, lens: Lens) -> Result<(), SchemaError> {
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {
@@ -197,7 +217,13 @@ impl SchemaManager {
                 target: lens.target_hash,
             });
         }
-        self.context.register_lens(lens);
+
+        // Update context
+        self.context.register_lens(lens.clone());
+
+        // Update QueryManager
+        self.query_manager.register_lens(lens);
+
         Ok(())
     }
 
@@ -430,7 +456,7 @@ impl SchemaManager {
         self.context.add_pending_schema(schema);
 
         // Try to activate in case we already have the lens path
-        self.try_activate_pending_schemas();
+        self.activate_pending_and_sync_to_query_manager();
 
         Ok(())
     }
@@ -487,11 +513,12 @@ impl SchemaManager {
             // Draft lens received via catalogue - storing but not activating schemas through it
         }
 
-        // Register the lens
-        self.context.register_lens(lens);
+        // Register the lens in both context and QueryManager
+        self.context.register_lens(lens.clone());
+        self.query_manager.register_lens(lens);
 
         // Try to activate pending schemas that may now be reachable
-        self.try_activate_pending_schemas();
+        self.activate_pending_and_sync_to_query_manager();
 
         Ok(())
     }
@@ -501,6 +528,26 @@ impl SchemaManager {
     /// Called after registering new lenses. Returns hashes of newly activated schemas.
     pub fn try_activate_pending_schemas(&mut self) -> Vec<SchemaHash> {
         self.context.try_activate_pending()
+    }
+
+    /// Activate pending schemas and sync them to QueryManager.
+    ///
+    /// This is the incremental replacement for sync_context().
+    fn activate_pending_and_sync_to_query_manager(&mut self) {
+        let activated = self.context.try_activate_pending();
+        if activated.is_empty() {
+            return;
+        }
+
+        // For each newly activated schema, add it to QueryManager
+        for hash in &activated {
+            if let Some(schema) = self.context.live_schemas.get(hash).cloned() {
+                self.query_manager.add_live_schema(schema);
+            }
+        }
+
+        // Retry any buffered row updates
+        self.query_manager.retry_pending_row_updates();
     }
 
     // =========================================================================
@@ -551,6 +598,9 @@ impl SchemaManager {
     /// This also processes any pending catalogue updates (schemas/lenses) that
     /// were received via sync. Catalogue schemas are stored as pending until
     /// a lens path exists, then activated.
+    ///
+    /// When schemas activate, QueryManager is updated incrementally and
+    /// buffered row updates are retried.
     pub fn process(&mut self) {
         self.query_manager.process();
 
@@ -561,16 +611,9 @@ impl SchemaManager {
             let _ =
                 self.process_catalogue_update(update.object_id, &update.metadata, &update.content);
         }
-    }
 
-    /// Rebuild QueryManager's schema context after adding live schemas.
-    ///
-    /// Call this after `add_live_schema` to update QueryManager's schema awareness.
-    pub fn sync_context(&mut self) {
-        let sync_manager = std::mem::take(self.query_manager.sync_manager_mut());
-        let schema = (*self.query_manager.schema()).clone();
-        self.query_manager =
-            QueryManager::new_with_schema_context(sync_manager, schema, self.context.clone());
+        // Final attempt to activate any remaining pending schemas
+        self.activate_pending_and_sync_to_query_manager();
     }
 }
 

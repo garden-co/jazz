@@ -32,6 +32,8 @@ pub struct PolicyFilterNode {
     schema: Schema,
     /// Table name for this node (for INHERITS resolution).
     table_name: String,
+    /// Branch name for index lookups.
+    branch: String,
     /// Current tuples that pass the policy.
     current_tuples: AHashSet<Tuple>,
     dirty: bool,
@@ -52,6 +54,18 @@ impl PolicyFilterNode {
         schema: Schema,
         table_name: impl Into<String>,
     ) -> Self {
+        Self::new_with_branch(descriptor, policy, session, schema, table_name, "main")
+    }
+
+    /// Create a new policy filter node with explicit branch.
+    pub fn new_with_branch(
+        descriptor: RowDescriptor,
+        policy: PolicyExpr,
+        session: Session,
+        schema: Schema,
+        table_name: impl Into<String>,
+        branch: impl Into<String>,
+    ) -> Self {
         let table_name = table_name.into();
         let inherits_tables = collect_inherits_tables(&policy, &descriptor);
         let has_inherits = !inherits_tables.is_empty();
@@ -61,6 +75,7 @@ impl PolicyFilterNode {
             session,
             schema,
             table_name,
+            branch: branch.into(),
             current_tuples: AHashSet::new(),
             dirty: true,
             has_inherits,
@@ -313,6 +328,7 @@ impl PolicyFilterNode {
             parent_policy,
             &self.session,
             &self.schema,
+            &self.branch,
         ) {
             Some(g) => g,
             None => return false,

@@ -329,6 +329,117 @@ crates/groove/src/query_manager/
 
 ---
 
+## Dynamic Schema Context
+
+QueryManager supports dynamic schema activation without recreation. This preserves active subscriptions and indices when new schema versions become available.
+
+### Initialization Pattern
+
+```rust
+// 1. Create QueryManager with empty context
+let mut qm = QueryManager::new(sync_manager);
+
+// 2. Set the current schema (only once)
+qm.set_current_schema(schema, "dev", "main");
+
+// 3. Add live schemas dynamically (can be called anytime)
+qm.add_live_schema(old_schema);
+qm.register_lens(lens);
+```
+
+### Key Behaviors
+
+**Schema Context Always Present**
+- `schema_context` is non-optional (starts empty, initialized by `set_current_schema`)
+- All code paths use schema-aware branch handling
+- `DEFAULT_ROW_BRANCH` has been removed; branches are always derived from schema context
+
+**Subscription Recompilation**
+- When `add_live_schema()` or `register_lens()` is called, subscriptions are marked for recompile
+- On next `process()`, stale subscriptions rebuild their QueryGraph with updated branch lists
+- Original `Query` is stored in subscription for recompilation
+- Subscription IDs remain stable across recompilation
+
+**Branch Name Composition**
+- Branch names follow format: `"{env}-{hash8}-{user_branch}"`
+- Example: `"dev-a1b2c3d4-main"` for env="dev", hash=a1b2..., user_branch="main"
+- All live schemas get their own branch name
+- Queries without explicit `.branch()` use schema context's branches automatically
+
+**Pending Row Buffer**
+- Rows arriving on unknown branches are buffered in `pending_row_updates`
+- When a schema activates, buffered rows are retried via `retry_pending_row_updates()`
+- This handles rows arriving before their schema is discovered via catalogue sync
+
+### Branch Propagation Through Query Graphs
+
+All query graph nodes receive explicit branch information. There is no implicit "main" default anywhere in production code.
+
+**IndexScanNode**
+- Always constructed with explicit branch: `IndexScanNode::new_with_branch(table, column, branch, condition, descriptor)`
+- Index lookups use the composed key `(table, column, branch)`
+- The `new()` method exists for tests only (uses "main")
+
+**Joins**
+- `compile_join()` receives branches from the outer query
+- Join correlation lookups use the same branch list as the main query
+- Inner table index scans use schema-aware branch names
+
+**Array Subqueries**
+- `SubgraphTemplate::instantiate()` copies branches from the base query
+- This ensures correlated subqueries query the same branch set as their parent
+- Nested subqueries inherit branches recursively
+
+**PolicyGraph and PolicyFilter**
+- PolicyGraph functions take explicit branch: `for_using_check(table, id, policy, session, schema, branch)`
+- PolicyFilterNode stores branch for INHERITS evaluation: `new_with_branch(..., branch)`
+- EXISTS clauses in policies use the row's source branch for index lookups
+
+### Server Subscriptions
+
+Server subscriptions (created via `subscribe_server_query`) handle remote clients:
+
+```rust
+struct ServerQuerySubscription {
+    query: Query,
+    graph: QueryGraph,
+    session: Option<Session>,
+    branches: Vec<String>,        // Resolved at creation time
+    last_scope: HashSet<(ObjectId, BranchName)>,
+    needs_recompile: bool,
+}
+```
+
+**Branch Resolution**
+- When `query.branches` is empty (common case), branches are resolved from schema context
+- This resolved list is stored in the subscription and used for settling
+- Recompilation updates the branch list from the current schema context
+
+**Scope Tracking**
+- `last_scope` tracks `(ObjectId, BranchName)` pairs for change detection
+- Row updates emit deltas based on scope differences
+- Branch-aware scope ensures correct delta emission across schema versions
+
+### SchemaManager Integration
+
+SchemaManager wraps QueryManager and provides the high-level API:
+
+```rust
+// SchemaManager::new() internally calls:
+// - QueryManager::new(sync_manager)
+// - qm.set_current_schema(schema, env, user_branch)
+
+// add_live_schema() updates both context and QueryManager
+sm.add_live_schema(old_schema)?;  // Auto-updates QueryManager
+
+// process() handles catalogue sync and auto-activates schemas
+sm.process();  // No more sync_context() needed
+```
+
+The old `sync_context()` method has been removed. Schema changes flow incrementally through `add_live_schema()` and `register_lens()`.
+
+---
+
 ## Known Limitations & Future Work
 
 ### High Priority
