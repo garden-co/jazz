@@ -1,21 +1,16 @@
 import { base58 } from "@scure/base";
-import { ControlledAccountOrAgent, RawAccountID } from "../coValues/account.js";
+import { RawAccountID } from "../coValues/account.js";
 import {
   AgentID,
   RawCoID,
   TransactionID,
-  SessionID,
   ActiveSessionID,
   DeleteSessionID,
 } from "../ids.js";
 import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
-import { JsonObject, JsonValue } from "../jsonValue.js";
+import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import {
-  PrivateTransaction,
-  Transaction,
-  TrustingTransaction,
-} from "../coValueCore/verifiedState.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 
 function randomBytes(bytesLength = 32): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(bytesLength));

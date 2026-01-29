@@ -34,14 +34,9 @@ import {
   textDecoder,
   textEncoder,
 } from "./crypto.js";
-import { ControlledAccountOrAgent } from "../coValues/account.js";
 import { WasmCrypto } from "./WasmCrypto.js";
 
-import {
-  PrivateTransaction,
-  Transaction,
-  TrustingTransaction,
-} from "../coValueCore/verifiedState.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 
 type Blake3State = Blake3Hasher;
 

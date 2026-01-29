@@ -11,7 +11,6 @@ import { TransactionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
 import { JsonObject } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { ControlledAccountOrAgent } from "../coValues/account.js";
 import {
   PrivateTransaction,
   Transaction,
@@ -20,12 +19,10 @@ import {
 import {
   CryptoProvider,
   KeyID,
-  KeySecret,
   Sealed,
   SealerID,
   SealerSecret,
   SessionMapImpl,
-  Signature,
   SignerID,
   SignerSecret,
   textDecoder,
