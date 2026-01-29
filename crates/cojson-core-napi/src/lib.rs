@@ -1,6 +1,5 @@
 use cojson_core::core::{
-  CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl,
-  Transaction as RustTransaction,
+  CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl, Transaction as RustTransaction,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
