@@ -15,14 +15,13 @@ import {
   verify,
 } from "cojson-core-napi";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
-import { RawCoID, SessionID, TransactionID } from "../ids.js";
+import { RawCoID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
-import { JsonObject, JsonValue } from "../jsonValue.js";
+import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
 import {
   CryptoProvider,
   Encrypted,
-  KeyID,
   KeySecret,
   Sealed,
   SealerID,

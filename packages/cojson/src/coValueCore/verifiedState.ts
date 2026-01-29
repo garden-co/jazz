@@ -202,17 +202,11 @@ export class VerifiedState {
     // Build fresh SessionLog from Rust data
     const signatureAfter: { [txIdx: number]: Signature | undefined } = {};
 
-    // Fetch all transactions - may return JSON strings (WASM) or native objects (NAPI/RN)
-    const rawTransactions =
+    // Fetch all transactions from Rust
+    const transactions: Transaction[] =
       currentTxCount > 0
-        ? this.impl.getSessionTransactions(sessionID, 0)
-        : undefined;
-
-    const transactions: Transaction[] = rawTransactions
-      ? rawTransactions.map((tx) =>
-          typeof tx === "string" ? (JSON.parse(tx) as Transaction) : tx,
-        )
-      : [];
+        ? (this.impl.getSessionTransactions(sessionID, 0) ?? [])
+        : [];
 
     // Build signatureAfter map
     const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
@@ -280,13 +274,8 @@ export class VerifiedState {
     for (const sessionID of sessionIds) {
       const txCount = this.impl.getTransactionCount(sessionID);
       if (txCount > 0) {
-        // getSessionTransactions may return JSON strings (WASM) or native objects (NAPI/RN)
-        const rawTransactions = this.impl.getSessionTransactions(sessionID, 0);
-        if (rawTransactions) {
-          // Convert to Transaction objects if needed, then stringify for addTransactions
-          const transactions = rawTransactions.map((tx) =>
-            typeof tx === "string" ? JSON.parse(tx) : tx,
-          );
+        const transactions = this.impl.getSessionTransactions(sessionID, 0);
+        if (transactions) {
           const lastSignature = this.impl.getLastSignature(sessionID) as
             | Signature
             | undefined;
@@ -451,17 +440,6 @@ export class VerifiedState {
       signature,
       transaction: result.transaction,
     };
-  }
-
-  getLastSignatureCheckpoint(sessionID: SessionID): number {
-    const sessionLog = this.getSession(sessionID);
-
-    if (!sessionLog?.signatureAfter) return -1;
-
-    return Object.keys(sessionLog.signatureAfter).reduce(
-      (max, idx) => Math.max(max, parseInt(idx)),
-      -1,
-    );
   }
 
   setStreamingKnownState(streamingKnownState: KnownStateSessions) {

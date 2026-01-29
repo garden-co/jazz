@@ -18,6 +18,7 @@ import {
 } from "cojson-core-wasm";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { RawCoID, TransactionID } from "../ids.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
@@ -299,17 +300,19 @@ class SessionMapAdapter implements SessionMapImpl {
     return this.sessionMap.getTransactionCount(sessionId);
   }
 
-  getTransaction(sessionId: string, txIndex: number): string | undefined {
-    return this.sessionMap.getTransaction(sessionId, txIndex) ?? undefined;
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return JSON.parse(result) as Transaction;
   }
 
   getSessionTransactions(
     sessionId: string,
     fromIndex: number,
-  ): string[] | undefined {
-    return (
-      this.sessionMap.getSessionTransactions(sessionId, fromIndex) ?? undefined
-    );
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result.map((tx) => JSON.parse(tx) as Transaction);
   }
 
   getLastSignature(sessionId: string): string | undefined {
