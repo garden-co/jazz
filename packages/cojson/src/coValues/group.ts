@@ -338,6 +338,13 @@ export class RawGroup<
   }
 
   /**
+   * Optional display name set at group creation. Immutable; stored in plaintext in header meta.
+   */
+  get name(): string | undefined {
+    return (this.headerMeta as { name?: string } | null)?.name;
+  }
+
+  /**
    * Returns the current role of a given account.
    *
    * @category 1. Role reading
