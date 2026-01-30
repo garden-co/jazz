@@ -517,6 +517,14 @@ export class StorageApiAsync implements StorageAPI {
     this.dbClient.trackCoValuesSyncState(updates).then(() => done?.());
   }
 
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void {
+    this.dbClient.getCoValueIDs(limit, offset).then(callback);
+  }
+
   getUnsyncedCoValueIDs(
     callback: (unsyncedCoValueIDs: RawCoID[]) => void,
   ): void {
