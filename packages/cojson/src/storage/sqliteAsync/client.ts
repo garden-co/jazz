@@ -313,6 +313,16 @@ export class SQLiteClientAsync
     ]);
   }
 
+  async getCoValueIDs(
+    limit: number,
+    offset: number,
+  ): Promise<{ id: RawCoID }[]> {
+    return this.db.query<{ id: RawCoID }>(
+      "SELECT id FROM coValues ORDER BY rowID LIMIT ? OFFSET ?",
+      [limit, offset],
+    );
+  }
+
   async getCoValueKnownState(
     coValueId: string,
   ): Promise<CoValueKnownState | undefined> {

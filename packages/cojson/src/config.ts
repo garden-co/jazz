@@ -64,3 +64,11 @@ export function setMaxOutgoingMessagesChunkBytes(bytes: number) {
 export function setMaxInFlightLoadsPerPeer(limit: number) {
   CO_VALUE_LOADING_CONFIG.MAX_IN_FLIGHT_LOADS_PER_PEER = limit;
 }
+
+export const STORAGE_RECONCILIATION_CONFIG = {
+  BATCH_SIZE: 100,
+};
+
+export function setStorageReconciliationBatchSize(size: number) {
+  STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE = size;
+}

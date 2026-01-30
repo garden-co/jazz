@@ -352,6 +352,10 @@ export class CoValueCore {
     return this.hasVerifiedContent();
   }
 
+  isPartiallyLoaded(): boolean {
+    return this.loadingState === "onlyKnownState";
+  }
+
   isCompletelyDownloaded(): boolean {
     if (!this.hasVerifiedContent()) {
       return false;
