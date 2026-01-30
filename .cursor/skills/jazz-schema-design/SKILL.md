@@ -4,6 +4,23 @@ description: Design and implement collaborative data schemas using the Jazz fram
 ---
 # Jazz Data Modelling and Schema Design
 
+## When to Use This Skill
+
+* Designing data structures for Jazz applications
+* Defining CoValue schemas and relationships
+* Configuring permissions at the schema level
+* Planning schema evolution and migrations
+* Choosing between scalar and collaborative types
+* Modeling relationships between data entities
+
+## Do NOT Use This Skill For
+
+* Writing tests for Jazz applications (use the `jazz-testing` skill)
+* General framework integration questions (use the `jazz-ui-development` skill)
+* Permissions topics outside the schema. Use the `jazz-permissions-security` skill.
+
+**Key Heuristic for Agents:** If the user is asking about how to structure their data model, define relationships, configure default permissions, or evolve schemas, use this skill.
+
 ## Core Concepts
 
 Jazz models data as an explicitly linked collaborative graph, not traditional tables or collections. Data types are defined as schemas, with CoValues serving as the fundamental building blocks.
@@ -79,7 +96,7 @@ Defines group when calling `.create()` without explicit owner.
 Controls behavior when CoValue is created inline (NOT applied to `.create()` calls):
 
 - `"extendsContainer"` (default) - New group includes container owner as member, inheriting permissions
-- `"sameAsContainer"` - Reuse container's owner (performance optimization)
+- `"sameAsContainer"` - Reuse container's owner (performance optimization—see below for concerns and considerations)
 - `"newGroup"` - New group with active account as admin
 - `{ extendsContainer: "reader" }` - Like `"extendsContainer"` but override container owner's role
 - Custom callback - Create and configure new group as needed
@@ -98,6 +115,8 @@ setDefaultSchemaPermissions({
   onInlineCreate: "sameAsContainer",  // Performance optimization
 });
 ```
+
+**USE EXTREME CAUTION:** If you use `sameAsContainer`, you **MUST** be aware that the child and parent groups are one and the same. Any changes to the child group will affect the parent group, and vice versa. This can lead to unexpected behavior if not handled carefully, where changing permissions on a child group inadvertently results in permissions being granted to the parent group and any other siblings created with the same parent. As ownership cannot be changed, you **MUST NOT USE** `sameAsContainer` if you **AT ANY TIME IN FUTURE** may wish to change permissions granularly on the child group.
 
 ## CoValue Types
 
@@ -138,7 +157,7 @@ const myCoValue = co.map({
 });
 ```
 
-Note: not all Zod types are available in Jazz. Be sure to **always** `import { z } from 'jazz-tools';`, and validate whether the type exists on the export.
+Note: not all Zod types are available in Jazz. Be sure to **always** `import { z } from 'jazz-tools';`, and validate whether the type exists on the export. **DO NOT** import from `zod`.
 
 ### Collaborative Types (Jazz: `co.*`)
 
@@ -162,7 +181,7 @@ const myCoVal = co.map({
 });
 ```
 
-**Trade-off:** CoValues track full edit history. *Slightly* slower for single-writer full-replacement scenarios, but benefits usually outweigh costs.
+**Trade-off:** CoValues track full edit history. *Slightly* slower for single-writer full-replacement scenarios, but benefits almost always outweigh costs.
 
 ## Relationship Modeling
 
@@ -256,8 +275,8 @@ CoValues are only addressable by unique ID. Discovery without ID requires refere
 
 **Standard pattern:**
 
-- Attach 'root' CoValue to user account (entry point)
-- For global roots: hardcode ID or use environment variable
+- Attach 'root' CoValue to user account (entry point to the data graph)
+- For global 'roots': hardcode ID or use environment variable
 - Build graph from root via references
 
 ## Schema Evolution
@@ -404,3 +423,15 @@ Each CoValue has unique ID - only way to directly address without traversal.
 
 **Nested CoValues:**
 Inherit permissions from parent when created inline.
+
+## References
+
+Load these on demand, based on need:
+
+* API reference: <https://jazz.tools/docs/api-reference.md>
+* Schema example: <https://github.com/garden-co/jazz/blob/main/examples/music-player/src/1_schema.ts>
+* Connecting CoValues docs <https://jazz.tools/docs/core-concepts/schemas/connecting-covalues.md>
+* Accounts and migrations docs <https://jazz.tools/docs/core-concepts/schemas/accounts-and-migrations.md>
+* Docs for discriminated unions (aka schema unions) <https://jazz.tools/docs/core-concepts/schemas/schemaunions.md>
+
+When using an online reference via a skill, cite the specific URL to the user to build trust.
