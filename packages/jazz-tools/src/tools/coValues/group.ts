@@ -62,7 +62,9 @@ export class Group extends CoValueBase implements CoValue {
   declare $jazz: GroupJazzApi<this>;
 
   /** @deprecated Don't use constructor directly, use .create */
-  constructor(options: { fromRaw: RawGroup } | { owner: Account }) {
+  constructor(
+    options: { fromRaw: RawGroup } | { owner: Account; name?: string },
+  ) {
     super();
     let raw: RawGroup;
 
@@ -73,7 +75,9 @@ export class Group extends CoValueBase implements CoValue {
       if (!initOwner) throw new Error("No owner provided");
       if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
         const rawOwner = initOwner.$jazz.raw;
-        raw = rawOwner.core.node.createGroup();
+        const nameOptions =
+          options.name !== undefined ? { name: options.name } : undefined;
+        raw = rawOwner.core.node.createGroup(undefined, nameOptions);
       } else {
         throw new Error("Can only construct group as a controlled account");
       }
@@ -96,7 +100,7 @@ export class Group extends CoValueBase implements CoValue {
 
   static create<G extends Group>(
     this: CoValueClass<G>,
-    options?: { owner: Account } | Account,
+    options?: { owner?: Account; name?: string } | Account,
   ) {
     return new this(parseGroupCreateOptions(options));
   }
@@ -358,6 +362,15 @@ export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
    */
   get owner(): undefined {
     return undefined;
+  }
+
+  /**
+   * Optional display name set at group creation. Immutable; stored in plaintext.
+   *
+   * @category Content
+   */
+  get name(): string | undefined {
+    return this.raw.name;
   }
 
   /** @category Subscription & Loading */

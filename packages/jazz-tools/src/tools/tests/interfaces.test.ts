@@ -88,4 +88,38 @@ describe("parseGroupCreateOptions", () => {
     const result = parseGroupCreateOptions({ owner: account });
     expect(result.owner).toBe(account);
   });
+
+  it("should include name when provided in options", async () => {
+    const account = await createJazzTestAccount();
+    const result = parseGroupCreateOptions({
+      owner: account,
+      name: "My Group",
+    });
+    expect(result.owner).toBe(account);
+    expect(result.name).toBe("My Group");
+  });
+
+  it("should not include name when not provided", async () => {
+    const account = await createJazzTestAccount();
+    const result = parseGroupCreateOptions({ owner: account });
+    expect(result.name).toBeUndefined();
+  });
+});
+
+describe("Group name metadata", () => {
+  it("should have undefined name when created without name", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+    const group = Group.create({ owner: account });
+    expect(group.$jazz.name).toBeUndefined();
+  });
+
+  it("should have name when created with name", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+    const group = Group.create({ owner: account, name: "Jazz Group" });
+    expect(group.$jazz.name).toBe("Jazz Group");
+  });
 });

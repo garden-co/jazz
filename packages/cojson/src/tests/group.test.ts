@@ -70,6 +70,34 @@ test("Can create a FileStream in a group", () => {
   expect(stream instanceof RawBinaryCoStream).toEqual(true);
 });
 
+test("Group without name has name undefined", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup();
+  expect(group.name).toBeUndefined();
+});
+
+test("Group created with name returns that name", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup(undefined, { name: "My Group" });
+  expect(group.name).toBe("My Group");
+});
+
+test("Group created with empty name has name undefined (meta not set)", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup(undefined, { name: "" });
+  expect(group.name).toBeUndefined();
+});
+
+test("Group with name persists after sync and load", async () => {
+  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+  const group = node1.node.createGroup(undefined, { name: "Synced Group" });
+  expect(group.name).toBe("Synced Group");
+  await group.core.waitForSync();
+
+  const loaded = expectGroup(await loadCoValueOrFail(node2.node, group.id));
+  expect(loaded.name).toBe("Synced Group");
+});
+
 test("Remove a member from a group where the admin role is inherited", async () => {
   const { node1, node2, node3 } = await createThreeConnectedNodes(
     "server",
