@@ -93,7 +93,7 @@ export function useMediaPlayer() {
 
     // Prefetch the next track in the background
     getNextTrack().then((nextTrack) => {
-      if (nextTrack.$isLoaded) {
+      if (nextTrack?.$isLoaded) {
         prefetchTrackAudio(nextTrack);
       }
     });
