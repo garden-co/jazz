@@ -12,6 +12,7 @@ import {
   Group,
   co,
   activeAccountContext,
+  deriveChildUniqueness,
 } from "../internal";
 import { z } from "../exports";
 import { waitFor } from "./utils";
@@ -1366,5 +1367,34 @@ describe("getOrCreateUnique vs upsertUnique behavior comparison", () => {
     assertLoaded(gotOrCreated);
     expect(gotOrCreated.theme).toBe("light"); // NOT updated
     expect(gotOrCreated.language).toBe("en"); // NOT updated
+  });
+});
+
+describe("deriveChildUniqueness", () => {
+  test("derives child uniqueness from a string parent using @@ separator", () => {
+    expect(deriveChildUniqueness("parent-unique", "fieldName")).toBe(
+      "parent-unique@@fieldName",
+    );
+  });
+
+  test("derives child uniqueness from an object parent with existing _field", () => {
+    expect(deriveChildUniqueness({ _field: "a" }, "b")).toEqual({
+      _field: "a/b",
+    });
+  });
+
+  test("derives child uniqueness from an object parent without _field", () => {
+    expect(deriveChildUniqueness({}, "field")).toEqual({ _field: "field" });
+  });
+
+  test("preserves extra properties on object uniqueness", () => {
+    expect(
+      deriveChildUniqueness({ _field: "parent", other: "value" }, "child"),
+    ).toEqual({ _field: "parent/child", other: "value" });
+  });
+
+  test("returns non-derivable inputs unchanged", () => {
+    expect(deriveChildUniqueness(true, "field")).toBe(true);
+    expect(deriveChildUniqueness(null as any, "field")).toBe(null);
   });
 });
