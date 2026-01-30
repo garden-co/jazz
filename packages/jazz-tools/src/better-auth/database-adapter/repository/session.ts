@@ -66,10 +66,16 @@ export class SessionRepository extends JazzRepository {
       },
     });
 
-    const session = this.getSchema("session").create(data, {
-      unique: data.token,
-      owner: this.owner,
-    });
+    const session = this.getSchema("session").create(
+      {
+        ...data,
+        _deleted: false,
+      },
+      {
+        unique: data.token,
+        owner: this.owner,
+      },
+    );
 
     sessions.$jazz.push(session);
 

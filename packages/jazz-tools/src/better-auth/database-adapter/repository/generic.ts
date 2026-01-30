@@ -70,9 +70,15 @@ export class JazzRepository {
 
     if (!uniqueId) {
       // Use the same owner of the table.
-      const node = schema.create(data, {
-        owner: list.$jazz.owner,
-      });
+      const node = schema.create(
+        {
+          ...data,
+          _deleted: false,
+        },
+        {
+          owner: list.$jazz.owner,
+        },
+      );
 
       list.$jazz.push(node);
 

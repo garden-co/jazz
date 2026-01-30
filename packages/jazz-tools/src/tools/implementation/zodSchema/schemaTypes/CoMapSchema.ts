@@ -19,6 +19,7 @@ import {
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  isCoValueSchema,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -33,6 +34,8 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { generateValidationSchemaFromItem } from "./schemaValidators.js";
+import type { LocalValidationMode } from "../validationSettings.js";
 
 type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
   CoMapInstanceCoValuesMaybeLoaded<Shape>
@@ -51,6 +54,41 @@ export class CoMapSchema<
   shape: Shape;
   catchAll?: CatchAll;
   getDefinition: () => CoMapSchemaDefinition;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const plainShape: Record<string, z.ZodTypeAny> = {};
+
+    for (const key in this.shape) {
+      const item = this.shape[key];
+      if (isCoValueSchema(item)) {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => generateValidationSchemaFromItem(item),
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        plainShape[key] = generateValidationSchemaFromItem(this.shape[key]);
+      }
+    }
+
+    let validationSchema = z.strictObject(plainShape);
+    if (this.catchAll) {
+      validationSchema = validationSchema.catchall(
+        generateValidationSchemaFromItem(
+          this.catchAll as unknown as AnyZodOrCoValueSchema,
+        ),
+      );
+    }
+
+    this.#validationSchema = z.instanceof(CoMap).or(validationSchema);
+    return this.#validationSchema;
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -83,6 +121,7 @@ export class CoMapSchema<
       | {
           owner?: Group;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
         }
       | Group,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
@@ -93,6 +132,7 @@ export class CoMapSchema<
       | {
           owner?: Owner;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
         }
       | Owner,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
@@ -101,6 +141,7 @@ export class CoMapSchema<
       options,
       this.permissions,
     );
+
     return this.coValueClass.create(init, optionsWithPermissions);
   }
 
@@ -449,6 +490,7 @@ export function createCoreCoMapSchema<
       },
     }),
     resolveQuery: true as const,
+    getValidationSchema: () => z.any(),
   };
 }
 

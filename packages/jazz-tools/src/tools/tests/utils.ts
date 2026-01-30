@@ -1,4 +1,4 @@
-import { assert } from "vitest";
+import { assert, expect } from "vitest";
 import { AccountClass, isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
@@ -177,4 +177,45 @@ export async function createAccountAs<S extends AccountSchema<any, any>>(
   await account.$jazz.waitForAllCoValuesSync();
 
   return account;
+}
+
+function verifyValidationError(e: any, expectedIssues?: any) {
+  if (e?.name !== "ZodError") {
+    throw e;
+  }
+
+  if (expectedIssues) {
+    expect(e.issues).toEqual(expectedIssues);
+  }
+}
+
+export function expectValidationError(
+  fn: () => Promise<any>,
+  expectedIssues?: any,
+): Promise<void>;
+export function expectValidationError(
+  fn: () => any,
+  expectedIssues?: any,
+): void;
+export function expectValidationError(
+  fn: () => any,
+  expectedIssues?: any,
+): void | Promise<void> {
+  try {
+    const result = fn();
+
+    if (result instanceof Promise) {
+      return result
+        .then(() => {
+          throw new Error("Expected validation error, but no error was thrown");
+        })
+        .catch((e: any) => {
+          verifyValidationError(e, expectedIssues);
+        });
+    } else {
+      throw new Error("Expected validation error, but no error was thrown");
+    }
+  } catch (e: any) {
+    verifyValidationError(e, expectedIssues);
+  }
 }
