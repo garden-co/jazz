@@ -191,6 +191,7 @@ export function createTestNode(opts?: { secret?: AgentSecret }) {
 export function connectToSyncServer(
   client: LocalNode,
   syncServer: LocalNode,
+  skipReconciliation: boolean = false,
 ): void {
   const [clientPeer, serverPeer] = cojsonInternals.connectedPeers(
     client.currentSessionID,
@@ -202,6 +203,6 @@ export function connectToSyncServer(
     },
   );
 
-  client.syncManager.addPeer(serverPeer);
-  syncServer.syncManager.addPeer(clientPeer);
+  client.syncManager.addPeer(serverPeer, skipReconciliation);
+  syncServer.syncManager.addPeer(clientPeer, skipReconciliation);
 }

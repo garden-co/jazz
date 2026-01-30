@@ -85,6 +85,7 @@ import {
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
   CO_VALUE_LOADING_CONFIG,
+  STORAGE_RECONCILIATION_CONFIG,
   TRANSACTION_CONFIG,
   WEBSOCKET_CONFIG,
   setCoValueLoadingMaxRetries,
@@ -94,6 +95,7 @@ import {
   setMaxInFlightLoadsPerPeer,
   setMaxOutgoingMessagesChunkBytes,
   setMaxRecommendedTxSize,
+  setStorageReconciliationBatchSize,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
@@ -147,6 +149,8 @@ export const cojsonInternals = {
   WEBSOCKET_CONFIG,
   setMaxOutgoingMessagesChunkBytes,
   setMaxInFlightLoadsPerPeer,
+  STORAGE_RECONCILIATION_CONFIG,
+  setStorageReconciliationBatchSize,
 };
 
 export {

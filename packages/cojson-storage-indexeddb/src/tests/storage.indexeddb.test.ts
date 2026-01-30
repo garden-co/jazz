@@ -1,4 +1,4 @@
-import { LocalNode, StorageApiAsync, cojsonInternals } from "cojson";
+import { LocalNode, RawCoMap, StorageApiAsync, cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
@@ -18,12 +18,18 @@ let syncMessages: ReturnType<typeof trackMessages>;
 
 let dbName: string;
 
+const originalStorageReconciliationBatchSize =
+  cojsonInternals.STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
+
 beforeEach(() => {
   dbName = `test-${crypto.randomUUID()}`;
   internal_setDatabaseName(dbName);
   syncMessages = trackMessages();
   cojsonInternals.setSyncStateTrackingBatchDelay(0);
   cojsonInternals.setCoValueLoadingRetryDelay(10);
+  cojsonInternals.setStorageReconciliationBatchSize(
+    originalStorageReconciliationBatchSize,
+  );
 });
 
 afterEach(async () => {
@@ -837,6 +843,63 @@ describe("getCoValueIDs", () => {
       expect(seen.has(id)).toBe(false);
       seen.add(id);
       expect(expectedIds.has(id)).toBe(true);
+    }
+  });
+});
+
+describe("full storage reconciliation", () => {
+  test("syncs CoValues in storage", async () => {
+    const client = createTestNode();
+    const storage = await getIndexedDBStorage();
+    client.setStorage(storage);
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    const anotherClient = createTestNode();
+    anotherClient.setStorage(storage);
+    const syncServer = createTestNode();
+    connectToSyncServer(anotherClient, syncServer, true);
+
+    expect(syncServer.hasCoValue(group.id)).toBe(false);
+    expect(syncServer.hasCoValue(map.id)).toBe(false);
+
+    anotherClient.syncManager.startStorageReconciliation();
+
+    await waitFor(() => syncServer.hasCoValue(group.id));
+    await waitFor(() => syncServer.hasCoValue(map.id));
+  });
+
+  test("sends reconcile messages in multiple batches", async () => {
+    cojsonInternals.setStorageReconciliationBatchSize(2);
+
+    const client = createTestNode();
+    const storage = await getIndexedDBStorage();
+    client.setStorage(storage);
+
+    const group = client.createGroup();
+    const maps: RawCoMap[] = [];
+    for (let i = 0; i < 4; i++) {
+      const m = group.createMap();
+      m.set("i", i, "trusting");
+      maps.push(m);
+    }
+
+    await Promise.all(maps.map((m) => m.core.waitForSync()));
+
+    const anotherClient = createTestNode();
+    anotherClient.setStorage(storage);
+    const syncServer = createTestNode();
+    connectToSyncServer(anotherClient, syncServer, true);
+
+    anotherClient.syncManager.startStorageReconciliation();
+
+    await waitFor(() => syncServer.hasCoValue(group.id));
+    for (const map of maps) {
+      await waitFor(() => syncServer.hasCoValue(map.id));
     }
   });
 });
