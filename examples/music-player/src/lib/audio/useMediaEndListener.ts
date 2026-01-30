@@ -6,7 +6,6 @@ export function useMediaEndListener(callback: () => void) {
 
   useEffect(() => {
     audioManager.mediaElement.addEventListener("ended", callback);
-
     return () => {
       audioManager.mediaElement.removeEventListener("ended", callback);
     };

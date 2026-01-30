@@ -28,6 +28,7 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
       position={position}
       localNode={localNode}
       accountId={me?.$jazz.raw.id}
+      showDeleteLocalData
     />
   );
 }

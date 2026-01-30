@@ -1,5 +1,60 @@
 # cojson
 
+## 0.20.7
+
+### Patch Changes
+
+- 988941c: Fixed a bug in `BatchedOutgoingMessages.push()` where messages sent via the fast path (when WebSocket is ready and not backpressured) were added to the queue but never removed. This caused the `pushed - pulled` metric to grow indefinitely even when the system was idle.
+
+  The fix moves the `queue.push()` call to only happen when taking the slow path (when WebSocket is not ready), since the fast path sends messages directly without using the queue.
+  - cojson-core-wasm@0.20.7
+  - cojson-core-rn@0.20.7
+  - cojson-core-napi@0.20.7
+
+## 0.20.6
+
+### Patch Changes
+
+- cdf8274: Improve performance of read key lookups in groups by using cached indices instead of iterating through all keys
+  - cojson-core-wasm@0.20.6
+  - cojson-core-rn@0.20.6
+  - cojson-core-napi@0.20.6
+
+## 0.20.5
+
+### Patch Changes
+
+- cojson-core-wasm@0.20.5
+- cojson-core-rn@0.20.5
+- cojson-core-napi@0.20.5
+
+## 0.20.4
+
+### Patch Changes
+
+- cojson-core-wasm@0.20.4
+- cojson-core-rn@0.20.4
+- cojson-core-napi@0.20.4
+
+## 0.20.3
+
+### Patch Changes
+
+- eca8b83: Added caching for groups when accessing a readKey.
+  Marked private transactions in groups as invalid.
+  - cojson-core-wasm@0.20.3
+  - cojson-core-rn@0.20.3
+  - cojson-core-napi@0.20.3
+
+## 0.20.2
+
+### Patch Changes
+
+- 251a89e: Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
+  - cojson-core-wasm@0.20.2
+  - cojson-core-rn@0.20.2
+  - cojson-core-napi@0.20.2
+
 ## 0.20.1
 
 ### Patch Changes
@@ -7,7 +62,6 @@
 - 03195eb: Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently.
 
   When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.
-
   - cojson-core-wasm@0.20.1
   - cojson-core-rn@0.20.1
   - cojson-core-napi@0.20.1
@@ -32,7 +86,6 @@
   ## 💥 Breaking changes
 
   ### Crypto providers / fallback behavior
-
   - **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
   - **Removed `RNQuickCrypto`** from `jazz-tools`.
   - **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
@@ -43,7 +96,6 @@
 ### Patch Changes
 
 - 6b9368a: Added `deleteCoValues` function to permanently delete CoValues and their nested references.
-
   - CoValues are marked with a tombstone, making them inaccessible to all users
   - Supports deleting nested CoValues via resolve queries
   - Requires admin permissions on the CoValue's group
@@ -55,7 +107,6 @@
 - 89332d5: Moved stable JSON serialization from JavaScript to Rust in SessionLog operations
 
   ### Changes
-
   - **`tryAdd`**: Stable serialization now happens in Rust. The Rust layer parses each transaction and re-serializes it to ensure a stable JSON representation for signature verification. JavaScript side now uses `JSON.stringify` instead of `stableStringify`.
 
   - **`addNewPrivateTransaction`** and **`addNewTrustingTransaction`**: Removed `stableStringify` usage since the data is either encrypted (private) or already in string format (trusting), making stable serialization unnecessary on the JS side.
@@ -431,7 +482,6 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
-
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -452,7 +502,6 @@
 - 2ddf4d9: Introducing version control APIs, unstable_branch and unstable_merge
 
   Flagged as unstable because branch & merge scope & propagation needs to be validated.
-
   - cojson-core-wasm@0.18.13
 
 ## 0.18.12
@@ -668,7 +717,6 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
-
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

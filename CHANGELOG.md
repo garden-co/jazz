@@ -1,3 +1,22 @@
+Released Jazz 0.20.7:
+- Bugfix: fixed a memory leak in the WebSocket outgoing queue introduced in 0.20.1 and improved queue close management
+
+Released Jazz 0.20.6:
+- Improved performance of read key lookups in groups by using cached indices instead of iterating through all keys
+
+Released Jazz 0.20.5:
+- Bugfix: fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
+- Bugfix: fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte
+
+Released Jazz 0.20.4:
+- Bugfix: infinite re-render loop when accessing nested CoValues in React hooks calls with `resolve: {}`
+
+Released Jazz 0.20.3:
+- Added caching for groups when accessing a readKey
+
+Released Jazz 0.20.2:
+- Added a Performance tab in the Jazz tools inspector
+- Optimized peer reconciliation to prevent unnecessary data transfer on reconnect.
 
 Released Jazz 0.20.1:
 - Added client-side load request throttling to improve the loading experience when loading a lot of data concurrently. When a client requests more than 1k CoValues concurrently, load requests are now queued locally and sent as capacity becomes available.

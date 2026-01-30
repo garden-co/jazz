@@ -12,6 +12,14 @@ import { SubscriptionScope } from "./SubscriptionScope.js";
 import type { BranchDefinition } from "./types.js";
 import { isEqualRefsToResolve } from "./utils.js";
 
+function copyResolve(resolve: RefsToResolve<any>): RefsToResolve<any> {
+  if (typeof resolve !== "object" || resolve === null) {
+    return resolve;
+  }
+
+  return { ...resolve };
+}
+
 interface CacheEntry {
   subscriptionScope: SubscriptionScope<any>;
   schema: CoValueClassOrSchema;
@@ -233,10 +241,11 @@ export class SubscriptionCache {
     };
 
     // Create cache entry with initial subscriber count (starts at 0)
+    // Clone resolve to prevent mutation by SubscriptionScope.subscribeToKey from affecting cache lookups
     const entry: CacheEntry = {
       subscriptionScope,
       schema,
-      resolve,
+      resolve: copyResolve(resolve),
       branch,
       subscriberCount: subscriptionScope.subscribers.size,
       unsubscribeFromScope: subscriptionScope.onSubscriberChange(

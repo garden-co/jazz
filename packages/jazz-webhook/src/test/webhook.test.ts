@@ -212,7 +212,14 @@ describe("jazz-webhook", () => {
 
       // Make a change to trigger webhook
       testMap.$jazz.set("value", "changed");
+
+      // Wait a bit to ensure the transaction is fully processed
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
       const txID = testMap.$jazz.raw.lastEditAt("value")?.tx;
+      if (!txID) {
+        throw new Error("Failed to get transaction ID after change");
+      }
 
       // Wait for webhook to be emitted
       const requests = await webhookServer.waitForRequests(2, 3000);

@@ -1,11 +1,29 @@
-import { usePasskeyAuth, useSuspenseAccount } from "jazz-tools/react";
+import {
+  usePasskeyAuth,
+  usePassphraseAuth,
+  useSuspenseAccount,
+} from "jazz-tools/react";
 import { ProfileForm } from "./ProfileForm";
 import { Button } from "./ui/button";
+import { Textarea } from "./ui/textarea";
 import { MusicaAccount } from "@/1_schema";
+import { wordlist } from "@/wordlist";
+import { useState } from "react";
+import { ArrowLeft } from "lucide-react";
+
+type LoginStep = "initial" | "passphrase-input";
 
 export function WelcomeScreen() {
-  const auth = usePasskeyAuth({
+  const [loginStep, setLoginStep] = useState<LoginStep>("initial");
+  const [loginPassphrase, setLoginPassphrase] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const passkeyAuth = usePasskeyAuth({
     appName: "Jazz Music Player",
+  });
+
+  const passphraseAuth = usePassphraseAuth({
+    wordlist,
   });
 
   const { handleCompleteSetup } = useSuspenseAccount(MusicaAccount, {
@@ -20,8 +38,29 @@ export function WelcomeScreen() {
 
   if (!handleCompleteSetup) return null;
 
-  const handleLogin = () => {
-    auth.logIn();
+  const handlePasskeyLogin = () => {
+    passkeyAuth.logIn();
+  };
+
+  const handlePassphraseLogin = async () => {
+    try {
+      await passphraseAuth.logIn(loginPassphrase);
+      setLoginStep("initial");
+      setLoginPassphrase("");
+      setError(null);
+    } catch (error) {
+      if (error instanceof Error) {
+        setError(error.message);
+      } else {
+        setError("Unknown error");
+      }
+    }
+  };
+
+  const handleBack = () => {
+    setLoginStep("initial");
+    setLoginPassphrase("");
+    setError(null);
   };
 
   return (
@@ -37,13 +76,52 @@ export function WelcomeScreen() {
             headerDescription="Let's set up your profile to get started"
           />
         </div>
-        <div className="lg:hidden pt-4 flex justify-end items-center w-full gap-2">
+
+        {/* Mobile Login Section */}
+        <div className="lg:hidden pt-4 flex flex-col items-center w-full gap-4">
           <div className="text-sm font-semibold text-gray-600">
             Already a user?
           </div>
-          <Button onClick={handleLogin} size="sm">
-            Login
-          </Button>
+          {loginStep === "initial" ? (
+            <div className="flex gap-2 w-full max-w-md">
+              <Button onClick={handlePasskeyLogin} size="sm" className="flex-1">
+                Passkey
+              </Button>
+              <Button
+                onClick={() => setLoginStep("passphrase-input")}
+                size="sm"
+                variant="outline"
+                className="flex-1"
+              >
+                Passphrase
+              </Button>
+            </div>
+          ) : (
+            <div className="w-full max-w-md space-y-3">
+              {error && <div className="text-sm text-red-500">{error}</div>}
+              <Textarea
+                value={loginPassphrase}
+                onChange={(e) => setLoginPassphrase(e.target.value)}
+                placeholder="Enter your passphrase..."
+                className="font-mono text-sm"
+                rows={3}
+              />
+              <div className="flex gap-2">
+                <Button onClick={handleBack} size="sm" variant="ghost">
+                  <ArrowLeft className="size-4 mr-1" />
+                  Back
+                </Button>
+                <Button
+                  onClick={handlePassphraseLogin}
+                  size="sm"
+                  className="flex-1"
+                  disabled={!loginPassphrase.trim()}
+                >
+                  Login
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Title Section - Hidden on mobile, shown on right side for larger screens */}
@@ -72,18 +150,57 @@ export function WelcomeScreen() {
                 </a>
               </div>
 
-              {/* Login Button */}
+              {/* Login Section */}
               <div className="pt-4">
-                <p className="text-sm font-semibold text-gray-600 mb-2">
+                <p className="text-sm font-semibold text-gray-600 mb-3">
                   Already a user?
                 </p>
-                <Button
-                  onClick={handleLogin}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 text-lg font-medium rounded-lg shadow-lg hover:shadow-xl transition-all duration-200"
-                  size="lg"
-                >
-                  Login
-                </Button>
+                {loginStep === "initial" ? (
+                  <div className="flex flex-col gap-2">
+                    <Button
+                      onClick={handlePasskeyLogin}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 text-lg font-medium rounded-lg shadow-lg hover:shadow-xl transition-all duration-200"
+                      size="lg"
+                    >
+                      Login with passkey
+                    </Button>
+                    <Button
+                      onClick={() => setLoginStep("passphrase-input")}
+                      variant="outline"
+                      size="lg"
+                      className="px-6 py-3 text-lg font-medium rounded-lg"
+                    >
+                      Login with passphrase
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {error && (
+                      <div className="text-sm text-red-500">{error}</div>
+                    )}
+                    <Textarea
+                      data-testid="passphrase-input"
+                      value={loginPassphrase}
+                      onChange={(e) => setLoginPassphrase(e.target.value)}
+                      placeholder="Enter your passphrase..."
+                      className="font-mono text-sm bg-white"
+                      rows={4}
+                    />
+                    <div className="flex gap-2">
+                      <Button onClick={handleBack} variant="ghost">
+                        <ArrowLeft className="size-4 mr-2" />
+                        Back
+                      </Button>
+                      <Button
+                        onClick={handlePassphraseLogin}
+                        className="flex-1 bg-blue-600 hover:bg-blue-700"
+                        disabled={!loginPassphrase.trim()}
+                      >
+                        Login
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

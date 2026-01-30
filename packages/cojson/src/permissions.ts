@@ -235,6 +235,7 @@ function determineValidTransactionsForGroup(
   const writeOnlyKeys: Record<RawAccountID | AgentID, KeyID> = {};
   const writeKeys = new Set<string>();
   const memberRoleResolver = new MemberRoleResolver();
+  const isGroup = coValue.isGroup();
 
   for (const transaction of coValue.verifiedTransactions) {
     const transactor = transaction.author;
@@ -247,6 +248,11 @@ function determineValidTransactionsForGroup(
     const tx = transaction.tx;
 
     if (tx.privacy === "private") {
+      if (isGroup) {
+        transaction.markInvalid("Can't make private transactions in groups");
+        continue;
+      }
+
       if (transactorRole === "admin") {
         transaction.markValid();
         continue;

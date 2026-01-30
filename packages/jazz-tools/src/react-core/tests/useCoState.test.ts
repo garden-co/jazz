@@ -890,4 +890,206 @@ describe("useCoState", () => {
     expect(result.current.person.age).toBe(30);
     expect(result.current.person.email).toBe("john@example.com");
   });
+
+  it("should render without infinite re-renders when accessing resolved schema", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    // Minimal schema with a nested optional co-value
+    const ServerState = co.map({
+      status: z.string(),
+    });
+
+    const Organization = co
+      .map({
+        name: z.string(),
+        serverState: co.optional(ServerState),
+      })
+      .resolved({ serverState: true });
+
+    const org = Organization.create({
+      name: "Test Org",
+      serverState: ServerState.create({ status: "active" }),
+    });
+
+    let renderCount = 0;
+
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        const orgState = useCoState(Organization, org.$jazz.id);
+
+        // Access the unresolved nested co-value
+        if (orgState.$isLoaded) {
+          // This should not cause infinite re-renders
+          const _ = orgState.serverState;
+        }
+
+        return orgState;
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      assertLoaded(result.current);
+      expect(result.current.name).toBe("Test Org");
+    });
+
+    // Wait a bit to ensure no additional re-renders occur
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Should not have excessive re-renders
+    expect(renderCount).toBeLessThan(10);
+  });
+
+  it("should render without infinite re-renders when accessing unresolved nested co-value", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    // Minimal schema with a nested optional co-value
+    const ServerState = co.map({
+      status: z.string(),
+    });
+
+    const Organization = co.map({
+      name: z.string(),
+      serverState: co.optional(ServerState),
+    });
+
+    const org = Organization.create({
+      name: "Test Org",
+      serverState: ServerState.create({ status: "active" }),
+    });
+
+    let renderCount = 0;
+
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        const orgState = useCoState(Organization, org.$jazz.id, {
+          resolve: {},
+        });
+
+        // Access the unresolved nested co-value
+        if (orgState.$isLoaded) {
+          // This should not cause infinite re-renders
+          const _ = orgState.serverState;
+        }
+
+        return orgState;
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      assertLoaded(result.current);
+      expect(result.current.name).toBe("Test Org");
+    });
+
+    // Wait a bit to ensure no additional re-renders occur
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Should not have excessive re-renders
+    expect(renderCount).toBeLessThan(10);
+  });
+
+  it("should not cause stack overflow when cloning resolve queries with circular references", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const TestMap = co.map({
+      value: z.string(),
+    });
+
+    const map = TestMap.create({
+      value: "test",
+    });
+
+    // Create a resolve query with circular reference
+    const circularResolve: Record<string, any> = { value: true };
+    circularResolve.self = circularResolve;
+
+    // This should not throw a stack overflow error
+    const { result } = renderHook(
+      () => useCoState(TestMap, map.$jazz.id, { resolve: circularResolve }),
+      { account },
+    );
+
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("test");
+  });
+
+  it("should render without infinite re-renders when accessing 2-level nested unresolved co-values", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    // 3-level schema: Organization -> Project -> Task
+    const Task = co.map({
+      title: z.string(),
+    });
+
+    const Project = co.map({
+      name: z.string(),
+      task: co.optional(Task),
+    });
+
+    const Organization = co.map({
+      name: z.string(),
+      project: co.optional(Project),
+    });
+
+    const org = Organization.create({
+      name: "Test Org",
+      project: Project.create({
+        name: "Test Project",
+        task: Task.create({ title: "Test Task" }),
+      }),
+    });
+
+    let renderCount = 0;
+
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        const orgState = useCoState(Organization, org.$jazz.id, {
+          resolve: {
+            project: {},
+          },
+        });
+
+        // Access 2-level nested unresolved co-values
+        if (orgState.$isLoaded) {
+          const project = orgState.project;
+          if (project?.$isLoaded) {
+            // This should not cause infinite re-renders
+            const _ = project.task;
+          }
+        }
+
+        return orgState;
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      assertLoaded(result.current);
+      expect(result.current.name).toBe("Test Org");
+    });
+
+    // Wait a bit to ensure no additional re-renders occur
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Should not have excessive re-renders
+    expect(renderCount).toBeLessThan(10);
+  });
 });

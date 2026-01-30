@@ -18,25 +18,7 @@ import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react-core";
 import { useIsMobile } from "./hooks/use-mobile";
 import { Pencil } from "lucide-react";
 
-export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
-  const playState = usePlayState();
-  const isPlaying = playState.value === "play";
-  const [isEditPlaylistDialogOpen, setIsEditPlaylistDialogOpen] =
-    useState(false);
-  const [
-    editPlaylistDialogDefaultSection,
-    setEditPlaylistDialogDefaultSection,
-  ] = useState<"details" | "members">("members");
-  const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false);
-
-  async function handleFileLoad(files: FileList) {
-    /**
-     * Follow this function definition to see how we update
-     * values in Jazz and manage files!
-     */
-    await uploadMusicTracks(playlist, files);
-  }
-
+export function PlaylistPage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const params = useParams<{ playlistId: string }>();
   const playlistId = useSuspenseAccount(MusicaAccount, {
     select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
@@ -55,19 +37,20 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     select: (me) => me.canManage(playlist),
   });
 
-  const isActivePlaylist = useSuspenseAccount(MusicaAccount, {
-    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
-  });
+  const isPlaying = usePlayState().value === "play";
+  const [currentDialog, setCurrentDialog] = useState<
+    | { name: "playlist"; section: "details" | "members" }
+    | { name: "add-tracks" }
+    | null
+  >(null);
 
-  const handlePlaylistShareClick = () => {
-    setEditPlaylistDialogDefaultSection("members");
-    setIsEditPlaylistDialogOpen(true);
-  };
-
-  const handleEditClick = () => {
-    setEditPlaylistDialogDefaultSection("details");
-    setIsEditPlaylistDialogOpen(true);
-  };
+  async function handleFileLoad(files: FileList) {
+    /**
+     * Follow this function definition to see how we update
+     * values in Jazz and manage files!
+     */
+    await uploadMusicTracks(playlist, files);
+  }
 
   return (
     <SidebarInset className="flex flex-col h-screen text-gray-800">
@@ -86,7 +69,12 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                     {canEdit ? (
                       <button
                         type="button"
-                        onClick={handleEditClick}
+                        onClick={() =>
+                          setCurrentDialog({
+                            name: "playlist",
+                            section: "details",
+                          })
+                        }
                         className="text-left hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-sm"
                         aria-label="Edit playlist title"
                       >
@@ -102,8 +90,13 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                       variant="ghost"
                       size="icon"
                       aria-label="Edit playlist"
-                      onClick={handleEditClick}
-                      className={`text-blue-800`}
+                      onClick={() =>
+                        setCurrentDialog({
+                          name: "playlist",
+                          section: "details",
+                        })
+                      }
+                      className="text-blue-800"
                     >
                       <Pencil className="w-4 h-4" />
                     </Button>
@@ -111,7 +104,9 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                 </div>
                 <PlaylistMembers
                   memberIds={membersIds}
-                  onClick={handlePlaylistShareClick}
+                  onClick={() =>
+                    setCurrentDialog({ name: "playlist", section: "members" })
+                  }
                 />
               </div>
             )}
@@ -123,21 +118,28 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                   </FileUploadButton>
                 </>
               ) : (
-                canEdit && (
-                  <>
-                    {canEdit && (
-                      <Button
-                        onClick={() => setIsAddTracksModalOpen(true)}
-                        variant="outline"
-                      >
-                        {isMobile ? "Add tracks" : "Add tracks from library"}
-                      </Button>
-                    )}
-                    {canManage && (
-                      <Button onClick={handlePlaylistShareClick}>Share</Button>
-                    )}
-                  </>
-                )
+                <>
+                  {canEdit && (
+                    <Button
+                      onClick={() => setCurrentDialog({ name: "add-tracks" })}
+                      variant="outline"
+                    >
+                      {isMobile ? "Add tracks" : "Add tracks from library"}
+                    </Button>
+                  )}
+                  {canManage && (
+                    <Button
+                      onClick={() =>
+                        setCurrentDialog({
+                          name: "playlist",
+                          section: "members",
+                        })
+                      }
+                    >
+                      Share
+                    </Button>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -151,10 +153,10 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                       key={track.$jazz.id}
                       index={index}
                       isPlaying={
-                        mediaPlayer.activeTrackId === track.$jazz.id &&
-                        isActivePlaylist &&
-                        isPlaying
+                        isPlaying &&
+                        mediaPlayer.activeTrackId === track.$jazz.id
                       }
+                      isLoading={mediaPlayer.loading === track.$jazz.id}
                       onClick={() => {
                         mediaPlayer.setActiveTrack(track, playlist);
                       }}
@@ -166,7 +168,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             !isRootPlaylist && (
               <PlaylistEmptyState
                 canEdit={canEdit}
-                onAddTracks={() => setIsAddTracksModalOpen(true)}
+                onAddTracks={() => setCurrentDialog({ name: "add-tracks" })}
               />
             )
           )}
@@ -175,20 +177,22 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       </div>
 
       {/* Playlist Edit / Members Dialog */}
-      {isEditPlaylistDialogOpen && (
+      {currentDialog?.name === "playlist" && (
         <EditPlaylistDialog
-          isOpen={isEditPlaylistDialogOpen}
-          onOpenChange={setIsEditPlaylistDialogOpen}
+          isOpen={true}
+          onOpenChange={(open) => !open && setCurrentDialog(null)}
           playlistId={playlistId}
-          defaultSection={editPlaylistDialogDefaultSection}
+          defaultSection={currentDialog.section}
         />
       )}
       {/* Add Tracks from Root Modal */}
-      <AddTracksDialog
-        isOpen={isAddTracksModalOpen}
-        onOpenChange={setIsAddTracksModalOpen}
-        playlist={playlist}
-      />
+      {currentDialog?.name === "add-tracks" && (
+        <AddTracksDialog
+          isOpen={true}
+          onOpenChange={(open) => !open && setCurrentDialog(null)}
+          playlist={playlist}
+        />
+      )}
     </SidebarInset>
   );
 }

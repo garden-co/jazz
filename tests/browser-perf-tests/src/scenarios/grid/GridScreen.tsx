@@ -1,20 +1,23 @@
-import { useCoState } from "jazz-tools/react-core";
+import { useCoState, useSuspenseAccount } from "jazz-tools/react-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { GridRoot, PixelCell } from "./schema";
 import { getCurrentSyncUrl } from "../../utils/connectionStorage";
+import { MaybeLoaded } from "jazz-tools";
 
 // Canvas pixel size - larger for smaller grids, 1:1 for larger grids
 const getPixelSize = (gridSize: number) => (gridSize <= 50 ? 8 : 1);
 
 export function GridScreen() {
   const { gridId } = useParams();
+  const me = useSuspenseAccount();
   const navigate = useNavigate();
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Track load timing
   const startTime = useRef(performance.now());
   const [loadTimeMs, setLoadTimeMs] = useState<number | null>(null);
+  const [allValuesSynced, setAllValuesSynced] = useState<boolean>(false);
 
   // Track loaded cells count with ref (no re-renders)
   const loadedCountRef = useRef(0);
@@ -36,7 +39,7 @@ export function GridScreen() {
     const ids = Array.from(grid.cells.$jazz.refs).map((ref) => ref.id);
     totalCellsRef.current = ids.length;
     return ids;
-  }, [grid.$isLoaded ? grid.cells.$jazz.refs : null]);
+  }, [grid]);
 
   // Get grid size for rendering
   const size = grid.$isLoaded ? grid.size : 0;
@@ -44,9 +47,9 @@ export function GridScreen() {
 
   // Handle cell load callback - updates canvas directly
   const handleCellLoad = useCallback(
-    (cellId: string, color: string, index: number) => {
-      cellColorsRef.current.set(cellId, color);
-      loadedCountRef.current += 1;
+    (cell: MaybeLoaded<PixelCell>, index: number) => {
+      const color = cell.$isLoaded ? cell.color : "#FF0000";
+      cellColorsRef.current.set(cell.$jazz.id, color);
 
       // Draw this pixel on the canvas
       const canvas = canvasRef.current;
@@ -60,12 +63,16 @@ export function GridScreen() {
         }
       }
 
-      // Check if all cells are loaded
+      loadedCountRef.current += 1;
+
       if (
         loadedCountRef.current === totalCellsRef.current &&
         totalCellsRef.current > 0
       ) {
         setLoadTimeMs(performance.now() - startTime.current);
+        me.$jazz.waitForAllCoValuesSync().then(() => {
+          setAllValuesSynced(true);
+        });
       }
     },
     [size, pixelSize],
@@ -75,9 +82,7 @@ export function GridScreen() {
     if (cellIds.length > 0) {
       cellIds.forEach((cellId, index) => {
         PixelCell.load(cellId).then((cell) => {
-          if (cell.$isLoaded) {
-            handleCellLoad(cellId, cell.color, index);
-          }
+          handleCellLoad(cell, index);
         });
       });
     }
@@ -155,7 +160,7 @@ export function GridScreen() {
         {/* Load Time Display */}
         <div
           data-testid="load-time"
-          data-load-time-ms={loadTimeMs}
+          data-load-time-ms={allValuesSynced ? loadTimeMs : null}
           style={{
             padding: "12px 20px",
             background:
@@ -168,7 +173,7 @@ export function GridScreen() {
             fontSize: "1rem",
           }}
         >
-          {loadTimeMs !== null ? (
+          {typeof loadTimeMs === "number" ? (
             <span style={{ color: "#4ade80" }}>
               Loaded in {loadTimeMs.toFixed(0)}ms
             </span>

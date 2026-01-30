@@ -222,4 +222,56 @@ describe("CoValueCore.getKnownStateFromStorage", () => {
 
     expect(doneSpy).toHaveBeenCalledWith(undefined);
   });
+
+  test("sets onlyKnownState and caches lastKnownState when storage returns data", () => {
+    const { node, coValue, id } = setup();
+    const storageKnownState = {
+      id,
+      header: true,
+      sessions: { session1: 5 },
+    };
+    const loadKnownStateSpy = vi.fn((id, callback) => {
+      callback(storageKnownState);
+    });
+    const storage = createMockStorage({ loadKnownState: loadKnownStateSpy });
+    node.setStorage(storage);
+
+    // Initially unknown
+    expect(coValue.loadingState).toBe("unknown");
+
+    const doneSpy = vi.fn();
+    coValue.getKnownStateFromStorage(doneSpy);
+
+    // After storage returns data, should be onlyKnownState
+    expect(coValue.loadingState).toBe("onlyKnownState");
+
+    // knownState() should return the cached lastKnownState
+    expect(coValue.knownState()).toEqual(storageKnownState);
+  });
+
+  test("returns cached lastKnownState on subsequent calls without hitting storage", () => {
+    const { node, coValue, id } = setup();
+    const storageKnownState = {
+      id,
+      header: true,
+      sessions: { session1: 5 },
+    };
+    const loadKnownStateSpy = vi.fn((id, callback) => {
+      callback(storageKnownState);
+    });
+    const storage = createMockStorage({ loadKnownState: loadKnownStateSpy });
+    node.setStorage(storage);
+
+    // First call - hits storage
+    const doneSpy1 = vi.fn();
+    coValue.getKnownStateFromStorage(doneSpy1);
+    expect(loadKnownStateSpy).toHaveBeenCalledTimes(1);
+    expect(doneSpy1).toHaveBeenCalledWith(storageKnownState);
+
+    // Second call - should use cached lastKnownState, not hit storage
+    const doneSpy2 = vi.fn();
+    coValue.getKnownStateFromStorage(doneSpy2);
+    expect(loadKnownStateSpy).toHaveBeenCalledTimes(1); // Still 1, not 2
+    expect(doneSpy2).toHaveBeenCalledWith(storageKnownState);
+  });
 });
