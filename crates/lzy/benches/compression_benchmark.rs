@@ -20,9 +20,7 @@ fn compression_benchmark(c: &mut Criterion) {
         data.len()
     );
 
-    group.bench_function("compress", |b| {
-        b.iter(|| compress(black_box(&data)))
-    });
+    group.bench_function("compress", |b| b.iter(|| compress(black_box(&data))));
 
     let decompressed = decompress(&compressed).unwrap();
     assert_eq!(data, decompressed);

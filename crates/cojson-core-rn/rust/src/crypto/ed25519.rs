@@ -1,4 +1,4 @@
-use cojson_core::crypto::{CryptoError, ed25519};
+use cojson_core::crypto::{ed25519, CryptoError};
 use thiserror::Error;
 
 #[derive(Error, Debug, uniffi::Error)]

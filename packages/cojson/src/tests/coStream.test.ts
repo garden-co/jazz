@@ -202,7 +202,7 @@ test("When adding large transactions (small fraction of MAX_RECOMMENDED_TX_SIZE)
     throw new Error("CoValue is not available");
   }
 
-  const sessionEntry = coValue.verified.sessions.get(node.currentSessionID)!;
+  const sessionEntry = coValue.verified.getSession(node.currentSessionID)!;
   expect(sessionEntry.transactions.length).toEqual(12);
   expect(sessionEntry.signatureAfter[0]).not.toBeDefined();
   expect(sessionEntry.signatureAfter[1]).not.toBeDefined();
@@ -278,7 +278,7 @@ test("When adding large transactions (bigger than MAX_RECOMMENDED_TX_SIZE), we s
     throw new Error("CoValue is not available");
   }
 
-  const sessionEntry = coValue.verified.sessions.get(node.currentSessionID)!;
+  const sessionEntry = coValue.verified.getSession(node.currentSessionID)!;
   expect(sessionEntry.transactions.length).toEqual(5);
   expect(sessionEntry.signatureAfter[0]).not.toBeDefined();
   expect(sessionEntry.signatureAfter[1]).toBeDefined();

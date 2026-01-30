@@ -22,7 +22,7 @@ function makeDeleteMarkerTransaction(core: CoValueCore, madeAt?: number) {
     (sessionID) => isDeleteSessionID(sessionID as SessionID),
   ) as SessionID;
   assert(deleteSessionID);
-  const log = core.verified?.sessions.get(deleteSessionID);
+  const log = core.verified?.getSession(deleteSessionID);
   assert(log?.lastSignature);
   const tx = log.transactions.at(-1);
   assert(tx);
@@ -123,7 +123,7 @@ test("rejects delete marker ingestion from non-admin (ownedByGroup, skipVerify=f
     reason: "NotAdmin",
   });
   expect(map.core.isDeleted).toBe(false);
-  expect(map.core.verified?.sessions.get(deleteSessionID)).toBeUndefined();
+  expect(map.core.verified?.getSession(deleteSessionID)).toBeUndefined();
 });
 
 test("accepts delete marker ingestion from admin (ownedByGroup, skipVerify=false) and marks deleted", async () => {
@@ -187,7 +187,7 @@ test("rejects delete session ingestion when attempting to append a second transa
   expect(first).toBeUndefined();
   expect(mapOnBob.core.isDeleted).toBe(true);
   expect(
-    mapOnBob.core.verified?.sessions.get(deleteSessionID)?.transactions,
+    mapOnBob.core.verified?.getSession(deleteSessionID)?.transactions,
   ).toHaveLength(1);
 
   const second = mapOnBob.core.tryAddTransactions(
@@ -210,7 +210,7 @@ test("rejects delete session ingestion when attempting to append a second transa
     );
   }
   expect(
-    mapOnBob.core.verified?.sessions.get(deleteSessionID)?.transactions,
+    mapOnBob.core.verified?.getSession(deleteSessionID)?.transactions,
   ).toHaveLength(1);
 });
 
@@ -253,7 +253,7 @@ test("rejects delete session ingestion when attempting to add multiple delete tr
       /Delete transaction must be the only transaction in the session/,
     );
   }
-  expect(mapOnBob.core.verified?.sessions.get(deleteSessionID)).toBeUndefined();
+  expect(mapOnBob.core.verified?.getSession(deleteSessionID)).toBeUndefined();
 });
 
 test("skipVerify=true ingestion marks deleted even for non-admin delete marker", async () => {

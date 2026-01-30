@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use cojson_core::hash::blake3 as blake3_crypto;
+use wasm_bindgen::prelude::*;
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from

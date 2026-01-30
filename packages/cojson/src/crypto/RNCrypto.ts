@@ -11,7 +11,6 @@ import { TransactionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
 import { JsonObject } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { ControlledAccountOrAgent } from "../coValues/account.js";
 import {
   PrivateTransaction,
   Transaction,
@@ -20,12 +19,10 @@ import {
 import {
   CryptoProvider,
   KeyID,
-  KeySecret,
   Sealed,
   SealerID,
   SealerSecret,
-  SessionLogImpl,
-  Signature,
+  SessionMapImpl,
   SignerID,
   SignerSecret,
   textDecoder,
@@ -45,9 +42,38 @@ import {
   seal,
   unseal,
   Blake3Hasher,
-  SessionLog,
+  SessionMap as RNSessionMap,
+  Transaction as RNTransaction,
+  Transaction_Tags,
+  PrivateTransaction as RNPrivateTransaction,
+  TrustingTransaction as RNTrustingTransaction,
 } from "cojson-core-rn";
 import { WasmCrypto } from "./WasmCrypto.js";
+
+/**
+ * Convert a Uniffi Transaction enum to the TypeScript Transaction type.
+ * Uniffi enums have a `tag` property and `inner` containing the data.
+ */
+function convertRNTransaction(rnTx: RNTransaction): Transaction {
+  if (rnTx.tag === Transaction_Tags.Private) {
+    const inner = rnTx.inner.tx as RNPrivateTransaction;
+    return {
+      privacy: "private",
+      madeAt: inner.madeAt,
+      keyUsed: inner.keyUsed as KeyID,
+      encryptedChanges: inner.encryptedChanges,
+      meta: inner.meta,
+    } as PrivateTransaction;
+  } else {
+    const inner = rnTx.inner.tx as RNTrustingTransaction;
+    return {
+      privacy: "trusting",
+      madeAt: inner.madeAt,
+      changes: inner.changes as Stringified<JsonValue[]>,
+      meta: inner.meta as Stringified<JsonObject> | undefined,
+    } as TrustingTransaction;
+  }
+}
 
 type Blake3State = Blake3Hasher;
 
@@ -137,12 +163,15 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
       return undefined;
     }
   }
-  createSessionLog(
+  createSessionMap(
     coID: RawCoID,
-    sessionID: SessionID,
-    signerID?: SignerID,
-  ): SessionLogImpl {
-    return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
+    headerJson: string,
+    maxTxSize?: number,
+    skipVerify?: boolean,
+  ): SessionMapImpl {
+    return new SessionMapAdapter(
+      new RNSessionMap(coID, headerJson, maxTxSize, skipVerify),
+    );
   }
 
   static async create(): Promise<RNCrypto> {
@@ -214,112 +243,176 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
   }
 }
 
-class SessionLogAdapter implements SessionLogImpl {
-  constructor(private readonly sessionLog: SessionLog) {}
+/**
+ * Adapter wrapping RNSessionMap to implement SessionMapImpl interface
+ */
+class SessionMapAdapter implements SessionMapImpl {
+  constructor(private readonly sessionMap: RNSessionMap) {}
 
-  tryAdd(
-    transactions: Transaction[],
-    newSignature: Signature,
+  // === Header ===
+  getHeader(): string {
+    return this.sessionMap.getHeader();
+  }
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
     skipVerify: boolean,
   ): void {
-    // Use direct calls instead of JSON.stringify for better performance
-    for (const tx of transactions) {
-      if (tx.privacy === "private") {
-        this.sessionLog.addExistingPrivateTransaction(
-          tx.encryptedChanges,
-          tx.keyUsed,
-          tx.madeAt,
-          tx.meta,
-        );
-      } else {
-        this.sessionLog.addExistingTrustingTransaction(
-          tx.changes,
-          tx.madeAt,
-          tx.meta,
-        );
-      }
-    }
-    this.sessionLog.commitTransactions(newSignature, skipVerify);
-  }
-
-  addNewPrivateTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    keyID: KeyID,
-    keySecret: KeySecret,
-    madeAt: number,
-    meta: JsonObject | undefined,
-  ) {
-    const output = this.sessionLog.addNewPrivateTransaction(
-      // We can avoid stableStringify because it will be encrypted.
-      JSON.stringify(changes),
-      signerAgent.currentSignerSecret(),
-      keySecret,
-      keyID,
-      madeAt,
-      // We can avoid stableStringify because it will be encrypted.
-      meta ? JSON.stringify(meta) : undefined,
+    this.sessionMap.addTransactions(
+      sessionId,
+      signerId,
+      transactionsJson,
+      signature,
+      skipVerify,
     );
-    const parsedOutput = JSON.parse(output);
-    const transaction: PrivateTransaction = {
-      privacy: "private",
-      madeAt,
-      encryptedChanges: parsedOutput.encrypted_changes,
-      keyUsed: keyID,
-      meta: parsedOutput.meta,
-    };
-    return { signature: parsedOutput.signature as Signature, transaction };
   }
 
-  addNewTrustingTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
     madeAt: number,
-    meta: JsonObject | undefined,
-  ) {
-    // We can avoid stableStringify because the changes will be in a string format already.
-    const stringifiedChanges = JSON.stringify(changes);
-    // We can avoid stableStringify because the meta will be in a string format already.
-    const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
-    const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
-      signerAgent.currentSignerSecret(),
-      madeAt,
-      stringifiedMeta,
-    );
-    const transaction: TrustingTransaction = {
-      privacy: "trusting",
-      madeAt,
-      changes: stringifiedChanges as Stringified<JsonValue[]>,
-      meta: stringifiedMeta as Stringified<JsonObject> | undefined,
-    };
-    return { signature: output as Signature, transaction };
-  }
-
-  decryptNextTransactionChangesJson(
-    txIndex: number,
-    keySecret: KeySecret,
   ): string {
-    return this.sessionLog.decryptNextTransactionChangesJson(
-      txIndex,
+    return this.sessionMap.makeNewPrivateTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      keyId,
       keySecret,
+      metaJson,
+      madeAt,
     );
   }
 
-  decryptNextTransactionMetaJson(
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
+    madeAt: number,
+  ): string {
+    return this.sessionMap.makeNewTrustingTransaction(
+      sessionId,
+      signerSecret,
+      changesJson,
+      metaJson,
+      madeAt,
+    );
+  }
+
+  // === Session Queries ===
+  getSessionIds(): string[] {
+    return this.sessionMap.getSessionIds();
+  }
+
+  getTransactionCount(sessionId: string): number {
+    return this.sessionMap.getTransactionCount(sessionId);
+  }
+
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
+    const result = this.sessionMap.getTransaction(sessionId, txIndex);
+    if (!result) return undefined;
+    return convertRNTransaction(result);
+  }
+
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): Transaction[] | undefined {
+    const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
+    if (!result) return undefined;
+    return result.map(convertRNTransaction);
+  }
+
+  getLastSignature(sessionId: string): string | undefined {
+    return this.sessionMap.getLastSignature(sessionId) ?? undefined;
+  }
+
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined {
+    return this.sessionMap.getSignatureAfter(sessionId, txIndex) ?? undefined;
+  }
+
+  getLastSignatureCheckpoint(sessionId: string): number | undefined {
+    return this.sessionMap.getLastSignatureCheckpoint(sessionId) ?? undefined;
+  }
+
+  // === Known State ===
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  } {
+    // Uniffi returns a Record with Map<string, number> for sessions
+    // Convert Map to Record for consistency
+    // Type assertion needed until Uniffi types are regenerated
+    const ks = this.sessionMap.getKnownState() as unknown as {
+      id: string;
+      header: boolean;
+      sessions: Map<string, number>;
+    };
+    return {
+      id: ks.id,
+      header: ks.header,
+      sessions: Object.fromEntries(ks.sessions),
+    };
+  }
+
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined {
+    // Uniffi returns a Record with Map<string, number> for sessions
+    // Type assertion needed until Uniffi types are regenerated
+    const ks = this.sessionMap.getKnownStateWithStreaming() as unknown as
+      | { id: string; header: boolean; sessions: Map<string, number> }
+      | undefined;
+    if (!ks || ks === undefined) return undefined;
+    return {
+      id: ks.id,
+      header: ks.header,
+      sessions: Object.fromEntries(ks.sessions),
+    };
+  }
+
+  setStreamingKnownState(streamingJson: string): void {
+    this.sessionMap.setStreamingKnownState(streamingJson);
+  }
+
+  // === Deletion ===
+  markAsDeleted(): void {
+    this.sessionMap.markAsDeleted();
+  }
+
+  isDeleted(): boolean {
+    return this.sessionMap.isDeleted();
+  }
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
     txIndex: number,
-    keySecret: KeySecret,
+    keySecret: string,
   ): string | undefined {
-    return this.sessionLog.decryptNextTransactionMetaJson(txIndex, keySecret);
+    return (
+      this.sessionMap.decryptTransaction(sessionId, txIndex, keySecret) ??
+      undefined
+    );
   }
 
-  free(): void {
-    this.sessionLog.uniffiDestroy();
-  }
-
-  clone(): SessionLogImpl {
-    return new SessionLogAdapter(
-      this.sessionLog.cloneSessionLog() as SessionLog,
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined {
+    return (
+      this.sessionMap.decryptTransactionMeta(sessionId, txIndex, keySecret) ??
+      undefined
     );
   }
 }
