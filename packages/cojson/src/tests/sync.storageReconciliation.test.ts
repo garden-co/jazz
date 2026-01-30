@@ -124,6 +124,9 @@ describe("full storage reconciliation", () => {
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN Group sessions: header/3",
         "server -> client | KNOWN Map sessions: header/2",
+        "server -> client | CONTENT Map header: true new: ",
+        "client -> server | KNOWN Map sessions: header/2",
+        "client -> storage | CONTENT Map header: true new: ",
       ]
     `);
   });
