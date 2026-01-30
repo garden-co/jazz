@@ -394,15 +394,10 @@ describe("CoMap.getOrCreateUnique", () => {
     // Both should have the same Person ID
     expect(bobPerson.$jazz.id).toBe(alicePerson.$jazz.id);
 
-    // Wait for sync
     await waitFor(() => {
-      expect(bobPerson.$jazz.raw.core.knownState()).toEqual(
-        alicePerson.$jazz.raw.core.knownState(),
-      );
+      // Both users should end up with the same address values (one wins)
+      expect(bobPerson.address.$jazz.id).toBe(alicePerson.address.$jazz.id);
     });
-
-    // Both users should end up with the same address values (one wins)
-    expect(bobPerson.address.$jazz.id).toBe(alicePerson.address.$jazz.id);
   });
 });
 
@@ -591,14 +586,14 @@ describe("CoList.getOrCreateUnique", () => {
       );
     });
 
+    // Verify that the items are the same
+    await waitFor(() => {
+      expect(bobList.$jazz.refs[0]).toEqual(aliceList.$jazz.refs[0]);
+    });
+
     // The list should contain both items (one from each user)
     expect(bobList.length).toBe(1);
     expect(aliceList.length).toBe(1);
-
-    // Verify that the items are the same
-    await waitFor(() => {
-      expect(bobList[0]?.name).toEqual(aliceList[0]?.name);
-    });
   });
 });
 
