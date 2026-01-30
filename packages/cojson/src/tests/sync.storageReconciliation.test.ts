@@ -25,7 +25,7 @@ beforeEach(async () => {
 });
 
 describe("full storage reconciliation", () => {
-  test("ensureCoValuesSync sends 'reconcile' message, server responds with 'known' messages for missing CoValues", async () => {
+  test("startStorageReconciliation sends 'reconcile' message, server responds with 'known' messages for missing CoValues", async () => {
     const client = setupTestNode();
     const { storage } = client.addStorage();
 
@@ -75,7 +75,7 @@ describe("full storage reconciliation", () => {
     `);
   });
 
-  test("ensureCoValuesSync sends 'reconcile' message, server responds with 'known' messages for outdated CoValues", async () => {
+  test("startStorageReconciliation sends 'reconcile' message, server responds with 'known' messages for outdated CoValues", async () => {
     const client = setupTestNode();
     const { storage } = client.addStorage();
 
