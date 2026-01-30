@@ -120,6 +120,7 @@ export class RawCoMap<
 
     for (const transaction of newValidTransactions) {
       const { txID, changes, madeAt, tx } = transaction;
+
       for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
         const change = changes[changeIdx] as MapOpPayload<
           keyof Shape & string,
@@ -400,6 +401,7 @@ export class RawCoMap<
   assign(
     entries: Partial<Shape>,
     privacy: "private" | "trusting" = "private",
+    meta?: JsonObject,
   ): void {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot set value on a time travel entity");
@@ -412,6 +414,7 @@ export class RawCoMap<
         value: isCoValue(value) ? value.id : value,
       })),
       privacy,
+      meta,
     );
 
     this.processNewTransactions();

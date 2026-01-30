@@ -95,9 +95,7 @@ class LibSQLSqliteSyncDriver implements SQLiteDatabaseDriver {
 function deleteDb(dbPath: string) {
   try {
     unlinkSync(dbPath);
-  } catch (error) {
-    console.error(error);
-  }
+  } catch {}
 }
 
 export async function createAsyncStorage({

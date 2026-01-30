@@ -3,9 +3,11 @@ import type {
   AgentID,
   BinaryStreamInfo,
   CojsonInternalTypes,
+  CoValueUniqueness,
   JsonValue,
   RawAccountID,
   RawBinaryCoStream,
+  RawCoID,
   RawCoStream,
   SessionID,
 } from "cojson";
@@ -15,14 +17,15 @@ import {
   CoFieldInit,
   CoValue,
   CoValueClass,
-  CoValueLoadingState,
   getCoValueOwner,
+  getIdFromHeader,
+  getUniqueHeader,
   Group,
   ID,
+  internalLoadUnique,
   MaybeLoaded,
   Settled,
   LoadedAndRequired,
-  unstable_mergeBranch,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -219,16 +222,109 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          firstComesWins?: boolean;
+        }
+      | Account
+      | Group,
   ) {
-    const { owner } = parseCoValueCreateOptions(options);
-    const raw = owner.$jazz.raw.createStream();
-    const instance = new this({ fromRaw: raw });
+    const { owner, uniqueness, firstComesWins } =
+      parseCoValueCreateOptions(options);
+    const initMeta = firstComesWins ? { fww: "init" } : undefined;
+
+    const processedInit: JsonValue[] = [];
 
     if (init) {
-      instance.$jazz.push(...init);
+      // @ts-expect-error - _schema is not defined on the class
+      const itemDescriptor = this._schema[ItemsSym] as Schema;
+
+      for (let index = 0; index < init.length; index++) {
+        const item = init[index];
+        processedInit.push(
+          processCoFeedItem(
+            itemDescriptor,
+            item,
+            owner,
+            uniqueness
+              ? {
+                  uniqueness: uniqueness?.uniqueness,
+                  fieldName: `${index}`,
+                  firstComesWins,
+                }
+              : undefined,
+          ),
+        );
+      }
     }
-    return instance;
+
+    const raw = owner.$jazz.raw.createStream(
+      processedInit,
+      "private",
+      null,
+      uniqueness,
+      initMeta,
+    );
+    return new this({ fromRaw: raw }) as S;
+  }
+
+  /** @deprecated Use `CoFeed.getOrCreateUnique` instead. */
+  static findUnique<F extends CoFeed>(
+    this: CoValueClass<F>,
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+    as?: Account | Group | AnonymousJazzAgent,
+  ) {
+    const header = getUniqueHeader("costream", unique, ownerID);
+    return getIdFromHeader(header, as);
+  }
+
+  /**
+   * Get an existing unique CoFeed or create a new one if it doesn't exist.
+   *
+   * The provided value is only used when creating a new CoFeed.
+   *
+   * @example
+   * ```ts
+   * const feed = await MessageFeed.getOrCreateUnique({
+   *   value: [],
+   *   unique: `messages-${conversationId}`,
+   *   owner: group,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoFeed.
+   * @returns Either an existing CoFeed (unchanged), or a new initialised CoFeed if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    F extends CoFeed,
+    const R extends RefsToResolve<F> = true,
+  >(
+    this: CoValueClass<F>,
+    options: {
+      value: F extends CoFeed<infer Item> ? Item[] : never;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<F, R>;
+    },
+  ): Promise<Settled<Resolved<F, R>>> {
+    return internalLoadUnique(this, {
+      type: "costream",
+      unique: options.unique,
+      owner: options.owner,
+      resolve: options.resolve,
+      onCreateWhenMissing: () => {
+        (this as any).create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+          firstComesWins: true,
+        });
+      },
+      // No onUpdateWhenFound - CoFeed is append-only
+    });
   }
 
   /**
@@ -329,6 +425,43 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 /** @internal */
 type CoFeedItem<L> = L extends CoFeed<infer Item> ? Item : never;
 
+/** @internal */
+function processCoFeedItem<F extends CoFeed>(
+  itemDescriptor: Schema,
+  item: CoFieldInit<CoFeedItem<F>>,
+  owner: Group,
+  unique?: {
+    uniqueness: CoValueUniqueness["uniqueness"];
+    fieldName: string;
+    firstComesWins: boolean;
+  },
+) {
+  if (itemDescriptor === "json") {
+    return item as JsonValue;
+  } else if ("encoded" in itemDescriptor) {
+    return itemDescriptor.encoded.encode(item);
+  } else if (isRefEncoded(itemDescriptor)) {
+    let refId = (item as unknown as CoValue).$jazz?.id;
+    if (!refId) {
+      const newOwnerStrategy =
+        itemDescriptor.permissions?.newInlineOwnerStrategy;
+      const onCreate = itemDescriptor.permissions?.onCreate;
+      const coValue = instantiateRefEncodedWithInit(
+        itemDescriptor,
+        item,
+        owner,
+        newOwnerStrategy,
+        onCreate,
+        unique,
+      );
+      refId = coValue.$jazz.id;
+    }
+    return refId;
+  }
+
+  throw new Error("Invalid item field schema");
+}
+
 export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   constructor(
     private coFeed: F,
@@ -370,27 +503,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
     const itemDescriptor = this.schema[ItemsSym] as Schema;
 
-    if (itemDescriptor === "json") {
-      this.raw.push(item as JsonValue);
-    } else if ("encoded" in itemDescriptor) {
-      this.raw.push(itemDescriptor.encoded.encode(item));
-    } else if (isRefEncoded(itemDescriptor)) {
-      let refId = (item as unknown as CoValue).$jazz?.id;
-      if (!refId) {
-        const newOwnerStrategy =
-          itemDescriptor.permissions?.newInlineOwnerStrategy;
-        const onCreate = itemDescriptor.permissions?.onCreate;
-        const coValue = instantiateRefEncodedWithInit(
-          itemDescriptor,
-          item,
-          this.owner,
-          newOwnerStrategy,
-          onCreate,
-        );
-        refId = coValue.$jazz.id;
-      }
-      this.raw.push(refId);
-    }
+    this.raw.push(processCoFeedItem(itemDescriptor, item, this.owner));
   }
 
   /**
