@@ -68,6 +68,15 @@ export class StorageApiSync implements StorageAPI {
     return this.knownStates.getKnownState(id);
   }
 
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void {
+    const batch = this.dbClient.getCoValueIDs(limit, offset);
+    callback(batch);
+  }
+
   loadKnownState(
     id: string,
     callback: (knownState: CoValueKnownState | undefined) => void,

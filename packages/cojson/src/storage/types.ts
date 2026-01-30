@@ -87,6 +87,20 @@ export interface StorageAPI {
   stopTrackingSyncState(id: RawCoID): void;
 
   /**
+   * Get a batch of CoValue IDs from storage.
+   * Used for full storage reconciliation. Call repeatedly with increasing offset
+   * until the returned batch has length < limit (or 0) to enumerate all IDs.
+   * @param limit - Max number of IDs to return (e.g. 100).
+   * @param offset - Number of IDs to skip (0 for first batch).
+   * @param callback - Called with the batch. Ordering must be stable (e.g. by id).
+   */
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void;
+
+  /**
    * Load only the knownState (header presence + session counters) for a CoValue.
    * This is more efficient than load() when we only need to check if a peer needs new content.
    *
@@ -232,6 +246,8 @@ export interface DBClientInterfaceAsync {
   getCoValueKnownState(
     coValueId: string,
   ): Promise<CoValueKnownState | undefined>;
+
+  getCoValueIDs(limit: number, offset: number): Promise<{ id: RawCoID }[]>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -317,4 +333,6 @@ export interface DBClientInterfaceSync {
    * Returns undefined if the CoValue doesn't exist.
    */
   getCoValueKnownState(coValueId: string): CoValueKnownState | undefined;
+
+  getCoValueIDs(limit: number, offset: number): { id: RawCoID }[];
 }

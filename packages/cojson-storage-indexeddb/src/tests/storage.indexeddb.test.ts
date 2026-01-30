@@ -778,3 +778,65 @@ describe("sync resumption", () => {
     await node2.gracefulShutdown();
   });
 });
+
+describe("getCoValueIDs", () => {
+  test("returns CoValue IDs in batch from storage", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const group = node1.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world");
+    await map.core.waitForSync();
+
+    const ids = await new Promise<{ id: string }[]>((resolve) => {
+      node1.storage!.getCoValueIDs(100, 0, resolve);
+    });
+
+    expect(ids.map((e) => e.id)).toContain(group.id);
+    expect(ids.map((e) => e.id)).toContain(map.id);
+    expect(ids.length).toEqual(2);
+  });
+
+  test("paginates when there are more CoValues than the limit and returns each ID only once", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const group = node1.createGroup();
+    const expectedIds = new Set<string>([group.id]);
+    const maps: ReturnType<typeof group.createMap>[] = [];
+    for (let i = 0; i < 4; i++) {
+      const map = group.createMap();
+      map.set(`key${i}`, `value${i}`);
+      maps.push(map);
+      expectedIds.add(map.id);
+    }
+    await maps[maps.length - 1]!.core.waitForSync();
+
+    const limit = 2;
+    const allIds: string[] = [];
+    await new Promise<void>((resolve) => {
+      const fetchBatch = (offset: number) => {
+        node1.storage!.getCoValueIDs(limit, offset, (batch) => {
+          for (const { id } of batch) {
+            allIds.push(id);
+          }
+          if (batch.length >= limit) {
+            fetchBatch(offset + batch.length);
+          } else {
+            resolve();
+          }
+        });
+      };
+      fetchBatch(0);
+    });
+
+    expect(allIds).toHaveLength(expectedIds.size);
+    const seen = new Set<string>();
+    for (const id of allIds) {
+      expect(seen.has(id)).toBe(false);
+      seen.add(id);
+      expect(expectedIds.has(id)).toBe(true);
+    }
+  });
+});

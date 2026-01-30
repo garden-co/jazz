@@ -363,6 +363,20 @@ export class IDBClient implements DBClientInterfaceAsync {
     await this.transaction((tx) => tx.deleteCoValueContent(coValue));
   }
 
+  async getCoValueIDs(
+    limit: number,
+    offset: number,
+  ): Promise<{ id: RawCoID }[]> {
+    const rows = await queryIndexedDbStore<StoredCoValueRow[]>(
+      this.db,
+      "coValues",
+      (store) =>
+        // Include upper bound but not lower bound (offset starts at 0)
+        store.getAll(IDBKeyRange.bound(offset, offset + limit, true, false)),
+    );
+    return rows.map((row) => ({ id: row.id }));
+  }
+
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
     const records = await queryIndexedDbStore<
       { rowID: number; coValueId: RawCoID; peerId: string }[]

@@ -273,6 +273,13 @@ export class SQLiteClient
     return undefined;
   }
 
+  getCoValueIDs(limit: number, offset: number): { id: RawCoID }[] {
+    return this.db.query<{ id: RawCoID }>(
+      "SELECT id FROM coValues ORDER BY rowID LIMIT ? OFFSET ?",
+      [limit, offset],
+    );
+  }
+
   getUnsyncedCoValueIDs(): RawCoID[] {
     const rows = this.db.query<{ co_value_id: RawCoID }>(
       "SELECT DISTINCT co_value_id FROM unsynced_covalues",
