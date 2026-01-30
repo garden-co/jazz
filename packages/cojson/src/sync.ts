@@ -26,7 +26,6 @@ import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.j
 import type { StorageStreamingQueue } from "./queue/StorageStreamingQueue.js";
 import {
   CoValueKnownState,
-  emptyKnownState,
   knownStateFrom,
   KnownStateSessions,
   peerHasAllContent,
@@ -842,9 +841,12 @@ export class SyncManager {
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
     } else if (coValue.isPartiallyLoaded()) {
-      this.local.loadCoValueCore(msg.id).then(() => {
-        this.sendNewContent(msg.id, peer);
-      });
+      // Validate if content is missing before loading it from storage
+      if (!this.syncState.isSynced(peer, msg.id)) {
+        this.local.loadCoValueCore(msg.id).then(() => {
+          this.sendNewContent(msg.id, peer);
+        });
+      }
     }
 
     peer.trackLoadRequestComplete(coValue);
