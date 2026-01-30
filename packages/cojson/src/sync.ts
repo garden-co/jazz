@@ -316,9 +316,12 @@ export class SyncManager {
     peer.trackToldKnownState(id);
   }
 
+  /**
+   * Reconciles all in-memory CoValues with all persistent server peers
+   */
   reconcileServerPeers() {
     const serverPeers = Object.values(this.peers).filter(
-      (peer) => peer.role === "server",
+      isPersistentServerPeer,
     );
     for (const peer of serverPeers) {
       this.startPeerReconciliation(peer);
@@ -464,6 +467,10 @@ export class SyncManager {
     });
   }
 
+  /**
+   * Reconciles all in-memory CoValues with the given peer.
+   * Creates a subscription for each CoValue that is not already subscribed to.
+   */
   startPeerReconciliation(peer: PeerState) {
     if (isPersistentServerPeer(peer)) {
       // Resume syncing unsynced CoValues asynchronously
