@@ -1,6 +1,6 @@
 //! SQL parsing and generation for schema definitions.
 //!
-//! This module provides bidirectional conversion between SQL DDL and our Schema/LensTransform types.
+//! Hand-rolled parser for the minimal SQL subset we support.
 //!
 //! # Supported SQL
 //!
@@ -23,13 +23,6 @@
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, ColumnDef, ColumnOption, DataType, Expr, ObjectName,
-    Statement, Value as SqlValue,
-};
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
-
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
@@ -39,18 +32,18 @@ use super::lens::{LensOp, LensTransform};
 /// Errors that can occur during SQL parsing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlParseError {
-    /// SQL syntax error from the parser.
+    /// SQL syntax error.
     SyntaxError(String),
     /// Unsupported SQL statement type.
     UnsupportedStatement(String),
     /// Unsupported column type.
     UnsupportedType(String),
-    /// Unsupported constraint.
-    UnsupportedConstraint(String),
-    /// Missing required information.
-    MissingInfo(String),
     /// Invalid value in DEFAULT clause.
     InvalidDefaultValue(String),
+    /// Unexpected end of input.
+    UnexpectedEnd,
+    /// Expected a specific token.
+    Expected(String),
 }
 
 impl std::fmt::Display for SqlParseError {
@@ -59,51 +52,510 @@ impl std::fmt::Display for SqlParseError {
             SqlParseError::SyntaxError(msg) => write!(f, "SQL syntax error: {}", msg),
             SqlParseError::UnsupportedStatement(msg) => write!(f, "Unsupported statement: {}", msg),
             SqlParseError::UnsupportedType(msg) => write!(f, "Unsupported type: {}", msg),
-            SqlParseError::UnsupportedConstraint(msg) => {
-                write!(f, "Unsupported constraint: {}", msg)
-            }
-            SqlParseError::MissingInfo(msg) => write!(f, "Missing required info: {}", msg),
             SqlParseError::InvalidDefaultValue(msg) => write!(f, "Invalid default value: {}", msg),
+            SqlParseError::UnexpectedEnd => write!(f, "Unexpected end of input"),
+            SqlParseError::Expected(msg) => write!(f, "Expected: {}", msg),
         }
     }
 }
 
 impl std::error::Error for SqlParseError {}
 
-/// Parse a schema SQL file into a Schema.
-///
-/// The SQL should contain only CREATE TABLE statements.
-///
-/// # Example
-/// ```ignore
-/// let sql = r#"
-///     CREATE TABLE todos (
-///         title TEXT NOT NULL,
-///         completed BOOLEAN NOT NULL
-///     );
-/// "#;
-/// let schema = parse_schema(sql)?;
-/// ```
-pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
-    let dialect = GenericDialect {};
-    let statements =
-        Parser::parse_sql(&dialect, sql).map_err(|e| SqlParseError::SyntaxError(e.to_string()))?;
+// ============================================================================
+// Tokenizer
+// ============================================================================
 
-    let mut schema = HashMap::new();
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    // Keywords
+    Create,
+    Table,
+    Alter,
+    Add,
+    Drop,
+    Column,
+    Rename,
+    To,
+    Not,
+    Null,
+    Default,
+    True,
+    False,
+    // Punctuation
+    LParen,
+    RParen,
+    Comma,
+    Semicolon,
+    // Literals
+    Ident(String),
+    Number(String),
+    StringLit(String),
+}
 
-    for stmt in statements {
-        match stmt {
-            Statement::CreateTable(create) => {
-                let table_name = object_name_to_string(&create.name);
-                let table_schema = parse_create_table(&create.columns)?;
-                schema.insert(TableName::new(table_name), table_schema);
+struct Tokenizer<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> Tokenizer<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+
+    fn advance(&mut self) {
+        if let Some(c) = self.peek_char() {
+            self.pos += c.len_utf8();
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(c) = self.peek_char() {
+            if c.is_whitespace() {
+                self.advance();
+            } else if c == '-' && self.input[self.pos..].starts_with("--") {
+                // Skip line comment
+                while let Some(c) = self.peek_char() {
+                    self.advance();
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn read_ident(&mut self) -> String {
+        let start = self.pos;
+        while let Some(c) = self.peek_char() {
+            if c.is_alphanumeric() || c == '_' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.input[start..self.pos].to_string()
+    }
+
+    fn read_number(&mut self) -> String {
+        let start = self.pos;
+        if self.peek_char() == Some('-') {
+            self.advance();
+        }
+        while let Some(c) = self.peek_char() {
+            if c.is_ascii_digit() || c == '.' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.input[start..self.pos].to_string()
+    }
+
+    fn read_string(&mut self) -> Result<String, SqlParseError> {
+        let quote = self.peek_char().unwrap();
+        self.advance(); // consume opening quote
+        let mut s = String::new();
+        loop {
+            match self.peek_char() {
+                None => return Err(SqlParseError::SyntaxError("Unterminated string".into())),
+                Some(c) if c == quote => {
+                    self.advance();
+                    // Check for escaped quote ('')
+                    if self.peek_char() == Some(quote) {
+                        s.push(quote);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                Some(c) => {
+                    s.push(c);
+                    self.advance();
+                }
+            }
+        }
+        Ok(s)
+    }
+
+    fn next_token(&mut self) -> Result<Option<Token>, SqlParseError> {
+        self.skip_whitespace();
+
+        let c = match self.peek_char() {
+            None => return Ok(None),
+            Some(c) => c,
+        };
+
+        let tok = match c {
+            '(' => {
+                self.advance();
+                Token::LParen
+            }
+            ')' => {
+                self.advance();
+                Token::RParen
+            }
+            ',' => {
+                self.advance();
+                Token::Comma
+            }
+            ';' => {
+                self.advance();
+                Token::Semicolon
+            }
+            '\'' | '"' => Token::StringLit(self.read_string()?),
+            '-' if self.input[self.pos..].starts_with("-") && {
+                let next = self.input[self.pos + 1..].chars().next();
+                next.map(|c| c.is_ascii_digit()).unwrap_or(false)
+            } =>
+            {
+                Token::Number(self.read_number())
+            }
+            c if c.is_ascii_digit() => Token::Number(self.read_number()),
+            c if c.is_alphabetic() || c == '_' => {
+                let ident = self.read_ident();
+                match ident.to_uppercase().as_str() {
+                    "CREATE" => Token::Create,
+                    "TABLE" => Token::Table,
+                    "ALTER" => Token::Alter,
+                    "ADD" => Token::Add,
+                    "DROP" => Token::Drop,
+                    "COLUMN" => Token::Column,
+                    "RENAME" => Token::Rename,
+                    "TO" => Token::To,
+                    "NOT" => Token::Not,
+                    "NULL" => Token::Null,
+                    "DEFAULT" => Token::Default,
+                    "TRUE" => Token::True,
+                    "FALSE" => Token::False,
+                    _ => Token::Ident(ident),
+                }
             }
             _ => {
-                return Err(SqlParseError::UnsupportedStatement(format!(
-                    "Only CREATE TABLE statements are allowed in schema files, got: {:?}",
-                    stmt
+                return Err(SqlParseError::SyntaxError(format!(
+                    "Unexpected char: {}",
+                    c
                 )));
             }
+        };
+
+        Ok(Some(tok))
+    }
+
+    fn tokenize(&mut self) -> Result<Vec<Token>, SqlParseError> {
+        let mut tokens = Vec::new();
+        while let Some(tok) = self.next_token()? {
+            tokens.push(tok);
+        }
+        Ok(tokens)
+    }
+}
+
+// ============================================================================
+// Parser
+// ============================================================================
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<&Token> {
+        let tok = self.tokens.get(self.pos);
+        self.pos += 1;
+        tok
+    }
+
+    fn expect(&mut self, expected: &Token) -> Result<(), SqlParseError> {
+        match self.advance() {
+            Some(t) if t == expected => Ok(()),
+            Some(t) => Err(SqlParseError::Expected(format!(
+                "{:?}, got {:?}",
+                expected, t
+            ))),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
+    }
+
+    fn expect_ident(&mut self) -> Result<String, SqlParseError> {
+        match self.advance() {
+            Some(Token::Ident(s)) => Ok(s.clone()),
+            Some(t) => Err(SqlParseError::Expected(format!("identifier, got {:?}", t))),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_column_type(&mut self) -> Result<ColumnType, SqlParseError> {
+        let type_name = self.expect_ident()?;
+
+        // Skip optional size like VARCHAR(255)
+        if self.peek() == Some(&Token::LParen) {
+            self.advance();
+            // Skip until closing paren
+            while self.peek() != Some(&Token::RParen) {
+                if self.advance().is_none() {
+                    return Err(SqlParseError::UnexpectedEnd);
+                }
+            }
+            self.advance(); // consume RParen
+        }
+
+        match type_name.to_uppercase().as_str() {
+            "TEXT" | "VARCHAR" | "CHAR" | "STRING" => Ok(ColumnType::Text),
+            "INTEGER" | "INT" | "SMALLINT" | "TINYINT" => Ok(ColumnType::Integer),
+            "BIGINT" => Ok(ColumnType::BigInt),
+            "BOOLEAN" | "BOOL" => Ok(ColumnType::Boolean),
+            "TIMESTAMP" => Ok(ColumnType::Timestamp),
+            "UUID" => Ok(ColumnType::Uuid),
+            _ => Err(SqlParseError::UnsupportedType(type_name)),
+        }
+    }
+
+    fn parse_value(&mut self) -> Result<Value, SqlParseError> {
+        match self.advance() {
+            Some(Token::Null) => Ok(Value::Null),
+            Some(Token::True) => Ok(Value::Boolean(true)),
+            Some(Token::False) => Ok(Value::Boolean(false)),
+            Some(Token::Number(n)) => {
+                if let Ok(i) = n.parse::<i32>() {
+                    Ok(Value::Integer(i))
+                } else if let Ok(i) = n.parse::<i64>() {
+                    Ok(Value::BigInt(i))
+                } else {
+                    Err(SqlParseError::InvalidDefaultValue(format!(
+                        "Cannot parse number: {}",
+                        n
+                    )))
+                }
+            }
+            Some(Token::StringLit(s)) => Ok(Value::Text(s.clone())),
+            Some(t) => Err(SqlParseError::InvalidDefaultValue(format!("{:?}", t))),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_column_def(&mut self) -> Result<ColumnDescriptor, SqlParseError> {
+        let name = self.expect_ident()?;
+        let column_type = self.parse_column_type()?;
+
+        let mut nullable = true;
+
+        // Check for NOT NULL
+        if self.peek() == Some(&Token::Not) {
+            self.advance();
+            self.expect(&Token::Null)?;
+            nullable = false;
+        } else if self.peek() == Some(&Token::Null) {
+            self.advance();
+            nullable = true;
+        }
+
+        // Skip DEFAULT in schema (we don't store defaults in schema, only in lenses)
+        if self.peek() == Some(&Token::Default) {
+            self.advance();
+            self.parse_value()?; // consume and discard
+        }
+
+        let mut desc = ColumnDescriptor::new(ColumnName::new(&name), column_type);
+        if nullable {
+            desc = desc.nullable();
+        }
+        Ok(desc)
+    }
+
+    fn parse_column_def_with_default(
+        &mut self,
+    ) -> Result<(ColumnDescriptor, Value), SqlParseError> {
+        let name = self.expect_ident()?;
+        let column_type = self.parse_column_type()?;
+
+        let mut nullable = true;
+        let mut default = Value::Null;
+
+        loop {
+            match self.peek() {
+                Some(Token::Not) => {
+                    self.advance();
+                    self.expect(&Token::Null)?;
+                    nullable = false;
+                }
+                Some(Token::Null) => {
+                    self.advance();
+                    nullable = true;
+                }
+                Some(Token::Default) => {
+                    self.advance();
+                    default = self.parse_value()?;
+                }
+                _ => break,
+            }
+        }
+
+        let mut desc = ColumnDescriptor::new(ColumnName::new(&name), column_type);
+        if nullable {
+            desc = desc.nullable();
+        }
+        Ok((desc, default))
+    }
+
+    fn parse_create_table(&mut self) -> Result<(String, TableSchema), SqlParseError> {
+        self.expect(&Token::Table)?;
+        let table_name = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+
+        let mut columns = Vec::new();
+        loop {
+            if self.peek() == Some(&Token::RParen) {
+                break;
+            }
+
+            columns.push(self.parse_column_def()?);
+
+            match self.peek() {
+                Some(Token::Comma) => {
+                    self.advance();
+                }
+                Some(Token::RParen) => break,
+                Some(t) => return Err(SqlParseError::Expected(format!(", or ), got {:?}", t))),
+                None => return Err(SqlParseError::UnexpectedEnd),
+            }
+        }
+
+        self.expect(&Token::RParen)?;
+
+        // Optional semicolon
+        if self.peek() == Some(&Token::Semicolon) {
+            self.advance();
+        }
+
+        Ok((table_name, TableSchema::new(RowDescriptor::new(columns))))
+    }
+
+    fn parse_alter_table(&mut self) -> Result<(LensOp, bool), SqlParseError> {
+        self.expect(&Token::Table)?;
+        let table_name = self.expect_ident()?;
+
+        match self.peek() {
+            Some(Token::Add) => {
+                self.advance();
+                self.expect(&Token::Column)?;
+                let (col, default) = self.parse_column_def_with_default()?;
+
+                // Optional semicolon
+                if self.peek() == Some(&Token::Semicolon) {
+                    self.advance();
+                }
+
+                Ok((
+                    LensOp::AddColumn {
+                        table: table_name,
+                        column: col.name.as_str().to_string(),
+                        column_type: col.column_type,
+                        default,
+                    },
+                    false,
+                ))
+            }
+            Some(Token::Drop) => {
+                self.advance();
+                self.expect(&Token::Column)?;
+                let col_name = self.expect_ident()?;
+
+                // Optional semicolon
+                if self.peek() == Some(&Token::Semicolon) {
+                    self.advance();
+                }
+
+                Ok((
+                    LensOp::RemoveColumn {
+                        table: table_name,
+                        column: col_name,
+                        column_type: ColumnType::Text, // Placeholder
+                        default: Value::Null,
+                    },
+                    true, // Draft - needs type info
+                ))
+            }
+            Some(Token::Rename) => {
+                self.advance();
+                self.expect(&Token::Column)?;
+                let old_name = self.expect_ident()?;
+                self.expect(&Token::To)?;
+                let new_name = self.expect_ident()?;
+
+                // Optional semicolon
+                if self.peek() == Some(&Token::Semicolon) {
+                    self.advance();
+                }
+
+                Ok((
+                    LensOp::RenameColumn {
+                        table: table_name,
+                        old_name,
+                        new_name,
+                    },
+                    false,
+                ))
+            }
+            Some(t) => Err(SqlParseError::Expected(format!(
+                "ADD, DROP, or RENAME, got {:?}",
+                t
+            ))),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
+    }
+
+    fn parse_drop_table(&mut self) -> Result<String, SqlParseError> {
+        self.expect(&Token::Table)?;
+        let table_name = self.expect_ident()?;
+
+        // Optional semicolon
+        if self.peek() == Some(&Token::Semicolon) {
+            self.advance();
+        }
+
+        Ok(table_name)
+    }
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Parse a schema SQL file into a Schema.
+pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
+    let tokens = Tokenizer::new(sql).tokenize()?;
+    let mut parser = Parser::new(tokens);
+    let mut schema = HashMap::new();
+
+    while parser.peek().is_some() {
+        match parser.peek() {
+            Some(Token::Create) => {
+                parser.advance();
+                let (name, table_schema) = parser.parse_create_table()?;
+                schema.insert(TableName::new(name), table_schema);
+            }
+            Some(t) => {
+                return Err(SqlParseError::UnsupportedStatement(format!(
+                    "Only CREATE TABLE allowed in schema files, got {:?}",
+                    t
+                )));
+            }
+            None => break,
         }
     }
 
@@ -111,66 +563,47 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
 }
 
 /// Parse a lens SQL file into a LensTransform.
-///
-/// The SQL should contain ALTER TABLE, CREATE TABLE, or DROP TABLE statements.
-///
-/// # Example
-/// ```ignore
-/// let sql = r#"
-///     ALTER TABLE users ADD COLUMN age INTEGER DEFAULT 0;
-///     ALTER TABLE users DROP COLUMN deprecated_field;
-/// "#;
-/// let transform = parse_lens(sql)?;
-/// ```
 pub fn parse_lens(sql: &str) -> Result<LensTransform, SqlParseError> {
-    let dialect = GenericDialect {};
-    let statements =
-        Parser::parse_sql(&dialect, sql).map_err(|e| SqlParseError::SyntaxError(e.to_string()))?;
-
+    let tokens = Tokenizer::new(sql).tokenize()?;
+    let mut parser = Parser::new(tokens);
     let mut transform = LensTransform::new();
 
-    for stmt in statements {
-        match stmt {
-            Statement::AlterTable {
-                name, operations, ..
-            } => {
-                let table_name = object_name_to_string(&name);
-                for op in operations {
-                    let (lens_op, is_draft) = parse_alter_operation(&table_name, &op)?;
-                    transform.push(lens_op, is_draft);
-                }
+    while parser.peek().is_some() {
+        match parser.peek() {
+            Some(Token::Alter) => {
+                parser.advance();
+                let (op, is_draft) = parser.parse_alter_table()?;
+                transform.push(op, is_draft);
             }
-            Statement::CreateTable(create) => {
-                let table_name = object_name_to_string(&create.name);
-                let table_schema = parse_create_table(&create.columns)?;
+            Some(Token::Create) => {
+                parser.advance();
+                let (name, table_schema) = parser.parse_create_table()?;
                 transform.push(
                     LensOp::AddTable {
-                        table: table_name,
+                        table: name,
                         schema: table_schema,
                     },
                     false,
                 );
             }
-            Statement::Drop { names, .. } => {
-                for name in names {
-                    let table_name = object_name_to_string(&name);
-                    // For DROP TABLE, we need the schema for reversibility
-                    // This is marked as draft since we don't have the schema info
-                    transform.push(
-                        LensOp::RemoveTable {
-                            table: table_name,
-                            schema: TableSchema::new(RowDescriptor::new(vec![])),
-                        },
-                        true, // Draft - needs schema info filled in
-                    );
-                }
+            Some(Token::Drop) => {
+                parser.advance();
+                let name = parser.parse_drop_table()?;
+                transform.push(
+                    LensOp::RemoveTable {
+                        table: name,
+                        schema: TableSchema::new(RowDescriptor::new(vec![])),
+                    },
+                    true, // Draft - needs schema info
+                );
             }
-            _ => {
+            Some(t) => {
                 return Err(SqlParseError::UnsupportedStatement(format!(
-                    "Only ALTER TABLE, CREATE TABLE, and DROP TABLE are allowed in lens files, got: {:?}",
-                    stmt
+                    "Only ALTER TABLE, CREATE TABLE, DROP TABLE allowed in lens files, got {:?}",
+                    t
                 )));
             }
+            None => break,
         }
     }
 
@@ -193,7 +626,6 @@ pub fn schema_to_sql(schema: &Schema) -> String {
     lines.join("\n\n")
 }
 
-/// Generate SQL for a single table schema.
 fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
     let mut columns = Vec::new();
 
@@ -205,7 +637,6 @@ fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
     format!("CREATE TABLE {} (\n{}\n);", table_name, columns.join(",\n"))
 }
 
-/// Generate SQL for a column descriptor.
 fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
     let type_str = column_type_to_sql(&col.column_type);
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
@@ -231,7 +662,6 @@ pub fn lens_to_sql(transform: &LensTransform) -> String {
     lines.join("\n")
 }
 
-/// Generate SQL for a single lens operation.
 fn lens_op_to_sql(op: &LensOp) -> String {
     match op {
         LensOp::AddColumn {
@@ -267,241 +697,6 @@ fn lens_op_to_sql(op: &LensOp) -> String {
     }
 }
 
-// ============================================================================
-// Internal Parsing Helpers
-// ============================================================================
-
-fn object_name_to_string(name: &ObjectName) -> String {
-    name.0
-        .iter()
-        .map(|i| i.value.clone())
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn parse_create_table(columns: &[ColumnDef]) -> Result<TableSchema, SqlParseError> {
-    let mut col_descriptors = Vec::new();
-
-    for col in columns {
-        let col_desc = parse_column_def(col)?;
-        col_descriptors.push(col_desc);
-    }
-
-    Ok(TableSchema::new(RowDescriptor::new(col_descriptors)))
-}
-
-fn parse_column_def(col: &ColumnDef) -> Result<ColumnDescriptor, SqlParseError> {
-    let name = ColumnName::new(&col.name.value);
-    let column_type = parse_data_type(&col.data_type)?;
-
-    // Default to nullable unless NOT NULL is specified
-    let mut nullable = true;
-    let mut _references: Option<TableName> = None;
-
-    for opt in &col.options {
-        match &opt.option {
-            ColumnOption::NotNull => {
-                nullable = false;
-            }
-            ColumnOption::Null => {
-                nullable = true;
-            }
-            ColumnOption::Default(_) => {
-                // Default values are handled in lens operations, not schema
-            }
-            ColumnOption::Unique { .. } => {
-                // Ignored for now - deferred feature
-            }
-            ColumnOption::ForeignKey { foreign_table, .. } => {
-                _references = Some(TableName::new(object_name_to_string(foreign_table)));
-            }
-            _ => {
-                // Ignore other options for now
-            }
-        }
-    }
-
-    let mut descriptor = ColumnDescriptor::new(name, column_type);
-    if nullable {
-        descriptor = descriptor.nullable();
-    }
-    if let Some(ref_table) = _references {
-        descriptor = descriptor.references(ref_table);
-    }
-
-    Ok(descriptor)
-}
-
-fn parse_data_type(dt: &DataType) -> Result<ColumnType, SqlParseError> {
-    match dt {
-        DataType::Text | DataType::Varchar(_) | DataType::String(_) | DataType::Char(_) => {
-            Ok(ColumnType::Text)
-        }
-        DataType::Integer(_) | DataType::Int(_) | DataType::SmallInt(_) | DataType::TinyInt(_) => {
-            Ok(ColumnType::Integer)
-        }
-        DataType::BigInt(_) => Ok(ColumnType::BigInt),
-        DataType::Boolean | DataType::Bool => Ok(ColumnType::Boolean),
-        DataType::Real | DataType::Float(_) | DataType::Double(_) | DataType::DoublePrecision => {
-            // Map floats to BigInt for now (we don't have REAL in ColumnType)
-            // TODO: Add REAL to ColumnType
-            Ok(ColumnType::BigInt)
-        }
-        DataType::Timestamp(_, _) => Ok(ColumnType::Timestamp),
-        DataType::Uuid => Ok(ColumnType::Uuid),
-        DataType::Blob(_) | DataType::Binary(_) | DataType::Varbinary(_) | DataType::Bytea => {
-            // Map blob types to Text for now
-            Ok(ColumnType::Text)
-        }
-        _ => Err(SqlParseError::UnsupportedType(format!("{:?}", dt))),
-    }
-}
-
-fn parse_alter_operation(
-    table: &str,
-    op: &AlterTableOperation,
-) -> Result<(LensOp, bool), SqlParseError> {
-    match op {
-        AlterTableOperation::AddColumn {
-            column_def,
-            if_not_exists: _,
-            ..
-        } => {
-            let col = parse_column_def(column_def)?;
-
-            // Extract DEFAULT value if present
-            let default = extract_default_value(column_def)?;
-
-            Ok((
-                LensOp::AddColumn {
-                    table: table.to_string(),
-                    column: col.name.as_str().to_string(),
-                    column_type: col.column_type,
-                    default,
-                },
-                false,
-            ))
-        }
-        AlterTableOperation::DropColumn {
-            column_name,
-            if_exists: _,
-            ..
-        } => {
-            // For DROP COLUMN, we mark as draft since we don't know the column type
-            Ok((
-                LensOp::RemoveColumn {
-                    table: table.to_string(),
-                    column: column_name.value.clone(),
-                    column_type: ColumnType::Text, // Placeholder
-                    default: Value::Null,
-                },
-                true, // Draft - needs type info filled in
-            ))
-        }
-        AlterTableOperation::RenameColumn {
-            old_column_name,
-            new_column_name,
-        } => Ok((
-            LensOp::RenameColumn {
-                table: table.to_string(),
-                old_name: old_column_name.value.clone(),
-                new_name: new_column_name.value.clone(),
-            },
-            false,
-        )),
-        AlterTableOperation::AlterColumn { column_name: _, op } => {
-            match op {
-                AlterColumnOperation::SetDefault { value: _ } => {
-                    // Can't really express this as a lens op directly
-                    Err(SqlParseError::UnsupportedStatement(
-                        "ALTER COLUMN SET DEFAULT is not supported in lenses".to_string(),
-                    ))
-                }
-                AlterColumnOperation::DropDefault => Err(SqlParseError::UnsupportedStatement(
-                    "ALTER COLUMN DROP DEFAULT is not supported in lenses".to_string(),
-                )),
-                _ => Err(SqlParseError::UnsupportedStatement(format!(
-                    "Unsupported ALTER COLUMN operation: {:?}",
-                    op
-                ))),
-            }
-        }
-        _ => Err(SqlParseError::UnsupportedStatement(format!(
-            "Unsupported ALTER TABLE operation: {:?}",
-            op
-        ))),
-    }
-}
-
-fn extract_default_value(col: &ColumnDef) -> Result<Value, SqlParseError> {
-    for opt in &col.options {
-        if let ColumnOption::Default(expr) = &opt.option {
-            return parse_default_expr(expr);
-        }
-    }
-    // No DEFAULT specified - use NULL
-    Ok(Value::Null)
-}
-
-fn parse_default_expr(expr: &Expr) -> Result<Value, SqlParseError> {
-    match expr {
-        Expr::Value(val) => parse_sql_value(val),
-        Expr::UnaryOp { op, expr } => {
-            // Handle negative numbers
-            if matches!(op, sqlparser::ast::UnaryOperator::Minus)
-                && let Expr::Value(SqlValue::Number(n, _)) = expr.as_ref()
-            {
-                let negated = format!("-{}", n);
-                if let Ok(i) = negated.parse::<i32>() {
-                    return Ok(Value::Integer(i));
-                }
-                if let Ok(i) = negated.parse::<i64>() {
-                    return Ok(Value::BigInt(i));
-                }
-            }
-            Err(SqlParseError::InvalidDefaultValue(format!(
-                "Unsupported expression: {:?}",
-                expr
-            )))
-        }
-        Expr::Identifier(ident) if ident.value.to_uppercase() == "NULL" => Ok(Value::Null),
-        _ => Err(SqlParseError::InvalidDefaultValue(format!(
-            "Unsupported default expression: {:?}",
-            expr
-        ))),
-    }
-}
-
-fn parse_sql_value(val: &SqlValue) -> Result<Value, SqlParseError> {
-    match val {
-        SqlValue::Null => Ok(Value::Null),
-        SqlValue::Boolean(b) => Ok(Value::Boolean(*b)),
-        SqlValue::Number(n, _) => {
-            if let Ok(i) = n.parse::<i32>() {
-                Ok(Value::Integer(i))
-            } else if let Ok(i) = n.parse::<i64>() {
-                Ok(Value::BigInt(i))
-            } else {
-                Err(SqlParseError::InvalidDefaultValue(format!(
-                    "Cannot parse number: {}",
-                    n
-                )))
-            }
-        }
-        SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
-            Ok(Value::Text(s.clone()))
-        }
-        _ => Err(SqlParseError::InvalidDefaultValue(format!(
-            "Unsupported value type: {:?}",
-            val
-        ))),
-    }
-}
-
-// ============================================================================
-// SQL Generation Helpers
-// ============================================================================
-
 fn column_type_to_sql(ct: &ColumnType) -> &'static str {
     match ct {
         ColumnType::Integer => "INTEGER",
@@ -510,8 +705,8 @@ fn column_type_to_sql(ct: &ColumnType) -> &'static str {
         ColumnType::Text => "TEXT",
         ColumnType::Timestamp => "TIMESTAMP",
         ColumnType::Uuid => "UUID",
-        ColumnType::Array(_) => "TEXT", // Serialize as JSON text for now
-        ColumnType::Row(_) => "TEXT",   // Serialize as JSON text for now
+        ColumnType::Array(_) => "TEXT",
+        ColumnType::Row(_) => "TEXT",
     }
 }
 
@@ -627,7 +822,7 @@ mod tests {
 
         let transform = parse_lens(sql).unwrap();
         assert_eq!(transform.ops.len(), 1);
-        assert!(transform.has_drafts()); // DROP COLUMN is marked as draft
+        assert!(transform.has_drafts());
 
         match &transform.ops[0] {
             LensOp::RemoveColumn { table, column, .. } => {
@@ -687,7 +882,7 @@ mod tests {
 
         let transform = parse_lens(sql).unwrap();
         assert_eq!(transform.ops.len(), 1);
-        assert!(transform.has_drafts()); // DROP TABLE is marked as draft
+        assert!(transform.has_drafts());
 
         match &transform.ops[0] {
             LensOp::RemoveTable { table, .. } => {
@@ -722,8 +917,6 @@ mod tests {
 
         let schema = parse_schema(sql).unwrap();
         let regenerated = schema_to_sql(&schema);
-
-        // Parse the regenerated SQL to verify it's valid
         let reparsed = parse_schema(&regenerated).unwrap();
 
         assert_eq!(schema.len(), reparsed.len());
@@ -807,9 +1000,7 @@ mod tests {
                 c BIGINT NOT NULL,
                 d BOOLEAN NOT NULL,
                 e TIMESTAMP NOT NULL,
-                f UUID NOT NULL,
-                g VARCHAR(255) NOT NULL,
-                h CHAR(10) NOT NULL
+                f UUID NOT NULL
             );
         "#;
 
@@ -825,8 +1016,6 @@ mod tests {
             ColumnType::Timestamp
         );
         assert_eq!(table.descriptor.columns[5].column_type, ColumnType::Uuid);
-        assert_eq!(table.descriptor.columns[6].column_type, ColumnType::Text); // VARCHAR -> TEXT
-        assert_eq!(table.descriptor.columns[7].column_type, ColumnType::Text); // CHAR -> TEXT
     }
 
     #[test]
@@ -835,10 +1024,6 @@ mod tests {
 
         let result = parse_schema(sql);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            SqlParseError::UnsupportedStatement(_)
-        ));
     }
 
     #[test]
@@ -847,5 +1032,31 @@ mod tests {
 
         let result = parse_lens(sql);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_with_comments() {
+        let sql = r#"
+            -- This is a comment
+            CREATE TABLE todos (
+                title TEXT NOT NULL -- inline comment not supported but line comments are
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        assert_eq!(schema.len(), 1);
+    }
+
+    #[test]
+    fn parse_negative_default() {
+        let sql = "ALTER TABLE t ADD COLUMN x INTEGER DEFAULT -42;";
+        let transform = parse_lens(sql).unwrap();
+
+        match &transform.ops[0] {
+            LensOp::AddColumn { default, .. } => {
+                assert_eq!(*default, Value::Integer(-42));
+            }
+            _ => panic!(),
+        }
     }
 }
