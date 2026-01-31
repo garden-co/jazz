@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/groove",
+    "crates/groove-rocksdb",
+    "crates/groove-runtime",
+    "crates/jazz-transport",
+    "crates/jazz-cli",
+    "crates/jazz-rs",
+    "examples/todo-server",
+]

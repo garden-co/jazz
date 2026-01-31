@@ -395,6 +395,43 @@ All query graph nodes receive explicit branch information. There is no implicit 
 - PolicyFilterNode stores branch for INHERITS evaluation: `new_with_branch(..., branch)`
 - EXISTS clauses in policies use the row's source branch for index lookups
 
+### Explicit Context Execution
+
+QueryManager supports two execution modes:
+
+**Implicit context** (default for clients):
+```rust
+// Uses manager's schema and schema_context
+manager.execute(query)?;
+```
+
+**Explicit context** (for servers):
+```rust
+// Core implementation - takes explicit schema and context
+manager.execute_with_explicit_context(query, &schema, &schema_context)?;
+```
+
+The implicit `execute()` delegates to `execute_with_explicit_context()`:
+
+```rust
+pub fn execute(&mut self, query: Query) -> Result<...> {
+    if !self.schema_context.is_initialized() {
+        return Err(QueryError::QueryCompilationError(...));
+    }
+    let schema = (*self.schema).clone();
+    let context = self.schema_context.clone();
+    self.execute_with_explicit_context(query, &schema, &context)
+}
+```
+
+This unifies the code path and allows servers to execute queries with any schema context.
+
+**Key behaviors of `execute_with_explicit_context()`:**
+- Builds `branch_schema_map` from passed context (not self)
+- Uses passed schema for table/column lookup
+- Applies lens transforms using passed context
+- Indices accessed via self (indices are shared)
+
 ### Server Subscriptions
 
 Server subscriptions (created via `subscribe_server_query`) handle remote clients:
@@ -437,6 +474,24 @@ sm.process();  // No more sync_context() needed
 ```
 
 The old `sync_context()` method has been removed. Schema changes flow incrementally through `add_live_schema()` and `register_lens()`.
+
+---
+
+## Error Types
+
+### QueryError
+
+Key error variants:
+
+- `TableNotFound` - Table not in schema
+- `ColumnCountMismatch` - Wrong number of columns for insert
+- `ObjectNotFound` - Object ID doesn't exist
+- `QueryCompilationError` - Failed to compile query graph
+- `PolicyDenied` - ReBAC policy rejected operation
+- `Pending` - Query waiting for objects to load from storage
+- `UnknownSchema` - Schema hash not in `known_schemas` (server mode)
+
+The `UnknownSchema` error occurs when server-mode query execution receives a query with a schema hash not yet synced via catalogue. Client should sync schema first.
 
 ---
 

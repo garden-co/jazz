@@ -1,0 +1,589 @@
+//! Integration tests for the todo server.
+//!
+//! Tests the full HTTP API end-to-end.
+
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use jazz_rs::{AppContext, AppId, ColumnType, JazzClient, SchemaBuilder, TableSchema};
+use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
+use tower::ServiceExt;
+use tower_http::cors::CorsLayer;
+use uuid::Uuid;
+
+/// Todo item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Todo {
+    pub id: Uuid,
+    pub title: String,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTodoRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateTodoRequest {
+    pub title: Option<String>,
+    pub completed: Option<bool>,
+}
+
+/// Application state.
+pub struct AppState {
+    pub client: JazzClient,
+}
+
+fn test_schema() -> jazz_rs::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("completed", ColumnType::Boolean),
+        )
+        .build()
+}
+
+async fn setup_test_app(temp_dir: &TempDir) -> Router {
+    setup_test_app_with_path(temp_dir.path().to_path_buf()).await
+}
+
+async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
+    let context = AppContext {
+        app_id: AppId::from_name("test-todos"),
+        client_id: None,
+        schema: test_schema(),
+        server_url: String::new(),
+        data_dir,
+    };
+
+    let client = JazzClient::connect(context).await.unwrap();
+    let state = Arc::new(AppState { client });
+
+    // Build router matching main.rs
+    Router::new()
+        .route("/todos", axum::routing::get(list_todos))
+        .route("/todos", axum::routing::post(create_todo))
+        .route("/todos/:id", axum::routing::put(update_todo))
+        .route("/todos/:id", axum::routing::delete(delete_todo))
+        .route("/health", axum::routing::get(health))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
+// Route handlers
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::response::IntoResponse;
+use jazz_rs::{ObjectId, QueryBuilder, Value};
+
+fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
+    if values.len() < 2 {
+        return None;
+    }
+    let title = match &values[0] {
+        Value::Text(s) => s.clone(),
+        _ => return None,
+    };
+    let completed = match &values[1] {
+        Value::Boolean(b) => *b,
+        _ => return None,
+    };
+    Some(Todo {
+        id: *object_id.uuid(),
+        title,
+        completed,
+    })
+}
+
+async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let query = QueryBuilder::new("todos").build();
+    match state.client.query(query).await {
+        Ok(rows) => {
+            let todos: Vec<Todo> = rows
+                .iter()
+                .filter_map(|(id, values)| row_to_todo(*id, values))
+                .collect();
+            Json(todos).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn create_todo(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CreateTodoRequest>,
+) -> impl IntoResponse {
+    let values = vec![Value::Text(request.title.clone()), Value::Boolean(false)];
+    match state.client.create("todos", values).await {
+        Ok(row_id) => {
+            let todo = Todo {
+                id: *row_id.uuid(),
+                title: request.title,
+                completed: false,
+            };
+            (StatusCode::CREATED, Json(todo)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn update_todo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateTodoRequest>,
+) -> impl IntoResponse {
+    let object_id = ObjectId::from_uuid(id);
+    let mut updates = Vec::new();
+    if let Some(title) = request.title {
+        updates.push(("title".to_string(), Value::Text(title)));
+    }
+    if let Some(completed) = request.completed {
+        updates.push(("completed".to_string(), Value::Boolean(completed)));
+    }
+
+    match state.client.update(object_id, updates).await {
+        Ok(()) => {
+            let query = QueryBuilder::new("todos").build();
+            match state.client.query(query).await {
+                Ok(rows) => {
+                    for (oid, values) in &rows {
+                        if *oid.uuid() == id {
+                            if let Some(todo) = row_to_todo(*oid, values) {
+                                return Json(todo).into_response();
+                            }
+                        }
+                    }
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "error": "Not found after refetch" })),
+                    )
+                        .into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Update failed: {}", e) })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_todo(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let object_id = ObjectId::from_uuid(id);
+    match state.client.delete(object_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "healthy" }))
+}
+
+// Tests
+
+#[tokio::test]
+async fn test_health_check() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = setup_test_app(&temp_dir).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_crud_operations() {
+    let temp_dir = TempDir::new().unwrap();
+    let app = setup_test_app(&temp_dir).await;
+
+    // 1. List todos (should be empty)
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/todos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let todos: Vec<Todo> = serde_json::from_slice(&body).unwrap();
+    assert!(todos.is_empty(), "Should start empty");
+
+    // 2. Create a todo
+    let create_req = CreateTodoRequest {
+        title: "Buy milk".to_string(),
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/todos")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&create_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let created_todo: Todo = serde_json::from_slice(&body).unwrap();
+    assert_eq!(created_todo.title, "Buy milk");
+    assert!(!created_todo.completed);
+
+    // 3. List todos (should have one)
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/todos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let todos: Vec<Todo> = serde_json::from_slice(&body).unwrap();
+    assert_eq!(todos.len(), 1);
+    assert_eq!(todos[0].title, "Buy milk");
+
+    // 4. Update the todo
+    let update_req = UpdateTodoRequest {
+        title: None,
+        completed: Some(true),
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/todos/{}", created_todo.id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&update_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let updated_todo: Todo = serde_json::from_slice(&body).unwrap();
+    assert!(updated_todo.completed, "Should be completed");
+
+    // 5. Delete the todo
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/todos/{}", created_todo.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // 6. Verify it's gone
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/todos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let todos: Vec<Todo> = serde_json::from_slice(&body).unwrap();
+    assert!(todos.is_empty(), "Should be empty after delete");
+}
+
+#[tokio::test]
+async fn test_local_persistence() {
+    let temp_dir = TempDir::new().unwrap();
+    let data_path = temp_dir.path().to_path_buf();
+
+    // Phase 1: Create a todo with first client
+    let created_id = {
+        let context = AppContext {
+            app_id: AppId::from_name("test-persist"),
+            client_id: None,
+            schema: test_schema(),
+            server_url: String::new(),
+            data_dir: data_path.clone(),
+        };
+        let client = JazzClient::connect(context).await.unwrap();
+
+        // Create a todo
+        let values = vec![Value::Text("Persist me".to_string()), Value::Boolean(false)];
+        let row_id = client.create("todos", values).await.unwrap();
+
+        // Verify it exists
+        let query = QueryBuilder::new("todos").build();
+        let results = client.query(query).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
+
+        // Shutdown client to release RocksDB
+        client.shutdown().await.unwrap();
+        row_id
+    };
+
+    // Phase 2: Create new client with same data dir, verify todo persisted
+    {
+        let context = AppContext {
+            app_id: AppId::from_name("test-persist"),
+            client_id: None,
+            schema: test_schema(),
+            server_url: String::new(),
+            data_dir: data_path,
+        };
+        let client = JazzClient::connect(context).await.unwrap();
+
+        // Query todos - should have the one we created
+        let query = QueryBuilder::new("todos").build();
+        let results = client.query(query).await.unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Todo should persist across client restarts"
+        );
+        assert_eq!(results[0].0, created_id, "Should be the same row");
+        assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
+
+        client.shutdown().await.unwrap();
+    }
+}
+
+// === Server resync test infrastructure ===
+
+/// Test server handle - kills process on drop.
+struct TestServer {
+    process: Child,
+    port: u16,
+    #[allow(dead_code)]
+    data_dir: TempDir,
+}
+
+impl TestServer {
+    /// Start a test server on the given port.
+    async fn start(port: u16) -> Self {
+        let data_dir = TempDir::new().expect("create temp dir");
+
+        // Use a deterministic UUID app ID for testing
+        let app_id = "00000000-0000-0000-0000-000000000001";
+
+        // Find the jazz binary. When running tests, look in target/debug or target/release.
+        let jazz_binary = Self::find_jazz_binary();
+
+        let process = Command::new(&jazz_binary)
+            .args([
+                "server",
+                app_id,
+                "--port",
+                &port.to_string(),
+                "--data-dir",
+                data_dir.path().to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("Failed to spawn jazz server at {:?}: {}", jazz_binary, e));
+
+        let server = Self {
+            process,
+            port,
+            data_dir,
+        };
+
+        // Wait for server to be ready
+        server.wait_ready().await;
+
+        server
+    }
+
+    /// Find the jazz binary in cargo's target directory.
+    fn find_jazz_binary() -> PathBuf {
+        // Get the path to the test binary, which gives us the target directory
+        let exe = std::env::current_exe().expect("get current exe");
+        let target_dir = exe
+            .parent() // deps
+            .and_then(|p| p.parent()) // debug or release
+            .expect("find target dir");
+
+        let jazz_path = target_dir.join("jazz");
+        if jazz_path.exists() {
+            return jazz_path;
+        }
+
+        // Try building if not found (useful for first run)
+        panic!(
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-cli` first.",
+            jazz_path
+        );
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    async fn wait_ready(&self) {
+        let client = reqwest::Client::new();
+        let url = format!("{}/health", self.base_url());
+
+        for i in 0..50 {
+            match client.get(&url).send().await {
+                Ok(_) => return,
+                Err(e) => {
+                    if i == 49 {
+                        eprintln!("Last error: {:?}", e);
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("Server failed to become ready within 5 seconds");
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+/// Find an available port by binding to port 0.
+fn get_free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to port 0");
+    listener.local_addr().unwrap().port()
+}
+
+/// Test that data syncs through server between clients.
+///
+/// This test verifies:
+/// 1. Client syncs schema to server via catalogue
+/// 2. Client syncs row data to server
+/// 3. Server stores data and can replay to new clients
+/// 4. New client receives data from server
+///
+/// NOTE: The core lazy schema activation is tested in groove's
+/// `e2e_two_clients_server_schema_sync`. This integration test verifies
+/// end-to-end client-server sync with persistent client IDs.
+#[tokio::test]
+async fn test_server_resync() {
+    // 1. Start jazz-cli server
+    let port = get_free_port();
+    let server = TestServer::start(port).await;
+
+    let data_dir = TempDir::new().unwrap();
+    let data_path = data_dir.path().to_path_buf();
+
+    // IMPORTANT: Client app_id must match server's app_id for schema sync to work
+    let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+
+    // 2. Create client with todos schema, add data
+    {
+        let context = AppContext {
+            app_id: test_app_id,
+            client_id: None,
+            schema: test_schema(),
+            server_url: server.base_url(),
+            data_dir: data_path.clone(),
+        };
+        let client = JazzClient::connect(context).await.unwrap();
+
+        // Create a todo
+        let values = vec![
+            Value::Text("Synced todo".to_string()),
+            Value::Boolean(false),
+        ];
+        let _row_id = client.create("todos", values).await.unwrap();
+
+        // Verify it exists locally
+        let query = QueryBuilder::new("todos").build();
+        let results = client.query(query).await.unwrap();
+        assert_eq!(results.len(), 1, "Todo should exist locally");
+
+        // Wait for sync to server
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+        client.shutdown().await.unwrap();
+    }
+
+    // 3. Wipe local data completely
+    std::fs::remove_dir_all(&data_path).unwrap();
+    std::fs::create_dir_all(&data_path).unwrap();
+
+    // 4. New client should resync from server
+    {
+        let context = AppContext {
+            app_id: test_app_id,
+            client_id: None,
+            schema: test_schema(),
+            server_url: server.base_url(),
+            data_dir: data_path,
+        };
+        let client = JazzClient::connect(context).await.unwrap();
+
+        // Wait for sync from server
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+        // Query todos - should have the one from before
+        let query = QueryBuilder::new("todos").build();
+        let results = client.query(query).await.unwrap();
+
+        assert_eq!(results.len(), 1, "Todo should resync from server");
+        assert_eq!(results[0].1[0], Value::Text("Synced todo".to_string()));
+
+        client.shutdown().await.unwrap();
+    }
+
+    drop(server);
+}

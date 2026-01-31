@@ -8,8 +8,8 @@ mod tests {
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
-        TableSchema, Value,
+        ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
+        SchemaHash, TableName, TableSchema, Value,
     };
     use crate::schema_manager::{
         AppId, CopyOnWriteWriter, Lens, LensOp, LensTransform, SchemaContext, SchemaManager,
@@ -1614,9 +1614,8 @@ mod tests {
     /// The main test `e2e_two_clients_query_subscriptions_through_server`
     /// validates the intended use case where all nodes share the same schema.
     ///
-    /// TODO: Implement schema bootstrapping if needed.
+    /// Now implemented via lazy schema activation in QueryManager.
     #[test]
-    #[ignore = "Schema bootstrapping from empty server not yet supported"]
     fn e2e_two_clients_server_schema_sync() {
         // === Define the schema (both clients use this) ===
         let schema = SchemaBuilder::new()
@@ -1650,18 +1649,9 @@ mod tests {
         )
         .unwrap();
 
-        // === Setup Server with minimal/empty schema ===
-        // Server starts with a trivially different schema (no tables)
-        // It will receive the real schema via catalogue sync
-        let empty_schema = SchemaBuilder::new().build();
-        let mut server = SchemaManager::new(
-            SyncManager::new(),
-            empty_schema,
-            test_app_id(),
-            "dev",
-            "main",
-        )
-        .unwrap();
+        // === Setup Server with NO schema (true server mode) ===
+        // Server starts with no schema knowledge - will learn via catalogue sync
+        let mut server = SchemaManager::new_server(SyncManager::new(), test_app_id(), "dev");
 
         // === Client A persists schema to catalogue BEFORE connecting to server ===
         // This way, when the server is added, the catalogue object will sync
@@ -1683,13 +1673,6 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .add_client(client_b_id);
-
-        // Subscribe to all object updates so we receive catalogue objects
-        server
-            .query_manager_mut()
-            .sync_manager_mut()
-            .object_manager
-            .subscribe_all();
 
         // Clients know about the server - this triggers initial sync including catalogue objects
         client_a
@@ -1735,37 +1718,71 @@ mod tests {
                 payload: schema_msg.payload.clone(),
             });
 
-        // Server processes the inbox
+        // Server processes the inbox - this triggers catalogue processing
         server.process();
 
-        // === Server should now have pending catalogue update ===
-        let catalogue_updates = server.query_manager_mut().take_pending_catalogue_updates();
-        assert_eq!(
-            catalogue_updates.len(),
-            1,
-            "Server should have 1 pending catalogue update"
-        );
-
-        // Process the catalogue update
-        let update = &catalogue_updates[0];
-        server
-            .process_catalogue_update(update.object_id, &update.metadata, &update.content)
-            .expect("Should process schema catalogue update");
-
-        // Verify server now has the schema (as pending, since no lens path yet)
-        // With empty starting schema, the received schema should be pending
-        // unless there's a trivial lens path (same schema or direct lens)
-        //
-        // Actually, since the server's current schema is empty and the received
-        // schema is non-empty, they're different. The server needs a lens to
-        // activate the received schema. Let's check if it's pending.
+        // === Server should now have the schema in known_schemas ===
         assert!(
-            server.context().is_pending(&schema_hash) || server.context().is_live(&schema_hash),
+            server.is_schema_known(&schema_hash),
             "Server should know about the schema after catalogue sync"
         );
 
-        // === Now let's test the simpler case: server initialized with same schema ===
-        // This tests the core sync flow without schema migration complexity
+        // === Now test that row data syncs and is indexed via lazy activation ===
+        // Client A creates a document
+        let doc_uuid = ObjectId::new();
+        let doc_values = vec![
+            Value::Uuid(doc_uuid),
+            Value::Text("alice".into()),
+            Value::Text("Test Document".into()),
+        ];
+        let handle = client_a.insert("documents", &doc_values).unwrap();
+        let doc_id = handle.row_id; // The actual row object ID
+        client_a.process();
+
+        // Get client A's outbox - should have the row object
+        let outbox_a = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        assert!(!outbox_a.is_empty(), "Client A should have row to sync");
+
+        // Find the row object message
+        let row_msg = outbox_a
+            .iter()
+            .find(|e| {
+                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
+                    *object_id == doc_id
+                } else {
+                    false
+                }
+            })
+            .expect("Should have row object in outbox");
+
+        // Push to server inbox
+        server
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Client(client_a_id),
+                payload: row_msg.payload.clone(),
+            });
+
+        // Server processes - lazy activation should kick in
+        server.process();
+
+        // === Verify the row was indexed on server ===
+        // Build the branch name that client A uses
+        let client_branch = ComposedBranchName::new("dev", schema_hash, "main").to_branch_name();
+
+        // The row should be in the server's index for that branch
+        assert!(
+            server.query_manager().row_is_indexed_on_branch(
+                "documents",
+                client_branch.as_str(),
+                doc_id
+            ),
+            "Row should be indexed on server after lazy activation"
+        );
     }
 
     /// E2E test: Two clients, server all with same schema - query subscriptions sync.

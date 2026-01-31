@@ -217,6 +217,40 @@ impl QueryGraph {
         result
     }
 
+    /// Check if the graph is waiting for pending objects to load.
+    ///
+    /// Returns true if the OutputNode is held pending (waiting for objects to materialize).
+    pub fn is_pending(&self) -> bool {
+        if let Some(GraphNode::Output(output)) = self.get_node(self.output_node) {
+            return output.is_held_pending();
+        }
+        false
+    }
+
+    /// Get all pending object IDs with their branches from MaterializeNodes.
+    ///
+    /// Returns (ObjectId, branch_name) pairs for all objects that are pending.
+    pub fn pending_ids_with_branches(&self) -> Vec<(ObjectId, String)> {
+        let mut result = Vec::new();
+        for compact in &self.nodes {
+            if let GraphNode::Materialize(mat) = &compact.node {
+                for (&id, branch) in mat.pending_ids_with_branches() {
+                    result.push((id, branch.clone()));
+                }
+            }
+        }
+        result
+    }
+
+    /// Set the default branch for pending ID tracking on all MaterializeNodes.
+    pub fn set_pending_branch(&mut self, branch: &str) {
+        for compact in &mut self.nodes {
+            if let GraphNode::Materialize(mat) = &mut compact.node {
+                mat.set_pending_branch(branch);
+            }
+        }
+    }
+
     /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
         Self::compile_with_session(query, schema, None)
@@ -1038,7 +1072,7 @@ impl QueryGraph {
     pub fn has_pending_id(&self, object_id: ObjectId) -> bool {
         for compact in &self.nodes {
             if let GraphNode::Materialize(mat_node) = &compact.node
-                && mat_node.pending_ids().contains(&object_id)
+                && mat_node.pending_ids().any(|id| *id == object_id)
             {
                 return true;
             }

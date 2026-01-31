@@ -72,6 +72,25 @@ impl std::fmt::Display for SchemaHash {
     }
 }
 
+impl Serialize for SchemaHash {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&hex::encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaHash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom("SchemaHash must be 32 bytes"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(SchemaHash(arr))
+    }
+}
+
 /// Hash a RowDescriptor into a hasher, sorting columns by name for order-independence.
 fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescriptor) {
     // Sort columns by name
@@ -137,10 +156,20 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
     }
 }
 
-/// Simple hex encoding (avoiding external crate).
+/// Simple hex encoding/decoding (avoiding external crate).
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    pub fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
+        if !s.len().is_multiple_of(2) {
+            return Err("hex string must have even length");
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "invalid hex character"))
+            .collect()
     }
 }
 

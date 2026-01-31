@@ -52,7 +52,7 @@ mod integration_tests;
 
 // Re-exports
 pub use auto_lens::generate_lens;
-pub use context::{SchemaContext, SchemaError};
+pub use context::{QuerySchemaContext, SchemaContext, SchemaError};
 pub use encoding::{
     CatalogueEncodingError, decode_lens_transform, decode_schema, encode_lens_transform,
     encode_schema,

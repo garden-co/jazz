@@ -5,10 +5,50 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::object::BranchName;
 use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash};
 
 use super::lens::Lens;
+
+/// Schema context for a query operation.
+///
+/// On client: constructed once from app's schema.
+/// On server: constructed per-query from client-provided params.
+///
+/// This is the minimal information needed to execute a query against
+/// a specific schema version. Servers use this to handle multi-tenant
+/// queries where each client may have a different schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuerySchemaContext {
+    /// Environment (e.g., "dev", "prod").
+    pub env: String,
+    /// Hash of the target schema for this query.
+    pub schema_hash: SchemaHash,
+    /// User-facing branch name (e.g., "main", "feature-x").
+    pub user_branch: String,
+}
+
+impl QuerySchemaContext {
+    /// Create a new query schema context.
+    pub fn new(
+        env: impl Into<String>,
+        schema_hash: SchemaHash,
+        user_branch: impl Into<String>,
+    ) -> Self {
+        Self {
+            env: env.into(),
+            schema_hash,
+            user_branch: user_branch.into(),
+        }
+    }
+
+    /// Get the composed branch name for this context.
+    pub fn branch_name(&self) -> ComposedBranchName {
+        ComposedBranchName::new(&self.env, self.schema_hash, &self.user_branch)
+    }
+}
 
 /// Error type for schema context operations.
 #[derive(Debug, Clone, PartialEq)]

@@ -103,8 +103,8 @@ fn query_with_sort_and_limit() {
     let results = qm.execute(query).unwrap();
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
-    assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
+    assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
+    assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
 }
 
 #[test]
@@ -271,8 +271,8 @@ fn multiple_inserts_all_visible_in_query() {
     let query = qm.query("users").order_by_desc("score").limit(2).build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
-    assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
+    assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
+    assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
 }
 
 #[test]
@@ -323,7 +323,7 @@ fn cold_start_loads_persisted_indices_and_rows() {
         .build();
     let results = qm2.execute(query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0], Value::Text("Alice".into()));
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
 }
 
 #[test]
@@ -415,9 +415,9 @@ fn cold_start_with_sorted_query() {
     let results = qm2.execute(query).unwrap();
 
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0][0], Value::Text("Alice".into())); // 100
-    assert_eq!(results[1][0], Value::Text("Charlie".into())); // 75
-    assert_eq!(results[2][0], Value::Text("Bob".into())); // 50
+    assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
+    assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
+    assert_eq!(results[2].1[0], Value::Text("Bob".into())); // 50
 }
 
 #[test]
@@ -767,8 +767,8 @@ fn synced_update_is_visible_in_query() {
         .build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1, "Should find initial row");
-    assert_eq!(results[0][0], Value::Text("Alice".into()));
-    assert_eq!(results[0][1], Value::Integer(100));
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
+    assert_eq!(results[0].1[1], Value::Integer(100));
 
     // Now simulate a synced update to this row (e.g., from another peer)
     let descriptor = RowDescriptor::new(vec![
@@ -813,8 +813,8 @@ fn synced_update_is_visible_in_query() {
         .build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1, "Should find updated row by new name");
-    assert_eq!(results[0][0], Value::Text("Alice Updated".into()));
-    assert_eq!(results[0][1], Value::Integer(200));
+    assert_eq!(results[0].1[0], Value::Text("Alice Updated".into()));
+    assert_eq!(results[0].1[1], Value::Integer(200));
 
     // Score index should also be updated
     let query = qm
@@ -1744,7 +1744,7 @@ fn soft_deleted_row_not_in_query_results() {
     let query = qm.query("users").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0], Value::Text("Bob".into()));
+    assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
 
 #[test]
@@ -1905,8 +1905,8 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let query = qm.query("users").include_deleted().build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0], Value::Text("TipB".into()));
-    assert_eq!(results[0][1], Value::Integer(200));
+    assert_eq!(results[0].1[0], Value::Text("TipB".into()));
+    assert_eq!(results[0].1[1], Value::Integer(200));
 }
 
 // ========================================================================
@@ -1997,8 +1997,8 @@ fn undelete_row_appears_in_query_results() {
     let query = qm.query("users").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0], Value::Text("Alice Restored".into()));
-    assert_eq!(results[0][1], Value::Integer(200));
+    assert_eq!(results[0].1[0], Value::Text("Alice Restored".into()));
+    assert_eq!(results[0].1[1], Value::Integer(200));
 }
 
 #[test]
@@ -2193,7 +2193,7 @@ fn include_deleted_query_returns_soft_deleted_rows() {
     let query = qm.query("users").build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0], Value::Text("Bob".into()));
+    assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 
     // Include deleted query - scans both _id and _id_deleted indices
     // Soft-deleted rows have preserved content, so both Alice and Bob are returned
@@ -2202,9 +2202,11 @@ fn include_deleted_query_returns_soft_deleted_rows() {
     assert_eq!(results.len(), 2);
 
     // Verify Alice's data is preserved
-    let alice_result = results.iter().find(|r| r[0] == Value::Text("Alice".into()));
+    let alice_result = results
+        .iter()
+        .find(|r| r.1[0] == Value::Text("Alice".into()));
     assert!(alice_result.is_some());
-    assert_eq!(alice_result.unwrap()[1], Value::Integer(100));
+    assert_eq!(alice_result.unwrap().1[1], Value::Integer(100));
 
     // Verify that Alice is in the _id_deleted index
     assert!(qm.row_is_deleted("users", handle1.row_id));
@@ -2230,7 +2232,7 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
     let query = qm.query("users").include_deleted().build();
     let results = qm.execute(query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0][0], Value::Text("Bob".into()));
+    assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
 
 // ========================================================================

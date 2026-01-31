@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 
 /// BLAKE3 hash of blob content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentHash(pub [u8; 32]);
 
 /// Tracks which commits reference a blob (for GC).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobAssociation {
     pub object_id: ObjectId,
     pub branch_name: BranchName,

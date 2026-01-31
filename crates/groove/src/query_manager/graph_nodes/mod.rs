@@ -98,7 +98,7 @@ pub use index_scan::IndexScanNode;
 pub use join::JoinNode;
 pub use limit_offset::LimitOffsetNode;
 pub use materialize::MaterializeNode;
-pub use output::OutputNode;
+pub use output::{OutputNode, QuerySubscriptionId};
 pub use policy_filter::PolicyFilterNode;
 pub use project::ProjectNode;
 pub use sort::SortNode;

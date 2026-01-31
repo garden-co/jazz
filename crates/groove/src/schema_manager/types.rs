@@ -20,6 +20,11 @@ use crate::object::ObjectId;
 pub struct AppId(pub ObjectId);
 
 impl AppId {
+    /// Create a random AppId.
+    pub fn random() -> Self {
+        Self(ObjectId::new())
+    }
+
     /// Create an AppId from a string identifier.
     ///
     /// Uses UUIDv5 with DNS namespace for deterministic generation.
@@ -29,6 +34,12 @@ impl AppId {
             &Uuid::NAMESPACE_DNS,
             name.as_bytes(),
         )))
+    }
+
+    /// Parse an AppId from a UUID string.
+    pub fn from_string(s: &str) -> Result<Self, uuid::Error> {
+        let uuid = Uuid::parse_str(s)?;
+        Ok(Self(ObjectId::from_uuid(uuid)))
     }
 
     /// Create an AppId from an existing ObjectId.

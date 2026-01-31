@@ -46,6 +46,11 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
+    /// Query has pending objects that need to be loaded from storage.
+    /// Caller should retry after storage processing.
+    Pending,
+    /// Unknown schema hash - client should sync schema first.
+    UnknownSchema(SchemaHash),
 }
 
 impl std::fmt::Display for QueryError {
@@ -67,6 +72,14 @@ impl std::fmt::Display for QueryError {
             QueryError::RowHardDeleted(id) => write!(f, "row hard deleted: {:?}", id),
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
+            }
+            QueryError::Pending => write!(f, "query pending: objects being loaded from storage"),
+            QueryError::UnknownSchema(hash) => {
+                write!(
+                    f,
+                    "unknown schema: {} - client should sync schema first",
+                    hash.short()
+                )
             }
         }
     }
@@ -237,6 +250,12 @@ pub struct QueryManager {
     /// Buffered row updates for unknown schema branches.
     /// These are retried when new schemas activate via try_activate_pending().
     pending_row_updates: Vec<AllObjectUpdate>,
+
+    /// Known schemas (for server-mode operation).
+    /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
+    /// When a row arrives with unknown branch, we parse the branch name to extract
+    /// the short hash, then look up the full schema in this map.
+    known_schemas: HashMap<SchemaHash, Schema>,
 }
 
 impl QueryManager {
@@ -264,6 +283,7 @@ impl QueryManager {
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
+            known_schemas: HashMap::new(),
         }
     }
 
@@ -453,6 +473,19 @@ impl QueryManager {
             .into_iter()
             .map(|b| b.as_str().to_string())
             .collect()
+    }
+
+    /// Public wrapper to ensure indices exist for a table on a specific branch.
+    ///
+    /// Used by SchemaManager for server-mode query execution when setting up
+    /// indices for a client's schema.
+    pub fn ensure_indices_for_branch(
+        &mut self,
+        table: &str,
+        branch: &str,
+        table_schema: &TableSchema,
+    ) {
+        Self::ensure_table_indices_for_branch(&mut self.indices, table, branch, table_schema);
     }
 
     /// Ensure indices exist for a table on a specific branch.
@@ -741,18 +774,16 @@ impl QueryManager {
         let author = object_id; // Self-authored
 
         // Add commit with row data
+        let branch = self.current_branch();
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(
-                object_id,
-                self.current_branch(),
-                vec![],
-                data.clone(),
-                author,
-                None,
-            )
+            .add_commit(object_id, &branch, vec![], data.clone(), author, None)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+
+        // Forward new row to all connected servers
+        self.sync_manager
+            .forward_update_to_servers(object_id, branch.into());
 
         // Update indices immediately and persist
         self.update_indices_for_insert(table, object_id, &data, &descriptor)?;
@@ -831,6 +862,10 @@ impl QueryManager {
             .object_manager
             .add_commit(object_id, branch, vec![], data.clone(), author, None)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+
+        // Forward new row to all connected servers
+        self.sync_manager
+            .forward_update_to_servers(object_id, branch.into());
 
         // Update indices on specified branch
         self.update_indices_for_insert_on_branch(table, branch, object_id, &data, &descriptor)?;
@@ -1547,12 +1582,10 @@ impl QueryManager {
         self.hard_delete(id)
     }
 
-    /// Test helper: get a row by ID if loaded in ObjectManager.
+    /// Get a row by ID if loaded in ObjectManager.
     ///
-    /// Production code should use queries to read data, not this method.
-    /// This exists only to verify test expectations about what's loaded.
-    #[cfg(test)]
-    pub fn test_get_row_if_loaded(&self, id: ObjectId) -> Option<Vec<Value>> {
+    /// Returns decoded values and the table name if the row exists.
+    pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -1567,7 +1600,17 @@ impl QueryManager {
         let (data, _) = self.load_row_from_object(id)?;
 
         let table_schema = self.schema.get(&table_name)?;
-        decode_row(&table_schema.descriptor, &data).ok()
+        let values = decode_row(&table_schema.descriptor, &data).ok()?;
+        Some((table, values))
+    }
+
+    /// Test helper: get a row by ID if loaded in ObjectManager.
+    ///
+    /// Production code should use queries to read data, not this method.
+    /// This exists only to verify test expectations about what's loaded.
+    #[cfg(test)]
+    pub fn test_get_row_if_loaded(&self, id: ObjectId) -> Option<Vec<Value>> {
+        self.get_row(id).map(|(_, values)| values)
     }
 
     /// Create a query builder for a table.
@@ -1581,42 +1624,76 @@ impl QueryManager {
     /// 1. Explicit branches in query (if any)
     /// 2. Schema context's live branches (requires initialized context)
     /// 3. Error if context not initialized and no explicit branches
-    pub fn execute(&mut self, query: Query) -> Result<Vec<Vec<Value>>, QueryError> {
+    pub fn execute(&mut self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
+        if !self.schema_context.is_initialized() {
+            return Err(QueryError::QueryCompilationError(
+                "schema context not initialized - call set_current_schema() first".into(),
+            ));
+        }
+
+        // Use the manager's schema and context
+        let schema = (*self.schema).clone();
+        let context = self.schema_context.clone();
+
+        self.execute_with_explicit_context(query, &schema, &context)
+    }
+
+    /// Execute a query with explicit schema and context (for server use).
+    ///
+    /// This is the core execution method. The regular `execute()` calls this
+    /// with the manager's own schema and context.
+    ///
+    /// For servers handling multi-tenant queries, pass a SchemaContext built
+    /// for the client's target schema. Lens transforms will still work if
+    /// the context has other live schemas with lens paths.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    /// * `schema` - The target schema (used for table/column lookup)
+    /// * `schema_context` - Context with current schema and any live schemas
+    pub fn execute_with_explicit_context(
+        &mut self,
+        query: Query,
+        schema: &Schema,
+        schema_context: &SchemaContext,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
         let table_name = query.table;
-        let table_schema = self
-            .schema
+        let table_schema = schema
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
 
-        // Determine branches
+        // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
-        } else if self.schema_context.is_initialized() {
-            self.schema_context
+        } else {
+            schema_context
                 .all_branch_names()
                 .into_iter()
                 .map(|b| b.as_str().to_string())
                 .collect()
-        } else {
-            return Err(QueryError::QueryCompilationError(
-                "schema context not initialized - call set_current_schema() first".into(),
-            ));
         };
 
+        // Build branch -> schema hash map from the context
+        let branch_schema_map: HashMap<String, SchemaHash> = schema_context
+            .all_branch_names()
+            .into_iter()
+            .filter_map(|branch_name| {
+                ComposedBranchName::parse(&branch_name)
+                    .map(|composed| (branch_name.as_str().to_string(), composed.schema_hash))
+            })
+            .collect();
+
         // Compile query graph with schema context
-        let mut graph = QueryGraph::compile_with_schema_context(
-            &query,
-            &self.schema,
-            None,
-            &self.schema_context,
-        )
-        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+        let mut graph =
+            QueryGraph::compile_with_schema_context(&query, schema, None, schema_context)
+                .ok_or_else(|| {
+                    QueryError::QueryCompilationError("failed to compile query".into())
+                })?;
 
         // Get references for the row loader closure
         let table = table_name.as_str().to_string();
-        let schema_context = &self.schema_context;
-        let branch_schema_map = &self.branch_schema_map;
 
         // Row loader with lens transform for old schema rows
         let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
@@ -1646,13 +1723,43 @@ impl QueryManager {
             Some((content, commit_id))
         };
 
+        // Set the default branch for pending ID tracking
+        if let Some(first_branch) = branches.first() {
+            graph.set_pending_branch(first_branch);
+        }
+
         graph.settle(&self.indices, &self.sync_manager.object_manager, row_loader);
+
+        // Check if graph has pending objects
+        if graph.is_pending() {
+            // Request loading for any pending object IDs
+            for compact in &graph.nodes {
+                if let super::graph::GraphNode::Materialize(mat_node) = &compact.node {
+                    for (&pending_id, branch) in mat_node.pending_ids_with_branches() {
+                        // Use the tracked branch, or fall back to first subscription branch
+                        let load_branch = if branch.is_empty() {
+                            branches.first().cloned().unwrap_or_default()
+                        } else {
+                            branch.clone()
+                        };
+                        self.sync_manager
+                            .object_manager
+                            .request_load(pending_id, load_branch);
+                    }
+                }
+            }
+            return Err(QueryError::Pending);
+        }
 
         // Decode results
         let rows = graph.current_result();
         let results = rows
             .iter()
-            .filter_map(|row| decode_row(&descriptor, &row.data).ok())
+            .filter_map(|row| {
+                decode_row(&descriptor, &row.data)
+                    .ok()
+                    .map(|values| (row.id, values))
+            })
             .collect();
 
         Ok(results)
@@ -1722,6 +1829,68 @@ impl QueryManager {
     /// Unsubscribe from a query.
     pub fn unsubscribe(&mut self, id: QuerySubscriptionId) {
         self.subscriptions.remove(&id);
+    }
+
+    /// Subscribe with explicit schema and context (for server use).
+    ///
+    /// This is the core subscription method for server-side query processing.
+    /// The regular `subscribe_with_session()` calls the internal context,
+    /// but servers need to use the client's schema context.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to subscribe to
+    /// * `schema` - The target schema (client's schema)
+    /// * `schema_context` - Context with current schema and any live schemas
+    /// * `session` - Optional session for policy evaluation
+    pub fn subscribe_with_explicit_context(
+        &mut self,
+        query: Query,
+        schema: &Schema,
+        schema_context: &SchemaContext,
+        session: Option<Session>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        let table_name = &query.table;
+        let _table_schema = schema
+            .get(table_name)
+            .ok_or(QueryError::TableNotFound(*table_name))?;
+
+        // Determine branches from query or context
+        let branches: Vec<String> = if !query.branches.is_empty() {
+            query.branches.clone()
+        } else {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        };
+
+        // Compile query graph with explicit schema context
+        let graph = QueryGraph::compile_with_schema_context(
+            &query,
+            schema,
+            session.clone(),
+            schema_context,
+        )
+        .ok_or_else(|| QueryError::QueryCompilationError("failed to compile query".into()))?;
+
+        let id = QuerySubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+
+        self.subscriptions.insert(
+            id,
+            QuerySubscription {
+                query,
+                graph,
+                mode: SubscriptionMode::Delta,
+                branches,
+                session,
+                needs_recompile: false,
+            },
+        );
+
+        Ok(id)
     }
 
     /// Subscribe to query results and sync matching objects from servers.
@@ -1799,6 +1968,38 @@ impl QueryManager {
     /// Restore pending row updates (used by sync_context after rebuild).
     pub fn restore_pending_row_updates(&mut self, updates: Vec<AllObjectUpdate>) {
         self.pending_row_updates = updates;
+    }
+
+    /// Set known schemas for server-mode operation.
+    ///
+    /// Called by SchemaManager.process() to sync the known_schemas map.
+    /// This enables lazy branch activation when rows arrive with unknown branches.
+    pub fn set_known_schemas(&mut self, schemas: HashMap<SchemaHash, Schema>) {
+        self.known_schemas = schemas;
+    }
+
+    /// Add a branch → schema hash mapping (for server-mode schema activation).
+    ///
+    /// Used when a subscription arrives with explicit schema context.
+    pub fn add_schema_branch(&mut self, branch: &str, schema_hash: SchemaHash) {
+        self.branch_schema_map
+            .insert(branch.to_string(), schema_hash);
+    }
+
+    /// Find a schema in known_schemas by its short hash prefix.
+    ///
+    /// Returns the full SchemaHash if found. The partial hash has the first 4 bytes
+    /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
+    fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
+        let target_short = &partial.0[..4];
+
+        // Search known_schemas for matching short hash
+        for full_hash in self.known_schemas.keys() {
+            if &full_hash.0[..4] == target_short {
+                return Some(*full_hash);
+            }
+        }
+        None
     }
 
     /// Update the branch_schema_map from the current schema context.
@@ -1953,6 +2154,11 @@ impl QueryManager {
                 }
             };
 
+            // Set the default branch for pending ID tracking
+            if let Some(first_branch) = branches.first() {
+                subscription.graph.set_pending_branch(first_branch);
+            }
+
             let delta = subscription.graph.settle(indices, om, row_loader);
             if !delta.is_empty() {
                 self.update_outbox.push(QueryUpdate {
@@ -1960,6 +2166,31 @@ impl QueryManager {
                     delta,
                 });
             }
+        }
+
+        // 7b. Request loading for any pending object IDs
+        // Collect pending IDs and their branches, then request loads
+        let mut load_requests: Vec<(ObjectId, String)> = Vec::new();
+        for subscription in self.subscriptions.values() {
+            for compact in &subscription.graph.nodes {
+                if let super::graph::GraphNode::Materialize(mat_node) = &compact.node {
+                    for (&pending_id, tracked_branch) in mat_node.pending_ids_with_branches() {
+                        // Use tracked branch, or fall back to subscription's first branch
+                        let branch = if tracked_branch.is_empty() {
+                            subscription.branches.first().cloned().unwrap_or_default()
+                        } else {
+                            tracked_branch.clone()
+                        };
+                        load_requests.push((pending_id, branch));
+                    }
+                }
+            }
+        }
+        // Now request loads (mutable borrow of object_manager)
+        for (object_id, branch) in load_requests {
+            self.sync_manager
+                .object_manager
+                .request_load(object_id, branch);
         }
 
         // 8. Settle server-side subscriptions and update scopes
@@ -2835,9 +3066,24 @@ impl QueryManager {
         let schema_hash = match self.branch_schema_map.get(branch) {
             Some(&hash) => hash,
             None => {
-                // Unknown branch - buffer for retry when schema activates
-                self.pending_row_updates.push(update);
-                return;
+                // Unknown branch - try lazy activation from known_schemas
+                let branch_name = BranchName::new(branch);
+                if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+                    // Search known_schemas for matching short hash
+                    if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
+                        // Activate this branch/schema combination
+                        self.branch_schema_map.insert(branch.to_string(), full_hash);
+                        full_hash
+                    } else {
+                        // Schema not known yet - buffer for retry
+                        self.pending_row_updates.push(update);
+                        return;
+                    }
+                } else {
+                    // Can't parse branch - buffer for retry
+                    self.pending_row_updates.push(update);
+                    return;
+                }
             }
         };
 
@@ -2848,19 +3094,22 @@ impl QueryManager {
                 Some(schema) => schema.clone(),
                 None => return,
             }
-        } else {
-            // Live schema - get from context
-            match self.schema_context.get_schema(&schema_hash) {
-                Some(schema) => match schema.get(&table_name) {
-                    Some(table_schema) => table_schema.clone(),
-                    None => return,
-                },
-                None => {
-                    // Schema not in context yet - buffer for retry
-                    self.pending_row_updates.push(update);
-                    return;
-                }
+        } else if let Some(schema) = self.schema_context.get_schema(&schema_hash) {
+            // Live schema from context
+            match schema.get(&table_name) {
+                Some(table_schema) => table_schema.clone(),
+                None => return,
             }
+        } else if let Some(schema) = self.known_schemas.get(&schema_hash) {
+            // Known schema (server mode) - not in context but available
+            match schema.get(&table_name) {
+                Some(table_schema) => table_schema.clone(),
+                None => return,
+            }
+        } else {
+            // Schema not available - buffer for retry
+            self.pending_row_updates.push(update);
+            return;
         };
 
         let descriptor = table_schema.descriptor.clone();
@@ -3327,7 +3576,9 @@ impl QueryManager {
     /// This handles both ObjectManager requests and index storage requests.
     /// Use this for tests that need actual persistence (e.g., cold_start tests).
     /// Note: May need to be called multiple times when loading indices (meta first, then pages).
-    pub fn process_storage_with_driver(&mut self, driver: &mut impl crate::driver::Driver) {
+    ///
+    /// Returns `true` if work was done (requests were processed), `false` if no requests pending.
+    pub fn process_storage_with_driver(&mut self, driver: &mut impl crate::driver::Driver) -> bool {
         use super::index::PageId;
         use crate::storage::StorageResponse;
 
@@ -3338,7 +3589,7 @@ impl QueryManager {
         }
 
         if all_requests.is_empty() {
-            return;
+            return false;
         }
 
         // Process through driver
@@ -3388,6 +3639,8 @@ impl QueryManager {
 
         // Process ObjectManager responses
         self.sync_manager.object_manager.process_storage_responses();
+
+        true
     }
 
     // ========================================================================

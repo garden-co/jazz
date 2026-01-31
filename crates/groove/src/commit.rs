@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
 
 use blake3::Hasher;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::object::ObjectId;
 
 /// BLAKE3 hash identifying a commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommitId(pub [u8; 32]);
 
-/// Storage state of a commit.
+/// Storage state of a commit (runtime only, not serialized).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum StoredState {
     #[default]
@@ -20,7 +21,7 @@ pub enum StoredState {
 }
 
 /// A commit in an object's history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commit {
     /// Parent commit IDs. Inline storage for 0-2 parents (root, regular, merge).
     pub parents: SmallVec<[CommitId; 2]>,
@@ -29,7 +30,8 @@ pub struct Commit {
     pub timestamp: u64,
     pub author: ObjectId,
     pub metadata: Option<BTreeMap<String, String>>,
-    /// Storage state (not included in commit hash).
+    /// Storage state (runtime only, not serialized).
+    #[serde(skip, default)]
     pub stored_state: StoredState,
 }
 
