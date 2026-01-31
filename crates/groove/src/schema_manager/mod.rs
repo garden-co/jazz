@@ -40,9 +40,12 @@
 
 pub mod auto_lens;
 pub mod context;
+pub mod diff;
 pub mod encoding;
+pub mod files;
 pub mod lens;
 pub mod manager;
+pub mod sql;
 pub mod transformer;
 pub mod types;
 pub mod writer;
@@ -53,12 +56,15 @@ mod integration_tests;
 // Re-exports
 pub use auto_lens::generate_lens;
 pub use context::{QuerySchemaContext, SchemaContext, SchemaError};
+pub use diff::{Ambiguity, DiffResult, diff_schemas};
 pub use encoding::{
     CatalogueEncodingError, decode_lens_transform, decode_schema, encode_lens_transform,
     encode_schema,
 };
+pub use files::{FileError, SchemaDirectory};
 pub use lens::{Direction, Lens, LensOp, LensTransform};
 pub use manager::SchemaManager;
+pub use sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};
 pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,
 };

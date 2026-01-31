@@ -24,17 +24,22 @@ pub struct Todo {
     pub id: Uuid,
     pub title: String,
     pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTodoRequest {
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateTodoRequest {
     pub title: Option<String>,
     pub completed: Option<bool>,
+    pub description: Option<String>,
 }
 
 /// Application state.
@@ -47,7 +52,8 @@ fn test_schema() -> jazz_rs::Schema {
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean),
+                .column("completed", ColumnType::Boolean)
+                .nullable_column("description", ColumnType::Text),
         )
         .build()
 }
@@ -97,10 +103,15 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
         Value::Boolean(b) => *b,
         _ => return None,
     };
+    let description = values.get(2).and_then(|v| match v {
+        Value::Text(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    });
     Some(Todo {
         id: *object_id.uuid(),
         title,
         completed,
+        description,
     })
 }
 
@@ -126,13 +137,23 @@ async fn create_todo(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateTodoRequest>,
 ) -> impl IntoResponse {
-    let values = vec![Value::Text(request.title.clone()), Value::Boolean(false)];
+    let description = request.description.clone().unwrap_or_default();
+    let values = vec![
+        Value::Text(request.title.clone()),
+        Value::Boolean(false),
+        Value::Text(description.clone()),
+    ];
     match state.client.create("todos", values).await {
         Ok(row_id) => {
             let todo = Todo {
                 id: *row_id.uuid(),
                 title: request.title,
                 completed: false,
+                description: if description.is_empty() {
+                    None
+                } else {
+                    Some(description)
+                },
             };
             (StatusCode::CREATED, Json(todo)).into_response()
         }
@@ -156,6 +177,9 @@ async fn update_todo(
     }
     if let Some(completed) = request.completed {
         updates.push(("completed".to_string(), Value::Boolean(completed)));
+    }
+    if let Some(description) = request.description {
+        updates.push(("description".to_string(), Value::Text(description)));
     }
 
     match state.client.update(object_id, updates).await {
@@ -255,6 +279,7 @@ async fn test_crud_operations() {
     // 2. Create a todo
     let create_req = CreateTodoRequest {
         title: "Buy milk".to_string(),
+        description: None,
     };
     let response = app
         .clone()
@@ -295,6 +320,7 @@ async fn test_crud_operations() {
     let update_req = UpdateTodoRequest {
         title: None,
         completed: Some(true),
+        description: None,
     };
     let response = app
         .clone()
@@ -360,7 +386,11 @@ async fn test_local_persistence() {
         let client = JazzClient::connect(context).await.unwrap();
 
         // Create a todo
-        let values = vec![Value::Text("Persist me".to_string()), Value::Boolean(false)];
+        let values = vec![
+            Value::Text("Persist me".to_string()),
+            Value::Boolean(false),
+            Value::Text(String::new()),
+        ];
         let row_id = client.create("todos", values).await.unwrap();
 
         // Verify it exists
@@ -543,6 +573,7 @@ async fn test_server_resync() {
         let values = vec![
             Value::Text("Synced todo".to_string()),
             Value::Boolean(false),
+            Value::Text(String::new()),
         ];
         let _row_id = client.create("todos", values).await.unwrap();
 

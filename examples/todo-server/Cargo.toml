@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 jazz-rs = { path = "../../crates/jazz-rs" }
+groove = { path = "../../crates/groove" }
 
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
