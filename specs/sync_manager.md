@@ -156,10 +156,12 @@ struct OutboxEntry {
 fn add_server(&mut self, server_id: ServerId)
 fn remove_server(&mut self, server_id: ServerId)
 fn add_client(&mut self, client_id: ClientId)
+fn add_client_with_full_sync(&mut self, client_id: ClientId)
 fn remove_client(&mut self, client_id: ClientId)
 ```
 
-Adding a server triggers full sync of all existing objects.
+- Adding a server triggers full sync of all existing objects to that server
+- `add_client_with_full_sync()` queues all existing objects for the new client (used when SSE connects)
 
 ### Query Management (Clients)
 
@@ -317,3 +319,16 @@ for pending in sm.take_pending_updates() {
 6. **Permission merge semantics**: Multiple queries for same (object, branch) take most permissive. Simplifies reasoning.
 
 7. **Query forwarding for multi-tier**: Enables hub-and-spoke topologies where intermediate nodes can request subsets from upstream.
+
+8. **Scope bypass for system objects**: `process_from_client()` auto-approves certain object types without scope checking:
+   - **Catalogue objects**: `type=catalogue_schema` or `type=catalogue_lens` (schema discovery)
+   - **Row objects**: Objects with `table` metadata (data sync)
+
+   This allows clients to sync data and schemas before establishing query subscriptions.
+
+   > **⚠️ SECURITY TODO:** Catalogue object bypass is a security gap. Schema/lens pushes should require an **app admin token** (separate from session token) to prevent malicious schema injection. See `schema_manager.md` for details.
+
+9. **Client-chosen persistent IDs**: Clients generate and persist their own `ClientId`. Server accepts the ID via SSE query parameter. This enables:
+   - Session state preservation across reconnects (`sent_tips` reused)
+   - Consistent ID between SSE registration and HTTP requests
+   - Reconnection without re-sending all data

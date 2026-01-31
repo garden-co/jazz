@@ -7,6 +7,10 @@ We use TDD and design for strong boundaries of concern, not taking shortcuts eve
 
 When time runs short, prefer leaving functionality incomplete (with clear TODO markers in code and plans) over implementing shortcuts that violate the architecture. It's more than OK to not complete a plan or even to not reach any passing tests within one session - we're working on complex stuff and eventual correctness and faithful design matters more than speed.
 
+Depth over breadth: One fully working feature is worth more than five scaffolded ones. Don't move to the next phase/crate/component until the current one has working E2E tests that exercise real behavior. Placeholder tests that just `assert!(true)` or return empty data are not tests - they're lies. If implementing something properly requires modifying existing code, do it.
+
+When working on multi-phase plans, ask before moving to the next phase. "Phase N compiles" is not the same as "Phase N works."
+
 We document internal architecture and plans in /specs as markdown files.
 We document public APIs and user guides in /docs as markdown files.
 

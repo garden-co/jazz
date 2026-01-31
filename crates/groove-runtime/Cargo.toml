@@ -1,0 +1,14 @@
+[package]
+name = "groove-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+groove = { path = "../groove" }
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+
+[dev-dependencies]
+groove-rocksdb = { path = "../groove-rocksdb" }
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }

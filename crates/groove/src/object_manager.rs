@@ -60,7 +60,7 @@ pub struct AllObjectUpdate {
 }
 
 /// Full blob identifier (for addressing within commit context).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlobId {
     pub object_id: ObjectId,
     pub branch_name: BranchName,
@@ -234,6 +234,33 @@ impl ObjectManager {
     /// Get the state of an object (Loading, Creating, or Available).
     pub fn get_state(&self, id: ObjectId) -> Option<&ObjectState> {
         self.objects.get(&id)
+    }
+
+    /// Request loading an object from storage if not already in memory.
+    ///
+    /// Returns true if a load request was queued, false if the object is already
+    /// loaded or loading. Use this for lazy loading: when a query needs an object
+    /// that isn't in memory, call this to trigger loading, then retry on next tick.
+    pub fn request_load(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+    ) -> bool {
+        let branch_name = branch_name.into();
+
+        // If already loaded or loading, no need to request
+        if self.objects.contains_key(&object_id) {
+            return false;
+        }
+
+        // Add as Loading and queue request
+        self.objects.insert(object_id, ObjectState::Loading);
+        self.outbox.push(StorageRequest::LoadObjectBranch {
+            object_id,
+            branch_name,
+            depth: LoadDepth::AllCommits,
+        });
+        true
     }
 
     /// Add a commit to an object's branch.

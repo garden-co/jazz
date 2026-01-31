@@ -63,6 +63,25 @@ SyncPayload::QueryUnsubscription {
 }
 ```
 
+### Transport Layer (jazz-transport)
+
+HTTP request types include schema context for server-side execution:
+
+```rust
+pub struct SubscribeRequest {
+    pub query: Query,
+    pub schema_context: QuerySchemaContext,  // env, schema_hash, user_branch
+    pub session: Option<Session>,
+}
+
+pub struct CreateObjectRequest {
+    pub table: String,
+    pub values: Vec<Value>,
+    pub schema_context: QuerySchemaContext,
+    pub session: Option<Session>,
+}
+```
+
 ### Full Mechanism
 
 ```
@@ -246,6 +265,7 @@ fn e2e_permissions_prevent_sync() {
 2. **QueryManager handles translation**: Query → Scope happens in QueryManager.process()
 3. **Session in query**: Client's session MUST be included for correct permission evaluation
 4. **No query dedup server-side**: Different clients may have different sessions/permissions
+5. **Schema context in requests**: All query/mutation requests include `QuerySchemaContext` so servers can execute with client's schema version
 
 ## Progress
 
@@ -259,6 +279,53 @@ fn e2e_permissions_prevent_sync() {
 ## TODO (Future Work)
 
 - **Reconnection**: When reconnect / dynamic server add-remove is implemented, client should re-send all active subscriptions to newly connected servers
+
+## Server-Mode Lazy Schema Activation
+
+### Problem
+
+When a server starts in `new_server()` mode (no pre-loaded schema), it receives:
+1. Schema catalogue objects via sync
+2. Row objects for tables in those schemas
+
+Without lazy activation, row objects would be buffered forever in `pending_row_updates` because the `branch_schema_map` isn't populated until a schema is "activated" via the normal client flow.
+
+### Solution: Lazy Branch Activation
+
+QueryManager now supports lazy schema activation:
+
+1. **known_schemas field**: SchemaManager syncs `known_schemas` to QueryManager via `set_known_schemas()`
+
+2. **find_schema_by_short_hash()**: When a row arrives with unknown branch:
+   - Parse branch name to extract short hash (e.g., "client-a1b2c3d4-main" → short hash "a1b2c3d4")
+   - Search `known_schemas` for matching full hash
+   - If found, activate the branch by adding to `branch_schema_map`
+
+3. **Table schema lookup fallback**: When getting table schema for indexing:
+   - First check current schema (`self.schema`)
+   - Then check live schemas via `schema_context.get_schema()`
+   - Finally check `known_schemas` (server mode)
+
+### Scope Bypass for System Objects
+
+SyncManager's `process_from_client()` now bypasses scope checking for:
+- **Catalogue objects**: `type=catalogue_schema` or `type=catalogue_lens`
+- **Row objects**: objects with `table` metadata
+
+This allows clients to sync data to servers without pre-establishing query subscriptions.
+
+### Multi-Environment Support
+
+Lazy activation naturally supports multiple environments:
+- Client A uses "dev-{hash}-main"
+- Client B uses "prod-{hash}-main"
+- Each branch gets its own `branch_schema_map` entry
+- Indices are per-branch, so data is segregated correctly
+
+### Test Coverage
+
+- `e2e_two_clients_server_schema_sync`: Tests full server bootstrap from empty state
+- Verifies schema catalogue sync, row sync, and lazy activation
 
 ## Known Shortcuts/Incomplete Items
 

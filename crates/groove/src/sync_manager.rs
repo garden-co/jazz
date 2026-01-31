@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
@@ -20,7 +21,7 @@ pub struct PolicyError {
 // ============================================================================
 
 /// Unique identifier for a server connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerId(pub Uuid);
 
 impl ServerId {
@@ -36,12 +37,17 @@ impl Default for ServerId {
 }
 
 /// Unique identifier for a client connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientId(pub Uuid);
 
 impl ClientId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
+    }
+
+    /// Parse from UUID string.
+    pub fn parse(s: &str) -> Option<Self> {
+        Uuid::parse_str(s).ok().map(ClientId)
     }
 }
 
@@ -51,8 +57,14 @@ impl Default for ClientId {
     }
 }
 
+impl std::fmt::Display for ClientId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Unique identifier for a query subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueryId(pub u64);
 
 /// Unique identifier for a pending update awaiting approval.
@@ -124,7 +136,7 @@ impl ClientState {
 // ============================================================================
 
 /// Strongly typed errors for sync operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncError {
     /// Operation denied due to insufficient permission.
     PermissionDenied {
@@ -143,14 +155,14 @@ pub enum SyncError {
 // ============================================================================
 
 /// Object metadata sent once per destination.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMetadata {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
 }
 
 /// Payload for sync messages between peers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncPayload {
     /// Object or branch update with commits.
     ObjectUpdated {
@@ -368,6 +380,15 @@ impl SyncManager {
     /// Add a client connection.
     pub fn add_client(&mut self, client_id: ClientId) {
         self.clients.insert(client_id, ClientState::default());
+    }
+
+    /// Add a client connection and sync all existing objects to them.
+    ///
+    /// This is useful for simple sync scenarios where new clients should
+    /// receive all server data immediately upon connecting.
+    pub fn add_client_with_full_sync(&mut self, client_id: ClientId) {
+        self.clients.insert(client_id, ClientState::default());
+        self.queue_full_sync_to_client(client_id);
     }
 
     /// Remove a client connection.
@@ -706,6 +727,97 @@ impl SyncManager {
         }
     }
 
+    /// Queue all existing objects to sync to a new client.
+    ///
+    /// This is called when a client first connects to send them all known data.
+    /// For production, clients should use query subscriptions to scope what they receive.
+    fn queue_full_sync_to_client(&mut self, client_id: ClientId) {
+        // Collect all object/branch/tips we need to sync
+        let mut to_sync: Vec<BranchSyncData> = Vec::new();
+
+        for (object_id, object_state) in &self.object_manager.objects {
+            if let Some(object) = match object_state {
+                crate::object::ObjectState::Creating(obj)
+                | crate::object::ObjectState::Available(obj) => Some(obj),
+                crate::object::ObjectState::Loading => None,
+            } {
+                for (branch_name, branch) in &object.branches {
+                    to_sync.push((
+                        *object_id,
+                        object.metadata.clone(),
+                        *branch_name,
+                        branch.tips.iter().copied().collect(),
+                    ));
+                }
+            }
+        }
+
+        // Now queue messages
+        for (object_id, metadata, branch_name, tips) in to_sync {
+            self.queue_tips_to_client_full_sync(client_id, object_id, metadata, branch_name, tips);
+        }
+    }
+
+    /// Queue tips to a client during full sync (bypasses scope check).
+    fn queue_tips_to_client_full_sync(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        branch_name: BranchName,
+        tips: HashSet<CommitId>,
+    ) {
+        // Skip objects marked as nosync (local-only, e.g., index nodes)
+        if metadata.get("nosync").map(|v| v == "true").unwrap_or(false) {
+            return;
+        }
+
+        // Extract needed info without holding mutable borrow
+        let (include_metadata, already_sent) = {
+            let Some(client) = self.clients.get(&client_id) else {
+                return;
+            };
+            let include_metadata = !client.sent_metadata.contains(&object_id);
+            let already_sent = client
+                .sent_tips
+                .get(&(object_id, branch_name))
+                .cloned()
+                .unwrap_or_default();
+            (include_metadata, already_sent)
+        };
+
+        // Collect commits
+        let commits = self.collect_commits_to_send(object_id, &branch_name, &already_sent, &tips);
+
+        if commits.is_empty() && !include_metadata {
+            return;
+        }
+
+        // Now update client state
+        let client = self.clients.get_mut(&client_id).unwrap();
+        if include_metadata {
+            client.sent_metadata.insert(object_id);
+        }
+        client.sent_tips.insert((object_id, branch_name), tips);
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id,
+                metadata: if include_metadata {
+                    Some(ObjectMetadata {
+                        id: object_id,
+                        metadata,
+                    })
+                } else {
+                    None
+                },
+                branch_name,
+                commits,
+            },
+        });
+    }
+
     /// Queue tips to a server, including metadata if first time.
     fn queue_tips_to_server(
         &mut self,
@@ -1017,10 +1129,20 @@ impl SyncManager {
                 object_id,
                 branch_name,
                 commits,
-                ..
+                metadata,
             } => {
-                // Check if object is in any query scope
-                if !client.is_in_scope(*object_id, branch_name) {
+                // Check if this is a system object that bypasses scope check:
+                // - Catalogue objects (schema or lens)
+                // - Row objects (have "table" metadata)
+                let is_system_or_row_object = metadata.as_ref().is_some_and(|m| {
+                    m.metadata
+                        .get("type")
+                        .is_some_and(|t| t == "catalogue_schema" || t == "catalogue_lens")
+                        || m.metadata.contains_key("table")
+                });
+
+                // Check if object is in any query scope (system/row objects bypass scope check)
+                if !is_system_or_row_object && !client.is_in_scope(*object_id, branch_name) {
                     // Out of scope - queue for approval
                     let id = PendingUpdateId(self.next_pending_id);
                     self.next_pending_id += 1;
@@ -1272,7 +1394,9 @@ impl SyncManager {
     }
 
     /// Forward an update to all servers.
-    fn forward_update_to_servers(&mut self, object_id: ObjectId, branch_name: BranchName) {
+    ///
+    /// Call this after local writes to sync changes to connected servers.
+    pub fn forward_update_to_servers(&mut self, object_id: ObjectId, branch_name: BranchName) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
 
         let Some(object) = self.object_manager.get(object_id) else {

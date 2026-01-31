@@ -87,6 +87,21 @@ Old data remains in old branch - no deletion or in-place modification.
 
 ## App ID and Catalogue Discovery
 
+> **⚠️ SECURITY TODO: Schema Push Authorization**
+>
+> Currently, any client can push schema/lens objects to the server via catalogue sync. This is a significant security gap:
+>
+> - Malicious clients could inject schemas with altered column types
+> - Attackers could add tables/columns to exfiltrate data
+> - Draft lenses could be pushed to cause server errors
+>
+> **Required:** Schema/lens pushes should require an **app admin token** separate from the normal session token. This token would:
+> - Be issued to developers/operators, not end users
+> - Be required for `type=catalogue_schema` and `type=catalogue_lens` objects
+> - Be validated server-side before accepting catalogue updates
+>
+> Until implemented, treat schema sync as trusted-network-only.
+
 ### App ID Concept
 
 An **App ID** is a UUID that identifies an application's schema family. All schemas and lenses for that app reference this ID in their metadata:
@@ -246,6 +261,106 @@ let results = manager.execute(manager.query("users").build())?;
 manager.delete("users", object_id)?;
 ```
 
+## Server-Mode Schema Management
+
+### The Client/Server Split
+
+Clients and servers have fundamentally different schema contexts:
+
+- **Client**: Fixed current schema (baked into app). Queries use implicit schema context.
+- **Server**: No fixed current. Serves multiple clients with different schema versions.
+
+### QuerySchemaContext
+
+Minimal context for a query operation - what schema to target:
+
+```rust
+pub struct QuerySchemaContext {
+    pub env: String,
+    pub schema_hash: SchemaHash,
+    pub user_branch: String,
+}
+
+impl QuerySchemaContext {
+    pub fn branch_name(&self) -> ComposedBranchName { ... }
+}
+```
+
+This travels with queries over the wire, allowing servers to execute queries using the client's schema as "current" for that operation.
+
+### Server-Mode SchemaManager
+
+Servers create a SchemaManager without a fixed current schema:
+
+```rust
+// Server mode - no fixed current schema
+let manager = SchemaManager::new_server(sync_manager, app_id, "prod");
+
+// Schemas are added when received from clients
+manager.add_known_schema(client_schema);  // No lens path required
+
+// Queries execute with explicit context
+let ctx = QuerySchemaContext::new("dev", schema_hash, "main");
+let results = manager.execute_with_schema_context(query, &ctx)?;
+```
+
+### known_schemas Storage
+
+`SchemaManager` maintains `known_schemas: HashMap<SchemaHash, Schema>`:
+
+- Populated automatically when `process_catalogue_schema()` receives schemas
+- No lens path required for storage (unlike live schema activation)
+- Used by `execute_with_schema_context()` for query execution
+- Enables multi-tenant query handling on servers
+
+### QueryManager Sync for Lazy Activation
+
+In `SchemaManager::process()`, `known_schemas` is synced to QueryManager:
+
+```rust
+self.query_manager.set_known_schemas(self.known_schemas.clone());
+```
+
+This enables **lazy branch activation** in QueryManager:
+- When a row arrives with unknown branch (e.g., `"client-a1b2c3d4-main"`)
+- QueryManager parses the branch name to extract the short hash
+- Looks up matching full hash in `known_schemas`
+- If found, activates the branch by adding to `branch_schema_map`
+
+This allows servers starting with no schema (`new_server()`) to automatically index row data as schemas arrive via catalogue sync.
+
+### Query Execution Flow
+
+**Client** (unchanged):
+```rust
+manager.execute(query)  // Uses implicit context from current schema
+```
+
+**Server**:
+```rust
+// Query arrives from client with explicit context
+let ctx = request.schema_context;
+manager.execute_with_schema_context(query, &ctx)?;
+```
+
+Internally, `execute_with_schema_context()`:
+1. Looks up schema in `known_schemas` (returns `UnknownSchema` error if not found)
+2. Builds temporary `SchemaContext` with target schema as "current"
+3. Copies lenses from main context
+4. Adds other known schemas as live if lens paths exist
+5. Ensures indices exist for all reachable branches
+6. Executes query using temporary context
+
+### Lens Transforms Still Work
+
+Even in server mode, multi-schema queries work correctly:
+
+1. Server has schemas A and B in `known_schemas`
+2. Server has lens between A and B
+3. Client A sends query with `schema_hash_A`
+4. Server builds context with A as current, B as live
+5. Query reads from both branches, transforms B→A via lens
+
 ## Error Handling
 
 ### SchemaError
@@ -254,6 +369,10 @@ manager.delete("users", object_id)?;
 - `NoLensPath` - No lens chain connects two schemas
 - `SchemaNotFound` - Schema hash not in context
 - `LensNotFound` - No lens between specified hashes
+
+### QueryError
+
+- `UnknownSchema` - Schema hash not in `known_schemas` (server mode)
 
 ## Implementation Status
 
@@ -282,6 +401,13 @@ manager.delete("users", object_id)?;
 - [x] Pending schema tracking and activation
 - [x] SchemaManager.process() drains catalogue updates
 - [x] E2E tests for catalogue flow and multi-hop activation
+- [x] QuerySchemaContext for parameterized queries
+- [x] Server-mode SchemaManager (new_server, known_schemas)
+- [x] execute_with_schema_context() for explicit context queries
+- [x] SchemaHash serde serialization (hex format)
+- [x] Lazy schema activation in QueryManager (server mode)
+- [x] known_schemas sync to QueryManager via set_known_schemas()
+- [x] E2E server schema bootstrap test (e2e_two_clients_server_schema_sync)
 
 ### Known Limitations
 

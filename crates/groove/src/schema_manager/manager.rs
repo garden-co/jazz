@@ -17,7 +17,7 @@ use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash, Value}
 use crate::sync_manager::SyncManager;
 
 use super::auto_lens::generate_lens;
-use super::context::{SchemaContext, SchemaError};
+use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
 use super::encoding::{decode_lens_transform, decode_schema, encode_lens_transform, encode_schema};
 use super::lens::Lens;
 use super::types::AppId;
@@ -66,6 +66,10 @@ pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
+    /// Schemas known to this manager (for server mode).
+    /// Server adds schemas here when received via catalogue sync.
+    /// These are stored without requiring a lens path to current.
+    known_schemas: HashMap<SchemaHash, Schema>,
 }
 
 impl SchemaManager {
@@ -86,15 +90,21 @@ impl SchemaManager {
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
         let context = SchemaContext::new(schema.clone(), env, user_branch);
+        let current_hash = SchemaHash::compute(&schema);
 
         // Create QueryManager with empty context, then set current schema
         let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.set_current_schema(schema, env, user_branch);
+        query_manager.set_current_schema(schema.clone(), env, user_branch);
+
+        // Initialize known_schemas with current schema
+        let mut known_schemas = HashMap::new();
+        known_schemas.insert(current_hash, schema);
 
         Ok(Self {
             context,
             query_manager,
             app_id,
+            known_schemas,
         })
     }
 
@@ -106,6 +116,64 @@ impl SchemaManager {
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
         Self::new(sync_manager, schema, app_id, "dev", user_branch)
+    }
+
+    /// Create a server-mode SchemaManager with no fixed current schema.
+    ///
+    /// Servers don't have a "current" schema - they serve multiple clients
+    /// with different schema versions. Schemas are added via `add_known_schema()`
+    /// when received from clients via catalogue sync.
+    ///
+    /// Queries are executed with explicit `QuerySchemaContext` rather than
+    /// using implicit current schema context.
+    pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
+        let query_manager = QueryManager::new(sync_manager);
+        Self {
+            context: SchemaContext::empty(),
+            query_manager,
+            app_id,
+            known_schemas: HashMap::new(),
+        }
+    }
+
+    /// Check if this manager has a current schema set.
+    ///
+    /// Returns false for server-mode managers created with `new_server()`.
+    pub fn has_current_schema(&self) -> bool {
+        self.context.is_initialized()
+    }
+
+    /// Add a schema to known_schemas without requiring a lens path to current.
+    ///
+    /// Used by servers when receiving client schemas via catalogue sync.
+    /// The schema becomes available for use in explicit-context queries.
+    ///
+    /// Also creates indices for all env/user_branch combinations if known.
+    pub fn add_known_schema(&mut self, schema: Schema) {
+        let hash = SchemaHash::compute(&schema);
+
+        // Skip if already known
+        if self.known_schemas.contains_key(&hash) {
+            return;
+        }
+
+        self.known_schemas.insert(hash, schema.clone());
+
+        // If we have a current schema context, also try the lens-path activation
+        if self.context.is_initialized() {
+            self.context.add_pending_schema(schema.clone());
+            self.activate_pending_and_sync_to_query_manager();
+        }
+    }
+
+    /// Get a known schema by hash.
+    pub fn get_known_schema(&self, hash: &SchemaHash) -> Option<&Schema> {
+        self.known_schemas.get(hash)
+    }
+
+    /// Check if a schema is known (either current, live, or in known_schemas).
+    pub fn is_schema_known(&self, hash: &SchemaHash) -> bool {
+        self.context.is_live(hash) || self.known_schemas.contains_key(hash)
     }
 
     /// Get the application ID.
@@ -447,16 +515,23 @@ impl SchemaManager {
 
         let hash = SchemaHash::compute(&schema);
 
+        // Always add to known_schemas (server or client)
+        // This allows server-mode query execution even without lens paths
+        self.known_schemas.insert(hash, schema.clone());
+
         // Skip if already live or is current
         if self.context.is_live(&hash) {
             return Ok(());
         }
 
-        // Add to pending - will be activated when lens path becomes available
-        self.context.add_pending_schema(schema);
+        // If we have a current schema, also try lens-path activation
+        if self.context.is_initialized() {
+            // Add to pending - will be activated when lens path becomes available
+            self.context.add_pending_schema(schema);
 
-        // Try to activate in case we already have the lens path
-        self.activate_pending_and_sync_to_query_manager();
+            // Try to activate in case we already have the lens path
+            self.activate_pending_and_sync_to_query_manager();
+        }
 
         Ok(())
     }
@@ -563,8 +638,168 @@ impl SchemaManager {
     ///
     /// Automatically queries across all live schema versions.
     /// Rows from old schemas are transformed via lens to current schema format.
-    pub fn execute(&mut self, query: Query) -> Result<Vec<Vec<Value>>, QueryError> {
+    pub fn execute(&mut self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
         self.query_manager.execute(query)
+    }
+
+    /// Execute a query with explicit schema context (for server use).
+    ///
+    /// Servers don't have a fixed "current" schema - they serve multiple clients
+    /// with different schema versions. This method allows executing a query
+    /// using the client's schema as the "current" for that query.
+    ///
+    /// The schema must be in `known_schemas` (received via catalogue sync).
+    /// Returns `UnknownSchema` error if the schema is not known.
+    ///
+    /// Lens transforms still work - if the server has other schemas with lens
+    /// paths to the target schema, rows from those branches will be transformed.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    /// * `ctx` - Schema context from the client (env, schema_hash, user_branch)
+    pub fn execute_with_schema_context(
+        &mut self,
+        query: Query,
+        ctx: &QuerySchemaContext,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
+        // Look up the target schema in known_schemas
+        let target_schema = self
+            .known_schemas
+            .get(&ctx.schema_hash)
+            .ok_or(QueryError::UnknownSchema(ctx.schema_hash))?
+            .clone();
+
+        // Build a SchemaContext with target as current
+        let mut temp_context =
+            SchemaContext::new(target_schema.clone(), &ctx.env, &ctx.user_branch);
+
+        // Add any other known schemas that have lens paths TO the target schema
+        // Copy lenses from our main context
+        for ((_source, _target), lens) in &self.context.lenses {
+            temp_context.register_lens(lens.clone());
+        }
+
+        // Add other known schemas as potential live schemas
+        for (hash, schema) in &self.known_schemas {
+            if *hash != ctx.schema_hash {
+                // Add to pending - will activate if lens path exists to target
+                temp_context.add_pending_schema(schema.clone());
+            }
+        }
+
+        // Try to activate any pending schemas that now have lens paths
+        temp_context.try_activate_pending();
+
+        // Ensure the client's branch is registered for indexing (server-mode)
+        let client_branch =
+            ComposedBranchName::new(&ctx.env, ctx.schema_hash, &ctx.user_branch).to_branch_name();
+        self.query_manager
+            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
+
+        // Ensure indices exist for all branches in the temp context
+        for branch_name in temp_context.all_branch_names() {
+            let branch_str = branch_name.as_str();
+            if let Some(composed) = ComposedBranchName::parse(&branch_name)
+                && let Some(schema) = self.known_schemas.get(&composed.schema_hash)
+            {
+                for (table_name, table_schema) in schema {
+                    self.query_manager.ensure_indices_for_branch(
+                        table_name.as_str(),
+                        branch_str,
+                        table_schema,
+                    );
+                }
+            }
+        }
+
+        // Retry any pending row updates that might now be processable
+        self.query_manager.retry_pending_row_updates();
+
+        // Execute using the temporary context
+        self.query_manager
+            .execute_with_explicit_context(query, &target_schema, &temp_context)
+    }
+
+    /// Subscribe to a query with explicit schema context (for server use).
+    ///
+    /// Servers don't have a fixed "current" schema - they serve multiple clients
+    /// with different schema versions. This method allows subscribing to a query
+    /// using the client's schema as the "current" for that subscription.
+    ///
+    /// The schema must be in `known_schemas` (received via catalogue sync).
+    /// Returns `UnknownSchema` error if the schema is not known.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to subscribe to
+    /// * `ctx` - Schema context from the client (env, schema_hash, user_branch)
+    /// * `session` - Optional session for policy evaluation
+    pub fn subscribe_with_schema_context(
+        &mut self,
+        query: Query,
+        ctx: &QuerySchemaContext,
+        session: Option<Session>,
+    ) -> Result<crate::query_manager::QuerySubscriptionId, QueryError> {
+        // Look up the target schema in known_schemas
+        let target_schema = self
+            .known_schemas
+            .get(&ctx.schema_hash)
+            .ok_or(QueryError::UnknownSchema(ctx.schema_hash))?
+            .clone();
+
+        // Build a SchemaContext with target as current
+        let mut temp_context =
+            SchemaContext::new(target_schema.clone(), &ctx.env, &ctx.user_branch);
+
+        // Copy lenses from our main context for multi-schema queries
+        for ((_source, _target), lens) in &self.context.lenses {
+            temp_context.register_lens(lens.clone());
+        }
+
+        // Add other known schemas as potential live schemas
+        for (hash, schema) in &self.known_schemas {
+            if *hash != ctx.schema_hash {
+                // Add to pending - will activate if lens path exists to target
+                temp_context.add_pending_schema(schema.clone());
+            }
+        }
+
+        // Try to activate any pending schemas that now have lens paths
+        temp_context.try_activate_pending();
+
+        // Ensure the client's branch is registered for indexing (server-mode)
+        let client_branch =
+            ComposedBranchName::new(&ctx.env, ctx.schema_hash, &ctx.user_branch).to_branch_name();
+        self.query_manager
+            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
+
+        // Ensure indices exist for all branches in the temp context
+        for branch_name in temp_context.all_branch_names() {
+            let branch_str = branch_name.as_str();
+            if let Some(composed) = ComposedBranchName::parse(&branch_name)
+                && let Some(schema) = self.known_schemas.get(&composed.schema_hash)
+            {
+                for (table_name, table_schema) in schema {
+                    self.query_manager.ensure_indices_for_branch(
+                        table_name.as_str(),
+                        branch_str,
+                        table_schema,
+                    );
+                }
+            }
+        }
+
+        // Retry any pending row updates that might now be processable
+        self.query_manager.retry_pending_row_updates();
+
+        // Subscribe using the temporary context
+        self.query_manager.subscribe_with_explicit_context(
+            query,
+            &target_schema,
+            &temp_context,
+            session,
+        )
     }
 
     /// Insert a row into the current schema's branch.
@@ -612,8 +847,16 @@ impl SchemaManager {
                 self.process_catalogue_update(update.object_id, &update.metadata, &update.content);
         }
 
+        // Sync known schemas to QueryManager for server-mode lazy activation
+        // This enables QueryManager to activate branches when rows arrive
+        self.query_manager
+            .set_known_schemas(self.known_schemas.clone());
+
         // Final attempt to activate any remaining pending schemas
         self.activate_pending_and_sync_to_query_manager();
+
+        // Retry any pending row updates that might now be processable
+        self.query_manager.retry_pending_row_updates();
     }
 }
 
@@ -923,6 +1166,6 @@ mod tests {
         // Query
         let results = manager.execute(manager.query("users").build()).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0][0], id_val);
+        assert_eq!(results[0].1[0], id_val);
     }
 }

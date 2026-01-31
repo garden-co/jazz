@@ -25,13 +25,16 @@ pub struct MaterializeNode {
     /// Current tuples (fully or partially materialized).
     current_tuples: AHashSet<Tuple>,
     /// IDs that are pending (loader returned None, still loading).
-    pending_ids: AHashSet<ObjectId>,
+    /// Maps ObjectId to the branch it should be loaded from.
+    pending_ids: AHashMap<ObjectId, String>,
     /// IDs to check for content updates (row data may have changed).
     updated_ids: AHashSet<ObjectId>,
     /// IDs that were deleted (emit removal delta during settle).
     deleted_ids: AHashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
+    /// Default branch to use for pending IDs when source branch is unknown.
+    default_pending_branch: String,
 }
 
 /// Function type for loading row data from storage.
@@ -53,10 +56,11 @@ impl MaterializeNode {
             elements_to_materialize,
             rows: AHashMap::new(),
             current_tuples: AHashSet::new(),
-            pending_ids: AHashSet::new(),
+            pending_ids: AHashMap::new(),
             updated_ids: AHashSet::new(),
             deleted_ids: AHashSet::new(),
             dirty: true,
+            default_pending_branch: String::new(),
         }
     }
 
@@ -79,10 +83,11 @@ impl MaterializeNode {
             elements_to_materialize: elements,
             rows: AHashMap::new(),
             current_tuples: AHashSet::new(),
-            pending_ids: AHashSet::new(),
+            pending_ids: AHashMap::new(),
             updated_ids: AHashSet::new(),
             deleted_ids: AHashSet::new(),
             dirty: true,
+            default_pending_branch: String::new(),
         }
     }
 
@@ -101,9 +106,20 @@ impl MaterializeNode {
         !self.pending_ids.is_empty()
     }
 
-    /// Get the set of pending IDs.
-    pub fn pending_ids(&self) -> &AHashSet<ObjectId> {
-        &self.pending_ids
+    /// Get the set of pending IDs (just the IDs, for backward compatibility).
+    pub fn pending_ids(&self) -> impl Iterator<Item = &ObjectId> {
+        self.pending_ids.keys()
+    }
+
+    /// Get pending IDs with their associated branches.
+    pub fn pending_ids_with_branches(&self) -> impl Iterator<Item = (&ObjectId, &String)> {
+        self.pending_ids.iter()
+    }
+
+    /// Set the default branch to use when tracking pending IDs.
+    /// Should be called before materialize_tuples if branch tracking is desired.
+    pub fn set_pending_branch(&mut self, branch: &str) {
+        self.default_pending_branch = branch.to_string();
     }
 
     /// Mark an ID for content update checking (only if we're tracking it).
@@ -221,8 +237,9 @@ impl MaterializeNode {
                                 commit_id,
                             }
                         } else {
-                            // Still pending
-                            self.pending_ids.insert(*id);
+                            // Still pending - track with branch info
+                            self.pending_ids
+                                .insert(*id, self.default_pending_branch.clone());
                             elem.clone()
                         }
                     }
@@ -571,8 +588,8 @@ mod tests {
 
         // Node should track id2 as pending
         assert!(node.has_pending());
-        assert!(node.pending_ids().contains(&id2));
-        assert!(!node.pending_ids().contains(&id1));
+        assert!(node.pending_ids().any(|id| *id == id2));
+        assert!(!node.pending_ids().any(|id| *id == id1));
 
         // id1's tuple should be materialized, id2's should not
         let id1_tuple = result.added.iter().find(|t| t.ids()[0] == id1).unwrap();
@@ -634,7 +651,7 @@ mod tests {
         // Both tuples are added (tuple-based API)
         assert_eq!(result.added.len(), 2);
         assert!(result.pending);
-        assert!(node.pending_ids().contains(&id2));
+        assert!(node.pending_ids().any(|id| *id == id2));
 
         // Now id2 becomes available
         let loader2 = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
@@ -667,7 +684,7 @@ mod tests {
         let add_delta = make_tuple_delta_add(&[id1]);
         let result = node.materialize_tuples(add_delta, |_| None);
         assert!(result.pending);
-        assert!(node.pending_ids().contains(&id1));
+        assert!(node.pending_ids().any(|id| *id == id1));
 
         // Remove while still pending - need to use a tuple that matches
         let tuple = Tuple::from_id(id1);
@@ -676,6 +693,6 @@ mod tests {
 
         // Should no longer be pending
         assert!(!result.pending);
-        assert!(!node.pending_ids().contains(&id1));
+        assert!(!node.pending_ids().any(|id| *id == id1));
     }
 }
