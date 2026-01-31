@@ -22,6 +22,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Build schema files and generate lenses
+    Build {
+        /// Path to schema directory
+        #[arg(long, default_value = "./schema")]
+        schema_dir: String,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -66,6 +72,12 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Build { schema_dir } => {
+            if let Err(e) = commands::build::run(&schema_dir) {
+                eprintln!("Build error: {}", e);
+                std::process::exit(1);
+            }
+        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 commands::create::app(name);

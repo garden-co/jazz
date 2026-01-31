@@ -30,9 +30,10 @@ impl SchemaHash {
         &self.0
     }
 
-    /// Get an 8-character hex prefix for display/branch naming.
+    /// Get a 12-character hex prefix for display/filenames.
+    /// Uses 6 bytes (48 bits) for good collision resistance.
     pub fn short(&self) -> String {
-        hex::encode(&self.0[..4])
+        hex::encode(&self.0[..6])
     }
 
     /// Convert to an ObjectId for storage in the catalogue.
@@ -227,17 +228,17 @@ impl ComposedBranchName {
         let hash_str = parts[1];
         let user_branch = parts[2].to_string();
 
-        // Validate hash is 8 hex chars
-        if hash_str.len() != 8 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Validate hash is 12 hex chars (6 bytes)
+        if hash_str.len() != 12 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
 
-        // We can't fully reconstruct the hash from just 8 chars,
+        // We can't fully reconstruct the hash from just 12 chars,
         // so we store a partial hash. For matching purposes, we use a zeroed hash
         // with the short portion filled in.
         let mut hash_bytes = [0u8; 32];
         if let Ok(bytes) = hex_decode(hash_str) {
-            hash_bytes[..4].copy_from_slice(&bytes);
+            hash_bytes[..6].copy_from_slice(&bytes);
         }
 
         Some(Self {
@@ -2278,7 +2279,7 @@ mod tests {
         let hash = SchemaHash::compute(&schema);
         let short = hash.short();
 
-        assert_eq!(short.len(), 8, "Short hash should be 8 hex chars");
+        assert_eq!(short.len(), 12, "Short hash should be 12 hex chars");
         assert!(short.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -2396,7 +2397,7 @@ mod tests {
 
         assert_eq!(parsed.env, "prod");
         assert_eq!(parsed.user_branch, "feature-x");
-        // Note: full hash can't be recovered from 8 chars, but short() should match
+        // Note: full hash can't be recovered from 12 chars, but short() should match
         assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
     }
 
@@ -2406,12 +2407,12 @@ mod tests {
         let name = BranchName::new("just-one");
         assert!(ComposedBranchName::parse(&name).is_none());
 
-        // Hash not 8 chars
+        // Hash not 12 chars
         let name = BranchName::new("dev-abc-main");
         assert!(ComposedBranchName::parse(&name).is_none());
 
         // Hash not hex
-        let name = BranchName::new("dev-gggggggg-main");
+        let name = BranchName::new("dev-gggggggggggg-main");
         assert!(ComposedBranchName::parse(&name).is_none());
     }
 

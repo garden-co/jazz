@@ -31,7 +31,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz_rs::{AppContext, AppId, ColumnType, JazzClient, SchemaBuilder, TableSchema};
+use groove::schema_manager::SchemaDirectory;
+use jazz_rs::{AppContext, AppId, JazzClient};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -67,14 +68,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Jazz server: {}", server_url);
     info!("Data directory: {}", data_dir);
 
-    // Define schema for todos
-    let schema = SchemaBuilder::new()
-        .table(
-            TableSchema::builder("todos")
-                .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean),
-        )
-        .build();
+    // Load schema from file
+    let schema_dir = SchemaDirectory::new("./schema");
+    let schema = schema_dir.current_schema()?;
+    info!(
+        "Loaded schema from schema/current.sql ({} tables)",
+        schema.len()
+    );
 
     // Create Jazz client
     let context = AppContext {
