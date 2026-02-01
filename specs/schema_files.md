@@ -237,18 +237,41 @@ pub enum Ambiguity {
 
 ## Git Branch Scenario
 
-The versioned naming with hashes handles concurrent development:
+Multiple schemas at the same version are allowed after a branch merge. The hash in the filename prevents actual git conflicts (different filenames).
 
 ```
-main:     schema_v1_aaa.sql, schema_v2_bbb.sql
-feature:  schema_v1_aaa.sql, schema_v2_ccc.sql  (different v2!)
+Before merge:
+  main:     schema_v1_aaa.sql, schema_v2_bbb.sql
+  feature:  schema_v1_aaa.sql, schema_v2_ccc.sql
 
-# Merge creates conflict in filenames, user must resolve:
-# - Keep one v2, renumber the other to v3
-# - Or: use description to disambiguate: schema_v2_feature_ccc.sql
+After merge (no conflict - different filenames!):
+  schema_v1_aaa.sql
+  schema_v2_bbb.sql           (from main)
+  schema_v2_feature_ccc.sql   (from feature, description recommended)
+
+Only current.sql/ts conflicts, which you resolve by creating the merged schema.
 ```
 
-The hash in the filename ensures that two schemas with the same version number but different content will be detected as a conflict during git merge.
+**Recommended workflow after merge:**
+
+1. Resolve the `current.sql` (or `current.ts`) conflict with the merged schema
+2. Use descriptions to disambiguate the v2 schemas (e.g., `schema_v2_feature_a_xxx.sql`)
+3. Run `jazz build` — this creates v3 and generates migrations from BOTH v2's to v3
+
+```
+After build:
+  schema_v1_aaa.sql
+  schema_v2_bbb.sql                            (from main)
+  schema_v2_feature_ccc.sql                    (from feature)
+  schema_v3_ddd.sql                            (merged result)
+  migration_v1_v2_fwd_aaa_bbb.sql              (v1 → v2 main)
+  migration_v1_v2_fwd_aaa_ccc.sql              (v1 → v2 feature)
+  migration_v2_v3_fwd_bbb_ddd.sql              (v2 main → v3)
+  migration_v2_v3_fwd_ccc_ddd.sql              (v2 feature → v3)
+  ... plus corresponding _bwd files
+```
+
+This ensures users on either branch can migrate to the merged state.
 
 ## Error Cases
 
@@ -256,7 +279,7 @@ The hash in the filename ensures that two schemas with the same version number b
 2. **Invalid naming**: `schema_foo.sql` (no version/hash) → Ignored
 3. **Modified frozen schema**: Content hash ≠ filename hash → Error: "Frozen schemas must not be edited"
 4. **Duplicate version with same hash**: OK (same schema)
-5. **Duplicate version with different hash**: Git merge conflict (needs manual resolution)
+5. **Duplicate version with different hash**: OK (branch merge scenario) — migrations generated for all pairs
 
 ## Implementation
 
