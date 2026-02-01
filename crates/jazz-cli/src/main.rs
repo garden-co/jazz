@@ -27,6 +27,10 @@ enum Commands {
         /// Path to schema directory
         #[arg(long, default_value = "./schema")]
         schema_dir: String,
+
+        /// Generate TypeScript lens stubs instead of SQL lens files
+        #[arg(long)]
+        ts: bool,
     },
     /// Create a new resource
     Create {
@@ -72,8 +76,8 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { schema_dir } => {
-            if let Err(e) = commands::build::run(&schema_dir) {
+        Commands::Build { schema_dir, ts } => {
+            if let Err(e) = commands::build::run(&schema_dir, ts) {
                 eprintln!("Build error: {}", e);
                 std::process::exit(1);
             }

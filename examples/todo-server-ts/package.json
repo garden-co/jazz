@@ -1,0 +1,12 @@
+{
+  "name": "todo-server-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "jazz-ts build"
+  },
+  "dependencies": {
+    "jazz-ts": "workspace:*"
+  }
+}
