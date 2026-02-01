@@ -15,7 +15,8 @@
 //!    a. Parse: version number, optional description, hash from filename
 //!    b. Compute actual hash from content
 //!    c. If filename hash ≠ computed hash → Error (frozen schemas must not be modified)
-//! 3. Build version→hash mapping, validate sequential versions (v1, v2, v3...)
+//! 3. Group schemas by version, validate versions start at 1 with no gaps
+//!    (Multiple schemas at the same version are allowed - e.g., after branch merge)
 //!
 //! 4. Compute hash of current.sql
 //! 5. Find if any schema file has this hash in its filename
@@ -23,10 +24,25 @@
 //!    - If no match: Create schema_vN_{hash}.sql (N = max_version + 1)
 //!
 //! 6. For each adjacent version pair (v1→v2, v2→v3...):
-//!    - If --ts: generate TypeScript migration stub if missing
+//!    - Generate migrations from ALL schemas at vN to ALL schemas at vN+1
+//!    - If --ts: generate TypeScript migration stubs if missing
 //!    - Else: generate SQL migration files if missing
 //!
 //! 7. Report results
+//!
+//! # Branch Merge Scenario
+//!
+//! After merging two branches that each created v2:
+//! ```text
+//! schema_v1_aaa.sql           (common ancestor)
+//! schema_v2_feature_a_bbb.sql (from branch A)
+//! schema_v2_feature_b_ccc.sql (from branch B)
+//! schema_v3_ddd.sql           (merged result)
+//! ```
+//!
+//! Build will generate migrations:
+//! - v1→v2_a, v1→v2_b (if not already present)
+//! - v2_a→v3, v2_b→v3 (so users on either branch can migrate to merged state)
 
 use std::fs;
 
@@ -77,24 +93,33 @@ pub fn run(schema_dir: &str, ts: bool) -> Result<(), Box<dyn std::error::Error>>
         validated_versions.push(info.clone());
     }
 
-    // Validate sequential versions (v1, v2, v3...)
-    for (i, info) in validated_versions.iter().enumerate() {
-        let expected_version = (i + 1) as u32;
-        if info.version != expected_version {
-            if i == 0 {
-                return Err(format!(
-                    "Schema versions must start at v1. Found v{} instead.",
-                    info.version
-                )
-                .into());
-            } else {
-                let prev = &validated_versions[i - 1];
-                return Err(format!(
-                    "Gap in schema versions: v{} -> v{}. Versions must be sequential.",
-                    prev.version, info.version
-                )
-                .into());
-            }
+    // Group schemas by version and validate no gaps
+    // Multiple schemas at the same version are allowed (branch merge scenario)
+    let mut versions_seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for info in &validated_versions {
+        versions_seen.insert(info.version);
+    }
+
+    // Validate versions start at 1 and have no gaps
+    if let Some(&first) = versions_seen.first() {
+        if first != 1 {
+            return Err(format!(
+                "Schema versions must start at v1. Found v{} instead.",
+                first
+            )
+            .into());
+        }
+    }
+
+    let versions_vec: Vec<u32> = versions_seen.iter().copied().collect();
+    for i in 1..versions_vec.len() {
+        if versions_vec[i] != versions_vec[i - 1] + 1 {
+            return Err(format!(
+                "Gap in schema versions: v{} -> v{}. Versions must be sequential.",
+                versions_vec[i - 1],
+                versions_vec[i]
+            )
+            .into());
         }
     }
 
@@ -147,12 +172,24 @@ pub fn run(schema_dir: &str, ts: bool) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // Step 6: Generate migrations for adjacent version pairs
-    if validated_versions.len() >= 2 {
-        for i in 0..validated_versions.len() - 1 {
-            let from = &validated_versions[i];
-            let to = &validated_versions[i + 1];
+    // For each version N, generate migrations from ALL schemas at N to ALL schemas at N+1
+    let max_version = validated_versions.last().map(|v| v.version).unwrap_or(0);
 
-            generate_migration_if_needed(&dir, from, to, ts)?;
+    for version in 1..max_version {
+        let from_schemas: Vec<&SchemaFileInfo> = validated_versions
+            .iter()
+            .filter(|v| v.version == version)
+            .collect();
+        let to_schemas: Vec<&SchemaFileInfo> = validated_versions
+            .iter()
+            .filter(|v| v.version == version + 1)
+            .collect();
+
+        // Generate migration for each (from, to) pair
+        for from in &from_schemas {
+            for to in &to_schemas {
+                generate_migration_if_needed(&dir, from, to, ts)?;
+            }
         }
     }
 
@@ -429,5 +466,88 @@ CREATE TABLE todos (
         let result = run(schema_dir.to_str().unwrap(), false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("current.sql"));
+    }
+
+    #[test]
+    fn build_branch_merge_scenario() {
+        // Simulates merging two branches that each created v2 with different schemas.
+        // After merge, we have:
+        //   v1 (common ancestor)
+        //   v2_feature_a (from branch A)
+        //   v2_feature_b (from branch B)
+        //   v3 (merged result in current.sql)
+        //
+        // Build should generate migrations:
+        //   v1 → v2_a, v1 → v2_b
+        //   v2_a → v3, v2_b → v3
+
+        let temp = TempDir::new().unwrap();
+        let schema_dir = temp.path().join("schema");
+        fs::create_dir_all(&schema_dir).unwrap();
+
+        // v1: base schema
+        let v1_sql = "CREATE TABLE todos (title TEXT NOT NULL);";
+        fs::write(schema_dir.join("current.sql"), v1_sql).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
+
+        let dir = SchemaDirectory::new(&schema_dir);
+        let v1_hash = dir.schema_versions().unwrap()[0].hash.clone();
+
+        // Simulate branch A: adds 'completed' column
+        let v2a_sql = "CREATE TABLE todos (title TEXT NOT NULL, completed BOOLEAN NOT NULL);";
+        fs::write(schema_dir.join("current.sql"), v2a_sql).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
+
+        let versions = dir.schema_versions().unwrap();
+        let v2a_hash = versions
+            .iter()
+            .find(|v| v.version == 2)
+            .unwrap()
+            .hash
+            .clone();
+
+        // Simulate branch B merging in: manually add a second v2 with different content
+        // (In real merge, this would come from the other branch's schema_v2_*.sql file)
+        let v2b_sql = "CREATE TABLE todos (title TEXT NOT NULL, priority INTEGER);";
+        let v2b_schema = parse_schema(v2b_sql).unwrap();
+        let v2b_hash = groove::query_manager::types::SchemaHash::compute(&v2b_schema);
+        dir.write_schema(&v2b_schema, 2, Some("feature_b"), &v2b_hash.short())
+            .unwrap();
+
+        // Now create v3 (merged result): has both columns
+        let v3_sql = "CREATE TABLE todos (title TEXT NOT NULL, completed BOOLEAN NOT NULL, priority INTEGER);";
+        fs::write(schema_dir.join("current.sql"), v3_sql).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
+
+        let versions = dir.schema_versions().unwrap();
+        let v3_hash = versions
+            .iter()
+            .find(|v| v.version == 3)
+            .unwrap()
+            .hash
+            .clone();
+
+        // Verify we have 4 schema files (1 at v1, 2 at v2, 1 at v3)
+        assert_eq!(versions.len(), 4);
+        assert_eq!(versions.iter().filter(|v| v.version == 1).count(), 1);
+        assert_eq!(versions.iter().filter(|v| v.version == 2).count(), 2);
+        assert_eq!(versions.iter().filter(|v| v.version == 3).count(), 1);
+
+        // Verify migrations exist:
+        // v1 → v2_a
+        assert!(dir.has_migration_sql(1, 2, &v1_hash, &v2a_hash, Direction::Forward));
+        assert!(dir.has_migration_sql(1, 2, &v1_hash, &v2a_hash, Direction::Backward));
+
+        // v1 → v2_b
+        assert!(dir.has_migration_sql(1, 2, &v1_hash, &v2b_hash.short(), Direction::Forward));
+        assert!(dir.has_migration_sql(1, 2, &v1_hash, &v2b_hash.short(), Direction::Backward));
+
+        // v2_a → v3
+        assert!(dir.has_migration_sql(2, 3, &v2a_hash, &v3_hash, Direction::Forward));
+        assert!(dir.has_migration_sql(2, 3, &v2a_hash, &v3_hash, Direction::Backward));
+
+        // v2_b → v3
+        assert!(dir.has_migration_sql(2, 3, &v2b_hash.short(), &v3_hash, Direction::Forward));
+        assert!(dir.has_migration_sql(2, 3, &v2b_hash.short(), &v3_hash, Direction::Backward));
     }
 }
