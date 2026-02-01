@@ -1,6 +1,6 @@
 //! Build command for schema evolution.
 //!
-//! Processes schema/current.sql and generates frozen schema files and lenses.
+//! Processes schema/current.sql and generates frozen schema files and migrations.
 //!
 //! # Usage
 //!
@@ -10,23 +10,35 @@
 //!
 //! # Algorithm
 //!
-//! 1. Parse `schema/current.sql` → Schema
-//! 2. Compute SchemaHash::compute(&schema) → new_hash
-//! 3. Find existing `schema_*.sql` files, identify latest hash
-//! 4. If new_hash matches latest: "Schema unchanged" → exit
-//! 5. If no prior schema: write `schema_{new_hash}.sql` → exit
-//! 6. If changed:
-//!    a. Write `schema_{new_hash}.sql`
-//!    b. Diff old schema vs new schema
-//!    c. Generate `lens_{old}_{new}_fwd.sql`
-//!    d. Generate `lens_{old}_{new}_bwd.sql`
-//!    e. Mark ambiguous ops with `-- TODO: Review` comments
+//! 1. Load all `schema_v*_*.sql` files
+//! 2. For each file:
+//!    a. Parse: version number, optional description, hash from filename
+//!    b. Compute actual hash from content
+//!    c. If filename hash ≠ computed hash → Error (frozen schemas must not be modified)
+//! 3. Build version→hash mapping, validate sequential versions (v1, v2, v3...)
+//!
+//! 4. Compute hash of current.sql
+//! 5. Find if any schema file has this hash in its filename
+//!    - If match exists: "Schema unchanged (matches vN)"
+//!    - If no match: Create schema_vN_{hash}.sql (N = max_version + 1)
+//!
+//! 6. For each adjacent version pair (v1→v2, v2→v3...):
+//!    - If --ts: generate TypeScript migration stub if missing
+//!    - Else: generate SQL migration files if missing
+//!
+//! 7. Report results
+
+use std::fs;
 
 use groove::query_manager::types::SchemaHash;
-use groove::schema_manager::{SchemaDirectory, diff_schemas};
+use groove::schema_manager::{
+    Direction, SchemaDirectory, SchemaFileInfo, diff_schemas, parse_schema, schema_filename,
+};
 
 /// Run the build command.
-pub fn run(schema_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// If `ts` is true, generates TypeScript migration stubs instead of SQL migration files.
+pub fn run(schema_dir: &str, ts: bool) -> Result<(), Box<dyn std::error::Error>> {
     let dir = SchemaDirectory::new(schema_dir);
 
     // Check if current.sql exists
@@ -38,64 +50,205 @@ pub fn run(schema_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    // Parse current.sql
+    // Step 1-3: Load and validate all existing schema versions
+    let versions = dir.schema_versions()?;
+    let mut validated_versions: Vec<SchemaFileInfo> = Vec::new();
+
+    for info in &versions {
+        // Read the file content and compute hash
+        let filename = schema_filename(info);
+        let path = dir.path().join(&filename);
+        let content = fs::read_to_string(&path)?;
+        let schema = parse_schema(&content)?;
+        let computed_hash = SchemaHash::compute(&schema);
+
+        // Validate hash matches filename
+        if computed_hash.short() != info.hash {
+            return Err(format!(
+                "Hash mismatch for {}: filename has {} but content hashes to {}. \
+                Frozen schemas must not be edited.",
+                filename,
+                info.hash,
+                computed_hash.short()
+            )
+            .into());
+        }
+
+        validated_versions.push(info.clone());
+    }
+
+    // Validate sequential versions (v1, v2, v3...)
+    for (i, info) in validated_versions.iter().enumerate() {
+        let expected_version = (i + 1) as u32;
+        if info.version != expected_version {
+            if i == 0 {
+                return Err(format!(
+                    "Schema versions must start at v1. Found v{} instead.",
+                    info.version
+                )
+                .into());
+            } else {
+                let prev = &validated_versions[i - 1];
+                return Err(format!(
+                    "Gap in schema versions: v{} -> v{}. Versions must be sequential.",
+                    prev.version, info.version
+                )
+                .into());
+            }
+        }
+    }
+
+    // Step 4: Parse current.sql and compute hash
     let schema = dir.current_schema()?;
     let new_hash = SchemaHash::compute(&schema);
 
     println!("Parsed schema: {} table(s)", schema.len());
     println!("Schema hash: {}", new_hash.short());
 
-    // Check for existing versions
-    let latest = dir.latest_version()?;
+    // Step 5: Check if this hash already exists
+    let existing_version = validated_versions
+        .iter()
+        .find(|v| v.hash == new_hash.short());
 
-    match latest {
-        None => {
-            // First schema version
-            let path = dir.write_schema(&schema, new_hash)?;
-            println!("Created frozen schema: {}", path.display());
-            println!("This is the first schema version.");
-        }
-        Some(old_hash) if old_hash.short() == new_hash.short() => {
-            println!("Schema unchanged (hash: {})", new_hash.short());
-        }
-        Some(old_hash) => {
-            // Schema changed - generate new version and lens
+    let latest_version = validated_versions.last().map(|v| v.version).unwrap_or(0);
+
+    match existing_version {
+        Some(existing) => {
             println!(
-                "Schema changed: {} -> {}",
-                old_hash.short(),
-                new_hash.short()
+                "Schema unchanged (matches v{}, hash: {})",
+                existing.version, existing.hash
             );
+        }
+        None => {
+            // Create new schema version
+            let new_version = latest_version + 1;
+            let path = dir.write_schema(&schema, new_version, None, &new_hash.short())?;
+            println!("Created frozen schema: {}", path.display());
 
-            // Write new frozen schema
-            let schema_path = dir.write_schema(&schema, new_hash)?;
-            println!("Created frozen schema: {}", schema_path.display());
+            // Add to validated versions for migration generation
+            validated_versions.push(SchemaFileInfo {
+                version: new_version,
+                description: None,
+                hash: new_hash.short().to_string(),
+            });
 
-            // Load old schema for diff
-            let old_schema = dir.schema(old_hash)?;
+            if new_version > 1 {
+                println!(
+                    "Schema changed: v{} ({}) -> v{} ({})",
+                    new_version - 1,
+                    validated_versions[validated_versions.len() - 2].hash,
+                    new_version,
+                    new_hash.short()
+                );
+            } else {
+                println!("This is the first schema version.");
+            }
+        }
+    }
 
-            // Compute diff
-            let diff_result = diff_schemas(&old_schema, &schema);
+    // Step 6: Generate migrations for adjacent version pairs
+    if validated_versions.len() >= 2 {
+        for i in 0..validated_versions.len() - 1 {
+            let from = &validated_versions[i];
+            let to = &validated_versions[i + 1];
+
+            generate_migration_if_needed(&dir, from, to, ts)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate migration files for a version pair if they don't exist.
+fn generate_migration_if_needed(
+    dir: &SchemaDirectory,
+    from: &SchemaFileInfo,
+    to: &SchemaFileInfo,
+    ts: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let has_ts_stub = dir.has_migration_ts_stub(from.version, to.version, &from.hash, &to.hash);
+    let has_fwd_sql = dir.has_migration_sql(
+        from.version,
+        to.version,
+        &from.hash,
+        &to.hash,
+        Direction::Forward,
+    );
+    let has_bwd_sql = dir.has_migration_sql(
+        from.version,
+        to.version,
+        &from.hash,
+        &to.hash,
+        Direction::Backward,
+    );
+
+    if has_fwd_sql && has_bwd_sql {
+        // Migration SQL files already exist
+        return Ok(());
+    }
+
+    // Load schemas for diffing
+    let from_schema = dir.schema_by_version(from.version)?;
+    let to_schema = dir.schema_by_version(to.version)?;
+    let diff_result = diff_schemas(&from_schema, &to_schema);
+
+    if ts {
+        // TypeScript mode: generate TS stub if missing
+        if !has_ts_stub {
+            let ts_path = dir.write_migration_ts_stub(
+                from.version,
+                to.version,
+                &from.hash,
+                &to.hash,
+                &diff_result.transform,
+            )?;
+            println!("Created TypeScript migration stub: {}", ts_path.display());
 
             // Report ambiguities
             if !diff_result.ambiguities.is_empty() {
-                println!("\nAmbiguities detected (marked with TODO in lens files):");
+                println!("  Ambiguities (marked with TODO):");
                 for amb in &diff_result.ambiguities {
-                    println!("  - {}", amb);
+                    println!("    - {}", amb);
                 }
             }
 
-            // Write lens files
-            let (fwd_path, bwd_path) =
-                dir.write_lens_pair(old_hash, new_hash, &diff_result.transform)?;
-            println!("\nCreated lens files:");
-            println!("  Forward:  {}", fwd_path.display());
-            println!("  Backward: {}", bwd_path.display());
-
-            // Summary
-            println!("\nLens operations: {}", diff_result.transform.ops.len());
             if diff_result.transform.has_drafts() {
-                println!("WARNING: Some operations are marked as drafts and need review.");
+                println!("  WARNING: Some operations are marked as drafts and need review.");
             }
+
+            println!(
+                "  Review the generated migration, then run `jazz-ts build` again to generate SQL."
+            );
+        }
+        // Note: When TS stub exists but SQL files are missing, the TypeScript CLI
+        // will handle converting the TS stub to SQL files.
+    } else {
+        // Pure SQL mode: generate SQL files directly
+        let (fwd_path, bwd_path) = dir.write_migration_sql_pair(
+            from.version,
+            to.version,
+            &from.hash,
+            &to.hash,
+            &diff_result.transform,
+        )?;
+        println!("Created migration SQL files:");
+        println!("  Forward:  {}", fwd_path.display());
+        println!("  Backward: {}", bwd_path.display());
+
+        // Report ambiguities
+        if !diff_result.ambiguities.is_empty() {
+            println!("  Ambiguities (marked with TODO in migration files):");
+            for amb in &diff_result.ambiguities {
+                println!("    - {}", amb);
+            }
+        }
+
+        println!(
+            "  Migration operations: {}",
+            diff_result.transform.ops.len()
+        );
+        if diff_result.transform.has_drafts() {
+            println!("  WARNING: Some operations are marked as drafts and need review.");
         }
     }
 
@@ -128,12 +281,17 @@ CREATE TABLE todos (
         .unwrap();
 
         // Run build
-        run(schema_dir.to_str().unwrap()).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
 
-        // Verify frozen schema was created
+        // Verify frozen schema was created with versioned name
         let dir = SchemaDirectory::new(&schema_dir);
         let versions = dir.schema_versions().unwrap();
         assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, 1);
+
+        // Check the file exists with proper name
+        let filename = schema_filename(&versions[0]);
+        assert!(schema_dir.join(&filename).exists());
     }
 
     #[test]
@@ -154,8 +312,8 @@ CREATE TABLE todos (
         .unwrap();
 
         // Run build twice
-        run(schema_dir.to_str().unwrap()).unwrap();
-        run(schema_dir.to_str().unwrap()).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
 
         // Should still have only one version
         let dir = SchemaDirectory::new(&schema_dir);
@@ -179,7 +337,7 @@ CREATE TABLE todos (
             "#,
         )
         .unwrap();
-        run(schema_dir.to_str().unwrap()).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
 
         // Version 2 - add column
         fs::write(
@@ -192,16 +350,73 @@ CREATE TABLE todos (
             "#,
         )
         .unwrap();
-        run(schema_dir.to_str().unwrap()).unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
 
-        // Should have two versions and lens files
+        // Should have two versions and migration files
         let dir = SchemaDirectory::new(&schema_dir);
         let versions = dir.schema_versions().unwrap();
         assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version, 1);
+        assert_eq!(versions[1].version, 2);
 
-        // Check lens exists
-        assert!(dir.has_lens(versions[0], versions[1], Direction::Forward));
-        assert!(dir.has_lens(versions[0], versions[1], Direction::Backward));
+        // Check migration files exist
+        assert!(dir.has_migration_sql(
+            versions[0].version,
+            versions[1].version,
+            &versions[0].hash,
+            &versions[1].hash,
+            Direction::Forward
+        ));
+        assert!(dir.has_migration_sql(
+            versions[0].version,
+            versions[1].version,
+            &versions[0].hash,
+            &versions[1].hash,
+            Direction::Backward
+        ));
+    }
+
+    #[test]
+    fn build_detects_modified_frozen_schema() {
+        let temp = TempDir::new().unwrap();
+        let schema_dir = temp.path().join("schema");
+        fs::create_dir_all(&schema_dir).unwrap();
+
+        // Create current.sql and build
+        fs::write(
+            schema_dir.join("current.sql"),
+            r#"
+CREATE TABLE todos (
+    title TEXT NOT NULL
+);
+            "#,
+        )
+        .unwrap();
+        run(schema_dir.to_str().unwrap(), false).unwrap();
+
+        // Get the frozen schema filename
+        let dir = SchemaDirectory::new(&schema_dir);
+        let versions = dir.schema_versions().unwrap();
+        let filename = schema_filename(&versions[0]);
+
+        // Modify the frozen schema (this is not allowed!)
+        fs::write(
+            schema_dir.join(&filename),
+            r#"
+CREATE TABLE todos (
+    title TEXT NOT NULL,
+    description TEXT
+);
+            "#,
+        )
+        .unwrap();
+
+        // Build should fail with hash mismatch
+        let result = run(schema_dir.to_str().unwrap(), false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Hash mismatch"));
+        assert!(err.contains("Frozen schemas must not be edited"));
     }
 
     #[test]
@@ -211,7 +426,7 @@ CREATE TABLE todos (
         fs::create_dir_all(&schema_dir).unwrap();
 
         // No current.sql
-        let result = run(schema_dir.to_str().unwrap());
+        let result = run(schema_dir.to_str().unwrap(), false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("current.sql"));
     }

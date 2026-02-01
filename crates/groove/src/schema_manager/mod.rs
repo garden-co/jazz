@@ -61,7 +61,11 @@ pub use encoding::{
     CatalogueEncodingError, decode_lens_transform, decode_schema, encode_lens_transform,
     encode_schema,
 };
-pub use files::{FileError, SchemaDirectory};
+pub use files::{
+    FileError, MigrationFileInfo, SchemaDirectory, SchemaFileInfo, migration_sql_filename,
+    migration_ts_filename, parse_migration_filename, parse_versioned_schema_filename,
+    schema_filename,
+};
 pub use lens::{Direction, Lens, LensOp, LensTransform};
 pub use manager::SchemaManager;
 pub use sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};

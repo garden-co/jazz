@@ -1,23 +1,29 @@
-//! File convention API for schema and lens files.
+//! File convention API for schema and migration files.
 //!
 //! This module provides a high-level API for working with schema directories,
 //! following the convention:
 //!
 //! ```text
 //! schema/
-//! ├── current.sql              # Editable source of truth
-//! ├── schema_a1b2c3d4e5f6.sql   # Frozen v1 (12-char hex hash)
-//! ├── schema_f7e8d9c0b1a2.sql   # Frozen v2
-//! ├── lens_a1b2c3d4e5f6_f7e8d9c0b1a2_fwd.sql  # v1 → v2
-//! └── lens_a1b2c3d4e5f6_f7e8d9c0b1a2_bwd.sql  # v2 → v1
+//! ├── current.sql                                          # Editable source of truth
+//! ├── schema_v1_455a1f10a158.sql                           # v1 with hash
+//! ├── schema_v2_add_description_357c464c4c43.sql           # Optional description before hash
+//! ├── schema_v3_abc123def456.sql                           # v3
+//! ├── migration_v1_v2_455a1f10a158_357c464c4c43_fwd.sql    # v1 → v2 forward
+//! └── migration_v1_v2_455a1f10a158_357c464c4c43_bwd.sql    # v1 → v2 backward
 //! ```
+//!
+//! **Naming rules:**
+//! - Schema: `schema_vN_{description}_{hash}.sql` where description is optional
+//! - Migration: `migration_vA_vB_{hashA}_{hashB}_{fwd|bwd}.sql`
+//! - Hash is always the last component before `.sql` or `_fwd`/`_bwd`
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::query_manager::types::{Schema, SchemaHash};
+use crate::query_manager::types::{ColumnType, Schema, Value};
 
-use super::lens::{Direction, LensTransform};
+use super::lens::{Direction, LensOp, LensTransform};
 use super::sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};
 
 /// Errors that can occur during file operations.
@@ -66,6 +72,36 @@ impl From<SqlParseError> for FileError {
     }
 }
 
+/// Information parsed from a versioned schema filename.
+///
+/// Valid format: `schema_vN_{description}_{hash}.sql` where description is optional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaFileInfo {
+    /// Version number (1, 2, 3, ...)
+    pub version: u32,
+    /// Optional description (e.g., "add_description")
+    pub description: Option<String>,
+    /// 12-char hex hash from filename
+    pub hash: String,
+}
+
+/// Information parsed from a migration filename.
+///
+/// Valid format: `migration_vA_vB_{hashA}_{hashB}_{fwd|bwd}.sql`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationFileInfo {
+    /// Source version number
+    pub from_version: u32,
+    /// Target version number
+    pub to_version: u32,
+    /// 12-char hex hash of source schema
+    pub from_hash: String,
+    /// 12-char hex hash of target schema
+    pub to_hash: String,
+    /// Direction (Some for SQL files, None for .ts stubs)
+    pub direction: Option<Direction>,
+}
+
 /// A schema directory following the file convention.
 #[derive(Debug, Clone)]
 pub struct SchemaDirectory {
@@ -96,14 +132,12 @@ impl SchemaDirectory {
         Ok(schema)
     }
 
-    /// List all frozen schema hashes in order (oldest to newest).
+    /// List all frozen schema versions in order (by version number).
     ///
-    /// Scans for files matching `schema_*.sql` pattern and extracts hashes.
-    /// Returns hashes sorted by file modification time.
-    pub fn schema_versions(&self) -> Result<Vec<SchemaHash>, FileError> {
-        use std::time::SystemTime;
-
-        let mut versions: Vec<(SchemaHash, Option<SystemTime>)> = Vec::new();
+    /// Scans for files matching `schema_v*_*.sql` pattern.
+    /// Returns schema info sorted by version number.
+    pub fn schema_versions(&self) -> Result<Vec<SchemaFileInfo>, FileError> {
+        let mut versions: Vec<SchemaFileInfo> = Vec::new();
 
         if !self.path.exists() {
             return Ok(Vec::new());
@@ -114,27 +148,37 @@ impl SchemaDirectory {
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
 
-            if let Some(hash) = parse_schema_filename(&name) {
-                let modified = entry.metadata()?.modified().ok();
-                versions.push((hash, modified));
+            if let Some(info) = parse_versioned_schema_filename(&name) {
+                versions.push(info);
             }
         }
 
-        // Sort by modification time (oldest first)
-        versions.sort_by(|a, b| a.1.cmp(&b.1));
+        // Sort by version number
+        versions.sort_by_key(|v| v.version);
 
-        Ok(versions.into_iter().map(|(hash, _)| hash).collect())
+        Ok(versions)
     }
 
-    /// Get the latest schema version hash, if any.
-    pub fn latest_version(&self) -> Result<Option<SchemaHash>, FileError> {
+    /// Get the latest schema version info, if any.
+    pub fn latest_version(&self) -> Result<Option<SchemaFileInfo>, FileError> {
         let versions = self.schema_versions()?;
-        Ok(versions.last().copied())
+        Ok(versions.into_iter().last())
     }
 
-    /// Read a specific frozen schema by hash.
-    pub fn schema(&self, hash: SchemaHash) -> Result<Schema, FileError> {
-        let filename = format!("schema_{}.sql", hash.short());
+    /// Read a specific frozen schema by version number.
+    pub fn schema_by_version(&self, version: u32) -> Result<Schema, FileError> {
+        let versions = self.schema_versions()?;
+        let info = versions
+            .into_iter()
+            .find(|v| v.version == version)
+            .ok_or_else(|| FileError::NotFound(format!("schema version {}", version)))?;
+
+        self.schema_by_info(&info)
+    }
+
+    /// Read a specific frozen schema by its file info.
+    pub fn schema_by_info(&self, info: &SchemaFileInfo) -> Result<Schema, FileError> {
+        let filename = schema_filename(info);
         let path = self.path.join(&filename);
 
         if !path.exists() {
@@ -146,18 +190,30 @@ impl SchemaDirectory {
         Ok(schema)
     }
 
-    /// Read a lens between two versions.
-    pub fn lens(
+    /// Read schema SQL content by version (for hash validation).
+    pub fn schema_sql_by_version(&self, version: u32) -> Result<String, FileError> {
+        let versions = self.schema_versions()?;
+        let info = versions
+            .into_iter()
+            .find(|v| v.version == version)
+            .ok_or_else(|| FileError::NotFound(format!("schema version {}", version)))?;
+
+        let filename = schema_filename(&info);
+        let path = self.path.join(&filename);
+        Ok(fs::read_to_string(&path)?)
+    }
+
+    /// Read a migration between two versions.
+    pub fn migration(
         &self,
-        from: SchemaHash,
-        to: SchemaHash,
+        from_version: u32,
+        to_version: u32,
+        from_hash: &str,
+        to_hash: &str,
         direction: Direction,
     ) -> Result<LensTransform, FileError> {
-        let dir_suffix = match direction {
-            Direction::Forward => "fwd",
-            Direction::Backward => "bwd",
-        };
-        let filename = format!("lens_{}_{}_{}.sql", from.short(), to.short(), dir_suffix);
+        let filename =
+            migration_sql_filename(from_version, to_version, from_hash, to_hash, direction);
         let path = self.path.join(&filename);
 
         if !path.exists() {
@@ -169,21 +225,48 @@ impl SchemaDirectory {
         Ok(transform)
     }
 
-    /// Check if a lens exists between two versions.
-    pub fn has_lens(&self, from: SchemaHash, to: SchemaHash, direction: Direction) -> bool {
-        let dir_suffix = match direction {
-            Direction::Forward => "fwd",
-            Direction::Backward => "bwd",
-        };
-        let filename = format!("lens_{}_{}_{}.sql", from.short(), to.short(), dir_suffix);
+    /// Check if a migration SQL file exists between two versions.
+    pub fn has_migration_sql(
+        &self,
+        from_version: u32,
+        to_version: u32,
+        from_hash: &str,
+        to_hash: &str,
+        direction: Direction,
+    ) -> bool {
+        let filename =
+            migration_sql_filename(from_version, to_version, from_hash, to_hash, direction);
         self.path.join(&filename).exists()
     }
 
-    /// Write a frozen schema file.
-    pub fn write_schema(&self, schema: &Schema, hash: SchemaHash) -> Result<PathBuf, FileError> {
+    /// Check if a migration TypeScript stub exists between two versions.
+    pub fn has_migration_ts_stub(
+        &self,
+        from_version: u32,
+        to_version: u32,
+        from_hash: &str,
+        to_hash: &str,
+    ) -> bool {
+        let filename = migration_ts_filename(from_version, to_version, from_hash, to_hash);
+        self.path.join(&filename).exists()
+    }
+
+    /// Write a frozen schema file with version number.
+    pub fn write_schema(
+        &self,
+        schema: &Schema,
+        version: u32,
+        description: Option<&str>,
+        hash: &str,
+    ) -> Result<PathBuf, FileError> {
         fs::create_dir_all(&self.path)?;
 
-        let filename = format!("schema_{}.sql", hash.short());
+        let info = SchemaFileInfo {
+            version,
+            description: description.map(String::from),
+            hash: hash.to_string(),
+        };
+        let filename = schema_filename(&info);
         let path = self.path.join(&filename);
         let content = schema_to_sql(schema);
 
@@ -191,21 +274,20 @@ impl SchemaDirectory {
         Ok(path)
     }
 
-    /// Write a lens file.
-    pub fn write_lens(
+    /// Write a migration SQL file.
+    pub fn write_migration_sql(
         &self,
-        from: SchemaHash,
-        to: SchemaHash,
+        from_version: u32,
+        to_version: u32,
+        from_hash: &str,
+        to_hash: &str,
         direction: Direction,
         transform: &LensTransform,
     ) -> Result<PathBuf, FileError> {
         fs::create_dir_all(&self.path)?;
 
-        let dir_suffix = match direction {
-            Direction::Forward => "fwd",
-            Direction::Backward => "bwd",
-        };
-        let filename = format!("lens_{}_{}_{}.sql", from.short(), to.short(), dir_suffix);
+        let filename =
+            migration_sql_filename(from_version, to_version, from_hash, to_hash, direction);
         let path = self.path.join(&filename);
         let content = lens_to_sql(transform);
 
@@ -213,17 +295,33 @@ impl SchemaDirectory {
         Ok(path)
     }
 
-    /// Write both forward and backward lens files.
-    pub fn write_lens_pair(
+    /// Write both forward and backward migration SQL files.
+    pub fn write_migration_sql_pair(
         &self,
-        from: SchemaHash,
-        to: SchemaHash,
+        from_version: u32,
+        to_version: u32,
+        from_hash: &str,
+        to_hash: &str,
         forward: &LensTransform,
     ) -> Result<(PathBuf, PathBuf), FileError> {
         let backward = forward.invert();
 
-        let fwd_path = self.write_lens(from, to, Direction::Forward, forward)?;
-        let bwd_path = self.write_lens(from, to, Direction::Backward, &backward)?;
+        let fwd_path = self.write_migration_sql(
+            from_version,
+            to_version,
+            from_hash,
+            to_hash,
+            Direction::Forward,
+            forward,
+        )?;
+        let bwd_path = self.write_migration_sql(
+            from_version,
+            to_version,
+            from_hash,
+            to_hash,
+            Direction::Backward,
+            &backward,
+        )?;
 
         Ok((fwd_path, bwd_path))
     }
@@ -244,104 +342,327 @@ impl SchemaDirectory {
         self.path.join("current.sql").exists()
     }
 
-    /// Check if a schema version exists.
-    pub fn has_schema(&self, hash: SchemaHash) -> bool {
-        let filename = format!("schema_{}.sql", hash.short());
-        self.path.join(&filename).exists()
+    /// Check if a schema version exists by hash.
+    pub fn has_schema_with_hash(&self, hash: &str) -> bool {
+        self.schema_versions()
+            .map(|versions| versions.iter().any(|v| v.hash == hash))
+            .unwrap_or(false)
+    }
+
+    /// Write a TypeScript migration stub file.
+    ///
+    /// The stub contains the inferred migration operations that the user should review/modify.
+    pub fn write_migration_ts_stub(
+        &self,
+        from_version: u32,
+        to_version: u32,
+        from_hash: &str,
+        to_hash: &str,
+        transform: &LensTransform,
+    ) -> Result<PathBuf, FileError> {
+        fs::create_dir_all(&self.path)?;
+
+        let filename = migration_ts_filename(from_version, to_version, from_hash, to_hash);
+        let path = self.path.join(&filename);
+        let content = lens_transform_to_ts(transform);
+
+        fs::write(&path, content)?;
+        Ok(path)
     }
 }
 
-/// Parse a schema filename and extract the hash.
+/// Parse a versioned schema filename and extract info.
 ///
-/// Valid format: `schema_{12-char-hex}.sql`
-fn parse_schema_filename(name: &str) -> Option<SchemaHash> {
-    if !name.starts_with("schema_") || !name.ends_with(".sql") {
+/// Valid formats:
+/// - `schema_v1_455a1f10a158.sql` → version=1, description=None, hash="455a1f10a158"
+/// - `schema_v2_add_description_357c464c4c43.sql` → version=2, description=Some("add_description"), hash="357c464c4c43"
+pub fn parse_versioned_schema_filename(name: &str) -> Option<SchemaFileInfo> {
+    if !name.starts_with("schema_v") || !name.ends_with(".sql") {
         return None;
     }
 
-    let hash_part = &name[7..name.len() - 4]; // Remove "schema_" prefix and ".sql" suffix
+    // Remove "schema_v" prefix and ".sql" suffix
+    let inner = &name[8..name.len() - 4];
 
-    // Must be 12 hex chars
-    if hash_part.len() != 12 || !hash_part.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-
-    // Decode hex to bytes
-    let bytes = hex_decode(hash_part)?;
-    if bytes.len() != 6 {
-        return None;
-    }
-
-    // Create a SchemaHash with just the first 6 bytes filled in
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes[..6].copy_from_slice(&bytes);
-    Some(SchemaHash::from_bytes(hash_bytes))
-}
-
-/// Parse a lens filename and extract the hashes and direction.
-///
-/// Valid format: `lens_{12-char-hex}_{12-char-hex}_{fwd|bwd}.sql`
-#[allow(dead_code)]
-fn parse_lens_filename(name: &str) -> Option<(SchemaHash, SchemaHash, Direction)> {
-    if !name.starts_with("lens_") || !name.ends_with(".sql") {
-        return None;
-    }
-
-    let inner = &name[5..name.len() - 4]; // Remove "lens_" prefix and ".sql" suffix
+    // Split by underscore
     let parts: Vec<&str> = inner.split('_').collect();
-
-    if parts.len() != 3 {
+    if parts.is_empty() {
         return None;
     }
 
-    let from_hex = parts[0];
-    let to_hex = parts[1];
-    let dir_str = parts[2];
+    // First part is the version number
+    let version: u32 = parts[0].parse().ok()?;
 
-    // Validate hex parts
-    if from_hex.len() != 12
-        || !from_hex.chars().all(|c| c.is_ascii_hexdigit())
-        || to_hex.len() != 12
-        || !to_hex.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    // Last part is the hash (12 hex chars)
+    let hash = parts.last()?;
+    if hash.len() != 12 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
 
-    let direction = match dir_str {
-        "fwd" => Direction::Forward,
-        "bwd" => Direction::Backward,
-        _ => return None,
+    // Middle parts (if any) are the description
+    let description = if parts.len() > 2 {
+        Some(parts[1..parts.len() - 1].join("_"))
+    } else {
+        None
     };
 
-    let from_bytes = hex_decode(from_hex)?;
-    let to_bytes = hex_decode(to_hex)?;
-
-    let mut from_hash = [0u8; 32];
-    let mut to_hash = [0u8; 32];
-    from_hash[..6].copy_from_slice(&from_bytes);
-    to_hash[..6].copy_from_slice(&to_bytes);
-
-    Some((
-        SchemaHash::from_bytes(from_hash),
-        SchemaHash::from_bytes(to_hash),
-        direction,
-    ))
+    Some(SchemaFileInfo {
+        version,
+        description,
+        hash: hash.to_string(),
+    })
 }
 
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+/// Parse a migration filename and extract info.
+///
+/// Valid formats:
+/// - `migration_v1_v2_455a1f10a158_357c464c4c43.ts` → TypeScript stub (direction=None)
+/// - `migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql` → Forward migration
+/// - `migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql` → Backward migration
+pub fn parse_migration_filename(name: &str) -> Option<MigrationFileInfo> {
+    if !name.starts_with("migration_") {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
+
+    let is_ts = name.ends_with(".ts");
+    let is_sql = name.ends_with(".sql");
+
+    if !is_ts && !is_sql {
+        return None;
+    }
+
+    // Remove prefix and suffix
+    let inner = if is_ts {
+        &name[10..name.len() - 3] // Remove "migration_" and ".ts"
+    } else {
+        &name[10..name.len() - 4] // Remove "migration_" and ".sql"
+    };
+
+    let parts: Vec<&str> = inner.split('_').collect();
+
+    // For .ts: v1_v2_hash1_hash2 (4 parts)
+    // For .sql: v1_v2_fwd/bwd_hash1_hash2 (5 parts)
+    let (expected_parts, direction, hash_start_idx) = if is_ts {
+        (4, None, 2)
+    } else {
+        if parts.len() < 3 {
+            return None;
+        }
+        let dir = match parts[2] {
+            "fwd" => Direction::Forward,
+            "bwd" => Direction::Backward,
+            _ => return None,
+        };
+        (5, Some(dir), 3)
+    };
+
+    if parts.len() != expected_parts {
+        return None;
+    }
+
+    // Parse version numbers (v1, v2 format)
+    if !parts[0].starts_with('v') {
+        return None;
+    }
+    let from_version: u32 = parts[0][1..].parse().ok()?;
+
+    if !parts[1].starts_with('v') {
+        return None;
+    }
+    let to_version: u32 = parts[1][1..].parse().ok()?;
+
+    // Validate hashes (12 hex chars each)
+    let from_hash = parts[hash_start_idx];
+    let to_hash = parts[hash_start_idx + 1];
+
+    if from_hash.len() != 12 || !from_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    if to_hash.len() != 12 || !to_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    Some(MigrationFileInfo {
+        from_version,
+        to_version,
+        from_hash: from_hash.to_string(),
+        to_hash: to_hash.to_string(),
+        direction,
+    })
+}
+
+/// Generate a schema filename from info.
+///
+/// Examples:
+/// - `schema_v1_455a1f10a158.sql`
+/// - `schema_v2_add_description_357c464c4c43.sql`
+pub fn schema_filename(info: &SchemaFileInfo) -> String {
+    match &info.description {
+        Some(desc) => format!("schema_v{}_{}_{}.sql", info.version, desc, info.hash),
+        None => format!("schema_v{}_{}.sql", info.version, info.hash),
+    }
+}
+
+/// Generate a migration TypeScript stub filename.
+///
+/// Example: `migration_v1_v2_455a1f10a158_357c464c4c43.ts`
+pub fn migration_ts_filename(
+    from_version: u32,
+    to_version: u32,
+    from_hash: &str,
+    to_hash: &str,
+) -> String {
+    format!(
+        "migration_v{}_v{}_{}_{}.ts",
+        from_version, to_version, from_hash, to_hash
+    )
+}
+
+/// Generate a migration SQL filename.
+///
+/// Examples:
+/// - `migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql`
+/// - `migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql`
+///
+/// Direction comes before hashes so truncated filenames still show useful info.
+pub fn migration_sql_filename(
+    from_version: u32,
+    to_version: u32,
+    from_hash: &str,
+    to_hash: &str,
+    direction: Direction,
+) -> String {
+    let dir = match direction {
+        Direction::Forward => "fwd",
+        Direction::Backward => "bwd",
+    };
+    format!(
+        "migration_v{}_v{}_{}_{}_{}.sql",
+        from_version, to_version, dir, from_hash, to_hash
+    )
+}
+
+/// Convert a Value to its TypeScript literal representation.
+fn value_to_ts_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::BigInt(i) => i.to_string(),
+        Value::Text(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Timestamp(t) => t.to_string(),
+        Value::Uuid(u) => format!("\"{}\"", u.uuid()),
+        Value::Array(arr) => {
+            let elements: Vec<String> = arr.iter().map(value_to_ts_literal).collect();
+            format!("[{}]", elements.join(", "))
+        }
+        Value::Row(row) => {
+            let elements: Vec<String> = row.iter().map(value_to_ts_literal).collect();
+            format!("[{}]", elements.join(", "))
+        }
+    }
+}
+
+/// Map ColumnType to col builder method name.
+fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
+    match column_type {
+        ColumnType::Text => "string",
+        ColumnType::Boolean => "boolean",
+        ColumnType::Integer | ColumnType::BigInt => "int",
+        ColumnType::Timestamp => "int", // Timestamps are stored as integers
+        _ => "string",                  // Fallback for unknown types
+    }
+}
+
+/// Convert a LensTransform to TypeScript code.
+///
+/// Generates a TypeScript file with the migration definition using the jazz-ts DSL.
+/// Uses side-effect collection - no export needed.
+fn lens_transform_to_ts(transform: &LensTransform) -> String {
+    let mut lines = Vec::new();
+    lines.push("import { migrate, col } from \"jazz-ts\"".to_string());
+    lines.push(String::new());
+
+    // Group operations by table
+    let mut tables: std::collections::HashMap<&str, Vec<(usize, &LensOp)>> =
+        std::collections::HashMap::new();
+    for (idx, op) in transform.ops.iter().enumerate() {
+        tables.entry(op.table()).or_default().push((idx, op));
+    }
+
+    let table_names: Vec<_> = tables.keys().copied().collect();
+
+    for (table_idx, table) in table_names.iter().enumerate() {
+        let ops = tables.get(table).unwrap();
+        let is_draft = |idx: usize| transform.draft_ops.contains(&idx);
+
+        lines.push(format!("migrate(\"{}\", {{", table));
+
+        for (idx, op) in ops {
+            let draft_comment = if is_draft(*idx) {
+                " // TODO: Review this auto-generated operation"
+            } else {
+                ""
+            };
+
+            match op {
+                LensOp::AddColumn {
+                    column,
+                    column_type,
+                    default,
+                    ..
+                } => {
+                    let method = sql_type_to_col_method(column_type);
+                    let default_ts = value_to_ts_literal(default);
+                    lines.push(format!(
+                        "  {}: col.add().{}({{ default: {} }}),{}",
+                        column, method, default_ts, draft_comment
+                    ));
+                }
+                LensOp::RemoveColumn {
+                    column,
+                    column_type,
+                    default,
+                    ..
+                } => {
+                    let method = sql_type_to_col_method(column_type);
+                    let default_ts = value_to_ts_literal(default);
+                    lines.push(format!(
+                        "  {}: col.drop().{}({{ backwardsDefault: {} }}),{}",
+                        column, method, default_ts, draft_comment
+                    ));
+                }
+                LensOp::RenameColumn {
+                    old_name, new_name, ..
+                } => {
+                    lines.push(format!(
+                        "  {}: col.rename(\"{}\"),{}",
+                        new_name, old_name, draft_comment
+                    ));
+                }
+                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
+                    lines.push(
+                        "  // TODO: Table-level operation not yet supported in TypeScript DSL"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        lines.push("})".to_string());
+        if table_idx < table_names.len() - 1 {
+            lines.push(String::new());
+        }
+    }
+
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
     use tempfile::TempDir;
 
     fn create_test_schema() -> Schema {
@@ -382,11 +703,11 @@ mod tests {
         let schema = create_test_schema();
         let hash = SchemaHash::compute(&schema);
 
-        dir.write_schema(&schema, hash).unwrap();
+        dir.write_schema(&schema, 1, None, &hash.short()).unwrap();
 
-        assert!(dir.has_schema(hash));
+        assert!(dir.has_schema_with_hash(&hash.short()));
 
-        let read_schema = dir.schema(hash).unwrap();
+        let read_schema = dir.schema_by_version(1).unwrap();
         assert_eq!(read_schema.len(), 1);
     }
 
@@ -406,26 +727,30 @@ mod tests {
             .build();
         let hash2 = SchemaHash::compute(&schema2);
 
-        dir.write_schema(&schema1, hash1).unwrap();
-        // Small delay to ensure different modification times
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        dir.write_schema(&schema2, hash2).unwrap();
+        dir.write_schema(&schema1, 1, None, &hash1.short()).unwrap();
+        dir.write_schema(&schema2, 2, Some("add_table_b"), &hash2.short())
+            .unwrap();
 
         let versions = dir.schema_versions().unwrap();
         assert_eq!(versions.len(), 2);
 
-        // Should be in order (oldest first)
-        assert_eq!(versions[0].short(), hash1.short());
-        assert_eq!(versions[1].short(), hash2.short());
+        // Should be in version order
+        assert_eq!(versions[0].version, 1);
+        assert_eq!(versions[0].hash, hash1.short());
+        assert_eq!(versions[0].description, None);
+
+        assert_eq!(versions[1].version, 2);
+        assert_eq!(versions[1].hash, hash2.short());
+        assert_eq!(versions[1].description, Some("add_table_b".to_string()));
     }
 
     #[test]
-    fn write_and_read_lens() {
+    fn write_and_read_migration() {
         let temp = TempDir::new().unwrap();
         let dir = SchemaDirectory::new(temp.path().join("schema"));
 
-        let hash1 = SchemaHash::from_bytes([1; 32]);
-        let hash2 = SchemaHash::from_bytes([2; 32]);
+        let hash1 = "a1b2c3d4e5f6";
+        let hash2 = "f7e8d9c0b1a2";
 
         let transform = LensTransform::with_ops(vec![super::super::lens::LensOp::AddColumn {
             table: "users".to_string(),
@@ -434,23 +759,25 @@ mod tests {
             default: crate::query_manager::types::Value::Integer(0),
         }]);
 
-        dir.write_lens(hash1, hash2, Direction::Forward, &transform)
+        dir.write_migration_sql(1, 2, hash1, hash2, Direction::Forward, &transform)
             .unwrap();
 
-        assert!(dir.has_lens(hash1, hash2, Direction::Forward));
-        assert!(!dir.has_lens(hash1, hash2, Direction::Backward));
+        assert!(dir.has_migration_sql(1, 2, hash1, hash2, Direction::Forward));
+        assert!(!dir.has_migration_sql(1, 2, hash1, hash2, Direction::Backward));
 
-        let read_transform = dir.lens(hash1, hash2, Direction::Forward).unwrap();
+        let read_transform = dir
+            .migration(1, 2, hash1, hash2, Direction::Forward)
+            .unwrap();
         assert_eq!(read_transform.ops.len(), 1);
     }
 
     #[test]
-    fn write_lens_pair() {
+    fn write_migration_pair() {
         let temp = TempDir::new().unwrap();
         let dir = SchemaDirectory::new(temp.path().join("schema"));
 
-        let hash1 = SchemaHash::from_bytes([1; 32]);
-        let hash2 = SchemaHash::from_bytes([2; 32]);
+        let hash1 = "a1b2c3d4e5f6";
+        let hash2 = "f7e8d9c0b1a2";
 
         let forward = LensTransform::with_ops(vec![super::super::lens::LensOp::AddColumn {
             table: "users".to_string(),
@@ -459,13 +786,16 @@ mod tests {
             default: crate::query_manager::types::Value::Integer(0),
         }]);
 
-        dir.write_lens_pair(hash1, hash2, &forward).unwrap();
+        dir.write_migration_sql_pair(1, 2, hash1, hash2, &forward)
+            .unwrap();
 
-        assert!(dir.has_lens(hash1, hash2, Direction::Forward));
-        assert!(dir.has_lens(hash1, hash2, Direction::Backward));
+        assert!(dir.has_migration_sql(1, 2, hash1, hash2, Direction::Forward));
+        assert!(dir.has_migration_sql(1, 2, hash1, hash2, Direction::Backward));
 
         // Verify backward is the inverse
-        let bwd = dir.lens(hash1, hash2, Direction::Backward).unwrap();
+        let bwd = dir
+            .migration(1, 2, hash1, hash2, Direction::Backward)
+            .unwrap();
         assert!(matches!(
             &bwd.ops[0],
             super::super::lens::LensOp::RemoveColumn { .. }
@@ -473,40 +803,79 @@ mod tests {
     }
 
     #[test]
-    fn parse_schema_filename_valid() {
-        let hash = parse_schema_filename("schema_a1b2c3d4e5f6.sql");
-        assert!(hash.is_some());
-        assert_eq!(hash.unwrap().short(), "a1b2c3d4e5f6");
+    fn parse_versioned_schema_filename_valid() {
+        // Simple version with hash
+        let info = parse_versioned_schema_filename("schema_v1_455a1f10a158.sql");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.version, 1);
+        assert_eq!(info.description, None);
+        assert_eq!(info.hash, "455a1f10a158");
+
+        // Version with description
+        let info = parse_versioned_schema_filename("schema_v2_add_description_357c464c4c43.sql");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.version, 2);
+        assert_eq!(info.description, Some("add_description".to_string()));
+        assert_eq!(info.hash, "357c464c4c43");
+
+        // Multi-word description
+        let info = parse_versioned_schema_filename("schema_v3_add_user_table_abc123def456.sql");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.version, 3);
+        assert_eq!(info.description, Some("add_user_table".to_string()));
+        assert_eq!(info.hash, "abc123def456");
     }
 
     #[test]
-    fn parse_schema_filename_invalid() {
-        assert!(parse_schema_filename("current.sql").is_none());
-        assert!(parse_schema_filename("schema_abc.sql").is_none()); // Too short
-        assert!(parse_schema_filename("schema_a1b2c3d4e5f6.txt").is_none());
-        assert!(parse_schema_filename("lens_a1b2c3d4e5f6_f7e8d9c0b1a2_fwd.sql").is_none());
+    fn parse_versioned_schema_filename_invalid() {
+        assert!(parse_versioned_schema_filename("current.sql").is_none());
+        assert!(parse_versioned_schema_filename("schema_abc.sql").is_none()); // No version
+        assert!(parse_versioned_schema_filename("schema_v1.sql").is_none()); // No hash
+        assert!(parse_versioned_schema_filename("schema_v1_abc.sql").is_none()); // Hash too short
+        assert!(parse_versioned_schema_filename("schema_455a1f10a158.sql").is_none()); // Old format
     }
 
     #[test]
-    fn parse_lens_filename_valid() {
-        let result = parse_lens_filename("lens_a1b2c3d4e5f6_f7e8d9c0b1a2_fwd.sql");
-        assert!(result.is_some());
-        let (from, to, dir) = result.unwrap();
-        assert_eq!(from.short(), "a1b2c3d4e5f6");
-        assert_eq!(to.short(), "f7e8d9c0b1a2");
-        assert_eq!(dir, Direction::Forward);
+    fn parse_migration_filename_valid() {
+        // TypeScript stub
+        let info = parse_migration_filename("migration_v1_v2_455a1f10a158_357c464c4c43.ts");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.from_version, 1);
+        assert_eq!(info.to_version, 2);
+        assert_eq!(info.from_hash, "455a1f10a158");
+        assert_eq!(info.to_hash, "357c464c4c43");
+        assert_eq!(info.direction, None);
 
-        let result = parse_lens_filename("lens_a1b2c3d4e5f6_f7e8d9c0b1a2_bwd.sql");
-        assert!(result.is_some());
-        let (_, _, dir) = result.unwrap();
-        assert_eq!(dir, Direction::Backward);
+        // Forward SQL (direction before hashes)
+        let info = parse_migration_filename("migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.from_version, 1);
+        assert_eq!(info.to_version, 2);
+        assert_eq!(info.from_hash, "455a1f10a158");
+        assert_eq!(info.to_hash, "357c464c4c43");
+        assert_eq!(info.direction, Some(Direction::Forward));
+
+        // Backward SQL
+        let info = parse_migration_filename("migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql");
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.direction, Some(Direction::Backward));
     }
 
     #[test]
-    fn parse_lens_filename_invalid() {
-        assert!(parse_lens_filename("schema_a1b2c3d4e5f6.sql").is_none());
-        assert!(parse_lens_filename("lens_abc_def_fwd.sql").is_none()); // Too short
-        assert!(parse_lens_filename("lens_a1b2c3d4e5f6_f7e8d9c0b1a2_invalid.sql").is_none());
+    fn parse_migration_filename_invalid() {
+        assert!(parse_migration_filename("schema_v1_455a1f10a158.sql").is_none());
+        assert!(parse_migration_filename("migration_v1_v2_fwd_abc_def.sql").is_none()); // Hashes too short
+        assert!(
+            parse_migration_filename("migration_v1_v2_invalid_455a1f10a158_357c464c4c43.sql")
+                .is_none()
+        );
+        assert!(parse_migration_filename("lens_455a1f10a158_357c464c4c43_fwd.sql").is_none()); // Old format
     }
 
     #[test]
@@ -530,11 +899,52 @@ mod tests {
         // Create a schema
         let schema = create_test_schema();
         let hash = SchemaHash::compute(&schema);
-        dir.write_schema(&schema, hash).unwrap();
+        dir.write_schema(&schema, 1, None, &hash.short()).unwrap();
 
         // Now we have a latest version
         let latest = dir.latest_version().unwrap();
         assert!(latest.is_some());
-        assert_eq!(latest.unwrap().short(), hash.short());
+        let latest = latest.unwrap();
+        assert_eq!(latest.version, 1);
+        assert_eq!(latest.hash, hash.short());
+    }
+
+    #[test]
+    fn schema_filename_generation() {
+        let info = SchemaFileInfo {
+            version: 1,
+            description: None,
+            hash: "455a1f10a158".to_string(),
+        };
+        assert_eq!(schema_filename(&info), "schema_v1_455a1f10a158.sql");
+
+        let info = SchemaFileInfo {
+            version: 2,
+            description: Some("add_description".to_string()),
+            hash: "357c464c4c43".to_string(),
+        };
+        assert_eq!(
+            schema_filename(&info),
+            "schema_v2_add_description_357c464c4c43.sql"
+        );
+    }
+
+    #[test]
+    fn migration_filename_generation() {
+        assert_eq!(
+            migration_ts_filename(1, 2, "455a1f10a158", "357c464c4c43"),
+            "migration_v1_v2_455a1f10a158_357c464c4c43.ts"
+        );
+
+        // SQL filenames have direction before hashes for better truncation display
+        assert_eq!(
+            migration_sql_filename(1, 2, "455a1f10a158", "357c464c4c43", Direction::Forward),
+            "migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"
+        );
+
+        assert_eq!(
+            migration_sql_filename(1, 2, "455a1f10a158", "357c464c4c43", Direction::Backward),
+            "migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"
+        );
     }
 }
