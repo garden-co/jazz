@@ -3,10 +3,13 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "strict": true,
     "esModuleInterop": true,
+    "strict": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "dist",
+    "declaration": true
   },
-  "include": ["schema/**/*"]
+  "include": ["src/**/*", "schema/**/*"],
+  "exclude": ["node_modules", "dist"]
 }

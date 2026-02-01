@@ -104,10 +104,7 @@ async function generateSqlForMigrationFile(tsFile: string): Promise<void> {
   console.log(`Generated: ${basename(bwdFile)}`);
 }
 
-async function runJazzBuild(
-  jazzBin: string,
-  schemaDir: string
-): Promise<void> {
+async function runJazzBuild(jazzBin: string, schemaDir: string): Promise<void> {
   return new Promise((resolve, reject) => {
     console.log(`\nRunning: ${jazzBin} build --ts --schema-dir ${schemaDir}`);
     const child = spawn(jazzBin, ["build", "--ts", "--schema-dir", schemaDir], {
@@ -123,9 +120,7 @@ async function runJazzBuild(
     child.on("error", (err) => {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         reject(
-          new Error(
-            `jazz binary not found at '${jazzBin}'. Use --jazz-bin to specify the path.`
-          )
+          new Error(`jazz binary not found at '${jazzBin}'. Use --jazz-bin to specify the path.`),
         );
       } else {
         reject(err);

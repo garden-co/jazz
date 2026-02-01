@@ -1,5 +1,12 @@
 {
-	"devDependencies": {
-		"lefthook": "^2.0.15"
-	}
+  "scripts": {
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint ."
+  },
+  "devDependencies": {
+    "lefthook": "^2.0.15",
+    "oxfmt": "^0.27.0",
+    "oxlint": "^1.42.0"
+  }
 }

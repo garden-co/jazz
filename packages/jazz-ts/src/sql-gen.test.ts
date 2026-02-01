@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { table, col, migrate, getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
+import {
+  table,
+  col,
+  migrate,
+  getCollectedSchema,
+  getCollectedMigration,
+  resetCollectedState,
+} from "./dsl.js";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 
 describe("schemaToSql", () => {
@@ -102,11 +109,11 @@ describe("lensToSql", () => {
 
     expect(lensToSql(lens, "fwd")).toBe(
       `ALTER TABLE todos RENAME COLUMN new_name TO old_name;
-`
+`,
     );
     expect(lensToSql(lens, "bwd")).toBe(
       `ALTER TABLE todos RENAME COLUMN old_name TO new_name;
-`
+`,
     );
   });
 
@@ -119,11 +126,11 @@ describe("lensToSql", () => {
 
     expect(lensToSql(lens, "fwd")).toBe(
       `ALTER TABLE todos DROP COLUMN removed;
-`
+`,
     );
     expect(lensToSql(lens, "bwd")).toBe(
       `ALTER TABLE todos ADD COLUMN removed TEXT DEFAULT 'default_value';
-`
+`,
     );
   });
 });

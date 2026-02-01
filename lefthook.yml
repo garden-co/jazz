@@ -6,3 +6,9 @@ pre-commit:
     clippy:
       glob: "*.rs"
       run: cargo clippy --manifest-path crates/groove/Cargo.toml -- -D warnings
+    oxfmt:
+      glob: "*.{ts,tsx,js,jsx}"
+      run: pnpm format:check
+    oxlint:
+      glob: "*.{ts,tsx,js,jsx}"
+      run: pnpm lint

@@ -45,6 +45,7 @@ On local data changes:
 ```
 
 This keeps:
+
 - SyncManager simple and scope-based only
 - All Query/Schema/Index knowledge in QueryManager
 - Clean separation of concerns
@@ -118,6 +119,7 @@ pub struct CreateObjectRequest {
 ### Reactive Scope Updates
 
 When QueryGraph's contributing ObjectIds change:
+
 - New ObjectId added → send ObjectUpdated downstream (if not already sent)
 - ObjectId removed → (object stays synced, just no longer in this query's scope)
 
@@ -128,10 +130,12 @@ When QueryGraph's contributing ObjectIds change:
 **Goal**: Query struct can be serialized for wire transmission.
 
 Changes:
+
 - Derive or implement Serialize/Deserialize for Query, Condition, JoinSpec, etc.
 - Add QuerySubscription and QueryUnsubscription to SyncPayload
 
 Files:
+
 - `query_manager/query.rs` - Add serde derives
 - `query_manager/types.rs` - Ensure Value, TableName, etc. are serializable
 - `sync_manager.rs` - Add new SyncPayload variants
@@ -141,11 +145,13 @@ Files:
 **Goal**: QueryGraph can report which ObjectIds contribute to its result set.
 
 Changes:
+
 - Add method `QueryGraph::contributing_object_ids() -> HashSet<(ObjectId, BranchName)>`
 - Track contributing IDs during graph settlement
 - IDs come from IndexScanNode outputs that survive filtering
 
 Files:
+
 - `query_manager/graph.rs` - Add contributing_object_ids() method
 
 ### Part 3: Server-Side Query Subscription ✅ COMPLETE
@@ -155,17 +161,20 @@ Files:
 **Architecture**: SyncManager stays scope-based, QueryManager handles Query → Scope.
 
 Changes to SyncManager:
+
 - Add `pending_query_subscriptions: Vec<PendingQuerySubscription>` field
 - On QuerySubscription receipt: queue to pending list (don't process)
 - Add `take_pending_query_subscriptions()` method
 - Add `set_client_query_scope(client_id, query_id, scope)` method
 
 Changes to QueryManager:
+
 - Add `server_subscriptions: HashMap<(ClientId, QueryId), ServerQuerySubscription>`
 - In `process()`: take pending subscriptions, build QueryGraphs, set scopes
 - On index updates: re-settle server QueryGraphs, detect scope changes
 
 New struct in QueryManager:
+
 ```rust
 struct ServerQuerySubscription {
     query: Query,
@@ -176,10 +185,12 @@ struct ServerQuerySubscription {
 ```
 
 Files:
+
 - `sync_manager.rs` - Pending queue, take method, set_client_query_scope
 - `query_manager/manager.rs` - ServerQuerySubscription tracking, process loop
 
 **Tests**:
+
 ```rust
 #[test]
 fn server_builds_query_graph_on_subscription() {
@@ -201,15 +212,18 @@ fn server_pushes_new_matches() {
 **Goal**: Client subscription automatically sends query upstream.
 
 Changes:
+
 - New method `QueryManager::subscribe_with_sync(query, session)`:
   1. Call existing `subscribe()` to build local QueryGraph
   2. Send QuerySubscription to SyncManager for upstream forwarding
   3. Return QuerySubscriptionId
 
 Files:
+
 - `query_manager/manager.rs` - Add subscribe_with_sync()
 
 **Tests**:
+
 ```rust
 #[test]
 fn subscribe_with_sync_sends_upstream() {
@@ -224,17 +238,20 @@ fn subscribe_with_sync_sends_upstream() {
 **Goal**: Mid-tier servers forward queries upstream and relay objects downstream.
 
 Changes:
+
 - Server forwards received QuerySubscription to its upstream servers
 - Server tracks which queries came from which clients
 - When upstream sends ObjectUpdated, forward to clients with matching queries
 
 Files:
+
 - `sync_manager.rs` - Query forwarding logic (scope-based, existing pattern)
 - `query_manager/manager.rs` - Forward QuerySubscription upstream
 
 ### Part 6: End-to-End Integration
 
 **Tests**:
+
 ```rust
 #[test]
 fn e2e_client_receives_server_data_via_subscription() {
@@ -285,6 +302,7 @@ fn e2e_permissions_prevent_sync() {
 ### Problem
 
 When a server starts in `new_server()` mode (no pre-loaded schema), it receives:
+
 1. Schema catalogue objects via sync
 2. Row objects for tables in those schemas
 
@@ -309,6 +327,7 @@ QueryManager now supports lazy schema activation:
 ### Scope Bypass for System Objects
 
 SyncManager's `process_from_client()` now bypasses scope checking for:
+
 - **Catalogue objects**: `type=catalogue_schema` or `type=catalogue_lens`
 - **Row objects**: objects with `table` metadata
 
@@ -317,6 +336,7 @@ This allows clients to sync data to servers without pre-establishing query subsc
 ### Multi-Environment Support
 
 Lazy activation naturally supports multiple environments:
+
 - Client A uses "dev-{hash}-main"
 - Client B uses "prod-{hash}-main"
 - Each branch gets its own `branch_schema_map` entry

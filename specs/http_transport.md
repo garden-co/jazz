@@ -30,16 +30,16 @@ Wire protocol for client-server communication in Jazz. Clients connect via SSE f
 
 ## Endpoint Reference
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/events` | GET | SSE stream for push updates |
-| `/sync` | POST | Push sync payload to server |
-| `/sync/subscribe` | POST | Subscribe to a query |
-| `/sync/unsubscribe` | POST | Unsubscribe from a query |
-| `/sync/object` | POST | Create new object |
-| `/sync/object` | PUT | Update existing object |
-| `/sync/object/delete` | POST | Delete object |
-| `/health` | GET | Health check |
+| Route                 | Method | Description                 |
+| --------------------- | ------ | --------------------------- |
+| `/events`             | GET    | SSE stream for push updates |
+| `/sync`               | POST   | Push sync payload to server |
+| `/sync/subscribe`     | POST   | Subscribe to a query        |
+| `/sync/unsubscribe`   | POST   | Unsubscribe from a query    |
+| `/sync/object`        | POST   | Create new object           |
+| `/sync/object`        | PUT    | Update existing object      |
+| `/sync/object/delete` | POST   | Delete object               |
+| `/health`             | GET    | Health check                |
 
 ## Client Identity
 
@@ -54,12 +54,14 @@ data_dir/
 ```
 
 **Lifecycle:**
+
 1. On `connect()`, check for `data_dir/client_id` file
 2. If exists: load and parse UUID
 3. If missing or corrupt: generate new UUIDv7, persist to file
 4. Use this ID for all server communication
 
 **Why persistence matters:**
+
 - Server maintains per-client state (`sent_tips`, query subscriptions)
 - Reconnecting with same ID preserves state, avoids re-sending all data
 - Different clients (different data_dir) get unique IDs
@@ -67,6 +69,7 @@ data_dir/
 ### Client ID in Requests
 
 The same `ClientId` must be used for both:
+
 1. **SSE connection**: Query parameter `?client_id=<uuid>`
 2. **HTTP requests**: `client_id` field in `SyncPayloadRequest`
 
@@ -81,6 +84,7 @@ GET /events?client_id=<uuid>
 ```
 
 **Query parameters:**
+
 - `client_id` (optional): Client's persistent UUID
   - If valid UUID: server uses this ID
   - If malformed: server returns `400 Bad Request`
@@ -91,6 +95,7 @@ GET /events?client_id=<uuid>
 ### Server Registration
 
 When SSE connects, server:
+
 1. Parses `client_id` from query param (or generates new)
 2. Calls `add_client_with_full_sync(client_id, session)`
 3. Sends all existing data to new client
@@ -153,6 +158,7 @@ loop {
 ```
 
 **Current behavior:**
+
 - Fixed 5-second retry delay
 - Same `client_id` on reconnect (preserves server state)
 - Server resumes sending from `sent_tips` (no duplicate data)
@@ -193,6 +199,7 @@ Content-Type: application/json
 ```
 
 **Response:**
+
 ```json
 { "query_id": 42 }
 ```
@@ -212,6 +219,7 @@ Content-Type: application/json
 ```
 
 **Response:**
+
 ```json
 { "object_id": "..." }
 ```
@@ -302,6 +310,7 @@ pub struct JazzClient {
 Client spawns two background tasks:
 
 **1. Runtime Event Processor:**
+
 ```rust
 while let Some(event) = events.recv().await {
     match event {
@@ -318,6 +327,7 @@ while let Some(event) = events.recv().await {
 ```
 
 **2. SSE Listener:**
+
 ```rust
 loop {
     let url = format!("{}/events?client_id={}", base_url, client_id);
@@ -420,12 +430,12 @@ async fn handle_server_event(event: ServerEvent, runtime: &RuntimeHandle) {
 
 ### HTTP Errors
 
-| Status | Meaning |
-|--------|---------|
-| 200 | Success |
-| 201 | Created (for POST /sync/object) |
-| 400 | Bad Request (malformed client_id, invalid JSON) |
-| 500 | Internal Server Error |
+| Status | Meaning                                         |
+| ------ | ----------------------------------------------- |
+| 200    | Success                                         |
+| 201    | Created (for POST /sync/object)                 |
+| 400    | Bad Request (malformed client_id, invalid JSON) |
+| 500    | Internal Server Error                           |
 
 ### SSE Errors
 
@@ -452,6 +462,7 @@ pub enum ErrorCode {
 > - App admin tokens: authorize schema operations (push schemas/lenses)
 >
 > App admin tokens should be:
+>
 > - Issued to developers/operators only
 > - Required in HTTP headers for catalogue object sync
 > - Validated server-side before accepting schema changes
@@ -461,11 +472,13 @@ pub enum ErrorCode {
 ### Client ID as Session Token
 
 Current model treats `ClientId` as a bearer token:
+
 - 122 bits of entropy (UUIDv7 random portion)
 - Computationally infeasible to guess
 - Persisted client-side only
 
 **Limitations:**
+
 - No server-side session validation
 - No expiration
 - Stolen client_id grants full access to that client's session
@@ -480,6 +493,7 @@ Current model treats `ClientId` as a bearer token:
 ## Implementation Status
 
 ### Complete
+
 - [x] SSE endpoint with client_id parameter
 - [x] Client ID persistence in data_dir
 - [x] HTTP POST for sync payloads
@@ -489,11 +503,13 @@ Current model treats `ClientId` as a bearer token:
 - [x] ServerEvent types with client_id confirmation
 
 ### Partial
+
 - [ ] `/sync/subscribe` and `/sync/unsubscribe` are stubs (return hardcoded values)
 - [ ] No exponential backoff for reconnection
 - [ ] No connection state tracking API (`is_connected()`)
 
 ### Future
+
 - [ ] Authentication/authorization layer
 - [ ] WebSocket alternative to SSE
 - [ ] Binary protocol option (MessagePack/CBOR)

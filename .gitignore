@@ -3,6 +3,11 @@ target/
 
 # Node
 node_modules/
+dist/
+*.log
+
+# Build artifacts
+*.tsbuildinfo
 
 # IDE
 .idea/
@@ -12,3 +17,13 @@ node_modules/
 
 # OS
 .DS_Store
+
+# Test
+coverage/
+
+# Local data
+data/
+
+# Environment
+.env
+.env.local

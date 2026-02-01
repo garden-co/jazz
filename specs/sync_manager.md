@@ -6,20 +6,22 @@ The sync manager sits atop the ObjectManager to coordinate network synchronizati
 
 ### Connection Types
 
-| | Upstream Servers | Downstream Clients |
-|---|---|---|
-| Trust | Trusted | Untrusted |
-| Scope | All objects | Query-filtered |
-| Direction | Bidirectional | We push to them, they can push back |
-| Permissions | Full access | Per-object: Readable or ReadableAndWritable |
+|             | Upstream Servers | Downstream Clients                          |
+| ----------- | ---------------- | ------------------------------------------- |
+| Trust       | Trusted          | Untrusted                                   |
+| Scope       | All objects      | Query-filtered                              |
+| Direction   | Bidirectional    | We push to them, they can push back         |
+| Permissions | Full access      | Per-object: Readable or ReadableAndWritable |
 
 ### Server Interaction Model
 
 **Upward (us → server):**
+
 - We push ALL our objects to the server
 - We forward client queries to the server (so server knows what we're interested in)
 
 **Downward (server → us):**
+
 - Server sends updates matching any forwarded query
 - This enables multi-tier: client queries us → we forward to server → server sends data we don't have → we forward to client
 
@@ -38,6 +40,7 @@ The effective scope merges all active queries, taking the most permissive permis
 ### Pending Updates
 
 When clients push updates for objects NOT in their effective scope:
+
 1. Update queued to `pending_updates`
 2. Upper layer evaluates (policy decision)
 3. Upper layer calls `approve_update()` or `reject_update()`
@@ -47,12 +50,12 @@ This enables custom authorization logic (e.g., "client can create objects of typ
 
 ## Identifiers
 
-| Type | Format | Purpose |
-|------|--------|---------|
-| ServerId | UUIDv7 | Identifies server connection |
-| ClientId | UUIDv7 | Identifies client connection |
-| QueryId | u64 | Identifies a query subscription |
-| PendingUpdateId | u64 | Identifies a pending update awaiting approval |
+| Type            | Format | Purpose                                       |
+| --------------- | ------ | --------------------------------------------- |
+| ServerId        | UUIDv7 | Identifies server connection                  |
+| ClientId        | UUIDv7 | Identifies client connection                  |
+| QueryId         | u64    | Identifies a query subscription               |
+| PendingUpdateId | u64    | Identifies a pending update awaiting approval |
 
 ## State Structures
 
@@ -176,6 +179,7 @@ fn unsubscribe_from_query(&mut self, client_id: ClientId, query_id: QueryId)
 ```
 
 Query changes trigger:
+
 - **Scope expansion**: Initial sync for newly-visible objects
 - **Scope contraction**: Stop sending future updates (no "unsend")
 
@@ -227,18 +231,22 @@ fn reject_update(&mut self, pending_id: PendingUpdateId, reason: String)
 ### Inbox from Client → Permission Check
 
 **In scope with ReadableAndWritable:**
+
 - Apply to ObjectManager
 - Forward to servers and other relevant clients
 
 **In scope with Readable (read-only):**
+
 - Queue `Error` response
 
 **Out of scope:**
+
 - Queue to `pending_updates` for upper layer evaluation
 
 ### Blob Handling
 
 **Request:**
+
 1. Check requester has read permission for associated object
 2. Authorized: queue `BlobResponse` with data
 3. Not authorized: queue `BlobResponse` with `data: None`
@@ -246,19 +254,23 @@ fn reject_update(&mut self, pending_id: PendingUpdateId, reason: String)
 ## Invariants
 
 ### Server Sync (INV-S)
+
 1. **Completeness**: All local objects eventually synced to all servers
 2. **Causal order**: Commits sent parent-before-child
 
 ### Client Scope (INV-C)
+
 1. **No leakage**: Clients only receive updates for objects in their effective_scope
 2. **Initial sync**: Query additions trigger current state for newly-visible objects
 3. **Scope removal**: Query removals stop future updates (no unsend)
 
 ### Permission Enforcement (INV-P)
+
 1. **Read-only enforcement**: Clients with `Readable` permission cannot push updates
 2. **Truncation control**: Truncations require `ReadableAndWritable`
 
 ### Consistency (INV-X)
+
 1. **Metadata once**: `ObjectMetadata` sent exactly once per destination per object
 2. **Tip tracking accuracy**: `sent_tips` accurately reflects what destination has seen
 

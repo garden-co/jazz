@@ -6,6 +6,7 @@ using the "dynamic graph instances" approach, to inform future optimization deci
 ## Current Approach: Recompile Per Binding
 
 For each unique outer row, we:
+
 1. Extract the correlation value from the outer tuple
 2. Create a fresh `SubgraphInstance` by calling `SubgraphTemplate::instantiate()`
 3. This compiles a new `QueryGraph` with the correlation value as a filter condition
@@ -15,6 +16,7 @@ For each unique outer row, we:
 ### Why This Approach?
 
 The recompile-per-binding approach was chosen to:
+
 1. Explore subgraph patterns without premature optimization
 2. Keep the implementation simple and correct
 3. Collect data about real-world usage patterns
@@ -24,11 +26,13 @@ The recompile-per-binding approach was chosen to:
 ### Memory Overhead Per Instance
 
 Each `SubgraphInstance` contains:
+
 - A full `QueryGraph` with nodes, edges, dirty tracking
 - Node state for IndexScan, Materialize, Filter, Sort, etc.
 - Current tuple sets in each node
 
 For a query like `users.with_array("posts", ...)`:
+
 - 1000 users = 1000 compiled graphs
 - Each graph has ~5-8 nodes depending on query complexity
 - Memory is proportional to: `num_outer_rows * nodes_per_subgraph`
@@ -38,11 +42,12 @@ For a query like `users.with_array("posts", ...)`:
 ### Update Cost Distribution
 
 When inner data changes (e.g., a new post is inserted):
+
 - Currently: ALL instances are re-evaluated via `reevaluate_all()`
 - Each re-evaluation settles the full subgraph
 - If 1000 users exist but only 1 user's posts changed, we still re-settle all 1000 graphs
 
-**Observation:** This is O(outer_rows * inner_change_frequency), which could be expensive.
+**Observation:** This is O(outer_rows \* inner_change_frequency), which could be expensive.
 
 ### Common Patterns Observed
 
@@ -68,15 +73,18 @@ inner_rows: HashMap<CorrelationValue, Vec<Row>>
 ```
 
 When outer row arrives:
+
 - Probe the hash index with correlation value
 - Return matching rows as array
 
 **Pros:**
+
 - O(1) lookup per outer row
 - Single index structure shared across all correlations
 - Updates to inner table only rebuild the hash index once
 
 **Cons:**
+
 - Less flexible than full subgraph (can't do complex filters/joins inside)
 - Memory for full hash index might exceed per-instance approach for sparse correlations
 
@@ -89,14 +97,17 @@ cache: HashMap<CorrelationValue, Vec<Row>>
 ```
 
 On inner table change:
+
 - Invalidate affected cache entries
 - Lazily re-evaluate on next access
 
 **Pros:**
+
 - Reduces redundant evaluation
 - Works with complex subgraphs
 
 **Cons:**
+
 - Cache invalidation complexity
 - Memory for cached results
 
@@ -109,10 +120,12 @@ Instead of one graph per outer row, batch outer rows and evaluate together:
 3. Group results by correlation value
 
 **Pros:**
+
 - Single graph settlement
 - Better cache locality
 
 **Cons:**
+
 - More complex result grouping
 - May not work well with LIMIT inside subquery
 
@@ -121,14 +134,17 @@ Instead of one graph per outer row, batch outer rows and evaluate together:
 For foreign key correlations, maintain per-correlation-value row sets incrementally:
 
 When post is inserted with `author_id = X`:
+
 - Add to `author_X_posts` set directly
 - No need to re-scan
 
 **Pros:**
+
 - O(1) update cost
 - No full re-evaluation
 
 **Cons:**
+
 - Only works for simple correlations
 - Requires index maintenance bookkeeping
 
@@ -137,6 +153,7 @@ When post is inserted with `author_id = X`:
 Based on these observations, the most impactful optimization would be:
 
 **Shared Hash Index approach** for simple foreign-key correlations:
+
 - Handles the common case efficiently
 - Matches what JoinNode already does
 - Could be added as optimization path when subquery is "simple" (single table, correlation-only filter)
@@ -146,6 +163,7 @@ Keep current approach as fallback for complex subqueries with filters, joins, or
 ## Metrics to Track
 
 For production use, consider tracking:
+
 - Number of subgraph instances per query
 - Time spent in `reevaluate_all()` vs `process_with_context()`
 - Cache hit rate if memoization is added
