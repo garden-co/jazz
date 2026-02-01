@@ -1,6 +1,8 @@
 packages:
-  - "packages/*"
-  - "examples/*"
+  - packages/*
+  - examples/*
+  - crates/groove-wasm/pkg
 
 ignoredBuiltDependencies:
+  - blake3
   - lefthook

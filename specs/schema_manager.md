@@ -13,6 +13,7 @@ SchemaHash = BLAKE3(canonicalized_schema)
 ```
 
 Canonicalization ensures order-independence:
+
 - Tables sorted by name
 - Columns within each table sorted by name
 - Structural elements (types, nullability, references) hashed deterministically
@@ -28,10 +29,12 @@ Branch names encode environment, schema version, and user branch:
 ```
 
 Examples:
+
 - `dev-a1b2c3d4-main` - Development, schema hash prefix a1b2c3d4, main branch
 - `prod-f9e8d7c6-feature-x` - Production, different schema, feature branch
 
 This naming scheme:
+
 - Keeps different schema versions isolated in separate branches
 - Allows multiple environments (dev/staging/prod) with same user branch
 - Makes branch relationships discoverable from names alone
@@ -50,6 +53,7 @@ Lens {
 ```
 
 V1 lens operations:
+
 - `AddColumn` / `RemoveColumn` - Add or remove a column with default value
 - `RenameColumn` - Rename a column
 - `AddTable` / `RemoveTable` - Add or remove a table
@@ -96,6 +100,7 @@ Old data remains in old branch - no deletion or in-place modification.
 > - Draft lenses could be pushed to cause server errors
 >
 > **Required:** Schema/lens pushes should require an **app admin token** separate from the normal session token. This token would:
+>
 > - Be issued to developers/operators, not end users
 > - Be required for `type=catalogue_schema` and `type=catalogue_lens` objects
 > - Be validated server-side before accepting catalogue updates
@@ -115,12 +120,14 @@ App ID: "my-todo-app" → UUIDv5(NAMESPACE_DNS, "my-todo-app")
 Schemas and lenses are persisted as Objects for discovery via sync:
 
 **Schema Object:**
+
 - `ObjectId = UUIDv5(NAMESPACE_DNS, schema_hash.as_bytes())` - deterministic from content
 - Single commit on branch `"main"`
 - Content = binary-encoded Schema
 - Metadata: `{"type": "catalogue_schema", "app_id": "<uuid>", "schema_hash": "<64-char hex>"}`
 
 **Lens Object:**
+
 - `ObjectId = UUIDv5(NAMESPACE_DNS, source_hash || target_hash)` - deterministic from endpoints
 - Single commit on branch `"main"`
 - Content = binary-encoded LensTransform
@@ -155,6 +162,7 @@ When v1 client receives the lens via catalogue sync, it adds v2 as a "live" sche
 ### Pending Schemas
 
 Schemas received via catalogue without a lens path to current are stored as **pending**. They become live when:
+
 1. A lens arrives that connects them to the current schema
 2. Multi-hop paths are considered (v1→v2 lens may unlock pending v3 if v2→v3 exists)
 
@@ -322,6 +330,7 @@ self.query_manager.set_known_schemas(self.known_schemas.clone());
 ```
 
 This enables **lazy branch activation** in QueryManager:
+
 - When a row arrives with unknown branch (e.g., `"client-a1b2c3d4-main"`)
 - QueryManager parses the branch name to extract the short hash
 - Looks up matching full hash in `known_schemas`
@@ -332,11 +341,13 @@ This allows servers starting with no schema (`new_server()`) to automatically in
 ### Query Execution Flow
 
 **Client** (unchanged):
+
 ```rust
 manager.execute(query)  // Uses implicit context from current schema
 ```
 
 **Server**:
+
 ```rust
 // Query arrives from client with explicit context
 let ctx = request.schema_context;
@@ -344,6 +355,7 @@ manager.execute_with_schema_context(query, &ctx)?;
 ```
 
 Internally, `execute_with_schema_context()`:
+
 1. Looks up schema in `known_schemas` (returns `UnknownSchema` error if not found)
 2. Builds temporary `SchemaContext` with target schema as "current"
 3. Copies lenses from main context
@@ -377,6 +389,7 @@ Even in server mode, multi-schema queries work correctly:
 ## Implementation Status
 
 ### Completed
+
 - [x] Schema hashing with column/table order independence
 - [x] Composed branch names (env-hash8-userBranch)
 - [x] Lens types and operations (add/remove/rename column/table)
@@ -416,6 +429,7 @@ Even in server mode, multi-schema queries work correctly:
 2. **No realistic sync E2E test**: Catalogue tests call `process_catalogue_update()` directly. Full SyncManager wiring test would require `wire_up_sync()` / `pump_sync()` helpers.
 
 ### Future Enhancements
+
 - [ ] Type change lens operations
 - [ ] GC for archived schema versions
 - [ ] Unify QueryManager constructors (see below)
@@ -431,6 +445,7 @@ Two QueryManager constructors exist with different behaviors:
 ### Fix Required
 
 `handle_object_update()` needs to be schema-aware:
+
 1. Detect which schema the branch uses (via `branch_schema_map`)
 2. Get the appropriate descriptor for that schema
 3. Decode using that descriptor (or skip indexing and let query-time lens transform handle it)
@@ -444,4 +459,4 @@ Identified during implementation review - non-blocking but worth addressing:
 1. **Wrapper delegation** (manager.rs): 9+ one-line delegates to SchemaContext could be reduced
 2. **pending_schemas is public** (context.rs): Lifecycle not enforced; consider event-based activation
 3. **Duplicate metadata building** (manager.rs): schema_metadata/lens_metadata share patterns
-4. **process_catalogue_* duplication**: Similar error handling could be extracted
+4. **process*catalogue*\* duplication**: Similar error handling could be extracted

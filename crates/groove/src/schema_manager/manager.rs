@@ -10,11 +10,13 @@
 use std::collections::HashMap;
 
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
+use crate::query_manager::manager::{
+    DeleteHandle, InsertHandle, QueryError, QueryManager, QueryUpdate,
+};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash, Value};
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{OutboxEntry, SyncManager};
 
 use super::auto_lens::generate_lens;
 use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
@@ -26,6 +28,21 @@ use super::types::AppId;
 pub const CATALOGUE_TYPE_SCHEMA: &str = "catalogue_schema";
 /// Metadata type for catalogue lens objects.
 pub const CATALOGUE_TYPE_LENS: &str = "catalogue_lens";
+
+/// Result of a single tick cycle.
+///
+/// Contains outbox entries (sync messages to send) and subscription updates
+/// (query result changes to emit to subscribers).
+///
+/// This is the shared output from both native and WASM runtimes after
+/// processing a tick cycle.
+#[derive(Debug, Clone)]
+pub struct TickResult {
+    /// Sync messages to send to connected peers/servers.
+    pub outbox: Vec<OutboxEntry>,
+    /// Query subscription result changes.
+    pub subscription_updates: Vec<QueryUpdate>,
+}
 
 /// SchemaManager coordinates schema evolution with query execution.
 ///
@@ -857,6 +874,30 @@ impl SchemaManager {
 
         // Retry any pending row updates that might now be processable
         self.query_manager.retry_pending_row_updates();
+    }
+
+    /// Execute a tick cycle when storage is already settled.
+    ///
+    /// This is the shared tick logic used by both native and WASM runtimes.
+    /// The caller is responsible for:
+    /// 1. Settling storage operations (platform-specific async handling)
+    /// 2. Emitting the returned events appropriately (channel vs JS callback)
+    ///
+    /// Returns outbox entries and subscription updates to emit.
+    pub fn tick_settled(&mut self) -> TickResult {
+        // 1. Process all logical updates
+        self.process();
+
+        // 2. Collect sync outbox
+        let outbox = self.query_manager.sync_manager_mut().take_outbox();
+
+        // 3. Collect subscription updates
+        let subscription_updates = self.query_manager.take_updates();
+
+        TickResult {
+            outbox,
+            subscription_updates,
+        }
     }
 }
 

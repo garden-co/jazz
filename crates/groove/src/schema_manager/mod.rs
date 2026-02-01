@@ -67,7 +67,7 @@ pub use files::{
     schema_filename,
 };
 pub use lens::{Direction, Lens, LensOp, LensTransform};
-pub use manager::SchemaManager;
+pub use manager::{SchemaManager, TickResult};
 pub use sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};
 pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,

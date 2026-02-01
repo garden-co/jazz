@@ -28,24 +28,26 @@ The QueryManager layer provides reactive SQL queries over Jazz2's object-based s
 - **Row = Object**: Each row is a separate Jazz object; ObjectId = primary key
 - **Row format**: Fixed fields first, then variable offsets, nullable 1-byte prefix
 - **Binary throughout**: `Value` only at API boundary; internally everything is `&[u8]` with `RowDescriptor`
-- **Index-first**: No table scans; every query uses an index as source (including "_id" for unfiltered)
+- **Index-first**: No table scans; every query uses an index as source (including "\_id" for unfiltered)
 - **Auto-index all columns**: Every column gets a single-column B-tree index (zero-config)
 - **All indices persisted**: Every index is persisted as B-tree pages in storage (not as Jazz objects)
 - **No index rebuild**: Indices are incrementally maintained; if missing on startup, that's an error state
 - **Query graph**: Unified `TupleDelta` type with progressive materialization throughout
 - **Branch-aware**: Indices are keyed by (table, column, branch); queries specify target branch(es)
 
-## The "_id" Index IS the Row Manifest
+## The "\_id" Index IS the Row Manifest
 
 The `_id` index for each table serves as the authoritative list of row ObjectIds. This eliminates the need for a separate manifest object.
 
 **Key principle:** Durability of a new row requires persisting BOTH:
+
 1. The row object itself
 2. The `_id` index update (and all column index updates)
 
 If any index is lost, that's an error state. We do NOT rebuild indices from rows.
 
 **On cold start:**
+
 1. Load `_id` index for each table → discover all row ObjectIds
 2. Load all column indices for each table
 3. Load row objects as needed (lazy, via query - NOT eagerly into a cache)
@@ -53,6 +55,7 @@ If any index is lost, that's an error state. We do NOT rebuild indices from rows
 ## Index Storage Model
 
 Indices are stored as B-tree pages directly in storage (not as Jazz objects):
+
 - **Much lower overhead**: ~20 bytes per page vs ~530 bytes per Object-wrapped node
 - **Higher fanout**: ~64 entries per leaf page means fewer storage operations
 - **Incremental updates**: Only modified pages are written
@@ -68,6 +71,7 @@ index:{table}:{column}:{branch}:page:{id} → Page data
 ### Page Format (Binary)
 
 **Internal node:**
+
 ```
 [type: u8 = 0]
 [key_count: u16]
@@ -76,6 +80,7 @@ index:{table}:{column}:{branch}:page:{id} → Page data
 ```
 
 **Leaf node:**
+
 ```
 [type: u8 = 1]
 [entry_count: u16]
@@ -120,6 +125,7 @@ impl BTreeIndex {
 ## Branch-Aware Queries
 
 Queries are branch-aware:
+
 - Each branch maintains its own set of indices: `(table, column, branch)`
 - Queries must specify branch(es) via `.branch("main")` or `.branches(&["main", "draft"])`
 - Multi-branch queries combine results with LWW (last-writer-wins) merge for same ObjectId
@@ -158,12 +164,15 @@ pub struct TupleDelta {
 ### Node Traits
 
 **Source nodes** (`SourceNode`) read from external state:
+
 - `IndexScanNode` - scans indices, returns length-1 tuples with `TupleElement::Id`
 
 **Transform nodes** (`TransformNode`) operate on tuple sets:
+
 - `UnionNode` - merges tuple sets for OR conditions
 
 **Row nodes** (`RowNode`) operate on `TupleDelta`:
+
 - `MaterializeNode` - converts `TupleElement::Id` → `TupleElement::Row`
 - `FilterNode` - filters tuples by predicate
 - `SortNode` - orders tuples
@@ -175,6 +184,7 @@ pub struct TupleDelta {
 ### Graph Pipeline
 
 **Single-table query:**
+
 ```
 IndexScan(table,branch) → [Union] → Materialize → [Filter] → [Sort] → [LimitOffset] → Output
      ↓                                  ↓              ↓          ↓           ↓            ↓
@@ -183,6 +193,7 @@ IndexScan(table,branch) → [Union] → Materialize → [Filter] → [Sort] → 
 ```
 
 **Join query:**
+
 ```
 IndexScan(users) → Materialize ──┐
                                  ├──→ JoinNode → Materialize({1}) → [Filter] → Output
@@ -263,10 +274,10 @@ pub struct Query {
 
 ## Deletion Semantics
 
-| Type | Content | Metadata | `_id_deleted` | Undeletable | Authoritative |
-|------|---------|----------|---------------|-------------|---------------|
-| Soft Delete | Preserved | `delete: soft` | Added | Yes | No |
-| Hard Delete | Empty | `delete: hard` | Removed | No | Yes (always wins) |
+| Type        | Content   | Metadata       | `_id_deleted` | Undeletable | Authoritative     |
+| ----------- | --------- | -------------- | ------------- | ----------- | ----------------- |
+| Soft Delete | Preserved | `delete: soft` | Added         | Yes         | No                |
+| Hard Delete | Empty     | `delete: hard` | Removed       | No          | Yes (always wins) |
 
 - `_id` index: Live rows only
 - `_id_deleted` index: Soft-deleted rows only (with preserved content)
@@ -350,23 +361,27 @@ qm.register_lens(lens);
 ### Key Behaviors
 
 **Schema Context Always Present**
+
 - `schema_context` is non-optional (starts empty, initialized by `set_current_schema`)
 - All code paths use schema-aware branch handling
 - `DEFAULT_ROW_BRANCH` has been removed; branches are always derived from schema context
 
 **Subscription Recompilation**
+
 - When `add_live_schema()` or `register_lens()` is called, subscriptions are marked for recompile
 - On next `process()`, stale subscriptions rebuild their QueryGraph with updated branch lists
 - Original `Query` is stored in subscription for recompilation
 - Subscription IDs remain stable across recompilation
 
 **Branch Name Composition**
+
 - Branch names follow format: `"{env}-{hash8}-{user_branch}"`
 - Example: `"dev-a1b2c3d4-main"` for env="dev", hash=a1b2..., user_branch="main"
 - All live schemas get their own branch name
 - Queries without explicit `.branch()` use schema context's branches automatically
 
 **Pending Row Buffer**
+
 - Rows arriving on unknown branches are buffered in `pending_row_updates`
 - When a schema activates, buffered rows are retried via `retry_pending_row_updates()`
 - This handles rows arriving before their schema is discovered via catalogue sync
@@ -376,21 +391,25 @@ qm.register_lens(lens);
 All query graph nodes receive explicit branch information. There is no implicit "main" default anywhere in production code.
 
 **IndexScanNode**
+
 - Always constructed with explicit branch: `IndexScanNode::new_with_branch(table, column, branch, condition, descriptor)`
 - Index lookups use the composed key `(table, column, branch)`
 - The `new()` method exists for tests only (uses "main")
 
 **Joins**
+
 - `compile_join()` receives branches from the outer query
 - Join correlation lookups use the same branch list as the main query
 - Inner table index scans use schema-aware branch names
 
 **Array Subqueries**
+
 - `SubgraphTemplate::instantiate()` copies branches from the base query
 - This ensures correlated subqueries query the same branch set as their parent
 - Nested subqueries inherit branches recursively
 
 **PolicyGraph and PolicyFilter**
+
 - PolicyGraph functions take explicit branch: `for_using_check(table, id, policy, session, schema, branch)`
 - PolicyFilterNode stores branch for INHERITS evaluation: `new_with_branch(..., branch)`
 - EXISTS clauses in policies use the row's source branch for index lookups
@@ -400,12 +419,14 @@ All query graph nodes receive explicit branch information. There is no implicit 
 QueryManager supports two execution modes:
 
 **Implicit context** (default for clients):
+
 ```rust
 // Uses manager's schema and schema_context
 manager.execute(query)?;
 ```
 
 **Explicit context** (for servers):
+
 ```rust
 // Core implementation - takes explicit schema and context
 manager.execute_with_explicit_context(query, &schema, &schema_context)?;
@@ -427,6 +448,7 @@ pub fn execute(&mut self, query: Query) -> Result<...> {
 This unifies the code path and allows servers to execute queries with any schema context.
 
 **Key behaviors of `execute_with_explicit_context()`:**
+
 - Builds `branch_schema_map` from passed context (not self)
 - Uses passed schema for table/column lookup
 - Applies lens transforms using passed context
@@ -448,11 +470,13 @@ struct ServerQuerySubscription {
 ```
 
 **Branch Resolution**
+
 - When `query.branches` is empty (common case), branches are resolved from schema context
 - This resolved list is stored in the subscription and used for settling
 - Recompilation updates the branch list from the current schema context
 
 **Scope Tracking**
+
 - `last_scope` tracks `(ObjectId, BranchName)` pairs for change detection
 - Row updates emit deltas based on scope differences
 - Branch-aware scope ensures correct delta emission across schema versions

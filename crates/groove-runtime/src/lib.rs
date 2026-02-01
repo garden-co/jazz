@@ -505,29 +505,21 @@ impl<D: Driver + Send + 'static> JazzRuntime<D> {
 
     /// Process one tick: flush storage, process inbox, emit events.
     pub fn tick(&mut self) {
-        // 1. Process storage requests through driver
+        // 1. Process storage requests through driver (runtime-specific)
         self.schema_manager
             .query_manager_mut()
             .process_storage_with_driver(&mut self.driver);
 
-        // 2. Process all logical updates (inbox, subscriptions, indices, catalogue, etc.)
-        // This settles subscriptions, populates update_outbox with deltas,
-        // and handles schema catalogue updates for dynamic schema discovery.
-        self.schema_manager.process();
+        // 2. Use shared tick logic: process + collect outbox + collect updates
+        let result = self.schema_manager.tick_settled();
 
-        // 3. Collect sync outbox entries and emit as events
-        let outbox = self
-            .schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_outbox();
-        for entry in outbox {
+        // 3. Emit sync outbox entries via channel (runtime-specific)
+        for entry in result.outbox {
             let _ = self.events.try_send(RuntimeEvent::SyncOutbox(entry));
         }
 
-        // 4. Collect and emit subscription updates
-        let updates = self.schema_manager.query_manager_mut().take_updates();
-        for update in updates {
+        // 4. Emit subscription updates via channel (runtime-specific)
+        for update in result.subscription_updates {
             if let Some(&handle) = self.subscription_reverse.get(&update.subscription_id) {
                 let _ = self.events.try_send(RuntimeEvent::SubscriptionUpdate {
                     handle,
@@ -536,7 +528,7 @@ impl<D: Driver + Send + 'static> JazzRuntime<D> {
             }
         }
 
-        // 5. Retry pending queries (may complete after sync/storage)
+        // 5. Retry pending queries (runtime-specific, may complete after sync/storage)
         self.retry_pending_queries();
     }
 

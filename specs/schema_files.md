@@ -49,17 +49,20 @@ schema/
 ```
 
 **Naming rules:**
+
 - Schema: `schema_vN_{description}_{hash}.sql` where description is optional
 - Migration: `migration_vA_vB_{fwd|bwd}_{hashA}_{hashB}.sql` (direction before hashes for readable truncation)
 - Hash: First 12 hex chars (6 bytes) of BLAKE3 hash via `SchemaHash::short()`
 - Hash is always the last component before `.sql` or `_fwd`/`_bwd`
 
 **Version rules:**
+
 - Versions must be sequential: v1, v2, v3, ...
 - Versions must start at v1
 - Gaps in versions cause build errors
 
 **Hash validation:**
+
 - Frozen schema files are immutable
 - On each build, the content hash is verified against the filename hash
 - If they don't match, build fails with "Frozen schemas must not be edited"
@@ -116,13 +119,13 @@ The `jazz-ts` package provides a TypeScript DSL for defining schemas, which is t
 
 ```typescript
 // schema/current.ts
-import { table, col } from "jazz-ts"
+import { table, col } from "jazz-ts";
 
 table("todos", {
   title: col.string(),
   completed: col.boolean(),
   description: col.string().optional(),
-})
+});
 ```
 
 Uses side-effect collection — no export needed.
@@ -133,11 +136,11 @@ When the Rust CLI generates a migration stub in TypeScript mode, it creates:
 
 ```typescript
 // schema/migration_v1_v2_455a1f10a158_357c464c4c43.ts
-import { migrate, col } from "jazz-ts"
+import { migrate, col } from "jazz-ts";
 
 migrate("todos", {
   description: col.add().string({ default: "" }),
-})
+});
 ```
 
 When the diff is ambiguous (e.g., possible rename vs add+drop), the operation is marked with `// TODO: Review this auto-generated operation`.
@@ -153,6 +156,7 @@ pnpm --filter jazz-ts exec jazz-ts build --jazz-bin ../../target/debug/jazz
 ```
 
 The `jazz-ts build` command:
+
 1. Compiles `current.ts` → `current.sql`
 2. Compiles `migration_v*_v*_*_*.ts` → `*_fwd.sql` + `*_bwd.sql`
 3. Runs `jazz build --ts` to validate and create new schema versions
@@ -160,6 +164,7 @@ The `jazz-ts build` command:
 ### DSL Reference
 
 **Column types (for `table()`):**
+
 - `col.string()` → `TEXT NOT NULL`
 - `col.string().optional()` → `TEXT`
 - `col.boolean()` → `BOOLEAN NOT NULL`
@@ -167,6 +172,7 @@ The `jazz-ts build` command:
 - `col.float()` → `REAL NOT NULL`
 
 **Migration operations (for `migrate()`):**
+
 - `col.add().string({ default: "" })` → Forward: add column with default; Backward: drop column
 - `col.drop().string({ backwardsDefault: "" })` → Forward: drop column; Backward: add column with default
 - `col.rename("oldName")` → Rename column from old name
@@ -283,13 +289,13 @@ This ensures users on either branch can migrate to the merged state.
 
 ## Implementation
 
-| File | Purpose |
-|------|---------|
-| `crates/groove/src/schema_manager/sql.rs` | SQL parsing/generation |
-| `crates/groove/src/schema_manager/files.rs` | File convention API |
-| `crates/groove/src/schema_manager/diff.rs` | Schema diffing |
-| `crates/jazz-cli/src/commands/build.rs` | CLI build command |
-| `packages/jazz-ts/src/cli.ts` | TypeScript CLI |
-| `packages/jazz-ts/src/sql-gen.ts` | TypeScript → SQL generation |
-| `examples/todo-server-rs/schema/current.sql` | Example SQL schema |
-| `examples/todo-server-ts/schema/current.ts` | Example TypeScript schema |
+| File                                         | Purpose                     |
+| -------------------------------------------- | --------------------------- |
+| `crates/groove/src/schema_manager/sql.rs`    | SQL parsing/generation      |
+| `crates/groove/src/schema_manager/files.rs`  | File convention API         |
+| `crates/groove/src/schema_manager/diff.rs`   | Schema diffing              |
+| `crates/jazz-cli/src/commands/build.rs`      | CLI build command           |
+| `packages/jazz-ts/src/cli.ts`                | TypeScript CLI              |
+| `packages/jazz-ts/src/sql-gen.ts`            | TypeScript → SQL generation |
+| `examples/todo-server-rs/schema/current.sql` | Example SQL schema          |
+| `examples/todo-server-ts/schema/current.ts`  | Example TypeScript schema   |
