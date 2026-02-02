@@ -9,11 +9,14 @@
 mod common;
 
 use common::{
-    MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator,
-    create_query_manager, create_session, current_timestamp, document_plaintext_size, format_bytes,
-    get_stats, reset_stats, setup_data,
+    MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator, create_runtime,
+    create_session, current_timestamp, document_plaintext_size, format_bytes, get_stats,
+    reset_stats, setup_data,
 };
+use groove::io_handler::NullIoHandler;
+use groove::query_manager::query::Query;
 use groove::query_manager::types::Value;
+use groove::runtime_core::RuntimeCore;
 
 // Install tracking allocator globally
 #[global_allocator]
@@ -36,9 +39,9 @@ fn run_memory_benchmark(scale: usize) {
     // Reset stats before setup
     reset_stats();
 
-    // Create query manager and populate data
-    let mut qm = create_query_manager();
-    let data = setup_data(&mut qm, scale, USER_ID);
+    // Create runtime and populate data
+    let mut core = create_runtime();
+    let data = setup_data(&mut core, scale, USER_ID);
     let session = create_session(USER_ID);
 
     let after_setup = get_stats();
@@ -76,7 +79,7 @@ fn run_memory_benchmark(scale: usize) {
     );
 
     // Print memory breakdown
-    let breakdown = compute_memory_breakdown(&qm);
+    let breakdown = compute_memory_breakdown(&core);
     breakdown.print();
 
     // Now measure incremental insert overhead
@@ -91,10 +94,10 @@ fn run_memory_benchmark(scale: usize) {
 
     for i in 0..num_inserts {
         let timestamp = current_timestamp() + i as u64;
-        let _handle = qm
-            .insert_with_session(
+        let _handle = core
+            .insert(
                 "documents",
-                &[
+                vec![
                     Value::Uuid(folder_id),
                     Value::Text(format!("{} {}", insert_title, i)),
                     Value::Text(insert_content.to_string()),
@@ -104,8 +107,8 @@ fn run_memory_benchmark(scale: usize) {
                 Some(&session),
             )
             .expect("insert");
-        qm.process();
-        qm.drain_storage_noop();
+        core.immediate_tick();
+        core.batched_tick();
     }
 
     let after_inserts = get_stats();
@@ -123,13 +126,12 @@ fn run_memory_benchmark(scale: usize) {
     // Measure subscription memory overhead
     let before_sub = get_stats();
 
-    let query = qm.query("documents").build();
-    let _sub_id = qm
-        .subscribe_with_session(query, Some(session.clone()))
+    let query = Query::new("documents");
+    let _sub_id = core
+        .subscribe(query, |_delta| {}, Some(session))
         .expect("subscribe");
-    qm.process();
-    qm.drain_storage_noop();
-    let _ = qm.take_updates();
+    core.immediate_tick();
+    core.batched_tick();
 
     let after_sub = get_stats();
     let sub_memory = after_sub.current() - before_sub.current();
@@ -159,12 +161,14 @@ fn run_memory_benchmark(scale: usize) {
 
     // Final breakdown
     println!("\nFinal memory breakdown:");
-    let final_breakdown = compute_memory_breakdown(&qm);
+    let final_breakdown = compute_memory_breakdown(&core);
     final_breakdown.print();
 }
 
-/// Compute memory breakdown from QueryManager.
-fn compute_memory_breakdown(qm: &groove::query_manager::QueryManager) -> MemoryBreakdown {
+/// Compute memory breakdown from RuntimeCore.
+fn compute_memory_breakdown(core: &RuntimeCore<NullIoHandler>) -> MemoryBreakdown {
+    let qm = core.schema_manager().query_manager();
+
     // Get ObjectManager memory breakdown via SyncManager
     let (row_objects, index_objects, blobs, subscriptions, outbox_inbox, om_total) =
         qm.sync_manager().object_manager.memory_size();

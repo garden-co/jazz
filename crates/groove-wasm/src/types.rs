@@ -189,6 +189,7 @@ pub struct WasmLoadedBranch {
     pub tips: Vec<String>,
     pub tails: Option<Vec<String>>,
     pub commits: HashMap<String, WasmCommit>,
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 /// Serializable blob association for WASM boundary.
@@ -534,6 +535,7 @@ pub fn wasm_response_to_storage(
                     .tails
                     .map(|t| t.into_iter().map(|s| parse_commit_id(&s)).collect())
                     .transpose()?;
+                let metadata = b.metadata.clone();
                 let commits: HashMap<CommitId, Commit> = b
                     .commits
                     .into_iter()
@@ -562,6 +564,7 @@ pub fn wasm_response_to_storage(
                     tips,
                     tails,
                     commits,
+                    metadata,
                 })
             } else {
                 Err(StorageError::NotFound)

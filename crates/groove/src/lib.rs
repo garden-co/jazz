@@ -1,8 +1,10 @@
 pub mod commit;
 pub mod driver;
+pub mod io_handler;
 pub mod object;
 pub mod object_manager;
 pub mod query_manager;
+pub mod runtime_core;
 pub mod schema_manager;
 pub mod storage;
 pub mod sync_manager;

@@ -1,6 +1,9 @@
 //! Memory tracking utilities for benchmarks.
 //!
 //! Provides a tracking allocator and utilities for measuring memory overhead.
+//! Only used by memory_benchmark.rs - other benchmarks don't use these utilities.
+
+#![allow(dead_code)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1,0 +1,773 @@
+//! Tokio runtime adapter for Groove.
+//!
+//! Provides `TokioRuntime` - a thin wrapper around `RuntimeCore<TokioIoHandler>`
+//! that handles async scheduling via `tokio::spawn`.
+//!
+//! # Architecture
+//!
+//! - `TokioIoHandler` implements `IoHandler` using tokio::spawn for scheduling
+//! - `TokioRuntime` wraps `Arc<Mutex<RuntimeCore<TokioIoHandler>>>`
+//! - Methods grab the lock, call RuntimeCore, and return
+//! - `schedule_batched_tick` spawns a task that calls `batched_tick`
+//! - No event loop - scheduling emerges from the IoHandler
+//!
+//! # Example
+//!
+//! ```ignore
+//! use groove_tokio::TokioRuntime;
+//! use groove_rocksdb::RocksDbDriver;
+//! use groove::schema_manager::{SchemaManager, AppId};
+//!
+//! let driver = RocksDbDriver::open("./data").unwrap();
+//! let schema_manager = SchemaManager::new(/* ... */);
+//! let runtime = TokioRuntime::new(schema_manager, driver, |msg| {
+//!     // Handle sync messages
+//! });
+//!
+//! // Direct method calls - no spawning needed
+//! runtime.insert("users", values)?;
+//! let future = runtime.query(query);
+//! let results = future.await?;
+//! ```
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+
+use groove::driver::Driver;
+use groove::io_handler::IoHandler;
+use groove::object::ObjectId;
+use groove::query_manager::query::Query;
+use groove::query_manager::session::Session;
+use groove::query_manager::types::{RowDelta, Schema, Value};
+pub use groove::runtime_core::SubscriptionHandle;
+use groove::runtime_core::{
+    QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, SubscriptionDelta,
+};
+use groove::schema_manager::{QuerySchemaContext, SchemaManager};
+use groove::storage::StorageRequest;
+use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryId, ServerId};
+
+// ============================================================================
+// TokioIoHandler
+// ============================================================================
+
+/// IoHandler implementation for Tokio.
+///
+/// - Storage requests are processed synchronously through the driver
+/// - Sync messages are emitted via callback
+/// - `schedule_batched_tick` spawns a tokio task (debounced)
+pub struct TokioIoHandler {
+    /// Synchronous storage driver (e.g., RocksDB).
+    driver: Box<dyn Driver + Send>,
+    /// Callback for sync messages.
+    sync_callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
+    /// Debounce flag for scheduled ticks.
+    scheduled: Arc<AtomicBool>,
+    /// Weak reference back to RuntimeCore for spawned tasks.
+    core_ref: Weak<Mutex<RuntimeCore<TokioIoHandler>>>,
+    /// Pending storage responses (from synchronous driver processing).
+    pending_responses: Vec<groove::storage::StorageResponse>,
+}
+
+impl TokioIoHandler {
+    /// Create a new TokioIoHandler.
+    ///
+    /// Note: `core_ref` starts as empty and is set after RuntimeCore is created.
+    fn new<F>(driver: Box<dyn Driver + Send>, sync_callback: F) -> Self
+    where
+        F: Fn(OutboxEntry) + Send + Sync + 'static,
+    {
+        Self {
+            driver,
+            sync_callback: Arc::new(sync_callback),
+            scheduled: Arc::new(AtomicBool::new(false)),
+            core_ref: Weak::new(),
+            pending_responses: Vec::new(),
+        }
+    }
+
+    /// Set the core reference (called after RuntimeCore is wrapped in Arc<Mutex>).
+    fn set_core_ref(&mut self, core_ref: Weak<Mutex<RuntimeCore<TokioIoHandler>>>) {
+        self.core_ref = core_ref;
+    }
+}
+
+impl IoHandler for TokioIoHandler {
+    fn send_storage_request(&mut self, request: StorageRequest) {
+        // Process synchronously through driver
+        let responses = self.driver.process(vec![request]);
+
+        // Store responses locally - they'll be drained by batched_tick
+        self.pending_responses.extend(responses);
+    }
+
+    fn send_sync_message(&mut self, message: OutboxEntry) {
+        (self.sync_callback)(message);
+    }
+
+    fn schedule_batched_tick(&self) {
+        // Debounce: only schedule if not already scheduled
+        if !self.scheduled.swap(true, Ordering::SeqCst) {
+            let core_ref = self.core_ref.clone();
+            let flag = self.scheduled.clone();
+
+            tokio::spawn(async move {
+                // Clear the scheduled flag
+                flag.store(false, Ordering::SeqCst);
+
+                // Call batched_tick on the core
+                if let Some(core_arc) = core_ref.upgrade() {
+                    if let Ok(mut core) = core_arc.lock() {
+                        core.batched_tick();
+                    }
+                }
+            });
+        }
+    }
+
+    fn take_pending_responses(&mut self) -> Vec<groove::storage::StorageResponse> {
+        std::mem::take(&mut self.pending_responses)
+    }
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+/// Errors from runtime operations.
+#[derive(Debug, Clone)]
+pub enum RuntimeError {
+    QueryError(String),
+    WriteError(String),
+    NotFound,
+    LockError,
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::QueryError(s) => write!(f, "Query error: {}", s),
+            RuntimeError::WriteError(s) => write!(f, "Write error: {}", s),
+            RuntimeError::NotFound => write!(f, "Not found"),
+            RuntimeError::LockError => write!(f, "Lock error"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+impl From<CoreRuntimeError> for RuntimeError {
+    fn from(e: CoreRuntimeError) -> Self {
+        match e {
+            CoreRuntimeError::QueryError(s) => RuntimeError::QueryError(s),
+            CoreRuntimeError::WriteError(s) => RuntimeError::WriteError(s),
+            CoreRuntimeError::NotFound => RuntimeError::NotFound,
+        }
+    }
+}
+
+// ============================================================================
+// TokioRuntime
+// ============================================================================
+
+/// Tokio runtime for Groove.
+///
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<TokioIoHandler>>>`.
+/// All methods grab the lock, call RuntimeCore, and return.
+/// Async scheduling happens via IoHandler.schedule_batched_tick().
+#[derive(Clone)]
+pub struct TokioRuntime {
+    core: Arc<Mutex<RuntimeCore<TokioIoHandler>>>,
+}
+
+impl TokioRuntime {
+    /// Create a new TokioRuntime.
+    ///
+    /// # Arguments
+    /// - `schema_manager` - The SchemaManager to wrap
+    /// - `driver` - Storage driver (must be Send)
+    /// - `sync_callback` - Called when sync messages need to be sent
+    pub fn new<D, F>(schema_manager: SchemaManager, driver: D, sync_callback: F) -> Self
+    where
+        D: Driver + Send + 'static,
+        F: Fn(OutboxEntry) + Send + Sync + 'static,
+    {
+        // Create IoHandler (without core_ref initially)
+        let io_handler = TokioIoHandler::new(Box::new(driver), sync_callback);
+
+        // Create RuntimeCore
+        let core = RuntimeCore::new(schema_manager, io_handler);
+
+        // Wrap in Arc<Mutex>
+        let core_arc = Arc::new(Mutex::new(core));
+
+        // Set the core_ref on the IoHandler
+        {
+            let mut core_guard = core_arc.lock().unwrap();
+            core_guard
+                .io_handler_mut()
+                .set_core_ref(Arc::downgrade(&core_arc));
+        }
+
+        Self { core: core_arc }
+    }
+
+    /// Load indices from storage (cold start).
+    ///
+    /// Call this after construction to initialize indices from RocksDB.
+    /// This synchronously loads all index pages.
+    /// Load indices from storage (cold start).
+    ///
+    /// This triggers index loading through the normal storage request flow.
+    /// For TokioIoHandler with synchronous storage, this completes before returning.
+    pub fn load_indices(&self) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        // Reset indices to trigger loading
+        core.schema_manager_mut()
+            .query_manager_mut()
+            .reset_indices_for_cold_start();
+        // Process storage in a loop until indices are loaded
+        for _ in 0..10 {
+            core.batched_tick();
+        }
+        Ok(())
+    }
+
+    // =========================================================================
+    // CRUD Operations
+    // =========================================================================
+
+    /// Insert a row into a table.
+    ///
+    /// This is fire-and-forget - the insert is queued and persistence happens
+    /// via IoHandler scheduling. Callers who need synchronous persistence
+    /// should call `flush()` after this method.
+    pub fn insert(
+        &self,
+        table: &str,
+        values: Vec<Value>,
+        session: Option<&Session>,
+    ) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let result = core.insert(table, values, session)?;
+        core.immediate_tick();
+        // IoHandler::schedule_batched_tick() is called automatically by immediate_tick
+        Ok(result)
+    }
+
+    /// Update a row (partial update by column name).
+    ///
+    /// This is fire-and-forget - the update is queued and persistence happens
+    /// via IoHandler scheduling. Callers who need synchronous persistence
+    /// should call `flush()` after this method.
+    pub fn update(
+        &self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        session: Option<&Session>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.update(object_id, values, session)?;
+        core.immediate_tick();
+        // IoHandler::schedule_batched_tick() is called automatically by immediate_tick
+        Ok(())
+    }
+
+    /// Delete a row.
+    ///
+    /// This is fire-and-forget - the delete is queued and persistence happens
+    /// via IoHandler scheduling. Callers who need synchronous persistence
+    /// should call `flush()` after this method.
+    pub fn delete(
+        &self,
+        object_id: ObjectId,
+        session: Option<&Session>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.delete(object_id, session)?;
+        core.immediate_tick();
+        // IoHandler::schedule_batched_tick() is called automatically by immediate_tick
+        Ok(())
+    }
+
+    /// Flush pending operations to storage synchronously.
+    ///
+    /// Call this after CRUD operations if you need to ensure data is persisted
+    /// before continuing. For most use cases, relying on IoHandler scheduling
+    /// via `schedule_batched_tick()` is sufficient.
+    pub fn flush(&self) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.batched_tick();
+        Ok(())
+    }
+
+    // =========================================================================
+    // Queries
+    // =========================================================================
+
+    /// Execute a one-shot query.
+    ///
+    /// Returns a future that resolves when the query completes.
+    pub fn query(
+        &self,
+        query: Query,
+        session: Option<Session>,
+    ) -> Result<QueryFuture, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.query(query, session))
+    }
+
+    // =========================================================================
+    // Subscriptions
+    // =========================================================================
+
+    /// Subscribe to a query with a callback.
+    ///
+    /// The callback is invoked when results change.
+    pub fn subscribe<F>(
+        &self,
+        query: Query,
+        callback: F,
+        session: Option<Session>,
+    ) -> Result<SubscriptionHandle, RuntimeError>
+    where
+        F: Fn(SubscriptionDelta) + Send + 'static,
+    {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.subscribe(query, callback, session)
+            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))
+    }
+
+    /// Unsubscribe from a query.
+    pub fn unsubscribe(&self, handle: SubscriptionHandle) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.unsubscribe(handle);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Sync Operations
+    // =========================================================================
+
+    /// Push a sync message to the inbox (from network).
+    pub fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.park_sync_message(entry);
+        Ok(())
+    }
+
+    /// Add a server connection.
+    pub fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.add_server(server_id);
+        core.immediate_tick();
+        Ok(())
+    }
+
+    /// Remove a server connection.
+    pub fn remove_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.remove_server(server_id);
+        Ok(())
+    }
+
+    /// Add a client connection.
+    pub fn add_client(
+        &self,
+        client_id: ClientId,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.add_client(client_id, session);
+        core.immediate_tick();
+        Ok(())
+    }
+
+    /// Add a client connection and sync all data to them.
+    pub fn add_client_with_full_sync(
+        &self,
+        client_id: ClientId,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.add_client_with_full_sync(client_id, session);
+        core.immediate_tick();
+        Ok(())
+    }
+
+    /// Remove a client connection.
+    pub fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.remove_client(client_id);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Schema Access
+    // =========================================================================
+
+    /// Get a clone of the current schema.
+    pub fn current_schema(&self) -> Result<Schema, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.current_schema().clone())
+    }
+
+    /// Subscribe to a query with explicit schema context (for server use).
+    ///
+    /// This is used by servers to create subscriptions on behalf of clients
+    /// that may be using different schema versions.
+    pub fn subscribe_with_schema_context(
+        &self,
+        query: Query,
+        schema_context: &QuerySchemaContext,
+        session: Option<Session>,
+    ) -> Result<QueryId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        let result = core
+            .subscribe_with_schema_context(query, schema_context, session)
+            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
+        Ok(result)
+    }
+}
+
+// ============================================================================
+// Legacy API Compatibility Layer
+// ============================================================================
+
+// The old JazzRuntime used a command channel pattern. For backwards compatibility
+// during the transition, we provide these types. They should be removed once
+// jazz-cli and jazz-rs are updated.
+
+/// Handle for interacting with a TokioRuntime (legacy compatibility).
+///
+/// This provides an async API similar to the old RuntimeHandle.
+/// New code should use TokioRuntime directly.
+#[derive(Clone)]
+pub struct RuntimeHandle {
+    runtime: TokioRuntime,
+}
+
+impl RuntimeHandle {
+    /// Create a RuntimeHandle from a TokioRuntime.
+    pub fn new(runtime: TokioRuntime) -> Self {
+        Self { runtime }
+    }
+
+    /// Subscribe to a query.
+    pub async fn subscribe(
+        &self,
+        _query: Query,
+        _session: Option<Session>,
+    ) -> Result<SubscriptionHandle, RuntimeError> {
+        // Legacy subscriptions used a different callback model
+        // For now, this is a stub - callers need to migrate to TokioRuntime.subscribe()
+        Err(RuntimeError::QueryError(
+            "Legacy subscribe not supported - use TokioRuntime.subscribe()".into(),
+        ))
+    }
+
+    /// Execute a one-shot query.
+    pub async fn query(
+        &self,
+        query: Query,
+        session: Option<Session>,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError> {
+        let future = self.runtime.query(query, session)?;
+        future
+            .await
+            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))
+    }
+
+    /// Insert a row into a table.
+    pub async fn insert(
+        &self,
+        table: &str,
+        values: Vec<Value>,
+        session: Option<Session>,
+    ) -> Result<ObjectId, RuntimeError> {
+        self.runtime.insert(table, values, session.as_ref())
+    }
+
+    /// Update a row.
+    pub async fn update(
+        &self,
+        object_id: ObjectId,
+        values: Vec<(String, Value)>,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        self.runtime.update(object_id, values, session.as_ref())
+    }
+
+    /// Delete a row.
+    pub async fn delete(
+        &self,
+        object_id: ObjectId,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        self.runtime.delete(object_id, session.as_ref())
+    }
+
+    /// Push a sync message to the inbox.
+    pub async fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), RuntimeError> {
+        self.runtime.push_sync_inbox(entry)
+    }
+
+    /// Add a server connection.
+    pub async fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
+        self.runtime.add_server(server_id)
+    }
+
+    /// Remove a server connection.
+    pub async fn remove_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
+        self.runtime.remove_server(server_id)
+    }
+
+    /// Add a client connection.
+    pub async fn add_client(
+        &self,
+        client_id: ClientId,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        self.runtime.add_client(client_id, session)
+    }
+
+    /// Add a client connection and sync all data.
+    pub async fn add_client_with_full_sync(
+        &self,
+        client_id: ClientId,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        self.runtime.add_client_with_full_sync(client_id, session)
+    }
+
+    /// Remove a client connection.
+    pub async fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        self.runtime.remove_client(client_id)
+    }
+
+    /// Get the current schema.
+    pub async fn get_schema(&self) -> Result<Schema, RuntimeError> {
+        self.runtime.current_schema()
+    }
+
+    /// Shutdown (no-op in new design - nothing to shut down).
+    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
+        // Flush any pending operations to storage
+        self.runtime.flush()
+    }
+
+    /// Subscribe with schema context.
+    pub async fn subscribe_with_schema_context(
+        &self,
+        query: Query,
+        schema_context: &QuerySchemaContext,
+        session: Option<Session>,
+    ) -> Result<QueryId, RuntimeError> {
+        self.runtime
+            .subscribe_with_schema_context(query, schema_context, session)
+    }
+}
+
+/// Event emitted by the runtime (legacy compatibility).
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    /// Subscription results changed.
+    SubscriptionUpdate {
+        handle: SubscriptionHandle,
+        delta: RowDelta,
+    },
+    /// Sync message to send.
+    SyncOutbox(OutboxEntry),
+}
+
+/// Legacy JazzRuntime factory for compatibility.
+///
+/// Creates a TokioRuntime and wraps it in the legacy API.
+pub struct JazzRuntime;
+
+impl JazzRuntime {
+    /// Create a new runtime (legacy API).
+    ///
+    /// Returns a RuntimeHandle and event receiver for backwards compatibility.
+    /// New code should use TokioRuntime directly.
+    pub fn new<D: Driver + Send + 'static>(
+        schema_manager: SchemaManager,
+        driver: D,
+    ) -> (RuntimeHandle, tokio::sync::mpsc::Receiver<RuntimeEvent>) {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
+        let event_tx_clone = event_tx.clone();
+
+        let runtime = TokioRuntime::new(schema_manager, driver, move |msg| {
+            let _ = event_tx_clone.try_send(RuntimeEvent::SyncOutbox(msg));
+        });
+
+        // Load indices
+        let _ = runtime.load_indices();
+
+        (RuntimeHandle::new(runtime), event_rx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use groove::schema_manager::AppId;
+    use groove::sync_manager::SyncManager;
+    use std::sync::atomic::AtomicUsize;
+
+    fn test_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build()
+    }
+
+    #[tokio::test]
+    async fn test_runtime_insert_query() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-app");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let driver = groove::driver::TestDriver::new();
+        let sync_count = Arc::new(AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let runtime = TokioRuntime::new(schema_manager, driver, move |_msg| {
+            sync_count_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        runtime.load_indices().unwrap();
+
+        // Insert a row
+        let values = vec![
+            Value::Uuid(ObjectId::new()),
+            Value::Text("Alice".to_string()),
+        ];
+        let object_id = runtime.insert("users", values, None).unwrap();
+        assert!(!object_id.0.is_nil());
+
+        // Query
+        let query = Query::new("users");
+        let future = runtime.query(query, None).unwrap();
+        let results = future.await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, object_id);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_update_delete() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-crud");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let driver = groove::driver::TestDriver::new();
+        let runtime = TokioRuntime::new(schema_manager, driver, |_| {});
+        runtime.load_indices().unwrap();
+
+        // Insert
+        let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
+        let object_id = runtime.insert("users", values, None).unwrap();
+
+        // Update
+        let updates = vec![("name".to_string(), Value::Text("Charlie".to_string()))];
+        runtime.update(object_id, updates, None).unwrap();
+
+        // Verify update
+        let query = Query::new("users");
+        let future = runtime.query(query, None).unwrap();
+        let results = future.await.unwrap();
+        assert_eq!(results[0].1[1], Value::Text("Charlie".to_string()));
+
+        // Delete
+        runtime.delete(object_id, None).unwrap();
+
+        // Verify deleted
+        let query = Query::new("users");
+        let future = runtime.query(query, None).unwrap();
+        let results = future.await.unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_api() {
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-legacy");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let driver = groove::driver::TestDriver::new();
+        let (handle, _events) = JazzRuntime::new(schema_manager, driver);
+
+        // Insert via legacy API
+        let values = vec![
+            Value::Uuid(ObjectId::new()),
+            Value::Text("Dave".to_string()),
+        ];
+        let object_id = handle.insert("users", values, None).await.unwrap();
+        assert!(!object_id.0.is_nil());
+
+        // Query via legacy API
+        let query = Query::new("users");
+        let results = handle.query(query, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Shutdown (no-op but should not panic)
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_subscription_callback() {
+        use std::sync::Mutex;
+
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-subscription");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let driver = groove::driver::TestDriver::new();
+        let runtime = TokioRuntime::new(schema_manager, driver, |_| {});
+        runtime.load_indices().unwrap();
+
+        // Track callback invocations
+        let updates: Arc<Mutex<Vec<SubscriptionDelta>>> = Arc::new(Mutex::new(Vec::new()));
+        let updates_clone = updates.clone();
+
+        // Subscribe to users table
+        let query = Query::new("users");
+        let handle = runtime
+            .subscribe(
+                query,
+                move |delta| {
+                    updates_clone.lock().unwrap().push(delta);
+                },
+                None,
+            )
+            .unwrap();
+
+        // Insert a row - this should trigger the subscription callback
+        let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Eve".to_string())];
+        let _object_id = runtime.insert("users", values, None).unwrap();
+
+        // Verify callback was invoked
+        let updates_vec = updates.lock().unwrap();
+        assert!(
+            !updates_vec.is_empty(),
+            "Subscription callback should have been invoked after insert"
+        );
+        assert_eq!(updates_vec[0].handle, handle);
+
+        // Cleanup
+        drop(updates_vec);
+        runtime.unsubscribe(handle).unwrap();
+    }
+}

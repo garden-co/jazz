@@ -444,10 +444,19 @@ impl RocksDbDriver {
             }
         };
 
+        // Load object metadata
+        let obj_key = object_id.uuid().as_bytes();
+        let metadata = self
+            .rocksdb
+            .get_cf(self.cf(CF_OBJECTS), obj_key)
+            .map_err(|e| StorageError::IoError(e.to_string()))?
+            .and_then(|data| serde_json::from_slice::<HashMap<String, String>>(&data).ok());
+
         Ok(LoadedBranch {
             tips,
             tails,
             commits,
+            metadata,
         })
     }
 

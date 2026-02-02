@@ -695,7 +695,7 @@ impl ObjectManager {
                         if matches!(self.objects.get(&object_id), Some(ObjectState::Loading)) {
                             let mut object = Object {
                                 id: object_id,
-                                metadata: HashMap::new(),
+                                metadata: loaded_branch.metadata.clone().unwrap_or_default(),
                                 branches: HashMap::new(),
                             };
                             object.branches.insert(
@@ -832,12 +832,18 @@ impl ObjectManager {
         std::mem::take(&mut self.outbox)
     }
 
+    /// Check if there are pending storage requests.
+    pub fn has_pending_requests(&self) -> bool {
+        !self.outbox.is_empty()
+    }
+
     /// Add a response to the inbox (used by drivers).
     pub fn push_response(&mut self, response: StorageResponse) {
         self.inbox.push(response);
     }
 
-    /// Start loading an object from storage.
+    /// Start loading an object from storage (test-only).
+    #[cfg(test)]
     pub fn start_loading(&mut self, object_id: ObjectId) {
         self.objects.insert(object_id, ObjectState::Loading);
     }
@@ -1387,142 +1393,6 @@ impl ObjectManager {
     // ========================================================================
     // No-op storage driver (for tests)
     // ========================================================================
-
-    /// Process all pending storage requests with successful no-op responses.
-    ///
-    /// This is useful for tests and benchmarks that don't have a real storage backend.
-    /// It drains the outbox, generates success responses, and processes them.
-    pub fn drain_storage_noop(&mut self) {
-        let requests = self.take_requests();
-        for request in requests {
-            let response = Self::noop_response_for(request);
-            self.push_response(response);
-        }
-        self.process_storage_responses();
-    }
-
-    /// Generate a successful no-op response for a storage request.
-    fn noop_response_for(request: StorageRequest) -> StorageResponse {
-        match request {
-            StorageRequest::CreateObject { id, .. } => {
-                StorageResponse::CreateObject { id, result: Ok(()) }
-            }
-            StorageRequest::AppendCommit {
-                object_id, commit, ..
-            } => StorageResponse::AppendCommit {
-                object_id,
-                commit_id: commit.id(),
-                result: Ok(()),
-            },
-            StorageRequest::LoadObjectBranch {
-                object_id,
-                branch_name,
-                ..
-            } => {
-                // Return empty branch - object doesn't exist in "storage"
-                StorageResponse::LoadObjectBranch {
-                    object_id,
-                    branch_name,
-                    result: Err(StorageError::NotFound),
-                }
-            }
-            StorageRequest::StoreBlob { content_hash, .. } => StorageResponse::StoreBlob {
-                content_hash,
-                result: Ok(()),
-            },
-            StorageRequest::LoadBlob { content_hash } => StorageResponse::LoadBlob {
-                content_hash,
-                result: Err(StorageError::NotFound),
-            },
-            StorageRequest::AssociateBlob { content_hash, .. } => StorageResponse::AssociateBlob {
-                content_hash,
-                result: Ok(()),
-            },
-            StorageRequest::LoadBlobAssociations { content_hash } => {
-                StorageResponse::LoadBlobAssociations {
-                    content_hash,
-                    result: Ok(vec![]),
-                }
-            }
-            StorageRequest::DeleteCommit {
-                object_id,
-                branch_name,
-                commit_id,
-            } => StorageResponse::DeleteCommit {
-                object_id,
-                branch_name,
-                commit_id,
-                result: Ok(()),
-            },
-            StorageRequest::DissociateAndMaybeDeleteBlob {
-                content_hash,
-                object_id,
-                branch_name,
-                commit_id,
-            } => StorageResponse::DissociateAndMaybeDeleteBlob {
-                content_hash,
-                object_id,
-                branch_name,
-                commit_id,
-                blob_deleted: Ok(true),
-            },
-            StorageRequest::SetBranchTails {
-                object_id,
-                branch_name,
-                ..
-            } => StorageResponse::SetBranchTails {
-                object_id,
-                branch_name,
-                result: Ok(()),
-            },
-
-            // Index page storage (no-op returns "not found" for loads, success for stores)
-            StorageRequest::LoadIndexPage {
-                table,
-                column,
-                page_id,
-            } => StorageResponse::LoadIndexPage {
-                table,
-                column,
-                page_id,
-                result: Ok(None), // Page doesn't exist in "storage"
-            },
-            StorageRequest::StoreIndexPage {
-                table,
-                column,
-                page_id,
-                ..
-            } => StorageResponse::StoreIndexPage {
-                table,
-                column,
-                page_id,
-                result: Ok(()),
-            },
-            StorageRequest::DeleteIndexPage {
-                table,
-                column,
-                page_id,
-            } => StorageResponse::DeleteIndexPage {
-                table,
-                column,
-                page_id,
-                result: Ok(()),
-            },
-            StorageRequest::LoadIndexMeta { table, column } => StorageResponse::LoadIndexMeta {
-                table,
-                column,
-                result: Ok(None), // Meta doesn't exist in "storage"
-            },
-            StorageRequest::StoreIndexMeta { table, column, .. } => {
-                StorageResponse::StoreIndexMeta {
-                    table,
-                    column,
-                    result: Ok(()),
-                }
-            }
-        }
-    }
-
     // ========================================================================
     // Memory profiling
     // ========================================================================
@@ -2239,6 +2109,7 @@ mod tests {
                 tips,
                 tails: None,
                 commits,
+                metadata: None,
             }),
         });
         manager.process_storage_responses();
@@ -3289,6 +3160,7 @@ mod tests {
                 tips: tips.clone(),
                 tails: tails.clone(),
                 commits,
+                metadata: None,
             }),
         });
         manager.process_storage_responses();

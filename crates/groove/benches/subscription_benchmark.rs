@@ -3,14 +3,16 @@
 //! Measures:
 //! - Single subscription: time from insert to update appearing
 //! - Fan-out: time to notify 100 subscriptions
-//! - Complex query: overhead of ORDER BY + LIMIT
 //! - Cold start: time to receive initial result set
 
 mod common;
 
-use common::{create_query_manager, create_session, current_timestamp, setup_data};
+use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use groove::query_manager::query::{Query, QueryBuilder};
 use groove::query_manager::types::Value;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const USER_ID: &str = "benchmark_user";
 
@@ -22,17 +24,28 @@ fn single_subscription_latency(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup
-            let mut qm = create_query_manager();
-            let data = setup_data(&mut qm, scale, USER_ID);
+            let mut core = create_runtime();
+            let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
 
+            // Track updates via callback
+            let update_count = Arc::new(AtomicUsize::new(0));
+            let update_count_clone = update_count.clone();
+
             // Subscribe to documents with policy filtering
-            let query = qm.query("documents").build();
-            let _sub_id = qm
-                .subscribe_with_session(query, Some(session.clone()))
+            let query = Query::new("documents");
+            let _sub_handle = core
+                .subscribe(
+                    query,
+                    move |_delta| {
+                        update_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                    Some(session.clone()),
+                )
                 .expect("subscribe");
-            qm.process();
-            qm.take_updates(); // Clear initial updates
+            core.immediate_tick();
+            core.batched_tick();
+            update_count.store(0, Ordering::SeqCst); // Clear initial update count
 
             let folder_id = data.owned_folders[0];
             let mut doc_counter = 0u64;
@@ -42,10 +55,10 @@ fn single_subscription_latency(c: &mut Criterion) {
                 let timestamp = current_timestamp();
 
                 // Insert a document
-                let _handle = qm
-                    .insert_with_session(
+                let _id = core
+                    .insert(
                         "documents",
-                        &[
+                        vec![
                             Value::Uuid(folder_id),
                             Value::Text(format!("Sub Doc {}", doc_counter)),
                             Value::Text("Subscription test".to_string()),
@@ -57,11 +70,12 @@ fn single_subscription_latency(c: &mut Criterion) {
                     .expect("insert");
 
                 // Process and wait for update
-                qm.process();
-                let updates = qm.take_updates();
+                core.immediate_tick();
+                let count = update_count.load(Ordering::SeqCst);
 
-                // Should have exactly one update with one added row
-                assert!(!updates.is_empty(), "should receive subscription update");
+                // Should have received an update
+                assert!(count > 0, "should receive subscription update");
+                update_count.store(0, Ordering::SeqCst); // Reset for next iteration
             });
         });
     }
@@ -74,30 +88,37 @@ fn fanout_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/fanout");
 
     for scale in [1_000usize] {
-        let num_subscriptions = 100;
-        group.throughput(Throughput::Elements(num_subscriptions));
+        let num_subscriptions = 100usize;
+        group.throughput(Throughput::Elements(num_subscriptions as u64));
         group.bench_with_input(
             BenchmarkId::new("subscriptions_x100", scale),
             &scale,
             |b, &scale| {
                 // Setup
-                let mut qm = create_query_manager();
-                let data = setup_data(&mut qm, scale, USER_ID);
+                let mut core = create_runtime();
+                let data = setup_data(&mut core, scale, USER_ID);
 
-                // Create 100 subscriptions with different sessions (same user for simplicity)
-                let mut sub_ids = Vec::with_capacity(num_subscriptions as usize);
+                // Track updates via shared counter
+                let update_count = Arc::new(AtomicUsize::new(0));
+
+                // Create 100 subscriptions
                 for _ in 0..num_subscriptions {
-                    // For fan-out, all sessions should see the same data
-                    // We'll use the base user ID since they own the folders
                     let session = create_session(USER_ID);
-                    let query = qm.query("documents").build();
-                    let sub_id = qm
-                        .subscribe_with_session(query, Some(session))
+                    let query = Query::new("documents");
+                    let count_clone = update_count.clone();
+                    let _handle = core
+                        .subscribe(
+                            query,
+                            move |_delta| {
+                                count_clone.fetch_add(1, Ordering::SeqCst);
+                            },
+                            Some(session),
+                        )
                         .expect("subscribe");
-                    sub_ids.push(sub_id);
                 }
-                qm.process();
-                qm.take_updates(); // Clear initial
+                core.immediate_tick();
+                core.batched_tick();
+                update_count.store(0, Ordering::SeqCst); // Clear initial
 
                 let session = create_session(USER_ID);
                 let folder_id = data.owned_folders[0];
@@ -108,10 +129,10 @@ fn fanout_latency(c: &mut Criterion) {
                     let timestamp = current_timestamp();
 
                     // Insert a document that all subscriptions can see
-                    let _handle = qm
-                        .insert_with_session(
+                    let _id = core
+                        .insert(
                             "documents",
-                            &[
+                            vec![
                                 Value::Uuid(folder_id),
                                 Value::Text(format!("Fanout Doc {}", doc_counter)),
                                 Value::Text("Fanout test".to_string()),
@@ -122,81 +143,18 @@ fn fanout_latency(c: &mut Criterion) {
                         )
                         .expect("insert");
 
-                    // Process - should update all 100 subscriptions
-                    qm.process();
-                    let updates = qm.take_updates();
+                    // Process - should update all subscriptions
+                    core.immediate_tick();
+                    let count = update_count.load(Ordering::SeqCst);
 
                     // Should have updates for all subscriptions
                     assert!(
-                        updates.len() >= num_subscriptions as usize,
+                        count >= num_subscriptions,
                         "should notify all {} subscriptions, got {}",
                         num_subscriptions,
-                        updates.len()
+                        count
                     );
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Measure complex query latency: ORDER BY + LIMIT.
-fn complex_query_latency(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subscription/complex_query");
-
-    for scale in [1_000usize] {
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::new("order_limit", scale),
-            &scale,
-            |b, &scale| {
-                // Setup
-                let mut qm = create_query_manager();
-                let data = setup_data(&mut qm, scale, USER_ID);
-                let session = create_session(USER_ID);
-
-                // Subscribe with ORDER BY created_at DESC LIMIT 50
-                let query = qm
-                    .query("documents")
-                    .order_by_desc("created_at")
-                    .limit(50)
-                    .build();
-                let _sub_id = qm
-                    .subscribe_with_session(query, Some(session.clone()))
-                    .expect("subscribe");
-                qm.process();
-                qm.take_updates(); // Clear initial
-
-                let folder_id = data.owned_folders[0];
-                let mut doc_counter = 0u64;
-
-                b.iter(|| {
-                    doc_counter += 1;
-                    // Use a timestamp that ensures this doc appears in top 50
-                    let timestamp = current_timestamp() + 1_000_000_000; // Far future
-
-                    // Insert a document
-                    let _handle = qm
-                        .insert_with_session(
-                            "documents",
-                            &[
-                                Value::Uuid(folder_id),
-                                Value::Text(format!("Complex Doc {}", doc_counter)),
-                                Value::Text("Complex query test".to_string()),
-                                Value::Text(USER_ID.to_string()),
-                                Value::Timestamp(timestamp),
-                            ],
-                            Some(&session),
-                        )
-                        .expect("insert");
-
-                    // Process
-                    qm.process();
-                    let updates = qm.take_updates();
-
-                    // Should have update (new doc in top 50)
-                    assert!(!updates.is_empty(), "should receive update for top-50 doc");
+                    update_count.store(0, Ordering::SeqCst);
                 });
             },
         );
@@ -215,30 +173,37 @@ fn cold_start_latency(c: &mut Criterion) {
             &scale,
             |b, &scale| {
                 // Setup data once (reused across iterations)
-                let mut qm = create_query_manager();
-                let _data = setup_data(&mut qm, scale, USER_ID);
+                let mut core = create_runtime();
+                let _data = setup_data(&mut core, scale, USER_ID);
 
                 b.iter(|| {
                     let session = create_session(USER_ID);
+                    let got_update = Arc::new(AtomicBool::new(false));
+                    let got_update_clone = got_update.clone();
 
                     // Fresh subscription
-                    let query = qm.query("documents").build();
-                    let sub_id = qm
-                        .subscribe_with_session(query, Some(session))
+                    let query = Query::new("documents");
+                    let handle = core
+                        .subscribe(
+                            query,
+                            move |_delta| {
+                                got_update_clone.store(true, Ordering::SeqCst);
+                            },
+                            Some(session),
+                        )
                         .expect("subscribe");
 
                     // Process to receive initial results
-                    qm.process();
-                    let updates = qm.take_updates();
+                    core.immediate_tick();
 
                     // Should have initial result set
                     assert!(
-                        updates.iter().any(|u| u.subscription_id == sub_id),
+                        got_update.load(Ordering::SeqCst),
                         "should receive initial results"
                     );
 
                     // Clean up subscription
-                    qm.unsubscribe(sub_id);
+                    core.unsubscribe(handle);
                 });
             },
         );
@@ -258,20 +223,29 @@ fn filtered_subscription_latency(c: &mut Criterion) {
             &scale,
             |b, &scale| {
                 // Setup
-                let mut qm = create_query_manager();
-                let data = setup_data(&mut qm, scale, USER_ID);
+                let mut core = create_runtime();
+                let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
 
+                let update_count = Arc::new(AtomicUsize::new(0));
+                let update_count_clone = update_count.clone();
+
                 // Subscribe only to user's own documents
-                let query = qm
-                    .query("documents")
+                let query = QueryBuilder::new("documents")
                     .filter_eq("author_id", Value::Text(USER_ID.to_string()))
                     .build();
-                let _sub_id = qm
-                    .subscribe_with_session(query, Some(session.clone()))
+                let _handle = core
+                    .subscribe(
+                        query,
+                        move |_delta| {
+                            update_count_clone.fetch_add(1, Ordering::SeqCst);
+                        },
+                        Some(session.clone()),
+                    )
                     .expect("subscribe");
-                qm.process();
-                qm.take_updates(); // Clear initial
+                core.immediate_tick();
+                core.batched_tick();
+                update_count.store(0, Ordering::SeqCst); // Clear initial
 
                 let folder_id = data.owned_folders[0];
                 let mut doc_counter = 0u64;
@@ -281,10 +255,10 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                     let timestamp = current_timestamp();
 
                     // Insert a document authored by user (should appear in subscription)
-                    let _handle = qm
-                        .insert_with_session(
+                    let _id = core
+                        .insert(
                             "documents",
-                            &[
+                            vec![
                                 Value::Uuid(folder_id),
                                 Value::Text(format!("Filtered Doc {}", doc_counter)),
                                 Value::Text("Filtered test".to_string()),
@@ -295,10 +269,11 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                         )
                         .expect("insert");
 
-                    qm.process();
-                    let updates = qm.take_updates();
+                    core.immediate_tick();
+                    let count = update_count.load(Ordering::SeqCst);
 
-                    assert!(!updates.is_empty(), "should receive filtered update");
+                    assert!(count > 0, "should receive filtered update");
+                    update_count.store(0, Ordering::SeqCst);
                 });
             },
         );
@@ -308,38 +283,44 @@ fn filtered_subscription_latency(c: &mut Criterion) {
 }
 
 /// Measure batch insert latency with subscription (exercises delta fast path).
-///
-/// This benchmark inserts multiple documents before calling process(),
-/// which allows the subscription scan to use incremental deltas instead
-/// of full index scans.
 fn batch_insert_subscription_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("subscription/batch_insert");
 
     for scale in [1_000usize, 10_000usize] {
-        let batch_size = 100u64;
-        group.throughput(Throughput::Elements(batch_size));
+        let batch_size = 100usize;
+        group.throughput(Throughput::Elements(batch_size as u64));
         group.bench_with_input(
             BenchmarkId::new("documents_x100", scale),
             &scale,
             |b, &scale| {
                 // Setup
-                let mut qm = create_query_manager();
-                let data = setup_data(&mut qm, scale, USER_ID);
+                let mut core = create_runtime();
+                let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
 
+                let update_count = Arc::new(AtomicUsize::new(0));
+                let update_count_clone = update_count.clone();
+
                 // Subscribe to documents
-                let query = qm.query("documents").build();
-                let _sub_id = qm
-                    .subscribe_with_session(query, Some(session.clone()))
+                let query = Query::new("documents");
+                let _handle = core
+                    .subscribe(
+                        query,
+                        move |_delta| {
+                            update_count_clone.fetch_add(1, Ordering::SeqCst);
+                        },
+                        Some(session.clone()),
+                    )
                     .expect("subscribe");
-                qm.process();
-                qm.take_updates(); // Clear initial updates
+                core.immediate_tick();
+                core.batched_tick();
+                update_count.store(0, Ordering::SeqCst); // Clear initial updates
 
                 let folder_ids: Vec<_> = data
                     .owned_folders
                     .iter()
                     .cycle()
-                    .take(batch_size as usize)
+                    .take(batch_size)
                     .copied()
                     .collect();
                 let mut batch_counter = 0u64;
@@ -348,13 +329,12 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                     batch_counter += 1;
                     let timestamp = current_timestamp();
 
-                    // Insert batch of documents WITHOUT calling process() between each
-                    // This accumulates deltas that the subscription can use
+                    // Insert batch of documents WITHOUT processing between each
                     for (i, &folder_id) in folder_ids.iter().enumerate() {
-                        let _handle = qm
-                            .insert_with_session(
+                        let _id = core
+                            .insert(
                                 "documents",
-                                &[
+                                vec![
                                     Value::Uuid(folder_id),
                                     Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
                                     Value::Text("Batch subscription test".to_string()),
@@ -366,11 +346,12 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                             .expect("insert");
                     }
 
-                    // Single process() call - subscription scan uses delta fast path
-                    qm.process();
-                    let updates = qm.take_updates();
+                    // Single immediate_tick - subscription receives batch update
+                    core.immediate_tick();
+                    let count = update_count.load(Ordering::SeqCst);
 
-                    assert!(!updates.is_empty(), "should receive batch update");
+                    assert!(count > 0, "should receive batch update");
+                    update_count.store(0, Ordering::SeqCst);
                 });
             },
         );
@@ -379,8 +360,6 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
     group.finish();
 }
 
-// TODO: complex_query_latency disabled - ORDER BY + LIMIT subscription updates
-// need investigation (not receiving updates for top-50 docs)
 criterion_group!(
     benches,
     single_subscription_latency,

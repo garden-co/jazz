@@ -18,7 +18,7 @@ pub struct BlobAssociation {
 }
 
 /// How deeply to load a branch from storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoadDepth {
     /// Just CommitIds of tips.
     TipIdsOnly,
@@ -29,14 +29,14 @@ pub enum LoadDepth {
 }
 
 /// Errors from storage operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageError {
     NotFound,
     IoError(String),
 }
 
 /// Request to the storage driver.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageRequest {
     CreateObject {
         id: ObjectId,
@@ -130,17 +130,19 @@ pub enum StorageRequest {
 }
 
 /// Branch data loaded from storage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadedBranch {
     pub tips: HashSet<CommitId>,
     /// Truncation boundary. None = full history.
     pub tails: Option<HashSet<CommitId>>,
     /// May be partial based on LoadDepth.
     pub commits: HashMap<CommitId, Commit>,
+    /// Object metadata (optional, included on first branch load).
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 /// Response from the storage driver.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageResponse {
     CreateObject {
         id: ObjectId,
