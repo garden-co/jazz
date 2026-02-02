@@ -4,14 +4,16 @@
 //! - Simple session comparisons (`owner_id = @session.user_id`)
 //! - INHERITS chains (documents → folders → teams)
 
+use groove::io_handler::NullIoHandler;
 use groove::object::ObjectId;
-use groove::query_manager::QueryManager;
 use groove::query_manager::policy::{Operation, PolicyExpr};
 use groove::query_manager::session::Session;
 use groove::query_manager::types::TablePolicies;
 use groove::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
+use groove::runtime_core::RuntimeCore;
+use groove::schema_manager::{AppId, SchemaManager};
 use groove::sync_manager::SyncManager;
 
 /// Create the benchmark schema with teams, folders, and documents.
@@ -107,7 +109,11 @@ pub struct BenchmarkData {
 /// - 100_000 documents: 1000 teams, 10000 folders
 ///
 /// The session user owns 10% of teams and authors 50% of documents.
-pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> BenchmarkData {
+pub fn setup_data(
+    core: &mut RuntimeCore<NullIoHandler>,
+    scale: usize,
+    user_id: &str,
+) -> BenchmarkData {
     let (num_teams, num_folders) = match scale {
         10_000 => (100, 1000),
         100_000 => (1000, 10000),
@@ -137,22 +143,23 @@ pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> Benchma
     for i in 0..num_teams {
         let is_owned = i < owned_team_count;
         let owner = if is_owned { user_id } else { "other_user" };
-        let handle = qm
+        let row_id = core
             .insert(
                 "teams",
-                &[
+                vec![
                     Value::Text(format!("Team {}", i)),
                     Value::Text(owner.to_string()),
                 ],
+                None,
             )
             .expect("insert team");
-        qm.process();
-        qm.drain_storage_noop();
+        core.immediate_tick();
+        core.batched_tick();
 
         if is_owned {
-            owned_teams.push(handle.row_id);
+            owned_teams.push(row_id);
         } else {
-            other_teams.push(handle.row_id);
+            other_teams.push(row_id);
         }
     }
 
@@ -165,23 +172,24 @@ pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> Benchma
             other_teams[team_idx - owned_team_count]
         };
 
-        let handle = qm
+        let row_id = core
             .insert(
                 "folders",
-                &[
+                vec![
                     Value::Uuid(team_id),
                     Value::Text(format!("Folder {}", i)),
                     Value::Timestamp(now + i as u64),
                 ],
+                None,
             )
             .expect("insert folder");
-        qm.process();
-        qm.drain_storage_noop();
+        core.immediate_tick();
+        core.batched_tick();
 
         if team_idx < owned_team_count {
-            owned_folders.push(handle.row_id);
+            owned_folders.push(row_id);
         } else {
-            other_folders.push(handle.row_id);
+            other_folders.push(row_id);
         }
     }
 
@@ -204,26 +212,27 @@ pub fn setup_data(qm: &mut QueryManager, scale: usize, user_id: &str) -> Benchma
             continue;
         };
 
-        let handle = qm
+        let row_id = core
             .insert(
                 "documents",
-                &[
+                vec![
                     Value::Uuid(folder_id),
                     Value::Text(format!("Document {}", i)),
                     Value::Text(format!("Content of document {}", i)),
                     Value::Text(author.to_string()),
                     Value::Timestamp(now + i as u64),
                 ],
+                None,
             )
             .expect("insert document");
-        qm.process();
-        qm.drain_storage_noop();
+        core.immediate_tick();
+        core.batched_tick();
 
-        all_documents.push(handle.row_id);
+        all_documents.push(row_id);
         if author == user_id {
-            owned_documents.push(handle.row_id);
+            owned_documents.push(row_id);
         } else {
-            team_documents.push(handle.row_id);
+            team_documents.push(row_id);
         }
     }
 
@@ -241,11 +250,22 @@ pub fn create_session(user_id: &str) -> Session {
     Session::new(user_id)
 }
 
-/// Create a new QueryManager with the benchmark schema.
-pub fn create_query_manager() -> QueryManager {
+/// Create a new RuntimeCore with NullIoHandler for benchmarking.
+///
+/// Uses NullIoHandler which drops all storage requests, allowing
+/// benchmarks to measure pure in-memory performance without storage overhead.
+pub fn create_runtime() -> RuntimeCore<NullIoHandler> {
     let sync_manager = SyncManager::new();
     let schema = create_schema();
-    QueryManager::new(sync_manager, schema)
+    let schema_manager = SchemaManager::new(
+        sync_manager,
+        schema,
+        AppId::from_name("bench"),
+        "dev",
+        "main",
+    )
+    .expect("schema manager");
+    RuntimeCore::new(schema_manager, NullIoHandler)
 }
 
 /// Get the current timestamp in microseconds.

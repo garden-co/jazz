@@ -121,6 +121,7 @@ impl TestDriver {
                             tips: branch.tips.clone(),
                             tails: branch.tails.clone(),
                             commits,
+                            metadata: Some(obj.metadata.clone()),
                         })
                     } else {
                         Err(StorageError::NotFound)

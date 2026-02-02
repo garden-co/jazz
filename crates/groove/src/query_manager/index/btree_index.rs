@@ -158,6 +158,14 @@ impl BTreeIndex {
         std::mem::take(&mut self.pending_requests)
     }
 
+    /// Check if there are pending storage requests.
+    pub fn has_pending_requests(&self) -> bool {
+        !self.pending_requests.is_empty()
+            || !self.dirty_pages.is_empty()
+            || !self.deleted_pages.is_empty()
+            || self.meta_dirty
+    }
+
     /// Process a loaded page response.
     pub fn process_page_load(&mut self, page_id: PageId, data: Option<Vec<u8>>) {
         match data {

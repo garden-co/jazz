@@ -10,7 +10,7 @@ use groove::query_manager::types::{RowDelta, SchemaHash, Value};
 use groove::schema_manager::{QuerySchemaContext, SchemaManager};
 use groove::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncManager};
 use groove_rocksdb::RocksDbDriver;
-use groove_runtime::{JazzRuntime, RuntimeHandle, SubscriptionHandle as RuntimeSubHandle};
+use groove_tokio::{JazzRuntime, RuntimeHandle, SubscriptionHandle as RuntimeSubHandle};
 use jazz_transport::{ServerEvent, SubscribeRequest};
 use reqwest_eventsource::{Event, EventSource};
 use tokio::sync::{RwLock, mpsc};
@@ -24,8 +24,6 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 pub struct JazzClient {
     /// Handle to the local runtime.
     runtime_handle: RuntimeHandle,
-    /// Handle to the runtime task (for shutdown).
-    runtime_task: Option<tokio::task::JoinHandle<()>>,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
     /// This client's unique ID.
@@ -107,11 +105,8 @@ impl JazzClient {
         // Persist schema to catalogue for server sync
         schema_manager.persist_schema();
 
-        // Create and spawn runtime
-        let (runtime, runtime_handle, mut events) = JazzRuntime::new(schema_manager, driver);
-        let runtime_task = tokio::spawn(async move {
-            runtime.run().await;
-        });
+        // Create runtime (no separate task needed - scheduling is implicit)
+        let (runtime_handle, mut events) = JazzRuntime::new(schema_manager, driver);
 
         // Connect to server if URL provided (before spawning event processor)
         let server_connection = if !context.server_url.is_empty() {
@@ -146,7 +141,7 @@ impl JazzClient {
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
                 match event {
-                    groove_runtime::RuntimeEvent::SyncOutbox(entry) => {
+                    groove_tokio::RuntimeEvent::SyncOutbox(entry) => {
                         // Send to server if connected and destination is server
                         if let Destination::Server(_) = entry.destination {
                             if let Some(ref conn) = server_conn_for_processor {
@@ -161,7 +156,7 @@ impl JazzClient {
                             }
                         }
                     }
-                    groove_runtime::RuntimeEvent::SubscriptionUpdate { handle, delta } => {
+                    groove_tokio::RuntimeEvent::SubscriptionUpdate { handle, delta } => {
                         // Route delta to the subscription's channel
                         let senders = senders_for_processor.read().await;
                         if let Some(sender) = senders.get(&handle) {
@@ -230,7 +225,6 @@ impl JazzClient {
 
         Ok(Self {
             runtime_handle,
-            runtime_task: Some(runtime_task),
             server_connection,
             client_id,
             context,
@@ -363,18 +357,14 @@ impl JazzClient {
 
     /// Shutdown the client and release resources.
     ///
-    /// This closes the RocksDB database and stops the runtime.
-    pub async fn shutdown(mut self) -> Result<()> {
-        // Signal shutdown
+    /// In the new design, there's no separate runtime task.
+    /// The RuntimeHandle's shutdown is a no-op since scheduling is implicit.
+    pub async fn shutdown(self) -> Result<()> {
+        // Signal shutdown (no-op in new design)
         self.runtime_handle
             .shutdown()
             .await
             .map_err(|e| JazzError::Connection(e.to_string()))?;
-
-        // Wait for runtime task to complete (releases RocksDB)
-        if let Some(task) = self.runtime_task.take() {
-            let _ = task.await;
-        }
 
         Ok(())
     }

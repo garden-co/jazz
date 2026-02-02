@@ -3,7 +3,7 @@ resolver = "2"
 members = [
   "crates/groove",
   "crates/groove-rocksdb",
-  "crates/groove-runtime",
+  "crates/groove-tokio",
   "crates/groove-wasm",
   "crates/jazz-transport",
   "crates/jazz-cli",

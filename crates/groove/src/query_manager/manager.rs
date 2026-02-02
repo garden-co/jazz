@@ -93,6 +93,14 @@ impl From<IndexError> for QueryError {
 
 impl std::error::Error for QueryError {}
 
+/// Handle to a pending query.
+///
+/// Used to correlate query results with the original request.
+/// Wrappers (groove-runtime, groove-wasm) use this to fulfill
+/// platform-specific futures/promises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryHandle(pub u64);
+
 /// Handle for tracking insert completion.
 ///
 /// Poll via `is_complete()` to check if the row is persisted.
@@ -147,7 +155,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) needs_recompile: bool,
 }
 
-/// Subscription mode.
+/// Subscription mode (reserved for future use).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum SubscriptionMode {
     Delta,
@@ -205,6 +214,15 @@ pub struct CatalogueUpdate {
     pub content: Vec<u8>,
 }
 
+/// A pending query waiting for sync/storage.
+struct PendingQueryEntry {
+    handle: QueryHandle,
+    query: Query,
+    /// Session for future use (policy evaluation on one-shot queries).
+    #[allow(dead_code)]
+    session: Option<Session>,
+}
+
 /// Manages reactive SQL queries over object-based storage.
 ///
 /// No global Setup/Ready state machine - indices and data are loaded lazily
@@ -256,6 +274,13 @@ pub struct QueryManager {
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
     known_schemas: HashMap<SchemaHash, Schema>,
+
+    /// Pending queries waiting for sync/storage to complete.
+    /// Evaluated during process() after sync data arrives.
+    pending_queries: Vec<PendingQueryEntry>,
+
+    /// Next handle ID for pending queries.
+    next_query_handle: u64,
 }
 
 impl QueryManager {
@@ -284,6 +309,8 @@ impl QueryManager {
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
             known_schemas: HashMap::new(),
+            pending_queries: Vec::new(),
+            next_query_handle: 0,
         }
     }
 
@@ -557,7 +584,7 @@ impl QueryManager {
 
     /// Test accessor for subscriptions (internal testing only).
     #[cfg(test)]
-    pub fn test_subscriptions_mut(
+    pub(crate) fn test_subscriptions_mut(
         &mut self,
     ) -> &mut HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
         &mut self.subscriptions
@@ -565,7 +592,7 @@ impl QueryManager {
 
     /// Test accessor for subscriptions (internal testing only).
     #[cfg(test)]
-    pub fn test_subscriptions(
+    pub(crate) fn test_subscriptions(
         &self,
     ) -> &HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
         &self.subscriptions
@@ -2062,8 +2089,8 @@ impl QueryManager {
             self.handle_object_update(update);
         }
 
-        // 5. Process index storage (handles pending page loads in noop mode)
-        self.process_index_storage();
+        // 5. Index storage is handled by IoHandler via batched_tick() - not here.
+        // Tests/benchmarks that don't need real storage use NullIoHandler.
 
         // 6. Mark subscriptions dirty if they have pending IDs that might now be available
         // This ensures settle() will be called to check pending rows
@@ -2862,55 +2889,6 @@ impl QueryManager {
         }
     }
 
-    /// Process index storage - collects requests from indices and handles noop responses.
-    ///
-    /// For real storage backends, this would forward requests to storage and
-    /// process responses. For now (tests), we use noop responses.
-    ///
-    /// TODO: Storage requests need branch awareness - currently uses default branch.
-    fn process_index_storage(&mut self) {
-        use super::index::PageId;
-        use crate::storage::StorageRequest;
-
-        // Collect storage requests from all indices
-        let mut all_requests = Vec::new();
-        for index in self.indices.values_mut() {
-            all_requests.extend(index.take_storage_requests());
-        }
-
-        // Generate noop responses and route them back to indices
-        // TODO: Add branch to StorageRequest for proper branch-aware storage
-        for request in all_requests {
-            match request {
-                StorageRequest::LoadIndexMeta { table, column } => {
-                    // New index - return None (index will initialize empty)
-                    // Try default branch first
-                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    if let Some(index) = self.indices.get_mut(&key) {
-                        index.process_meta_load(None);
-                    }
-                }
-                StorageRequest::LoadIndexPage {
-                    table,
-                    column,
-                    page_id,
-                } => {
-                    // Page doesn't exist - return None (index will create new page)
-                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    if let Some(index) = self.indices.get_mut(&key) {
-                        index.process_page_load(PageId(page_id), None);
-                    }
-                }
-                StorageRequest::StoreIndexMeta { .. }
-                | StorageRequest::StoreIndexPage { .. }
-                | StorageRequest::DeleteIndexPage { .. } => {
-                    // Store/delete requests are fire-and-forget in noop mode
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
     /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
     fn load_row_from_object_on_branch(
@@ -3540,14 +3518,6 @@ impl QueryManager {
     // No-op storage driver (for tests)
     // ========================================================================
 
-    /// Process all pending storage requests with successful no-op responses.
-    ///
-    /// This is useful for tests and benchmarks that don't have a real storage backend.
-    /// Delegates to SyncManager::drain_storage_noop().
-    pub fn drain_storage_noop(&mut self) {
-        self.sync_manager.drain_storage_noop();
-    }
-
     /// Reset all indices to unloaded state for cold start scenarios.
     ///
     /// Call this on a new QueryManager created with an existing SyncManager
@@ -3558,12 +3528,13 @@ impl QueryManager {
         }
     }
 
-    /// Load indices from storage using a real driver.
+    /// Load indices from storage using a real driver (test-only).
     ///
     /// This is a convenience method that calls `reset_indices_for_cold_start()` and then
     /// processes storage in a loop until all indices are loaded. Use this after creating
     /// a new QueryManager with an existing SyncManager (cold start scenario).
-    pub fn load_indices_from_driver(&mut self, driver: &mut impl crate::driver::Driver) {
+    #[cfg(test)]
+    pub fn load_indices_from_driver(&mut self, driver: &mut dyn crate::driver::Driver) {
         self.reset_indices_for_cold_start();
         // Loop until no more pending requests
         for _ in 0..10 {
@@ -3571,14 +3542,15 @@ impl QueryManager {
         }
     }
 
-    /// Process storage requests through a real driver.
+    /// Process storage requests through a real driver (test-only).
     ///
     /// This handles both ObjectManager requests and index storage requests.
     /// Use this for tests that need actual persistence (e.g., cold_start tests).
     /// Note: May need to be called multiple times when loading indices (meta first, then pages).
     ///
     /// Returns `true` if work was done (requests were processed), `false` if no requests pending.
-    pub fn process_storage_with_driver(&mut self, driver: &mut impl crate::driver::Driver) -> bool {
+    #[cfg(test)]
+    pub fn process_storage_with_driver(&mut self, driver: &mut dyn crate::driver::Driver) -> bool {
         use super::index::PageId;
         use crate::storage::StorageResponse;
 
@@ -3643,6 +3615,83 @@ impl QueryManager {
         true
     }
 
+    /// Take all pending storage requests (for fire-and-forget dispatch).
+    ///
+    /// Used by RuntimeCore's batched_tick to collect requests before
+    /// sending them to the IoHandler.
+    pub fn take_storage_requests(&mut self) -> Vec<crate::storage::StorageRequest> {
+        let mut all_requests = self.sync_manager.object_manager.take_requests();
+        for index in self.indices.values_mut() {
+            all_requests.extend(index.take_storage_requests());
+        }
+        all_requests
+    }
+
+    /// Check if there are pending storage requests.
+    pub fn has_pending_storage_requests(&self) -> bool {
+        if self.sync_manager.object_manager.has_pending_requests() {
+            return true;
+        }
+        for index in self.indices.values() {
+            if index.has_pending_requests() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Apply storage responses (from parked async responses).
+    ///
+    /// Routes responses to the appropriate handlers (ObjectManager or indices).
+    /// Call this when storage responses arrive from the IoHandler callback.
+    pub fn apply_storage_responses(&mut self, responses: Vec<crate::storage::StorageResponse>) {
+        use super::index::PageId;
+        use crate::storage::StorageResponse;
+
+        for response in responses {
+            match &response {
+                // Index responses - route to indices
+                StorageResponse::LoadIndexMeta {
+                    table,
+                    column,
+                    result,
+                } => {
+                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
+                    if let Some(index) = self.indices.get_mut(&key) {
+                        index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
+                    }
+                }
+                StorageResponse::LoadIndexPage {
+                    table,
+                    column,
+                    page_id,
+                    result,
+                } => {
+                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
+                    if let Some(index) = self.indices.get_mut(&key) {
+                        index.process_page_load(
+                            PageId(*page_id),
+                            result.as_ref().ok().and_then(|o| o.clone()),
+                        );
+                    }
+                }
+                StorageResponse::StoreIndexMeta { .. }
+                | StorageResponse::StoreIndexPage { .. }
+                | StorageResponse::DeleteIndexPage { .. } => {
+                    // Store/delete responses don't need routing
+                }
+
+                // Object/blob responses - route to ObjectManager
+                _ => {
+                    self.sync_manager.object_manager.push_response(response);
+                }
+            }
+        }
+
+        // Process ObjectManager responses
+        self.sync_manager.object_manager.process_storage_responses();
+    }
+
     // ========================================================================
     // Memory profiling
     // ========================================================================
@@ -3679,5 +3728,64 @@ impl QueryManager {
 
         let total = indices + subscriptions + policy_checks;
         (indices, subscriptions, policy_checks, total)
+    }
+
+    // =========================================================================
+    // Pending Query Management
+    // =========================================================================
+
+    /// Register a pending query that will be retried during process().
+    ///
+    /// Returns a handle that can be used to correlate the result when
+    /// the query completes.
+    pub fn register_pending_query(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+    ) -> QueryHandle {
+        let handle = QueryHandle(self.next_query_handle);
+        self.next_query_handle += 1;
+        self.pending_queries.push(PendingQueryEntry {
+            handle,
+            query,
+            session,
+        });
+        handle
+    }
+
+    /// Retry pending queries and return completed ones.
+    ///
+    /// Called at the end of process() after sync data has been processed.
+    /// Queries that return Pending are kept for the next cycle.
+    #[allow(clippy::type_complexity)]
+    pub fn retry_pending_queries(
+        &mut self,
+    ) -> Vec<(QueryHandle, Result<Vec<(ObjectId, Vec<Value>)>, QueryError>)> {
+        let entries = std::mem::take(&mut self.pending_queries);
+        let mut completed = Vec::new();
+
+        for entry in entries {
+            // Try to execute the query
+            // Note: We don't have execute_with_session, so session is used for
+            // subscriptions but not one-shot queries currently.
+            // The session is passed through for future use.
+            let result = self.execute(entry.query.clone());
+
+            match result {
+                Ok(results) => {
+                    completed.push((entry.handle, Ok(results)));
+                }
+                Err(QueryError::Pending) => {
+                    // Still pending - put back in queue
+                    self.pending_queries.push(entry);
+                }
+                Err(e) => {
+                    // Real error - return it
+                    completed.push((entry.handle, Err(e)));
+                }
+            }
+        }
+
+        completed
     }
 }

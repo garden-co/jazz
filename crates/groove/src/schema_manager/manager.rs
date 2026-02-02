@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{
-    DeleteHandle, InsertHandle, QueryError, QueryManager, QueryUpdate,
+    DeleteHandle, InsertHandle, QueryError, QueryHandle, QueryManager, QueryUpdate,
 };
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
@@ -31,17 +31,21 @@ pub const CATALOGUE_TYPE_LENS: &str = "catalogue_lens";
 
 /// Result of a single tick cycle.
 ///
-/// Contains outbox entries (sync messages to send) and subscription updates
-/// (query result changes to emit to subscribers).
+/// Contains outbox entries (sync messages to send), subscription updates
+/// (query result changes to emit to subscribers), and completed one-shot queries.
 ///
 /// This is the shared output from both native and WASM runtimes after
 /// processing a tick cycle.
 #[derive(Debug, Clone)]
+#[allow(clippy::type_complexity)]
 pub struct TickResult {
     /// Sync messages to send to connected peers/servers.
     pub outbox: Vec<OutboxEntry>,
     /// Query subscription result changes.
     pub subscription_updates: Vec<QueryUpdate>,
+    /// One-shot queries that completed this tick.
+    /// Wrappers use these to fulfill platform-specific futures.
+    pub completed_queries: Vec<(QueryHandle, Result<Vec<(ObjectId, Vec<Value>)>, QueryError>)>,
 }
 
 /// SchemaManager coordinates schema evolution with query execution.
@@ -894,9 +898,13 @@ impl SchemaManager {
         // 3. Collect subscription updates
         let subscription_updates = self.query_manager.take_updates();
 
+        // 4. Retry pending queries (they may now complete after sync/process)
+        let completed_queries = self.query_manager.retry_pending_queries();
+
         TickResult {
             outbox,
             subscription_updates,
+            completed_queries,
         }
     }
 }

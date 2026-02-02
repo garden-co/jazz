@@ -7,7 +7,7 @@ use std::sync::Arc;
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::sync_manager::{ClientId, Destination, SyncManager, SyncPayload};
 use groove_rocksdb::RocksDbDriver;
-use groove_runtime::{JazzRuntime, RuntimeHandle};
+use groove_tokio::{JazzRuntime, RuntimeHandle};
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
@@ -52,13 +52,8 @@ pub async fn run(
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
-    // Create runtime
-    let (runtime, runtime_handle, mut events) = JazzRuntime::new(schema_manager, driver);
-
-    // Spawn runtime event loop
-    tokio::spawn(async move {
-        runtime.run().await;
-    });
+    // Create runtime (no separate task needed - scheduling is implicit)
+    let (runtime_handle, mut events) = JazzRuntime::new(schema_manager, driver);
 
     // Create broadcast channel for SSE updates
     let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(256);
@@ -77,14 +72,14 @@ pub async fn run(
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             match event {
-                groove_runtime::RuntimeEvent::SyncOutbox(entry) => {
+                groove_tokio::RuntimeEvent::SyncOutbox(entry) => {
                     // Route to appropriate client via broadcast
                     if let Destination::Client(client_id) = entry.destination {
                         let _ = sync_tx_clone.send((client_id, entry.payload));
                     }
                     // Server destinations would be handled differently (e.g., HTTP push)
                 }
-                groove_runtime::RuntimeEvent::SubscriptionUpdate { handle, delta } => {
+                groove_tokio::RuntimeEvent::SubscriptionUpdate { handle, delta } => {
                     // Subscription updates are typically local to the subscriber
                     // For now, log them - in future could route to specific client
                     tracing::debug!("Subscription update: {:?} delta: {:?}", handle, delta);

@@ -4,52 +4,112 @@
 //! - CRUD operations (insert, query, update, delete)
 //! - Reactive subscriptions with callback-based updates
 //! - Sync message handling for server communication
+//!
+//! # Architecture
+//!
+//! - `WasmIoHandler` implements `IoHandler` using JS callbacks and spawn_local
+//! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<WasmIoHandler>>>`
+//! - Storage requests are fire-and-forget to JS; responses come via `on_storage_response`
+//! - `schedule_batched_tick` uses `wasm_bindgen_futures::spawn_local` (debounced)
+//! - No explicit tick loops - scheduling emerges from IoHandler
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use js_sys::Function;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use groove::driver::Driver;
+use groove::io_handler::IoHandler;
 use groove::object::ObjectId;
-use groove::query_manager::manager::QueryUpdate;
-use groove::query_manager::types::{Schema, TableName, Value};
+use groove::query_manager::types::{Schema, Value};
+use groove::runtime_core::{RuntimeCore, SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::{StorageRequest, StorageResponse};
 use groove::sync_manager::{InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
-use crate::driver_bridge::{JsStorageDriver, PendingStorage, WasmDriverBridge};
+use crate::driver_bridge::JsStorageDriver;
 use crate::query::parse_query;
 use crate::types::{WasmSchema, WasmValue};
 
 // ============================================================================
-// Async Driver Wrapper
+// WasmIoHandler
 // ============================================================================
 
-/// Driver that buffers requests for async processing.
+/// IoHandler implementation for WASM.
 ///
-/// Since the Groove `Driver` trait is synchronous but JavaScript storage is async,
-/// this wrapper collects requests during synchronous operations and processes
-/// them in batches during `tick()` calls.
-struct AsyncDriverWrapper {
-    pending: Rc<RefCell<PendingStorage>>,
+/// - Storage requests are sent to JS via callback (fire-and-forget)
+/// - Sync messages are sent via callback
+/// - `schedule_batched_tick` uses spawn_local (debounced)
+pub struct WasmIoHandler {
+    /// JS callback for storage requests (fire-and-forget).
+    storage_callback: Function,
+    /// JS callback for sync messages.
+    sync_callback: Option<Function>,
+    /// Debounce flag for scheduled ticks.
+    scheduled: Rc<RefCell<bool>>,
+    /// Weak reference back to RuntimeCore for spawned tasks.
+    core_ref: Weak<RefCell<RuntimeCore<WasmIoHandler>>>,
 }
 
-impl AsyncDriverWrapper {
-    fn new(pending: Rc<RefCell<PendingStorage>>) -> Self {
-        Self { pending }
+impl WasmIoHandler {
+    fn new(storage_callback: Function) -> Self {
+        Self {
+            storage_callback,
+            sync_callback: None,
+            scheduled: Rc::new(RefCell::new(false)),
+            core_ref: Weak::new(),
+        }
+    }
+
+    fn set_core_ref(&mut self, core_ref: Weak<RefCell<RuntimeCore<WasmIoHandler>>>) {
+        self.core_ref = core_ref;
+    }
+
+    fn set_sync_callback(&mut self, callback: Function) {
+        self.sync_callback = Some(callback);
     }
 }
 
-impl Driver for AsyncDriverWrapper {
-    fn process(&mut self, requests: Vec<StorageRequest>) -> Vec<StorageResponse> {
-        // Queue requests for async processing
-        self.pending.borrow_mut().queue_requests(requests);
-        // Return any responses that were processed in a previous tick
-        self.pending.borrow_mut().take_responses()
+impl IoHandler for WasmIoHandler {
+    fn send_storage_request(&mut self, request: StorageRequest) {
+        // Serialize request to JSON and send to JS
+        if let Ok(json) = serde_json::to_string(&request) {
+            let js_value = JsValue::from_str(&json);
+            let _ = self.storage_callback.call1(&JsValue::NULL, &js_value);
+        }
+    }
+
+    fn send_sync_message(&mut self, message: OutboxEntry) {
+        if let Some(ref callback) = self.sync_callback {
+            // Serialize just the payload
+            if let Ok(json) = serde_json::to_string(&message.payload) {
+                let js_value = JsValue::from_str(&json);
+                let _ = callback.call1(&JsValue::NULL, &js_value);
+            }
+        }
+    }
+
+    fn schedule_batched_tick(&self) {
+        // Debounce: only schedule if not already scheduled
+        let mut scheduled = self.scheduled.borrow_mut();
+        if !*scheduled {
+            *scheduled = true;
+
+            let core_ref = self.core_ref.clone();
+            let flag = self.scheduled.clone();
+
+            wasm_bindgen_futures::spawn_local(async move {
+                // Clear the scheduled flag
+                *flag.borrow_mut() = false;
+
+                // Call batched_tick on the core
+                if let Some(core_rc) = core_ref.upgrade() {
+                    core_rc.borrow_mut().batched_tick();
+                }
+            });
+        }
     }
 }
 
@@ -59,24 +119,12 @@ impl Driver for AsyncDriverWrapper {
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps the Groove SchemaManager and provides async CRUD operations,
-/// reactive subscriptions, and sync message handling.
+/// Wraps `Rc<RefCell<RuntimeCore<WasmIoHandler>>>`.
+/// All methods borrow the core, call RuntimeCore, and return.
+/// Async scheduling happens via IoHandler.schedule_batched_tick().
 #[wasm_bindgen]
 pub struct WasmRuntime {
-    schema_manager: SchemaManager,
-    driver_bridge: WasmDriverBridge,
-    pending_storage: Rc<RefCell<PendingStorage>>,
-    next_subscription_id: u32,
-    subscriptions: HashMap<u32, SubscriptionState>,
-    sync_message_callback: Option<Function>,
-}
-
-struct SubscriptionState {
-    #[allow(dead_code)]
-    query_json: String,
-    callback: Function,
-    #[allow(dead_code)]
-    query_sub_id: groove::query_manager::QuerySubscriptionId,
+    core: Rc<RefCell<RuntimeCore<WasmIoHandler>>>,
 }
 
 #[wasm_bindgen]
@@ -84,14 +132,14 @@ impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
     /// # Arguments
-    /// * `driver` - JavaScript storage driver implementing the StorageDriver interface
+    /// * `storage_callback` - JS function called with storage requests (JSON string)
     /// * `schema_json` - JSON-encoded schema definition
     /// * `app_id` - Application identifier
     /// * `env` - Environment (e.g., "dev", "prod")
     /// * `user_branch` - User's branch name (e.g., "main")
     #[wasm_bindgen(constructor)]
     pub fn new(
-        driver: JsStorageDriver,
+        storage_callback: Function,
         schema_json: &str,
         app_id: &str,
         env: &str,
@@ -109,88 +157,85 @@ impl WasmRuntime {
             .try_into()
             .map_err(|e: String| JsError::new(&e))?;
 
-        // Create pending storage for async driver
-        let pending_storage = Rc::new(RefCell::new(PendingStorage::new()));
-
         // Create sync manager
         let sync_manager = SyncManager::new();
 
-        // Create schema manager with async driver wrapper
-        let mut async_driver = AsyncDriverWrapper::new(pending_storage.clone());
-        let mut schema_manager =
+        // Create schema manager
+        let schema_manager =
             SchemaManager::new(sync_manager, schema, AppId::from_name(app_id), env, user_branch)
                 .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
-        // Load indices from driver (will queue storage requests)
-        schema_manager
-            .query_manager_mut()
-            .load_indices_from_driver(&mut async_driver);
+        // Create IoHandler
+        let io_handler = WasmIoHandler::new(storage_callback);
 
-        Ok(WasmRuntime {
-            schema_manager,
-            driver_bridge: WasmDriverBridge::new(driver),
-            pending_storage,
-            next_subscription_id: 0,
-            subscriptions: HashMap::new(),
-            sync_message_callback: None,
-        })
+        // Create RuntimeCore
+        let core = RuntimeCore::new(schema_manager, io_handler);
+
+        // Wrap in Rc<RefCell>
+        let core_rc = Rc::new(RefCell::new(core));
+
+        // Set the core_ref on the IoHandler
+        {
+            let mut core_guard = core_rc.borrow_mut();
+            core_guard
+                .io_handler_mut()
+                .set_core_ref(Rc::downgrade(&core_rc));
+        }
+
+        Ok(WasmRuntime { core: core_rc })
     }
 
-    /// Process pending storage operations.
+    /// Called by JS when a storage response arrives.
     ///
-    /// This must be called periodically (via requestAnimationFrame or setInterval)
-    /// to process async storage operations.
-    #[wasm_bindgen]
-    pub async fn tick(&mut self) -> Result<(), JsError> {
-        // 1. Async storage settling (WASM-specific: driver is async)
-        loop {
-            // Send pending requests to JS driver and await responses
-            if self.pending_storage.borrow().has_pending_requests() {
-                let requests = self.pending_storage.borrow_mut().take_requests();
-                let responses = self
-                    .driver_bridge
-                    .process_async(requests)
-                    .await
-                    .map_err(|e| JsError::new(&e))?;
-                self.pending_storage.borrow_mut().store_responses(responses);
-            }
+    /// # Arguments
+    /// * `response_json` - JSON-encoded StorageResponse
+    #[wasm_bindgen(js_name = onStorageResponse)]
+    pub fn on_storage_response(&self, response_json: &str) -> Result<(), JsError> {
+        let response: StorageResponse = serde_json::from_str(response_json)
+            .map_err(|e| JsError::new(&format!("Invalid storage response: {}", e)))?;
 
-            // Let schema manager consume responses (may queue more requests)
-            let mut async_driver = AsyncDriverWrapper::new(self.pending_storage.clone());
-            let made_progress = self.schema_manager
-                .query_manager_mut()
-                .process_storage_with_driver(&mut async_driver);
-
-            // If no progress and no new pending requests, storage has settled
-            if !made_progress && !self.pending_storage.borrow().has_pending_requests() {
-                break;
-            }
-        }
-
-        // 2. Use shared tick logic: process + collect outbox + collect updates
-        let result = self.schema_manager.tick_settled();
-
-        // 3. Emit sync outbox entries via JS callback (WASM-specific)
-        for entry in result.outbox {
-            self.emit_sync_message(&entry)?;
-        }
-
-        // 4. Emit subscription updates via JS callbacks (WASM-specific)
-        self.emit_subscription_updates_from_result(&result.subscription_updates)?;
-
+        self.core.borrow_mut().park_storage_response(response);
         Ok(())
     }
+
+    /// Called by JS when a sync message arrives from the server.
+    ///
+    /// # Arguments
+    /// * `message_json` - JSON-encoded SyncPayload
+    #[wasm_bindgen(js_name = onSyncMessageReceived)]
+    pub fn on_sync_message_received(&self, message_json: &str) -> Result<(), JsError> {
+        let payload: SyncPayload = serde_json::from_str(message_json)
+            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+
+        let entry = InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload,
+        };
+
+        self.core.borrow_mut().park_sync_message(entry);
+        Ok(())
+    }
+
+    /// Register a callback for outgoing sync messages.
+    #[wasm_bindgen(js_name = onSyncMessageToSend)]
+    pub fn on_sync_message_to_send(&self, callback: Function) {
+        self.core.borrow_mut().io_handler_mut().set_sync_callback(callback);
+    }
+
+    // =========================================================================
+    // CRUD Operations
+    // =========================================================================
 
     /// Insert a row into a table.
     ///
     /// # Arguments
     /// * `table` - Table name
-    /// * `values` - JSON-encoded array of values
+    /// * `values` - JS array of values
     ///
     /// # Returns
     /// The new row's ObjectId as a UUID string.
     #[wasm_bindgen]
-    pub async fn insert(&mut self, table: &str, values: JsValue) -> Result<String, JsError> {
+    pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
         // Parse values
         let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
         let groove_values: Vec<Value> = wasm_values
@@ -199,102 +244,83 @@ impl WasmRuntime {
             .collect::<Result<_, _>>()
             .map_err(|e: String| JsError::new(&e))?;
 
-        // Perform insert
-        let result = self
-            .schema_manager
-            .insert(table, &groove_values)
+        let mut core = self.core.borrow_mut();
+        let result = core
+            .insert(table, groove_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+        core.immediate_tick();
 
-        // Process pending operations
-        self.tick().await?;
-
-        Ok(result.row_id.uuid().to_string())
+        Ok(result.uuid().to_string())
     }
 
-    /// Execute a query and return results.
+    /// Execute a query and return results as a Promise.
     ///
     /// # Arguments
     /// * `query_json` - JSON-encoded query specification
     ///
     /// # Returns
-    /// JSON-encoded array of `{id: string, values: Value[]}` objects.
+    /// Promise that resolves to JSON-encoded array of `{id: string, values: Value[]}` objects.
     #[wasm_bindgen]
-    pub async fn query(&mut self, query_json: &str) -> Result<JsValue, JsError> {
-        // Parse query
+    pub fn query(&self, query_json: &str) -> Result<js_sys::Promise, JsError> {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
-        // Execute query
-        let results = self
-            .schema_manager
-            .execute(query)
-            .map_err(|e| JsError::new(&format!("Query failed: {:?}", e)))?;
+        // Get the query future from RuntimeCore
+        let future = {
+            let mut core = self.core.borrow_mut();
+            core.query(query, None)
+        };
 
-        // Convert results
-        let wasm_results: Vec<_> = results
-            .into_iter()
-            .map(|(id, values)| {
-                let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
-                serde_json::json!({
-                    "id": id.uuid().to_string(),
-                    "values": wasm_values
+        // Convert to a JS Promise
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let results = future.await
+                .map_err(|e| JsValue::from_str(&format!("Query failed: {:?}", e)))?;
+
+            // Convert results
+            let wasm_results: Vec<_> = results
+                .into_iter()
+                .map(|(id, values)| {
+                    let wasm_values: Vec<WasmValue> = values.into_iter().map(Into::into).collect();
+                    serde_json::json!({
+                        "id": id.uuid().to_string(),
+                        "values": wasm_values
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        // Use serialize_maps_as_objects to get plain JS objects instead of Map
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        Ok(wasm_results.serialize(&serializer)?)
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            wasm_results.serialize(&serializer)
+                .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
+        });
+
+        Ok(promise)
     }
 
     /// Update a row by ObjectId.
     ///
     /// # Arguments
     /// * `object_id` - UUID string of the row to update
-    /// * `values` - JSON-encoded object mapping column names to new values
+    /// * `values` - JS object mapping column names to new values
     #[wasm_bindgen]
-    pub async fn update(&mut self, object_id: &str, values: JsValue) -> Result<(), JsError> {
-        // Parse object ID
+    pub fn update(&self, object_id: &str, values: JsValue) -> Result<(), JsError> {
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        // Parse partial values as {column: value} object
         let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
 
-        // Get current row
-        let (table, mut current_values) = self
-            .schema_manager
-            .query_manager_mut()
-            .get_row(oid)
-            .ok_or_else(|| JsError::new("Row not found"))?;
+        let updates: Vec<(String, Value)> = partial_values
+            .into_iter()
+            .map(|(k, v)| {
+                let groove_value: Value = v.try_into()?;
+                Ok((k, groove_value))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|e: String| JsError::new(&e))?;
 
-        // Get schema for column lookup
-        let schema = self.schema_manager.current_schema();
-        let table_name = TableName::new(&table);
-        let table_schema = schema
-            .get(&table_name)
-            .ok_or_else(|| JsError::new("Table not found"))?;
-
-        // Merge updates
-        for (col_name, wasm_value) in partial_values {
-            if let Some(idx) = table_schema.descriptor.column_index(&col_name) {
-                let groove_value: Value = wasm_value
-                    .try_into()
-                    .map_err(|e: String| JsError::new(&e))?;
-                current_values[idx] = groove_value;
-            } else {
-                return Err(JsError::new(&format!("Column '{}' not found", col_name)));
-            }
-        }
-
-        // Perform update
-        self.schema_manager
-            .query_manager_mut()
-            .update_with_session(oid, &current_values, None)
+        let mut core = self.core.borrow_mut();
+        core.update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
-
-        // Process pending operations
-        self.tick().await?;
+        core.immediate_tick();
 
         Ok(())
     }
@@ -304,211 +330,140 @@ impl WasmRuntime {
     /// # Arguments
     /// * `object_id` - UUID string of the row to delete
     #[wasm_bindgen]
-    pub async fn delete(&mut self, object_id: &str) -> Result<(), JsError> {
-        // Parse object ID
+    pub fn delete(&self, object_id: &str) -> Result<(), JsError> {
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        // Perform delete
-        self.schema_manager
-            .query_manager_mut()
-            .delete_with_session(oid, None)
+        let mut core = self.core.borrow_mut();
+        core.delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
-
-        // Process pending operations
-        self.tick().await?;
+        core.immediate_tick();
 
         Ok(())
     }
 
+    // =========================================================================
+    // Subscriptions
+    // =========================================================================
+
     /// Subscribe to a query with a callback.
-    ///
-    /// The callback will be invoked with a `RowDelta` object whenever the
-    /// query results change.
     ///
     /// # Arguments
     /// * `query_json` - JSON-encoded query specification
-    /// * `on_update` - Callback function invoked with updates
+    /// * `on_update` - Callback function invoked with updates (receives JSON delta)
     ///
     /// # Returns
-    /// Subscription ID for later unsubscription.
+    /// Subscription handle (u64) for later unsubscription.
+    #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
-    pub async fn subscribe(
-        &mut self,
-        query_json: &str,
-        on_update: Function,
-    ) -> Result<u32, JsError> {
-        // Parse query
+    pub fn subscribe(&self, query_json: &str, on_update: Function) -> Result<f64, JsError> {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
-        // Subscribe through QueryManager
-        let query_sub_id = self
-            .schema_manager
-            .query_manager_mut()
-            .subscribe_with_session(query, None)
+        // Create a Rust callback that bridges to the JS function.
+        // The callback serializes the delta to JSON and calls the JS function.
+        let callback = move |delta: SubscriptionDelta| {
+            // Serialize the delta for JS
+            // Row has id, data (binary), commit_id - we expose id for now
+            let delta_json = serde_json::json!({
+                "handle": delta.handle.0,
+                "delta": {
+                    "added": delta.delta.added.iter().map(|row| {
+                        serde_json::json!({
+                            "id": row.id.uuid().to_string()
+                        })
+                    }).collect::<Vec<_>>(),
+                    "updated": delta.delta.updated.iter().map(|(old, new)| {
+                        serde_json::json!({
+                            "oldId": old.id.uuid().to_string(),
+                            "newId": new.id.uuid().to_string()
+                        })
+                    }).collect::<Vec<_>>(),
+                    "removed": delta.delta.removed.iter().map(|row| {
+                        row.id.uuid().to_string()
+                    }).collect::<Vec<_>>(),
+                    "pending": delta.delta.pending
+                }
+            });
+
+            if let Ok(json_str) = serde_json::to_string(&delta_json) {
+                let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
+            }
+        };
+
+        let handle = self
+            .core
+            .borrow_mut()
+            .subscribe(query, callback, None)
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
-        // Allocate subscription ID
-        let sub_id = self.next_subscription_id;
-        self.next_subscription_id += 1;
-
-        // Store subscription state
-        self.subscriptions.insert(
-            sub_id,
-            SubscriptionState {
-                query_json: query_json.to_string(),
-                callback: on_update,
-                query_sub_id,
-            },
-        );
-
-        Ok(sub_id)
+        // Return handle as f64 since JS doesn't have u64
+        Ok(handle.0 as f64)
     }
 
     /// Unsubscribe from a query.
     ///
     /// # Arguments
-    /// * `subscription_id` - ID returned from `subscribe()`
+    /// * `handle` - Handle returned from `subscribe()`
+    #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
-    pub fn unsubscribe(&mut self, subscription_id: u32) {
-        if let Some(state) = self.subscriptions.remove(&subscription_id) {
-            self.schema_manager
-                .query_manager_mut()
-                .unsubscribe(state.query_sub_id);
-        }
+    pub fn unsubscribe(&self, handle: f64) {
+        self.core
+            .borrow_mut()
+            .unsubscribe(SubscriptionHandle(handle as u64));
     }
 
-    /// Register a callback for outgoing sync messages.
-    ///
-    /// The callback will be invoked with a JSON-encoded sync message whenever
-    /// the runtime needs to send data to the server.
-    #[wasm_bindgen(js_name = onSyncMessageToSend)]
-    pub fn on_sync_message_to_send(&mut self, callback: Function) {
-        self.sync_message_callback = Some(callback);
-    }
-
-    /// Process an incoming sync message from the server.
-    ///
-    /// # Arguments
-    /// * `message` - JSON-encoded SyncPayload
-    #[wasm_bindgen(js_name = onSyncMessageReceived)]
-    pub fn on_sync_message_received(&mut self, message: &str) -> Result<(), JsError> {
-        // Parse sync payload
-        let payload: SyncPayload = serde_json::from_str(message)
-            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
-
-        // Create inbox entry with server source (server ID doesn't matter for now)
-        let entry = InboxEntry {
-            source: Source::Server(ServerId::new()),
-            payload,
-        };
-
-        // Push to sync manager
-        self.schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .push_inbox(entry);
-
-        Ok(())
-    }
+    // =========================================================================
+    // Sync Operations
+    // =========================================================================
 
     /// Add a server connection.
     #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(&mut self) {
+    pub fn add_server(&self) {
         let server_id = ServerId::new();
-        self.schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .add_server(server_id);
+        let mut core = self.core.borrow_mut();
+        core.add_server(server_id);
+        core.immediate_tick();
     }
+
+    // =========================================================================
+    // Schema Access
+    // =========================================================================
 
     /// Get the current schema as JSON.
     #[wasm_bindgen(js_name = getSchema)]
     pub fn get_schema(&self) -> Result<JsValue, JsError> {
-        let schema = self.schema_manager.current_schema();
+        let core = self.core.borrow();
+        let schema = core.current_schema();
         let wasm_schema = WasmSchema::from(schema);
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
     }
 
 }
 
+// ============================================================================
+// Legacy API for backwards compatibility
+// ============================================================================
 
-// Private helper methods
-impl WasmRuntime {
-    fn emit_sync_message(&self, entry: &OutboxEntry) -> Result<(), JsError> {
-        if let Some(ref callback) = self.sync_message_callback {
-            // Serialize just the payload, not the full OutboxEntry
-            let json = serde_json::to_string(&entry.payload)
-                .map_err(|e| JsError::new(&format!("Serialize error: {}", e)))?;
-            let js_value = JsValue::from_str(&json);
-            callback
-                .call1(&JsValue::NULL, &js_value)
-                .map_err(|e| JsError::new(&format!("Callback error: {:?}", e)))?;
-        }
-        Ok(())
-    }
+/// Legacy constructor that takes a JsStorageDriver.
+///
+/// New code should use the main constructor with a storage callback.
+#[wasm_bindgen]
+pub fn create_wasm_runtime_legacy(
+    driver: JsStorageDriver,
+    schema_json: &str,
+    app_id: &str,
+    env: &str,
+    user_branch: &str,
+) -> Result<WasmRuntime, JsError> {
+    // Create a callback that uses the driver bridge
+    let driver_bridge = crate::driver_bridge::WasmDriverBridge::new(driver);
 
-    fn emit_subscription_updates_from_result(&self, updates: &[QueryUpdate]) -> Result<(), JsError> {
-        for update in updates {
-            // Find the subscription by query_sub_id
-            for (_sub_id, state) in &self.subscriptions {
-                if state.query_sub_id == update.subscription_id {
-                    // Convert delta to WASM format
-                    let wasm_delta = crate::types::WasmRowDelta {
-                        added: update
-                            .delta
-                            .added
-                            .iter()
-                            .map(|row| {
-                                // TODO: Decode row content to values using schema
-                                crate::types::WasmRow {
-                                    id: row.id.uuid().to_string(),
-                                    values: vec![], // Placeholder - needs decoding
-                                }
-                            })
-                            .collect(),
-                        removed: update
-                            .delta
-                            .removed
-                            .iter()
-                            .map(|row| crate::types::WasmRow {
-                                id: row.id.uuid().to_string(),
-                                values: vec![],
-                            })
-                            .collect(),
-                        updated: update
-                            .delta
-                            .updated
-                            .iter()
-                            .map(|(old, new)| {
-                                (
-                                    crate::types::WasmRow {
-                                        id: old.id.uuid().to_string(),
-                                        values: vec![],
-                                    },
-                                    crate::types::WasmRow {
-                                        id: new.id.uuid().to_string(),
-                                        values: vec![],
-                                    },
-                                )
-                            })
-                            .collect(),
-                        pending: update.delta.pending,
-                    };
-
-                    // Invoke callback
-                    let js_delta = serde_wasm_bindgen::to_value(&wasm_delta)
-                        .map_err(|e| JsError::new(&e.to_string()))?;
-                    state
-                        .callback
-                        .call1(&JsValue::NULL, &js_delta)
-                        .map_err(|e| JsError::new(&format!("Callback error: {:?}", e)))?;
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
+    // For legacy mode, we need to handle this differently
+    // The old API expected async tick() calls
+    // For now, return an error directing to the new API
+    Err(JsError::new(
+        "Legacy JsStorageDriver API is no longer supported. \
+         Use the new constructor with a storage callback function instead."
+    ))
 }

@@ -234,7 +234,6 @@ mod tests {
 
             let query = QueryBuilder::new("todos").build();
             let results = client.query(query).await.unwrap();
-            eprintln!("DEBUG: Query returned {} results", results.len());
 
             assert_eq!(results.len(), 1, "Todo should persist");
             assert_eq!(results[0].0, created_id);

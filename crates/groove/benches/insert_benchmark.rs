@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{create_query_manager, create_session, current_timestamp, setup_data};
+use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use groove::query_manager::types::Value;
 
@@ -21,8 +21,8 @@ fn insert_own_folder(c: &mut Criterion) {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("documents", scale), &scale, |b, &scale| {
             // Setup: create data at scale
-            let mut qm = create_query_manager();
-            let data = setup_data(&mut qm, scale, USER_ID);
+            let mut core = create_runtime();
+            let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
 
             // Pick a folder owned by the user
@@ -34,9 +34,9 @@ fn insert_own_folder(c: &mut Criterion) {
                 let timestamp = current_timestamp();
 
                 // Insert with session - exercises WITH CHECK policy (INHERITS chain)
-                let result = qm.insert_with_session(
+                let result = core.insert(
                     "documents",
-                    &[
+                    vec![
                         Value::Uuid(folder_id),
                         Value::Text(format!("Bench Doc {}", doc_counter)),
                         Value::Text("Benchmark content".to_string()),
@@ -45,7 +45,7 @@ fn insert_own_folder(c: &mut Criterion) {
                     ],
                     Some(&session),
                 );
-                qm.process();
+                core.immediate_tick();
 
                 result.expect("insert should succeed")
             });
@@ -64,8 +64,8 @@ fn insert_team_folder(c: &mut Criterion) {
             // Setup: create data at scale
             // For this benchmark, we modify setup to give user access to some "other" folders
             // by making them owner of more teams
-            let mut qm = create_query_manager();
-            let data = setup_data(&mut qm, scale, USER_ID);
+            let mut core = create_runtime();
+            let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
 
             // Use a folder from owned teams (which exercises INHERITS chain)
@@ -78,9 +78,9 @@ fn insert_team_folder(c: &mut Criterion) {
 
                 // Insert authored by a different user but in accessible folder
                 // This exercises the INHERITS SELECT VIA folder_id chain
-                let result = qm.insert_with_session(
+                let result = core.insert(
                     "documents",
-                    &[
+                    vec![
                         Value::Uuid(folder_id),
                         Value::Text(format!("Team Doc {}", doc_counter)),
                         Value::Text("Team benchmark content".to_string()),
@@ -89,7 +89,7 @@ fn insert_team_folder(c: &mut Criterion) {
                     ],
                     Some(&session),
                 );
-                qm.process();
+                core.immediate_tick();
 
                 result.expect("insert should succeed via INHERITS")
             });
@@ -109,8 +109,8 @@ fn insert_batch(c: &mut Criterion) {
             BenchmarkId::new("documents_x100", scale),
             &scale,
             |b, &scale| {
-                let mut qm = create_query_manager();
-                let data = setup_data(&mut qm, scale, USER_ID);
+                let mut core = create_runtime();
+                let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
 
                 let folder_ids: Vec<_> = data
@@ -128,9 +128,9 @@ fn insert_batch(c: &mut Criterion) {
 
                     // Insert batch of documents
                     for (i, &folder_id) in folder_ids.iter().enumerate() {
-                        let result = qm.insert_with_session(
+                        let result = core.insert(
                             "documents",
-                            &[
+                            vec![
                                 Value::Uuid(folder_id),
                                 Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
                                 Value::Text("Batch content".to_string()),
@@ -141,7 +141,7 @@ fn insert_batch(c: &mut Criterion) {
                         );
                         result.expect("batch insert should succeed");
                     }
-                    qm.process();
+                    core.immediate_tick();
                 });
             },
         );

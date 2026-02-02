@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 groove = { path = "../groove" }
 groove-rocksdb = { path = "../groove-rocksdb" }
-groove-runtime = { path = "../groove-runtime" }
+groove-tokio = { path = "../groove-tokio" }
 jazz-transport = { path = "../jazz-transport" }
 
 tokio = { version = "1", features = ["full"] }

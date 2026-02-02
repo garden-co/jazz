@@ -11,6 +11,31 @@ Depth over breadth: One fully working feature is worth more than five scaffolded
 
 When working on multi-phase plans, ask before moving to the next phase. "Phase N compiles" is not the same as "Phase N works."
 
+## On Complex Multi-Step Work and the Completion Trap
+
+There is a strong systemic bias toward showing incremental progress - marking tasks complete, making each step compile, having green checkmarks. This bias actively harms complex work (refactors, multi-module features, architectural changes) where the correct path involves intermediate states that don't compile or pass tests.
+
+**The nature of complex work**: Whether refactoring existing code or building a new feature that touches many places, there's often no valid "halfway" state. The thing works when it's done, not incrementally. Fighting this reality by adding workarounds creates tech debt and obscures the design.
+
+**Principles:**
+
+- **Temporary breakage is expected**: Changing an interface breaks its callers. Adding a new abstraction means old code doesn't use it yet. The fix comes later in the plan. Do not add shims, null implementations, or workarounds to "fix" intermediate breakage.
+
+- **Deferred validation**: Running tests/checks after every micro-step creates pressure to "fix" expected errors. For complex work, validate at the END or at explicit milestones, not continuously.
+
+- **Design fidelity over completion**: A half-implemented design that compiles is worse than a fully-implemented design that doesn't compile yet.
+
+- **The TODO list is a map, not a railroad**: It shows what's left to do. It is not a forcing function requiring each item to leave the codebase working. Items can be reordered, combined, or done in parallel if that serves the design better.
+
+**Warning signs you're in the completion trap:**
+- Adding "temporary" implementations you plan to replace
+- Writing explicit loops where the design implies scheduler-driven iteration
+- Using test/null/mock versions of components the design says should be real
+- Feeling urgency to mark a task "done" before its design intent is realized
+- Choosing a suboptimal implementation order because "this task is next"
+
+**When you notice these signs**: STOP. Reread the plan. Ask whether you're implementing the design or working around it.
+
 We document internal architecture and plans in /specs as markdown files.
 We document public APIs and user guides in /docs as markdown files.
 

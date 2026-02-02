@@ -9,7 +9,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 groove = { path = "../groove" }
-groove-runtime = { path = "../groove-runtime" }
 jazz-transport = { path = "../jazz-transport" }
 
 wasm-bindgen = "0.2"
