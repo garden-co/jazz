@@ -130,4 +130,78 @@ describe("Todo Server Integration", () => {
       expect(res.status).toBe(400);
     });
   });
+
+  describe("SSE Live Endpoint", () => {
+    it("streams all todos and updates on changes", async () => {
+      // Connect to SSE endpoint
+      const res = await fetch(`${baseUrl}/todos/live`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/event-stream");
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+
+      // Helper to read next SSE event
+      async function readEvent(): Promise<Todo[]> {
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) throw new Error("Stream ended unexpectedly");
+          buffer += decoder.decode(value, { stream: true });
+
+          // Parse SSE format: "data: {...}\n\n"
+          const eventEnd = buffer.indexOf("\n\n");
+          if (eventEnd !== -1) {
+            const eventData = buffer.slice(0, eventEnd);
+            buffer = buffer.slice(eventEnd + 2);
+
+            const dataLine = eventData.split("\n").find((line) => line.startsWith("data: "));
+            if (dataLine) {
+              return JSON.parse(dataLine.slice(6));
+            }
+          }
+        }
+      }
+
+      // 1. Initial event should be empty list
+      const initial = await readEvent();
+      expect(initial).toEqual([]);
+
+      // 2. Create a todo - should see it in next event
+      const createRes = await fetch(`${baseUrl}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "SSE Test Todo" }),
+      });
+      expect(createRes.status).toBe(201);
+      const createdTodo: Todo = await createRes.json();
+
+      const afterCreate = await readEvent();
+      expect(afterCreate.length).toBe(1);
+      expect(afterCreate[0].id).toBe(createdTodo.id);
+      expect(afterCreate[0].title).toBe("SSE Test Todo");
+
+      // 3. Update the todo - should see updated state
+      await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ done: true }),
+      });
+
+      const afterUpdate = await readEvent();
+      expect(afterUpdate.length).toBe(1);
+      expect(afterUpdate[0].done).toBe(true);
+
+      // 4. Delete the todo - should see empty list again
+      await fetch(`${baseUrl}/todos/${createdTodo.id}`, {
+        method: "DELETE",
+      });
+
+      const afterDelete = await readEvent();
+      expect(afterDelete).toEqual([]);
+
+      // Clean up
+      reader.cancel();
+    });
+  });
 });

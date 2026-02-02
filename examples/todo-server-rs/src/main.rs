@@ -33,13 +33,18 @@ use std::sync::Arc;
 use axum::Router;
 use groove::schema_manager::SchemaDirectory;
 use jazz_rs::{AppContext, AppId, JazzClient};
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use routes::Todo;
+
 /// Application state shared across request handlers.
 pub struct AppState {
     pub client: JazzClient,
+    /// Broadcast channel for SSE updates. Sends the full list of todos.
+    pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
 #[tokio::main]
@@ -88,8 +93,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = JazzClient::connect(context).await?;
     info!("Connected to Jazz");
 
+    // Create broadcast channel for SSE updates
+    let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
+
     // Build application state
-    let state = Arc::new(AppState { client });
+    let state = Arc::new(AppState { client, sse_tx });
 
     // Build router
     let app = Router::new()

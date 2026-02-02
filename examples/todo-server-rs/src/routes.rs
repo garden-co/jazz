@@ -1,16 +1,23 @@
 //! HTTP routes for the todo API.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        IntoResponse,
+        sse::{Event, Sse},
+    },
     routing::{delete, get, post, put},
 };
+use futures_util::stream::Stream;
+use futures_util::StreamExt as FuturesStreamExt;
 use jazz_rs::{ObjectId, QueryBuilder, Value};
 use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -45,10 +52,24 @@ pub fn create_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/todos", get(list_todos))
         .route("/todos", post(create_todo))
+        .route("/todos/live", get(todos_live))
         .route("/todos/:id", get(get_todo))
         .route("/todos/:id", put(update_todo))
         .route("/todos/:id", delete(delete_todo))
         .route("/health", get(health))
+}
+
+/// Broadcast current todos to all SSE connections.
+async fn broadcast_todos(state: &AppState) {
+    let query = QueryBuilder::new("todos").build();
+    if let Ok(rows) = state.client.query(query).await {
+        let todos: Vec<Todo> = rows
+            .iter()
+            .filter_map(|(id, values)| row_to_todo(*id, values))
+            .collect();
+        // Ignore send errors (no receivers is fine)
+        let _ = state.sse_tx.send(todos);
+    }
 }
 
 /// Convert a query result row to a Todo.
@@ -119,6 +140,10 @@ async fn create_todo(
                     Some(description)
                 },
             };
+
+            // Broadcast to SSE connections
+            broadcast_todos(&state).await;
+
             (StatusCode::CREATED, Json(todo)).into_response()
         }
         Err(e) => (
@@ -198,6 +223,9 @@ async fn update_todo(
 
     match state.client.update(object_id, updates).await {
         Ok(()) => {
+            // Broadcast to SSE connections
+            broadcast_todos(&state).await;
+
             // Re-fetch the updated todo
             let query = QueryBuilder::new("todos").build();
             match state.client.query(query).await {
@@ -238,7 +266,11 @@ async fn delete_todo(
     let object_id = ObjectId::from_uuid(id);
 
     match state.client.delete(object_id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            // Broadcast to SSE connections
+            broadcast_todos(&state).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => {
             let err_str = e.to_string();
             if err_str.contains("NotFound") || err_str.contains("ObjectNotFound") {
@@ -261,4 +293,43 @@ async fn delete_todo(
 /// Health check.
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "healthy" }))
+}
+
+/// SSE endpoint streaming all todos on changes.
+async fn todos_live(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Subscribe to broadcast channel
+    let rx = state.sse_tx.subscribe();
+
+    // Get initial state
+    let query = QueryBuilder::new("todos").build();
+    let initial_todos: Vec<Todo> = state
+        .client
+        .query(query)
+        .await
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|(id, values)| row_to_todo(*id, values))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Create stream that yields initial state then updates
+    let initial_event = futures_util::stream::once(async move {
+        Ok::<_, Infallible>(
+            Event::default().data(serde_json::to_string(&initial_todos).unwrap_or_default()),
+        )
+    });
+
+    let update_stream = BroadcastStream::new(rx).filter_map(|result| async move {
+        match result {
+            Ok(todos) => Some(Ok::<_, Infallible>(
+                Event::default().data(serde_json::to_string(&todos).unwrap_or_default()),
+            )),
+            Err(_) => None, // Ignore lagged errors
+        }
+    });
+
+    Sse::new(initial_event.chain(update_stream))
 }
