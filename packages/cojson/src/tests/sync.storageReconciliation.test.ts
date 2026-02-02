@@ -78,18 +78,17 @@ describe("full storage reconciliation", () => {
   test("startStorageReconciliation sends 'reconcile' message, server responds with 'known' messages for outdated CoValues", async () => {
     const client = setupTestNode();
     const { storage } = client.addStorage();
+    client.connectToSyncServer({ persistent: true });
 
     const group = client.node.createGroup();
     const map = group.createMap();
     map.set("hello", "world", "trusting");
-    await map.core.waitForSync();
 
-    importContentIntoNode(group.core, jazzCloud.node);
-    importContentIntoNode(map.core, jazzCloud.node);
+    await map.core.waitForSync();
 
     map.set("hello", "world2", "trusting");
-    await map.core.waitForSync();
 
+    // Restart the client before the latest change is synced to the sync server
     await client.restart();
     client.addStorage({ storage });
     client.connectToSyncServer({ persistent: true, skipReconciliation: true });
@@ -124,9 +123,6 @@ describe("full storage reconciliation", () => {
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN Group sessions: header/3",
         "server -> client | KNOWN Map sessions: header/2",
-        "server -> client | CONTENT Map header: true new: ",
-        "client -> server | KNOWN Map sessions: header/2",
-        "client -> storage | CONTENT Map header: true new: ",
       ]
     `);
   });
