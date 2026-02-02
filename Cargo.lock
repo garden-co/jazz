@@ -2252,14 +2252,17 @@ name = "todo-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "groove",
  "http-body-util",
  "jazz-rs",
  "reqwest",
+ "reqwest-eventsource",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http 0.5.2",
  "tracing",
@@ -2324,6 +2327,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

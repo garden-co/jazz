@@ -120,6 +120,22 @@ export async function createServer(driver: StorageDriver): Promise<TodoServer> {
   const app = express();
   app.use(express.json());
 
+  // Track active SSE connections for live updates
+  const sseConnections = new Set<Response>();
+
+  // Helper to broadcast current todos to all SSE connections
+  async function broadcastTodos() {
+    const rows = await client.query(buildQuery("todos"));
+    const todos = rows
+      .map((row) => rowToTodo(row.id, row.values))
+      .filter((t): t is Todo => t !== null);
+    const data = `data: ${JSON.stringify(todos)}\n\n`;
+
+    for (const res of sseConnections) {
+      res.write(data);
+    }
+  }
+
   // ========================================================================
   // Routes
   // ========================================================================
@@ -169,9 +185,36 @@ export async function createServer(driver: StorageDriver): Promise<TodoServer> {
       };
 
       res.status(201).json(todo);
+
+      // Notify SSE connections
+      broadcastTodos();
     } catch (e) {
       next(e);
     }
+  });
+
+  // Live SSE stream of all todos (must be before /todos/:id)
+  app.get("/todos/live", async (_req: Request, res: Response) => {
+    // Set SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    // Register this connection
+    sseConnections.add(res);
+
+    // Send initial state
+    const rows = await client.query(buildQuery("todos"));
+    const todos = rows
+      .map((row) => rowToTodo(row.id, row.values))
+      .filter((t): t is Todo => t !== null);
+    res.write(`data: ${JSON.stringify(todos)}\n\n`);
+
+    // Clean up on disconnect
+    res.on("close", () => {
+      sseConnections.delete(res);
+    });
   });
 
   // Get a single todo
@@ -245,6 +288,9 @@ export async function createServer(driver: StorageDriver): Promise<TodoServer> {
 
       const todo = rowToTodo(row.id, row.values);
       res.json(todo);
+
+      // Notify SSE connections
+      broadcastTodos();
     } catch (e) {
       next(e);
     }
@@ -257,6 +303,9 @@ export async function createServer(driver: StorageDriver): Promise<TodoServer> {
 
       await client.delete(id);
       res.status(204).send();
+
+      // Notify SSE connections
+      broadcastTodos();
     } catch (e) {
       const error = e as Error;
       if (error.message?.includes("NotFound")) {

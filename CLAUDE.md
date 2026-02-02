@@ -28,6 +28,7 @@ There is a strong systemic bias toward showing incremental progress - marking ta
 - **The TODO list is a map, not a railroad**: It shows what's left to do. It is not a forcing function requiring each item to leave the codebase working. Items can be reordered, combined, or done in parallel if that serves the design better.
 
 **Warning signs you're in the completion trap:**
+
 - Adding "temporary" implementations you plan to replace
 - Writing explicit loops where the design implies scheduler-driven iteration
 - Using test/null/mock versions of components the design says should be real

@@ -4,13 +4,14 @@
 
 ## Overview
 
-This document describes how RuntimeCore orchestrates storage I/O and sync messaging through a batched tick architecture. The design separates *what* needs to happen (storage requests, sync messages) from *when/how* it happens (IoHandler implementation).
+This document describes how RuntimeCore orchestrates storage I/O and sync messaging through a batched tick architecture. The design separates _what_ needs to happen (storage requests, sync messages) from _when/how_ it happens (IoHandler implementation).
 
 ## Core Concepts
 
 ### RuntimeCore<H: IoHandler>
 
 RuntimeCore is generic over an IoHandler, which abstracts platform-specific I/O:
+
 - **TokioIoHandler** (groove-tokio): Uses RocksDB synchronously, spawns batched_tick via tokio
 - **WasmIoHandler** (groove-wasm): Fires requests to JS callbacks, uses spawn_local
 

@@ -2,6 +2,7 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -10,10 +11,15 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::response::sse::{Event, Sse};
+use futures_util::stream::Stream;
+use futures_util::StreamExt as _;
 use http_body_util::BodyExt;
 use jazz_rs::{AppContext, AppId, ColumnType, JazzClient, SchemaBuilder, TableSchema};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
@@ -45,6 +51,7 @@ pub struct UpdateTodoRequest {
 /// Application state.
 pub struct AppState {
     pub client: JazzClient,
+    pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
 fn test_schema() -> jazz_rs::Schema {
@@ -72,12 +79,14 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
     };
 
     let client = JazzClient::connect(context).await.unwrap();
-    let state = Arc::new(AppState { client });
+    let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
+    let state = Arc::new(AppState { client, sse_tx });
 
     // Build router matching main.rs
     Router::new()
         .route("/todos", axum::routing::get(list_todos))
         .route("/todos", axum::routing::post(create_todo))
+        .route("/todos/live", axum::routing::get(todos_live))
         .route("/todos/:id", axum::routing::put(update_todo))
         .route("/todos/:id", axum::routing::delete(delete_todo))
         .route("/health", axum::routing::get(health))
@@ -113,6 +122,54 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
         completed,
         description,
     })
+}
+
+/// Broadcast current todos to all SSE connections.
+async fn broadcast_todos(state: &AppState) {
+    let query = QueryBuilder::new("todos").build();
+    if let Ok(rows) = state.client.query(query).await {
+        let todos: Vec<Todo> = rows
+            .iter()
+            .filter_map(|(id, values)| row_to_todo(*id, values))
+            .collect();
+        let _ = state.sse_tx.send(todos);
+    }
+}
+
+/// SSE endpoint streaming all todos on changes.
+async fn todos_live(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.sse_tx.subscribe();
+
+    let query = QueryBuilder::new("todos").build();
+    let initial_todos: Vec<Todo> = state
+        .client
+        .query(query)
+        .await
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|(id, values)| row_to_todo(*id, values))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let initial_event = futures_util::stream::once(async move {
+        Ok::<_, Infallible>(
+            Event::default().data(serde_json::to_string(&initial_todos).unwrap_or_default()),
+        )
+    });
+
+    let update_stream = BroadcastStream::new(rx).filter_map(|result| async move {
+        match result {
+            Ok(todos) => Some(Ok::<_, Infallible>(
+                Event::default().data(serde_json::to_string(&todos).unwrap_or_default()),
+            )),
+            Err(_) => None,
+        }
+    });
+
+    Sse::new(initial_event.chain(update_stream))
 }
 
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -155,6 +212,7 @@ async fn create_todo(
                     Some(description)
                 },
             };
+            broadcast_todos(&state).await;
             (StatusCode::CREATED, Json(todo)).into_response()
         }
         Err(e) => (
@@ -184,6 +242,7 @@ async fn update_todo(
 
     match state.client.update(object_id, updates).await {
         Ok(()) => {
+            broadcast_todos(&state).await;
             let query = QueryBuilder::new("todos").build();
             match state.client.query(query).await {
                 Ok(rows) => {
@@ -221,7 +280,10 @@ async fn delete_todo(
 ) -> impl IntoResponse {
     let object_id = ObjectId::from_uuid(id);
     match state.client.delete(object_id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            broadcast_todos(&state).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -623,4 +685,96 @@ async fn test_server_resync() {
     }
 
     drop(server);
+}
+
+/// Test that the /todos/live SSE endpoint streams all todos and updates on changes.
+#[tokio::test]
+async fn test_todos_live_sse() {
+    use futures_util::StreamExt;
+    use reqwest_eventsource::{Event, EventSource};
+
+    let temp_dir = TempDir::new().unwrap();
+    let app = setup_test_app(&temp_dir).await;
+
+    // Start a real HTTP server for SSE (tower oneshot doesn't support streaming)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Give server time to start
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Connect to SSE endpoint
+    let mut es = EventSource::get(format!("{}/todos/live", base_url));
+
+    // Helper to get next event data
+    async fn next_todos(es: &mut EventSource) -> Vec<Todo> {
+        loop {
+            match es.next().await {
+                Some(Ok(Event::Message(msg))) => {
+                    return serde_json::from_str(&msg.data).expect("parse todos");
+                }
+                Some(Ok(Event::Open)) => continue,
+                Some(Err(e)) => panic!("SSE error: {:?}", e),
+                None => panic!("SSE stream ended unexpectedly"),
+            }
+        }
+    }
+
+    // 1. Initial event should be empty list
+    let initial = next_todos(&mut es).await;
+    assert!(initial.is_empty(), "Should start empty");
+
+    // 2. Create a todo - should see it in next event
+    let client = reqwest::Client::new();
+    let create_resp = client
+        .post(format!("{}/todos", base_url))
+        .json(&CreateTodoRequest {
+            title: "SSE Test".to_string(),
+            description: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 201);
+    let created: Todo = create_resp.json().await.unwrap();
+
+    let after_create = next_todos(&mut es).await;
+    assert_eq!(after_create.len(), 1);
+    assert_eq!(after_create[0].id, created.id);
+    assert_eq!(after_create[0].title, "SSE Test");
+
+    // 3. Update the todo - should see updated state
+    client
+        .put(format!("{}/todos/{}", base_url, created.id))
+        .json(&UpdateTodoRequest {
+            title: None,
+            completed: Some(true),
+            description: None,
+        })
+        .send()
+        .await
+        .unwrap();
+
+    let after_update = next_todos(&mut es).await;
+    assert_eq!(after_update.len(), 1);
+    assert!(after_update[0].completed, "Should be completed");
+
+    // 4. Delete the todo - should see empty list again
+    client
+        .delete(format!("{}/todos/{}", base_url, created.id))
+        .send()
+        .await
+        .unwrap();
+
+    let after_delete = next_todos(&mut es).await;
+    assert!(after_delete.is_empty(), "Should be empty after delete");
+
+    // Clean up
+    es.close();
+    server_handle.abort();
 }
