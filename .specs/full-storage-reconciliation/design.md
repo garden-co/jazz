@@ -251,19 +251,15 @@ pendingReconciliationAck: Set<string> = new Set(); // entries are "batchId#peerI
 const RECONCILIATION_BATCH_SIZE = 100;
 
 /**
- * Ensures all CoValues in storage are synced to server peers.
+ * Ensures all CoValues in storage are synced to the given server peer.
  * Sends "reconcile" message(s) with [coValueId, sessionsHash] for each CoValue.
  * Server responds with "known" only where it is missing the CoValue or has different sessions,
  * so that client can send missing content.
  * Processes CoValues in batches of RECONCILIATION_BATCH_SIZE.
  */
-startStorageReconciliation(): void {
+startStorageReconciliation(peer: PeerState): void {
   if (!this.local.storage) return;
-
-  const serverPeers = Object.values(this.peers).filter(
-    isPersistentServerPeer,
-  );
-  if (serverPeers.length === 0) return;
+  if (!isPersistentServerPeer(peer)) return;
 
   const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
 
@@ -275,10 +271,8 @@ startStorageReconciliation(): void {
       id: batchId,
       values: entries,
     };
-    for (const peer of serverPeers) {
-      this.pendingReconciliationAck.add(`${batchId}#${peer.id}`);
-      this.trySendToPeer(peer, msg);
-    }
+    this.pendingReconciliationAck.add(`${batchId}#${peer.id}`);
+    this.trySendToPeer(peer, msg);
   };
 
   const processStorageBatch = (offset: number) => {
@@ -324,6 +318,102 @@ startStorageReconciliation(): void {
 
 When the client receives a "known" message (in response to a reconcile), it compares with local known state and uploads content if the client is ahead. Since `startStorageReconciliation` only loads the CoValue known state (but not its content), we need to modify the `handleKnownState` method to load the CoValue if it's partially loaded.
 
+### 5. Scheduling: when to run storage reconciliation
+
+Storage reconciliation runs per server peer, periodically (every 30 days), with single-tab/process execution per peer. If the process is interrupted, it is fine to restart when the app is reloaded. There is one lock and lastRun per peer, so reconciliation with different peers can run independently (or in parallel). We use the Storage API to schedule the run.
+
+#### 5.1. Storage API additions
+
+**File:** `packages/cojson/src/storage/types.ts`
+
+Add to `StorageAPI`:
+
+```typescript
+export type StorageReconciliationAcquireResult =
+  | { acquired: true }
+  | { acquired: false; reason: "not_due" | "lock_held" };
+
+// Constants (in sync.ts or a shared config):
+// LOCK_TTL_MS = 24 * 60 * 60 * 1000 (1 day)
+// RECONCILIATION_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000 (30 days)
+
+/**
+ * Try to acquire the storage reconciliation lock for a given peer.
+ * Atomically checks if reconciliation is due for this peer (lastRun older than 30 days or missing)
+ * and if no other process/tab holds the lock for this peer, then acquires it.
+ * @param sessionId - Unique ID for this process/tab (e.g. crypto.randomUUID())
+ * @param peerId - The peer ID to reconcile with.
+ * @param callback - Called with result. If acquired, caller must call releaseStorageReconciliationLock on completion.
+ */
+tryAcquireStorageReconciliationLock(
+  sessionId: string,
+  peerId: string,
+  callback: (result: StorageReconciliationAcquireResult) => void
+): void;
+
+/**
+ * Release the storage reconciliation lock for a peer and record completion. Only call on successful completion.
+ * On failure/interrupt, do not call; the lock expires after LOCK_TTL_MS and another process can retry for this peer.
+ * @param sessionId - The sessionId that acquired the lock.
+ * @param peerId - The peer ID for this reconciliation run.
+ * @param releasedAt - Timestamp when reconciliation completed / lock was released (e.g. Date.now()).
+ */
+releaseStorageReconciliationLock(
+  sessionId: string,
+  peerId: string,
+  releasedAt: number,
+): void;
+```
+
+**Behavior of `tryAcquireStorageReconciliationLock`** (must run in one storage transaction):
+
+1. Read `lastRun` for this peerId. If it exists and `Date.now() - timestamp < RECONCILIATION_INTERVAL_MS`, return `{ acquired: false, reason: "not_due" }`.
+2. Read `lock` for this peerId. If it exists and `expiresAt >= Date.now()`, return `{ acquired: false, reason: "lock_held" }`.
+3. Otherwise: write `lock` for this peerId with `{ holderSessionId, acquiredAt, expiresAt: now + LOCK_TTL_MS }` and return `{ acquired: true }`.
+
+#### 5.2. startStorageReconciliation takes a peer
+
+**File:** `packages/cojson/src/sync.ts`
+
+Change `startStorageReconciliation()` to accept a peer and only send reconcile messages to that peer:
+
+```typescript
+startStorageReconciliation(peer: PeerState): void;
+```
+
+Reconcile batches are sent only to the given peer. `pendingReconciliationAck` entries for a given run are only for that peer. Completion is detected when all acks for that peer's batches are received.
+
+#### 5.3. Storage backend implementations
+
+Add the two methods to `StorageAPI`; implementations delegate to the underlying DB client. Add corresponding methods to `DBClientInterfaceSync` and `DBClientInterfaceAsync` in `packages/cojson/src/storage/types.ts`, and implement in the storage wrappers (`storageSync.ts`, `storageAsync.ts`). Lock and lastRun are stored per peerId (e.g. key = `lock#${peerId}` and `lastRun#${peerId}`). The release method atomically removes the lock and updates lastRun for that peer in one transaction.
+
+**IndexedDB** (`packages/cojson-storage-indexeddb`):
+
+- Add object store `storageReconciliationMetadata` with keyPath `"key"` (bump DB version).
+- Rows: `{ key: "lock#<peerId>", holderSessionId, acquiredAt, expiresAt }`, `{ key: "lastRun#<peerId>", timestamp }`.
+- Implement using IndexedDB transactions.
+
+**SQLite** (`packages/cojson-storage-sqlite`):
+
+- Add table `storage_reconciliation_metadata` with columns for peerId and lock/lastRun (e.g. composite key `(peerId, key)` or `peer_id`, `key`, `holder_session_id`, `acquired_at`, `expires_at`, `timestamp`).
+- Implement using SQLite transactions.
+
+#### 5.4. Integration point
+
+**File:** `packages/cojson/src/sync.ts` (e.g. when adding a peer)
+
+For each persistent server peer, check if full-storage reconciliation needs to be performed for that peer:
+
+1. If `!this.local.storage`, skip.
+2. Call `storage.tryAcquireStorageReconciliationLock(sessionId, peer.id, (result) => { ... })`.
+3. If `result.acquired`:
+   - Call `this.startStorageReconciliation(peer)`.
+   - Wait for completion (e.g. poll `pendingReconciliationAck` for entries matching this peer, or add completion callback).
+   - On success: call `storage.releaseStorageReconciliationLock(sessionId, peer.id, Date.now())`.
+   - On failure/interrupt: do not call release; the lock expires after `LOCK_TTL_MS` and another process/tab can acquire it and retry for this peer.
+
+Run this check when a persistent server peer is added (and at startup for already-connected peers).
+
 ## Design Considerations
 
 1. **No Subscription**: The "reconcile" message does not create a subscription. The server does not add the client to its subscription list for the CoValues in the reconcile; it only sends back "known" where state differs or the CoValue is missing.
@@ -336,13 +426,21 @@ When the client receives a "known" message (in response to a reconcile), it comp
 
 5. **Batching**: CoValues are processed in batches of 100. Reconcile messages are sent per batch (one message per batch per peer). Storage never returns all IDs in one call.
 
-6. **Completion signal**: The server sends a **reconcile-ack** with the same batch `id` after processing each reconcile message. The client tracks pending acks in `pendingReconciliationAck` (e.g. `"batchId#peerId"`) so it knows when each batch has been acknowledged by each server peer. Callers can use this to run logic after reconciliation (e.g. when `pendingReconciliationAck` is empty for a given run).
+6. **Completion signal**: The server sends a **reconcile-ack** with the same batch `id` after processing each reconcile message. The client tracks pending acks in `pendingReconciliationAck` (e.g. `"batchId#peerId"`) so it knows when each batch has been acknowledged by each server peer. Callers can use this to run logic after reconciliation (e.g. when `pendingReconciliationAck` is empty for a given peer's run).
+
+7. **Scheduling**: Reconciliation runs at most every 30 days per peer, triggered when peers connect. Lock and lastRun are per peer; reconciliation with different peers can run independently. Storage backends persist lock and `lastRun` per peerId; the lock ensures only one tab/process runs reconciliation for a given peer at a time. Lock TTL is 1 day; if interrupted, another tab/process can acquire when it expires. `lastRun` is only updated on successful completion (via `releaseStorageReconciliationLock`), so interrupted runs do not block the next due run.
 
 ## Testing
 
-- Test `startStorageReconciliation` with CoValues only in storage
+- Test `startStorageReconciliation(peer)` with CoValues only in storage (single peer)
 - Test with CoValues already in memory
 - Test with mixed scenarios (some synced, some not)
 - Verify that client correctly uploads content when needed after receiving "known" messages
 - Verify that server sends "reconcile-ack" with the same `id` after processing each "reconcile" batch
 - Verify that client removes entries from `pendingReconciliationAck` when it receives "reconcile-ack" (e.g. one ack per peer per batch)
+- **Scheduling / lock**: Test `tryAcquireStorageReconciliationLock` returns `not_due` when `lastRun` for that peer is recent
+- **Scheduling / lock**: Test `tryAcquireStorageReconciliationLock` returns `lock_held` when another process holds a non-expired lock for that peer
+- **Scheduling / lock**: Test `tryAcquireStorageReconciliationLock` returns `acquired: true` when due and no lock (or lock expired) for that peer
+- **Scheduling / lock**: Test that locks are independent per peer (acquiring for peer A does not block peer B)
+- **Scheduling / lock**: Test that `lastRun` is only updated on successful completion, not on acquisition
+- **Scheduling / lock**: Test with both IndexedDB and SQLite backends

@@ -867,7 +867,10 @@ describe("full storage reconciliation", () => {
     expect(syncServer.hasCoValue(group.id)).toBe(false);
     expect(syncServer.hasCoValue(map.id)).toBe(false);
 
-    anotherClient.syncManager.startStorageReconciliation();
+    const serverPeer = Object.values(anotherClient.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    anotherClient.syncManager.startStorageReconciliation(serverPeer);
 
     await waitFor(() => syncServer.hasCoValue(group.id));
     await waitFor(() => syncServer.hasCoValue(map.id));
@@ -895,7 +898,10 @@ describe("full storage reconciliation", () => {
     const syncServer = createTestNode();
     connectToSyncServer(anotherClient, syncServer, true);
 
-    anotherClient.syncManager.startStorageReconciliation();
+    const serverPeer = Object.values(anotherClient.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    anotherClient.syncManager.startStorageReconciliation(serverPeer);
 
     await waitFor(() => syncServer.hasCoValue(group.id));
     for (const map of maps) {

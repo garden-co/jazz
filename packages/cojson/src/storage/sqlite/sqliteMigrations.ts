@@ -47,6 +47,15 @@ export const migrations: Record<number, string[]> = {
     ) WITHOUT ROWID;`,
     "CREATE INDEX IF NOT EXISTS deletedCoValuesByStatus ON deletedCoValues (status);",
   ],
+  6: [
+    `CREATE TABLE IF NOT EXISTS storage_reconciliation_metadata (
+      key TEXT PRIMARY KEY,
+      holder_session_id TEXT,
+      acquired_at INTEGER,
+      expires_at INTEGER,
+      released_at INTEGER
+    ) WITHOUT ROWID;`,
+  ],
 };
 
 type Migration = {

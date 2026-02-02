@@ -328,21 +328,28 @@ export class SyncManager {
   }
 
   /**
-   * Ensures all CoValues in storage are synced to server peers.
+   * Ensures all CoValues in storage are synced to the given server peer.
    * Sends "reconcile" message(s) with [coValueId, sessionsHash] for each CoValue.
    * Server responds with "known" only where it is missing the CoValue or has different sessions,
    * so that client can send missing content.
    * Processes CoValues in batches of RECONCILIATION_BATCH_SIZE.
+   * @param peer - The server peer to reconcile with.
+   * @param onComplete - Called when reconciliation is fully complete (all batches sent and acked).
    */
-  startStorageReconciliation(): void {
+  startStorageReconciliation(peer: PeerState, onComplete?: () => void): void {
     if (!this.local.storage) return;
-
-    const serverPeers = Object.values(this.peers).filter(
-      isPersistentServerPeer,
-    );
-    if (serverPeers.length === 0) return;
+    if (!isPersistentServerPeer(peer)) return;
 
     const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
+    let lastBatchSent = false;
+    const peerId = peer.id;
+    const hasPendingAcksForPeer = () =>
+      [...this.pendingReconciliationAck].some((k) => k.endsWith(`#${peerId}`));
+    const maybeComplete = () => {
+      if (lastBatchSent && !hasPendingAcksForPeer() && onComplete) {
+        onComplete();
+      }
+    };
 
     const sendReconcileBatch = (entries: [RawCoID, string][]) => {
       if (entries.length === 0) return;
@@ -352,10 +359,8 @@ export class SyncManager {
         id: batchId,
         values: entries,
       };
-      for (const peer of serverPeers) {
-        this.pendingReconciliationAck.add(`${batchId}#${peer.id}`);
-        this.trySendToPeer(peer, msg);
-      }
+      this.pendingReconciliationAck.add(`${batchId}#${peer.id}`);
+      this.trySendToPeer(peer, msg);
     };
 
     const processStorageBatch = (offset: number) => {
@@ -369,6 +374,9 @@ export class SyncManager {
             sendReconcileBatch(entries);
             if (batch.length === batchSize) {
               processStorageBatch(offset + batch.length);
+            } else {
+              lastBatchSent = true;
+              maybeComplete();
             }
           }
         };
@@ -386,10 +394,50 @@ export class SyncManager {
         }
         if (pending.length === 0 && batch.length >= batchSize) {
           processStorageBatch(offset + batchSize);
+        } else if (pending.length === 0 && batch.length < batchSize) {
+          lastBatchSent = true;
+          maybeComplete();
         }
       });
     };
+
+    let completed = false;
+    const completionCallback = onComplete;
+    const checkInterval = completionCallback
+      ? setInterval(() => {
+          if (peer.closed || completed) {
+            clearInterval(checkInterval);
+            return;
+          }
+          if (lastBatchSent && !hasPendingAcksForPeer()) {
+            completed = true;
+            clearInterval(checkInterval);
+            completionCallback();
+          }
+        }, 1000)
+      : undefined;
+
     processStorageBatch(0);
+  }
+
+  private maybeStartStorageReconciliationForPeer(peer: PeerState): void {
+    if (!this.local.storage) return;
+
+    const sessionId = this.local.currentSessionID;
+    this.local.storage.tryAcquireStorageReconciliationLock(
+      sessionId,
+      peer.id,
+      (result) => {
+        if (!result.acquired) return;
+
+        this.startStorageReconciliation(peer, () => {
+          this.local.storage?.releaseStorageReconciliationLock(
+            sessionId,
+            peer.id,
+          );
+        });
+      },
+    );
   }
 
   async resumeUnsyncedCoValues(): Promise<void> {
@@ -476,6 +524,9 @@ export class SyncManager {
       this.resumeUnsyncedCoValues().catch((error) => {
         logger.warn("Failed to resume unsynced CoValues:", error);
       });
+
+      // Try to run full storage reconciliation for this peer (scheduled per peer, every 30 days)
+      this.maybeStartStorageReconciliationForPeer(peer);
     }
 
     const coValuesOrderedByDependency: CoValueCore[] = [];

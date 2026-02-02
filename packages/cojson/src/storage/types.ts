@@ -13,6 +13,10 @@ export type CorrectionCallback = (
   correction: CoValueKnownState,
 ) => NewContentMessage[] | undefined;
 
+export type StorageReconciliationAcquireResult =
+  | { acquired: true }
+  | { acquired: false; reason: "not_due" | "lock_held" };
+
 /**
  * Deletion work queue status for `deletedCoValues` (SQLite).
  *
@@ -99,6 +103,23 @@ export interface StorageAPI {
     offset: number,
     callback: (batch: { id: RawCoID }[]) => void,
   ): void;
+
+  /**
+   * Try to acquire the storage reconciliation lock for a given peer.
+   * Atomically checks if reconciliation is due for this peer (lastRun older than 30 days or missing)
+   * and if no other process/tab holds the lock for this peer, then acquires it.
+   */
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    callback: (result: StorageReconciliationAcquireResult) => void,
+  ): void;
+
+  /**
+   * Release the storage reconciliation lock for a peer and record completion. Only call on successful completion.
+   * On failure/interrupt, do not call; the lock expires after LOCK_TTL_MS and another process can retry for this peer.
+   */
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void;
 
   /**
    * Load only the knownState (header presence + session counters) for a CoValue.
@@ -248,6 +269,16 @@ export interface DBClientInterfaceAsync {
   ): Promise<CoValueKnownState | undefined>;
 
   getCoValueIDs(limit: number, offset: number): Promise<{ id: RawCoID }[]>;
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<StorageReconciliationAcquireResult>;
+
+  releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<void>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -335,4 +366,11 @@ export interface DBClientInterfaceSync {
   getCoValueKnownState(coValueId: string): CoValueKnownState | undefined;
 
   getCoValueIDs(limit: number, offset: number): { id: RawCoID }[];
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): StorageReconciliationAcquireResult;
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void;
 }

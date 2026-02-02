@@ -12,7 +12,9 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "cojson";
+import { cojsonInternals } from "cojson";
 import {
   CoJsonIDBTransaction,
   putIndexedDbStore,
@@ -401,6 +403,82 @@ export class IDBClient implements DBClientInterfaceAsync {
       },
       ["unsyncedCoValues"],
     );
+  }
+
+  async tryAcquireStorageReconciliationLock(
+    sessionId: string,
+    peerId: string,
+  ): Promise<StorageReconciliationAcquireResult> {
+    const lockKey = `lock#${peerId}`;
+    const now = Date.now();
+    const { LOCK_TTL_MS, RECONCILIATION_INTERVAL_MS } =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG;
+
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(
+        ["storageReconciliationMetadata"],
+        "readwrite",
+      );
+      const store = tx.objectStore("storageReconciliationMetadata");
+
+      const lockReq = store.get(lockKey);
+      lockReq.onsuccess = () => {
+        const lock = lockReq.result as
+          | { releasedAt?: number; expiresAt?: number }
+          | undefined;
+        if (
+          lock?.releasedAt &&
+          now - lock.releasedAt < RECONCILIATION_INTERVAL_MS
+        ) {
+          resolve({ acquired: false, reason: "not_due" });
+          return;
+        }
+        if (lock?.expiresAt !== undefined && lock.expiresAt >= now) {
+          resolve({ acquired: false, reason: "lock_held" });
+          return;
+        }
+        store.put({
+          key: lockKey,
+          holderSessionId: sessionId,
+          acquiredAt: now,
+          expiresAt: now + LOCK_TTL_MS,
+        });
+        resolve({ acquired: true });
+      };
+      lockReq.onerror = () => reject(lockReq.error);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+  ): Promise<void> {
+    const lockKey = `lock#${peerId}`;
+    const releasedAt = Date.now();
+
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(
+        ["storageReconciliationMetadata"],
+        "readwrite",
+      );
+      const store = tx.objectStore("storageReconciliationMetadata");
+
+      const lockReq = store.get(lockKey);
+      lockReq.onsuccess = () => {
+        const lock = lockReq.result as { holderSessionId?: string } | undefined;
+        if (lock?.holderSessionId === sessionId) {
+          store.put({
+            ...lock,
+            releasedAt,
+          });
+        }
+        resolve();
+      };
+      lockReq.onerror = () => reject(lockReq.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
   }
 
   async getCoValueKnownState(

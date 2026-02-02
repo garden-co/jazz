@@ -4,7 +4,8 @@ export type StoreName =
   | "transactions"
   | "signatureAfter"
   | "deletedCoValues"
-  | "unsyncedCoValues";
+  | "unsyncedCoValues"
+  | "storageReconciliationMetadata";
 
 const DEFAULT_TX_STORES: StoreName[] = [
   "coValues",

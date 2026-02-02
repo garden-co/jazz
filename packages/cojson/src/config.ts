@@ -67,6 +67,8 @@ export function setMaxInFlightLoadsPerPeer(limit: number) {
 
 export const STORAGE_RECONCILIATION_CONFIG = {
   BATCH_SIZE: 100,
+  LOCK_TTL_MS: 24 * 60 * 60 * 1000, // 1 day
+  RECONCILIATION_INTERVAL_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
 };
 
 export function setStorageReconciliationBatchSize(size: number) {

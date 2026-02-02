@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { RawCoID, SessionID } from "../ids";
 import { PeerID } from "../sync";
-import { StorageAPI } from "../storage/types";
+import type {
+  StorageAPI,
+  StorageReconciliationAcquireResult,
+} from "../storage/types";
 import { CoValueKnownState, peerHasAllContent } from "../knownState";
 import { createTestNode, createUnloadedCoValue } from "./testUtils";
 
@@ -33,6 +36,16 @@ function createMockStorage(
     markDeleteAsValid?: (id: RawCoID) => void;
     enableDeletedCoValuesErasure?: () => void;
     eraseAllDeletedCoValues?: () => Promise<void>;
+    tryAcquireStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback: (result: StorageReconciliationAcquireResult) => void,
+    ) => void;
+    releaseStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback?: () => void,
+    ) => void;
   } = {},
 ): StorageAPI {
   return {
@@ -51,6 +64,13 @@ function createMockStorage(
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
     onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
+    tryAcquireStorageReconciliationLock:
+      opts.tryAcquireStorageReconciliationLock ||
+      vi.fn((_sessionId, _peerId, callback) =>
+        callback({ acquired: false as const, reason: "not_due" as const }),
+      ),
+    releaseStorageReconciliationLock:
+      opts.releaseStorageReconciliationLock || vi.fn(),
   };
 }
 
