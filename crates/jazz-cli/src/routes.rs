@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Json,
         sse::{Event, KeepAlive, Sse},
@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use futures::stream::Stream;
+use groove::sync_manager::SyncPayload;
 use jazz_transport::{
     ConnectionId, CreateObjectRequest, CreateObjectResponse, DeleteObjectRequest, ErrorResponse,
     ServerEvent, SubscribeRequest, SubscribeResponse, SuccessResponse, SyncPayloadRequest,
@@ -25,6 +26,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::commands::server::{ConnectionState, ServerState};
+use crate::middleware::auth::{extract_session, validate_admin_secret};
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -70,11 +72,8 @@ async fn events_handler(
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Register client with runtime and sync all data to them
-    let _ = state
-        .runtime_handle
-        .add_client_with_full_sync(client_id, None)
-        .await;
+    // Register client with runtime - sync is query-driven, not full-sync on connect
+    let _ = state.runtime.add_client(client_id, None);
 
     // Subscribe to broadcast channel for this client's events
     let mut sync_rx = state.sync_broadcast.subscribe();
@@ -140,26 +139,55 @@ async fn events_handler(
             let mut connections = state_cleanup.connections.write().await;
             connections.remove(&connection_id_cleanup);
         }
-        let _ = state_cleanup.runtime_handle.remove_client(client_id_cleanup).await;
+        let _ = state_cleanup.runtime.remove_client(client_id_cleanup);
         tracing::debug!("SSE connection {} closed, cleaned up", connection_id_cleanup);
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+/// Check if a sync payload is for a catalogue object (schema or lens).
+fn is_catalogue_payload(payload: &SyncPayload) -> bool {
+    match payload {
+        SyncPayload::ObjectUpdated { metadata, .. } => {
+            if let Some(meta) = metadata {
+                if let Some(type_str) = meta.metadata.get("type") {
+                    return type_str == "catalogue_schema" || type_str == "catalogue_lens";
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Push a sync payload to the server's inbox.
+///
+/// Catalogue objects (schema/lens) require admin authentication.
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
+
+    // Check if this is a catalogue object - requires admin auth
+    if is_catalogue_payload(&request.payload) {
+        let admin_secret = headers
+            .get("X-Jazz-Admin-Secret")
+            .and_then(|v| v.to_str().ok());
+
+        if let Err((status, msg)) = validate_admin_secret(admin_secret, &state.auth_config) {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
 
     let entry = InboxEntry {
         source: Source::Client(request.client_id),
         payload: request.payload,
     };
 
-    match state.runtime_handle.push_sync_inbox(entry).await {
+    match state.runtime.push_sync_inbox(entry) {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -170,14 +198,24 @@ async fn sync_handler(
 }
 
 /// Subscribe to a query.
+///
+/// Session is resolved from headers (JWT or backend impersonation).
 async fn subscribe_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Json(request): Json<SubscribeRequest>,
 ) -> impl IntoResponse {
+    // Resolve session from headers only
+    let session = match extract_session(&headers, &state.auth_config) {
+        Ok(s) => s,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
     match state
-        .runtime_handle
-        .subscribe_with_schema_context(request.query, &request.schema_context, request.session)
-        .await
+        .runtime
+        .subscribe_with_schema_context(request.query, &request.schema_context, session)
     {
         Ok(query_id) => Json(SubscribeResponse { query_id }).into_response(),
         Err(e) => (
@@ -198,14 +236,24 @@ async fn unsubscribe_handler(
 }
 
 /// Create a new object.
+///
+/// Session is resolved from headers (JWT or backend impersonation).
 async fn create_object_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Json(request): Json<CreateObjectRequest>,
 ) -> impl IntoResponse {
+    // Resolve session from headers only
+    let session = match extract_session(&headers, &state.auth_config) {
+        Ok(s) => s,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
     match state
-        .runtime_handle
-        .insert(&request.table, request.values, request.session)
-        .await
+        .runtime
+        .insert(&request.table, request.values, session.as_ref())
     {
         Ok(object_id) => (
             StatusCode::CREATED,
@@ -221,14 +269,24 @@ async fn create_object_handler(
 }
 
 /// Update an existing object.
+///
+/// Session is resolved from headers (JWT or backend impersonation).
 async fn update_object_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Json(request): Json<UpdateObjectRequest>,
 ) -> impl IntoResponse {
+    // Resolve session from headers only
+    let session = match extract_session(&headers, &state.auth_config) {
+        Ok(s) => s,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
     match state
-        .runtime_handle
-        .update(request.object_id, request.updates, request.session)
-        .await
+        .runtime
+        .update(request.object_id, request.updates, session.as_ref())
     {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
         Err(e) => (
@@ -240,14 +298,24 @@ async fn update_object_handler(
 }
 
 /// Delete an object.
+///
+/// Session is resolved from headers (JWT or backend impersonation).
 async fn delete_object_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Json(request): Json<DeleteObjectRequest>,
 ) -> impl IntoResponse {
+    // Resolve session from headers only
+    let session = match extract_session(&headers, &state.auth_config) {
+        Ok(s) => s,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
     match state
-        .runtime_handle
-        .delete(request.object_id, request.session)
-        .await
+        .runtime
+        .delete(request.object_id, session.as_ref())
     {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
         Err(e) => (

@@ -84,6 +84,8 @@ pub struct QueryGraph {
     pub table_descriptors: Vec<RowDescriptor>,
     /// Combined descriptor for output (all columns from all tables).
     pub combined_descriptor: RowDescriptor,
+    /// Cached pending state from last settle (avoids iterating all nodes).
+    has_pending: bool,
 }
 
 impl QueryGraph {
@@ -98,6 +100,7 @@ impl QueryGraph {
             policy_filter_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
+            has_pending: false,
         }
     }
 
@@ -349,7 +352,8 @@ impl QueryGraph {
         };
 
         // Materialize node (boundary between Phase 1 and Phase 2)
-        let materialize_node = MaterializeNode::new(descriptor.clone());
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let materialize_node = MaterializeNode::new_all(tuple_desc);
         let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
         graph.add_edge(materialize_id, phase1_output);
 
@@ -400,7 +404,9 @@ impl QueryGraph {
         // Build remaining predicate - only include conditions not fully handled by index scans
         let predicate = build_remaining_predicate(query, &index_columns, &current_descriptor);
         if !matches!(predicate, Predicate::True) {
-            let filter_node = FilterNode::new(current_descriptor.clone(), predicate);
+            let filter_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
             let filter_id = graph.add_node(GraphNode::Filter(filter_node));
             graph.add_edge(filter_id, phase2_input);
             phase2_input = filter_id;
@@ -410,7 +416,12 @@ impl QueryGraph {
         if !query.order_by.is_empty() {
             let sort_keys = query.sort_keys(&current_descriptor);
             if !sort_keys.is_empty() {
-                let sort_node = SortNode::new(current_descriptor.clone(), sort_keys);
+                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
+                    "",
+                    current_descriptor.clone(),
+                    true,
+                );
+                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
                 let sort_id = graph.add_node(GraphNode::Sort(sort_node));
                 graph.add_edge(sort_id, phase2_input);
                 phase2_input = sort_id;
@@ -419,8 +430,10 @@ impl QueryGraph {
 
         // LimitOffset node (if limit or offset specified)
         if query.limit.is_some() || query.offset > 0 {
+            let limit_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
             let limit_offset_node =
-                LimitOffsetNode::new(current_descriptor.clone(), query.limit, query.offset);
+                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, query.limit, query.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
             phase2_input = limit_offset_id;
@@ -437,7 +450,9 @@ impl QueryGraph {
         }
 
         // Output node
-        let output_node = OutputNode::new(current_descriptor, OutputMode::Delta);
+        let output_tuple_desc =
+            TupleDescriptor::single_with_materialization("", current_descriptor, true);
+        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
@@ -578,7 +593,8 @@ impl QueryGraph {
 
         // Materialize node (boundary between Phase 1 and Phase 2)
         // Lens transforms are applied in the row_loader, so MaterializeNode uses current schema
-        let materialize_node = MaterializeNode::new(descriptor.clone());
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let materialize_node = MaterializeNode::new_all(tuple_desc);
         let materialize_id = graph.add_node(GraphNode::Materialize(materialize_node));
         graph.add_edge(materialize_id, phase1_output);
 
@@ -625,7 +641,9 @@ impl QueryGraph {
         // Phase 2: Filter node (only if there are remaining conditions not covered by index)
         let predicate = build_remaining_predicate(query, &index_columns, &current_descriptor);
         if !matches!(predicate, Predicate::True) {
-            let filter_node = FilterNode::new(current_descriptor.clone(), predicate);
+            let filter_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
+            let filter_node = FilterNode::with_tuple_descriptor(filter_tuple_desc, predicate);
             let filter_id = graph.add_node(GraphNode::Filter(filter_node));
             graph.add_edge(filter_id, phase2_input);
             phase2_input = filter_id;
@@ -635,7 +653,12 @@ impl QueryGraph {
         if !query.order_by.is_empty() {
             let sort_keys = query.sort_keys(&current_descriptor);
             if !sort_keys.is_empty() {
-                let sort_node = SortNode::new(current_descriptor.clone(), sort_keys);
+                let sort_tuple_desc = TupleDescriptor::single_with_materialization(
+                    "",
+                    current_descriptor.clone(),
+                    true,
+                );
+                let sort_node = SortNode::with_tuple_descriptor(sort_tuple_desc, sort_keys);
                 let sort_id = graph.add_node(GraphNode::Sort(sort_node));
                 graph.add_edge(sort_id, phase2_input);
                 phase2_input = sort_id;
@@ -644,8 +667,10 @@ impl QueryGraph {
 
         // LimitOffset node (if limit or offset specified)
         if query.limit.is_some() || query.offset > 0 {
+            let limit_tuple_desc =
+                TupleDescriptor::single_with_materialization("", current_descriptor.clone(), true);
             let limit_offset_node =
-                LimitOffsetNode::new(current_descriptor.clone(), query.limit, query.offset);
+                LimitOffsetNode::with_tuple_descriptor(limit_tuple_desc, query.limit, query.offset);
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
             phase2_input = limit_offset_id;
@@ -662,7 +687,9 @@ impl QueryGraph {
         }
 
         // Output node
-        let output_node = OutputNode::new(current_descriptor, OutputMode::Delta);
+        let output_tuple_desc =
+            TupleDescriptor::single_with_materialization("", current_descriptor, true);
+        let output_node = OutputNode::with_tuple_descriptor(output_tuple_desc, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
@@ -838,7 +865,8 @@ impl QueryGraph {
             .index_scan_nodes
             .push((base_scan_id, query.table, id_column));
 
-        let base_mat = MaterializeNode::new(base_descriptor.clone());
+        let base_tuple_desc = TupleDescriptor::single("", base_descriptor.clone());
+        let base_mat = MaterializeNode::new_all(base_tuple_desc);
         let base_mat_id = graph.add_node(GraphNode::Materialize(base_mat));
         graph.add_edge(base_mat_id, base_scan_id);
 
@@ -865,7 +893,8 @@ impl QueryGraph {
                 .index_scan_nodes
                 .push((right_scan_id, join_spec.table, id_column));
 
-            let right_mat = MaterializeNode::new(right_descriptor.clone());
+            let right_tuple_desc = TupleDescriptor::single("", right_descriptor.clone());
+            let right_mat = MaterializeNode::new_all(right_tuple_desc);
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_id);
 
@@ -944,7 +973,8 @@ impl QueryGraph {
         if !query.order_by.is_empty() {
             let sort_keys = query.sort_keys(&combined_descriptor);
             if !sort_keys.is_empty() {
-                let sort_node = SortNode::new(combined_descriptor.clone(), sort_keys);
+                let sort_node =
+                    SortNode::with_tuple_descriptor(tuple_descriptor.clone(), sort_keys);
                 let sort_id = graph.add_node(GraphNode::Sort(sort_node));
                 graph.add_edge(sort_id, phase2_input);
                 phase2_input = sort_id;
@@ -953,15 +983,18 @@ impl QueryGraph {
 
         // LimitOffset node (if limit or offset specified)
         if query.limit.is_some() || query.offset > 0 {
-            let limit_offset_node =
-                LimitOffsetNode::new(combined_descriptor.clone(), query.limit, query.offset);
+            let limit_offset_node = LimitOffsetNode::with_tuple_descriptor(
+                tuple_descriptor.clone(),
+                query.limit,
+                query.offset,
+            );
             let limit_offset_id = graph.add_node(GraphNode::LimitOffset(limit_offset_node));
             graph.add_edge(limit_offset_id, phase2_input);
             phase2_input = limit_offset_id;
         }
 
         // Output node
-        let output_node = OutputNode::new(combined_descriptor, OutputMode::Delta);
+        let output_node = OutputNode::with_tuple_descriptor(tuple_descriptor, OutputMode::Delta);
         let output_id = graph.add_node(GraphNode::Output(output_node));
         graph.add_edge(output_id, phase2_input);
         graph.output_node = output_id;
@@ -1068,6 +1101,12 @@ impl QueryGraph {
                 .any(|(_, t)| t.as_str() == table)
     }
 
+    /// Check if any MaterializeNode has pending IDs (objects being loaded).
+    /// O(1) - uses cached state from last settle().
+    pub fn has_pending_ids(&self) -> bool {
+        self.has_pending
+    }
+
     /// Check if the MaterializeNode has a specific object ID pending.
     pub fn has_pending_id(&self, object_id: ObjectId) -> bool {
         for compact in &self.nodes {
@@ -1081,6 +1120,7 @@ impl QueryGraph {
     }
 
     /// Mark the materialize node dirty (to re-check pending IDs).
+    /// Also marks downstream nodes (like Output) so they process the delta.
     pub fn mark_materialize_dirty(&mut self) {
         let materialize_ids: Vec<NodeId> = self
             .nodes
@@ -1091,6 +1131,7 @@ impl QueryGraph {
             .collect();
         for node_id in materialize_ids {
             self.mark_dirty(node_id);
+            self.mark_downstream_dirty(node_id);
         }
     }
 
@@ -1204,6 +1245,9 @@ impl QueryGraph {
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
+        // Reset pending state - will be updated by MaterializeNode processing
+        self.has_pending = false;
+
         let order = self.topo_sort_dirty();
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
 
@@ -1301,6 +1345,11 @@ impl QueryGraph {
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
                         merged.pending = new_delta.pending;
+
+                        // Update graph-level pending state for O(1) has_pending_ids() check
+                        if merged.pending {
+                            self.has_pending = true;
+                        }
 
                         tuple_deltas.insert(node_id, merged);
                     }

@@ -1,2 +1,2 @@
-export { JazzClient, type Row, type SubscriptionCallback } from "./client.js";
-export type { AppContext } from "./context.js";
+export { JazzClient, SessionClient, type Row, type SubscriptionCallback } from "./client.js";
+export type { AppContext, Session } from "./context.js";

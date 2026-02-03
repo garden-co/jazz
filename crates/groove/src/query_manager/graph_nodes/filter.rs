@@ -132,15 +132,6 @@ pub struct FilterNode {
 }
 
 impl FilterNode {
-    /// Create a FilterNode with a single-table descriptor (backward compatible).
-    /// Assumes the single element is materialized.
-    pub fn new(descriptor: RowDescriptor, predicate: Predicate) -> Self {
-        // Create tuple descriptor with materialized state
-        let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
-        // Use unchecked internally since we know single element is materialized
-        Self::with_tuple_descriptor(tuple_desc, predicate)
-    }
-
     /// Create a FilterNode with a full TupleDescriptor, validating materialization.
     /// Returns Err if required elements are not materialized.
     pub fn try_new(
@@ -394,14 +385,19 @@ mod tests {
         tuples.iter().any(|t| t.ids().contains(&id))
     }
 
+    fn make_filter_node(predicate: Predicate) -> FilterNode {
+        let descriptor = test_descriptor();
+        let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
+        FilterNode::with_tuple_descriptor(tuple_desc, predicate)
+    }
+
     #[test]
     fn filter_eq() {
-        let descriptor = test_descriptor();
         let predicate = Predicate::Eq {
             col_index: 2,
             value: 100i32.to_le_bytes().to_vec(),
         };
-        let mut node = FilterNode::new(descriptor, predicate);
+        let mut node = make_filter_node(predicate);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -437,7 +433,6 @@ mod tests {
 
     #[test]
     fn filter_and() {
-        let descriptor = test_descriptor();
         let predicate = Predicate::And(vec![
             Predicate::Ge {
                 col_index: 2,
@@ -448,7 +443,7 @@ mod tests {
                 value: 100i32.to_le_bytes().to_vec(),
             },
         ]);
-        let mut node = FilterNode::new(descriptor, predicate);
+        let mut node = make_filter_node(predicate);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -493,7 +488,6 @@ mod tests {
 
     #[test]
     fn filter_or() {
-        let descriptor = test_descriptor();
         let predicate = Predicate::Or(vec![
             Predicate::Eq {
                 col_index: 2,
@@ -504,7 +498,7 @@ mod tests {
                 value: 150i32.to_le_bytes().to_vec(),
             },
         ]);
-        let mut node = FilterNode::new(descriptor, predicate);
+        let mut node = make_filter_node(predicate);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -550,12 +544,11 @@ mod tests {
 
     #[test]
     fn filter_update_passes_to_fails() {
-        let descriptor = test_descriptor();
         let predicate = Predicate::Ge {
             col_index: 2,
             value: 50i32.to_le_bytes().to_vec(),
         };
-        let mut node = FilterNode::new(descriptor, predicate);
+        let mut node = make_filter_node(predicate);
 
         let id1 = ObjectId::new();
         let old_tuple = make_tuple(
@@ -602,12 +595,11 @@ mod tests {
 
     #[test]
     fn filter_update_fails_to_passes() {
-        let descriptor = test_descriptor();
         let predicate = Predicate::Ge {
             col_index: 2,
             value: 50i32.to_le_bytes().to_vec(),
         };
-        let mut node = FilterNode::new(descriptor, predicate);
+        let mut node = make_filter_node(predicate);
 
         let id1 = ObjectId::new();
         let old_tuple = make_tuple(

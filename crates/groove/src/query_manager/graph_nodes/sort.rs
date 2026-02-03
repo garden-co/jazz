@@ -36,20 +36,6 @@ pub struct SortNode {
 }
 
 impl SortNode {
-    /// Create a SortNode with RowDescriptor (backward compatible).
-    pub fn new(descriptor: RowDescriptor, sort_keys: Vec<SortKey>) -> Self {
-        let output_tuple_descriptor =
-            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
-        Self {
-            descriptor,
-            output_tuple_descriptor,
-            sort_keys,
-            sorted_tuples: Vec::new(),
-            current_tuples: AHashSet::new(),
-            dirty: true,
-        }
-    }
-
     /// Create a SortNode with TupleDescriptor.
     pub fn with_tuple_descriptor(
         tuple_descriptor: TupleDescriptor,
@@ -233,14 +219,19 @@ mod tests {
         node.sorted_tuples.iter().map(|t| t.ids()[0]).collect()
     }
 
+    fn make_sort_node(sort_keys: Vec<SortKey>) -> SortNode {
+        let descriptor = test_descriptor();
+        let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
+        SortNode::with_tuple_descriptor(tuple_desc, sort_keys)
+    }
+
     #[test]
     fn sort_ascending() {
-        let descriptor = test_descriptor();
         let sort_keys = vec![SortKey {
             col_index: 2, // score
             direction: SortDirection::Ascending,
         }];
-        let mut node = SortNode::new(descriptor, sort_keys);
+        let mut node = make_sort_node(sort_keys);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -288,12 +279,11 @@ mod tests {
 
     #[test]
     fn sort_descending() {
-        let descriptor = test_descriptor();
         let sort_keys = vec![SortKey {
             col_index: 2, // score
             direction: SortDirection::Descending,
         }];
-        let mut node = SortNode::new(descriptor, sort_keys);
+        let mut node = make_sort_node(sort_keys);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -356,7 +346,8 @@ mod tests {
                 direction: SortDirection::Descending,
             },
         ];
-        let mut node = SortNode::new(descriptor.clone(), sort_keys);
+        let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
+        let mut node = SortNode::with_tuple_descriptor(tuple_desc, sort_keys);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -426,12 +417,11 @@ mod tests {
 
     #[test]
     fn sort_maintains_order_on_insert() {
-        let descriptor = test_descriptor();
         let sort_keys = vec![SortKey {
             col_index: 2,
             direction: SortDirection::Ascending,
         }];
-        let mut node = SortNode::new(descriptor, sort_keys);
+        let mut node = make_sort_node(sort_keys);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();

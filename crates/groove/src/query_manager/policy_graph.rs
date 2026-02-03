@@ -18,7 +18,7 @@ use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::ColumnName;
-use super::types::{Schema, TableName, Value};
+use super::types::{Schema, TableName, TupleDescriptor, Value};
 
 /// A one-shot graph for evaluating a policy condition.
 ///
@@ -67,7 +67,8 @@ impl PolicyGraph {
         graph.index_scan_nodes.push((scan_id, *table, id_column));
 
         // Materialize node: load row content
-        let mat_node = MaterializeNode::new(descriptor.clone());
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let mat_node = MaterializeNode::new_all(tuple_desc);
         let mat_id = graph.add_node_with_id(GraphNode::Materialize(mat_node));
         graph.add_edge(mat_id, scan_id);
 
@@ -151,7 +152,8 @@ impl PolicyGraph {
         graph.index_scan_nodes.push((scan_id, *table, id_column));
 
         // Materialize node: load row content
-        let mat_node = MaterializeNode::new(descriptor.clone());
+        let tuple_desc = TupleDescriptor::single("", descriptor.clone());
+        let mat_node = MaterializeNode::new_all(tuple_desc);
         let mat_id = graph.add_node_with_id(GraphNode::Materialize(mat_node));
         graph.add_edge(mat_id, scan_id);
 

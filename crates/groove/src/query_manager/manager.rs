@@ -153,6 +153,9 @@ pub(crate) struct QuerySubscription {
     pub(crate) session: Option<Session>,
     /// Flag indicating this subscription needs recompilation due to schema change.
     pub(crate) needs_recompile: bool,
+    /// Flag indicating this subscription has settled at least once.
+    /// Used to ensure one-shot queries receive an initial callback (even if empty).
+    pub(crate) settled_once: bool,
 }
 
 /// Subscription mode (reserved for future use).
@@ -168,6 +171,9 @@ pub enum SubscriptionMode {
 pub struct QueryUpdate {
     pub subscription_id: QuerySubscriptionId,
     pub delta: RowDelta,
+    /// Output descriptor for decoding the binary row data.
+    /// This matches the query's output schema (handles JOINs, projections, etc).
+    pub descriptor: RowDescriptor,
 }
 
 /// State for an active policy check (graphs and associated data).
@@ -212,15 +218,6 @@ pub struct CatalogueUpdate {
     pub metadata: HashMap<String, String>,
     /// Content from the latest commit.
     pub content: Vec<u8>,
-}
-
-/// A pending query waiting for sync/storage.
-struct PendingQueryEntry {
-    handle: QueryHandle,
-    query: Query,
-    /// Session for future use (policy evaluation on one-shot queries).
-    #[allow(dead_code)]
-    session: Option<Session>,
 }
 
 /// Manages reactive SQL queries over object-based storage.
@@ -274,13 +271,6 @@ pub struct QueryManager {
     /// When a row arrives with unknown branch, we parse the branch name to extract
     /// the short hash, then look up the full schema in this map.
     known_schemas: HashMap<SchemaHash, Schema>,
-
-    /// Pending queries waiting for sync/storage to complete.
-    /// Evaluated during process() after sync data arrives.
-    pending_queries: Vec<PendingQueryEntry>,
-
-    /// Next handle ID for pending queries.
-    next_query_handle: u64,
 }
 
 impl QueryManager {
@@ -309,8 +299,6 @@ impl QueryManager {
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
             known_schemas: HashMap::new(),
-            pending_queries: Vec::new(),
-            next_query_handle: 0,
         }
     }
 
@@ -613,26 +601,28 @@ impl QueryManager {
         self.indices.keys().cloned().collect()
     }
 
-    /// Get subscription results as decoded rows (for testing).
+    /// Get subscription results as decoded rows with ObjectIds (for testing).
+    /// Returns `Vec<(ObjectId, Vec<Value>)>` to match the old execute() return type.
     #[cfg(test)]
     pub fn get_subscription_results(
         &self,
         sub_id: super::graph_nodes::output::QuerySubscriptionId,
-    ) -> Vec<Vec<Value>> {
+    ) -> Vec<(ObjectId, Vec<Value>)> {
         let Some(subscription) = self.subscriptions.get(&sub_id) else {
             return vec![];
         };
 
-        let table_schema = match self.schema.get(&subscription.graph.table) {
-            Some(s) => s,
-            None => return vec![],
-        };
+        let descriptor = &subscription.graph.combined_descriptor;
 
         subscription
             .graph
             .current_result()
             .iter()
-            .filter_map(|row| decode_row(&table_schema.descriptor, &row.data).ok())
+            .filter_map(|row| {
+                decode_row(descriptor, &row.data)
+                    .ok()
+                    .map(|values| (row.id, values))
+            })
             .collect()
     }
 
@@ -1645,153 +1635,6 @@ impl QueryManager {
         QueryBuilder::new(table)
     }
 
-    /// Execute a query and return results (one-shot).
-    ///
-    /// Branches are determined by:
-    /// 1. Explicit branches in query (if any)
-    /// 2. Schema context's live branches (requires initialized context)
-    /// 3. Error if context not initialized and no explicit branches
-    pub fn execute(&mut self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
-        if !self.schema_context.is_initialized() {
-            return Err(QueryError::QueryCompilationError(
-                "schema context not initialized - call set_current_schema() first".into(),
-            ));
-        }
-
-        // Use the manager's schema and context
-        let schema = (*self.schema).clone();
-        let context = self.schema_context.clone();
-
-        self.execute_with_explicit_context(query, &schema, &context)
-    }
-
-    /// Execute a query with explicit schema and context (for server use).
-    ///
-    /// This is the core execution method. The regular `execute()` calls this
-    /// with the manager's own schema and context.
-    ///
-    /// For servers handling multi-tenant queries, pass a SchemaContext built
-    /// for the client's target schema. Lens transforms will still work if
-    /// the context has other live schemas with lens paths.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query to execute
-    /// * `schema` - The target schema (used for table/column lookup)
-    /// * `schema_context` - Context with current schema and any live schemas
-    pub fn execute_with_explicit_context(
-        &mut self,
-        query: Query,
-        schema: &Schema,
-        schema_context: &SchemaContext,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
-        let table_name = query.table;
-        let table_schema = schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
-
-        // Determine branches from query or context
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        };
-
-        // Build branch -> schema hash map from the context
-        let branch_schema_map: HashMap<String, SchemaHash> = schema_context
-            .all_branch_names()
-            .into_iter()
-            .filter_map(|branch_name| {
-                ComposedBranchName::parse(&branch_name)
-                    .map(|composed| (branch_name.as_str().to_string(), composed.schema_hash))
-            })
-            .collect();
-
-        // Compile query graph with schema context
-        let mut graph =
-            QueryGraph::compile_with_schema_context(&query, schema, None, schema_context)
-                .ok_or_else(|| {
-                    QueryError::QueryCompilationError("failed to compile query".into())
-                })?;
-
-        // Get references for the row loader closure
-        let table = table_name.as_str().to_string();
-
-        // Row loader with lens transform for old schema rows
-        let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-            let (content, commit_id, source_branch) = if branches.len() == 1 {
-                let branch = &branches[0];
-                self.load_row_from_object_on_branch(id, branch)
-                    .map(|(c, cid)| (c, cid, branch.clone()))?
-            } else {
-                self.load_row_from_object_multi_branch_with_source(id, &branches)?
-            };
-
-            if content.is_empty() {
-                return None;
-            }
-
-            // Apply lens transform if needed
-            if let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                && source_hash != schema_context.current_hash
-            {
-                let transformer = LensTransformer::new(schema_context, &table);
-                match transformer.transform(&content, commit_id, source_hash) {
-                    Ok(result) => return Some((result.data, commit_id)),
-                    Err(_) => return Some((content, commit_id)),
-                }
-            }
-
-            Some((content, commit_id))
-        };
-
-        // Set the default branch for pending ID tracking
-        if let Some(first_branch) = branches.first() {
-            graph.set_pending_branch(first_branch);
-        }
-
-        graph.settle(&self.indices, &self.sync_manager.object_manager, row_loader);
-
-        // Check if graph has pending objects
-        if graph.is_pending() {
-            // Request loading for any pending object IDs
-            for compact in &graph.nodes {
-                if let super::graph::GraphNode::Materialize(mat_node) = &compact.node {
-                    for (&pending_id, branch) in mat_node.pending_ids_with_branches() {
-                        // Use the tracked branch, or fall back to first subscription branch
-                        let load_branch = if branch.is_empty() {
-                            branches.first().cloned().unwrap_or_default()
-                        } else {
-                            branch.clone()
-                        };
-                        self.sync_manager
-                            .object_manager
-                            .request_load(pending_id, load_branch);
-                    }
-                }
-            }
-            return Err(QueryError::Pending);
-        }
-
-        // Decode results
-        let rows = graph.current_result();
-        let results = rows
-            .iter()
-            .filter_map(|row| {
-                decode_row(&descriptor, &row.data)
-                    .ok()
-                    .map(|values| (row.id, values))
-            })
-            .collect();
-
-        Ok(results)
-    }
-
     /// Subscribe to query results (delta mode).
     pub fn subscribe(&mut self, query: Query) -> Result<QuerySubscriptionId, QueryError> {
         self.subscribe_with_session(query, None)
@@ -1847,6 +1690,7 @@ impl QueryManager {
                 branches,
                 session,
                 needs_recompile: false,
+                settled_once: false,
             },
         );
 
@@ -1914,6 +1758,7 @@ impl QueryManager {
                 branches,
                 session,
                 needs_recompile: false,
+                settled_once: false,
             },
         );
 
@@ -2187,10 +2032,18 @@ impl QueryManager {
             }
 
             let delta = subscription.graph.settle(indices, om, row_loader);
-            if !delta.is_empty() {
+
+            // Check if this subscription has pending local loads
+            let has_pending_loads = subscription.graph.has_pending_ids();
+
+            // Emit on first settle ONLY if no pending loads, or when delta is non-empty
+            let needs_initial = !subscription.settled_once && !has_pending_loads;
+            if needs_initial || !delta.is_empty() {
+                subscription.settled_once = true;
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
                     delta,
+                    descriptor: subscription.graph.combined_descriptor.clone(),
                 });
             }
         }
@@ -2968,6 +2821,7 @@ impl QueryManager {
     /// Load a row's data from multiple branches with source branch info.
     ///
     /// Same as load_row_from_object_multi_branch but also returns which branch the data came from.
+    #[allow(dead_code)]
     fn load_row_from_object_multi_branch_with_source(
         &self,
         row_id: ObjectId,
@@ -3728,64 +3582,5 @@ impl QueryManager {
 
         let total = indices + subscriptions + policy_checks;
         (indices, subscriptions, policy_checks, total)
-    }
-
-    // =========================================================================
-    // Pending Query Management
-    // =========================================================================
-
-    /// Register a pending query that will be retried during process().
-    ///
-    /// Returns a handle that can be used to correlate the result when
-    /// the query completes.
-    pub fn register_pending_query(
-        &mut self,
-        query: Query,
-        session: Option<Session>,
-    ) -> QueryHandle {
-        let handle = QueryHandle(self.next_query_handle);
-        self.next_query_handle += 1;
-        self.pending_queries.push(PendingQueryEntry {
-            handle,
-            query,
-            session,
-        });
-        handle
-    }
-
-    /// Retry pending queries and return completed ones.
-    ///
-    /// Called at the end of process() after sync data has been processed.
-    /// Queries that return Pending are kept for the next cycle.
-    #[allow(clippy::type_complexity)]
-    pub fn retry_pending_queries(
-        &mut self,
-    ) -> Vec<(QueryHandle, Result<Vec<(ObjectId, Vec<Value>)>, QueryError>)> {
-        let entries = std::mem::take(&mut self.pending_queries);
-        let mut completed = Vec::new();
-
-        for entry in entries {
-            // Try to execute the query
-            // Note: We don't have execute_with_session, so session is used for
-            // subscriptions but not one-shot queries currently.
-            // The session is passed through for future use.
-            let result = self.execute(entry.query.clone());
-
-            match result {
-                Ok(results) => {
-                    completed.push((entry.handle, Ok(results)));
-                }
-                Err(QueryError::Pending) => {
-                    // Still pending - put back in queue
-                    self.pending_queries.push(entry);
-                }
-                Err(e) => {
-                    // Real error - return it
-                    completed.push((entry.handle, Err(e)));
-                }
-            }
-        }
-
-        completed
     }
 }

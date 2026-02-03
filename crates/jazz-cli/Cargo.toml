@@ -15,7 +15,8 @@ jazz-transport = { path = "../jazz-transport" }
 
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
-clap = { version = "4", features = ["derive"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+clap = { version = "4", features = ["derive", "env"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -25,6 +26,8 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 futures = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"
+jsonwebtoken = "9"
+base64 = "0.22"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

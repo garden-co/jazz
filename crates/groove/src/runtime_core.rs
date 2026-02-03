@@ -36,7 +36,8 @@ use futures::channel::oneshot;
 use crate::io_handler::IoHandler;
 use crate::object::ObjectId;
 use crate::query_manager::QuerySubscriptionId;
-use crate::query_manager::manager::{QueryError, QueryHandle, QueryUpdate};
+use crate::query_manager::encoding::decode_row;
+use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{RowDelta, Schema, TableName, Value};
@@ -120,8 +121,11 @@ pub struct TickOutput {
 pub struct SubscriptionDelta {
     /// The subscription handle.
     pub handle: SubscriptionHandle,
-    /// The row changes.
+    /// The row changes (binary encoded).
     pub delta: RowDelta,
+    /// Output descriptor for decoding the binary row data.
+    /// Use with `decode_row(&descriptor, &row.data)` to get `Vec<Value>`.
+    pub descriptor: crate::query_manager::types::RowDescriptor,
 }
 
 /// Callback type for subscriptions.
@@ -142,10 +146,10 @@ struct SubscriptionState {
     callback: SubscriptionCallback,
 }
 
-/// Pending query waiting to be fulfilled.
-struct PendingQuery {
-    handle: QueryHandle,
-    sender: QuerySender,
+/// Pending one-shot query waiting for first subscription callback.
+struct PendingOneShotQuery {
+    subscription_id: QuerySubscriptionId,
+    sender: Option<QuerySender>,
 }
 
 /// Unified runtime core for both native and WASM platforms.
@@ -161,14 +165,14 @@ pub struct RuntimeCore<H: IoHandler> {
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
 
-    /// Pending queries waiting for data.
-    pending_queries: Vec<PendingQuery>,
-
     /// Subscription tracking with callbacks.
     subscriptions: HashMap<SubscriptionHandle, SubscriptionState>,
     /// Reverse map for routing updates.
     subscription_reverse: HashMap<QuerySubscriptionId, SubscriptionHandle>,
     next_subscription_handle: u64,
+
+    /// Pending one-shot queries (query() calls waiting for first callback).
+    pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 }
 
 impl<H: IoHandler> RuntimeCore<H> {
@@ -182,10 +186,10 @@ impl<H: IoHandler> RuntimeCore<H> {
             io_handler,
             parked_storage_responses: Vec::new(),
             parked_sync_messages: Vec::new(),
-            pending_queries: Vec::new(),
             subscriptions: HashMap::new(),
             subscription_reverse: HashMap::new(),
             next_subscription_handle: 0,
+            pending_one_shot_queries: HashMap::new(),
         }
     }
 
@@ -219,29 +223,58 @@ impl<H: IoHandler> RuntimeCore<H> {
     /// Call this after any mutation operation (insert, update, delete, etc.)
     /// to process the change and schedule any required I/O.
     pub fn immediate_tick(&mut self) -> TickOutput {
-        // 1. Process logical updates (sync, subscriptions, pending queries)
+        // 1. Process logical updates (sync, subscriptions)
         let tick_result = self.schema_manager.tick_settled();
 
-        // 2. Call subscription callbacks
+        // Track one-shot queries that completed this tick
+        let mut completed_one_shots: Vec<SubscriptionHandle> = Vec::new();
+
+        // 2. Call subscription callbacks AND handle one-shot queries
         for update in &tick_result.subscription_updates {
-            if let Some(&handle) = self.subscription_reverse.get(&update.subscription_id)
-                && let Some(state) = self.subscriptions.get(&handle)
-            {
-                let delta = SubscriptionDelta {
-                    handle,
-                    delta: update.delta.clone(),
-                };
-                (state.callback)(delta);
+            if let Some(&handle) = self.subscription_reverse.get(&update.subscription_id) {
+                // Check if this is a one-shot query
+                if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
+                    // First callback = graph settled, fulfill the future
+                    if let Some(sender) = pending.sender.take() {
+                        // Decode rows using the query's output descriptor
+                        let results: Vec<(ObjectId, Vec<Value>)> = update
+                            .delta
+                            .added
+                            .iter()
+                            .filter_map(|row| {
+                                decode_row(&update.descriptor, &row.data)
+                                    .ok()
+                                    .map(|values| (row.id, values))
+                            })
+                            .collect();
+                        let _ = sender.send(Ok(results));
+                    }
+                    // Mark for cleanup (unsubscribe happens after loop)
+                    completed_one_shots.push(handle);
+                } else if let Some(state) = self.subscriptions.get(&handle) {
+                    // Regular subscription - call callback
+                    let delta = SubscriptionDelta {
+                        handle,
+                        delta: update.delta.clone(),
+                        descriptor: update.descriptor.clone(),
+                    };
+                    (state.callback)(delta);
+                }
             }
         }
 
-        // 3. Fulfill completed queries
-        let completed = tick_result.completed_queries;
-        for (qm_handle, result) in completed {
-            self.fulfill_query(qm_handle, result);
+        // 2b. Cleanup completed one-shot queries
+        for handle in completed_one_shots {
+            if let Some(pending) = self.pending_one_shot_queries.remove(&handle) {
+                // Unsubscribe from the underlying subscription
+                self.schema_manager
+                    .query_manager_mut()
+                    .unsubscribe_with_sync(pending.subscription_id);
+                self.subscription_reverse.remove(&pending.subscription_id);
+            }
         }
 
-        // 4. Schedule batched_tick if outbound messages exist
+        // 3. Schedule batched_tick if outbound messages exist
         if self.has_outbound() {
             self.io_handler.schedule_batched_tick();
         }
@@ -345,28 +378,6 @@ impl<H: IoHandler> RuntimeCore<H> {
     }
 
     // =========================================================================
-    // Query Fulfillment
-    // =========================================================================
-
-    /// Fulfill a completed query by sending the result to its future.
-    fn fulfill_query(
-        &mut self,
-        handle: QueryHandle,
-        result: Result<Vec<(ObjectId, Vec<Value>)>, QueryError>,
-    ) {
-        // Find and remove the pending query
-        if let Some(idx) = self
-            .pending_queries
-            .iter()
-            .position(|pq| pq.handle == handle)
-        {
-            let pq = self.pending_queries.swap_remove(idx);
-            let runtime_result = result.map_err(|e| RuntimeError::QueryError(format!("{:?}", e)));
-            let _ = pq.sender.send(runtime_result);
-        }
-    }
-
-    // =========================================================================
     // Subscriptions
     // =========================================================================
 
@@ -467,24 +478,42 @@ impl<H: IoHandler> RuntimeCore<H> {
 
     /// Execute a one-shot query.
     ///
-    /// Returns a `QueryFuture` that resolves when the query completes.
-    /// The query may complete immediately (if all data is available)
-    /// or after storage/sync operations.
+    /// Returns results once the local query graph settles. This uses subscribe
+    /// internally, which triggers sync with upstream servers.
+    ///
+    /// **Limitation:** "Complete" means the local query graph has settled on
+    /// locally persisted data. We do NOT currently wait for confirmation that
+    /// results reflect all upstream server tiers. See sync_manager.md Future Work.
     pub fn query(&mut self, query: Query, session: Option<Session>) -> QueryFuture {
         let (sender, receiver) = oneshot::channel();
 
-        // Register with QueryManager
-        let handle = self
+        // Subscribe with sync - this triggers server to send matching data
+        let sub_id = match self
             .schema_manager
             .query_manager_mut()
-            .register_pending_query(query, session);
+            .subscribe_with_sync(query, session)
+        {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = sender.send(Err(RuntimeError::QueryError(format!("{:?}", e))));
+                return QueryFuture::new(receiver);
+            }
+        };
 
-        // Store the pending query
-        self.pending_queries.push(PendingQuery { handle, sender });
+        // Store as pending one-shot query waiting for first callback
+        let handle = SubscriptionHandle(self.next_subscription_handle);
+        self.next_subscription_handle += 1;
 
-        // Trigger immediate_tick to try to complete immediately
+        self.pending_one_shot_queries.insert(
+            handle,
+            PendingOneShotQuery {
+                subscription_id: sub_id,
+                sender: Some(sender),
+            },
+        );
+        self.subscription_reverse.insert(sub_id, handle);
+
         self.immediate_tick();
-
         QueryFuture::new(receiver)
     }
 
@@ -669,6 +698,19 @@ mod tests {
         core
     }
 
+    /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
+    fn execute_query(
+        core: &mut RuntimeCore<TestIoHandler<TestDriver>>,
+        query: Query,
+    ) -> Vec<(ObjectId, Vec<Value>)> {
+        let qm = core.schema_manager_mut().query_manager_mut();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe(sub_id);
+        results
+    }
+
     #[test]
     fn test_runtime_core_new() {
         let core = create_test_runtime();
@@ -692,9 +734,9 @@ mod tests {
         core.immediate_tick();
         core.batched_tick();
 
-        // Query for the row - using the sync execute for testing
+        // Query for the row - using the sync execute_query helper for testing
         let query = Query::new("users");
-        let results = core.schema_manager_mut().execute(query).unwrap();
+        let results = execute_query(&mut core, query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, object_id);
     }
@@ -759,7 +801,7 @@ mod tests {
 
         // Verify via query
         let query = Query::new("users");
-        let results = core.schema_manager_mut().execute(query).unwrap();
+        let results = execute_query(&mut core, query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[1], Value::Text("Dave".to_string()));
 
@@ -770,7 +812,7 @@ mod tests {
 
         // Verify deleted
         let query = Query::new("users");
-        let results = core.schema_manager_mut().execute(query).unwrap();
+        let results = execute_query(&mut core, query);
         assert_eq!(results.len(), 0);
     }
 

@@ -1,6 +1,7 @@
 packages:
   - packages/*
   - examples/*
+  - crates
   - crates/groove-wasm/pkg
 
 ignoredBuiltDependencies:

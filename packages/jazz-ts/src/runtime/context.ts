@@ -2,7 +2,17 @@
  * Application context for Jazz client connections.
  */
 
-import type { StorageDriver, Schema } from "../drivers/types.js";
+import type { StorageDriver, WasmSchema } from "../drivers/types.js";
+
+/**
+ * Session context for policy evaluation.
+ */
+export interface Session {
+  /** User identifier */
+  user_id: string;
+  /** Additional claims (roles, teams, etc.) */
+  claims: Record<string, unknown>;
+}
 
 /**
  * Configuration for connecting to Jazz.
@@ -15,7 +25,7 @@ export interface AppContext {
   clientId?: string;
 
   /** Schema definition */
-  schema: Schema;
+  schema: WasmSchema;
 
   /** Optional server URL for sync */
   serverUrl?: string;
@@ -28,4 +38,24 @@ export interface AppContext {
 
   /** User branch name (default: "main") */
   userBranch?: string;
+
+  // Authentication fields
+
+  /**
+   * JWT token for frontend authentication.
+   * Sent as `Authorization: Bearer <token>`.
+   */
+  jwtToken?: string;
+
+  /**
+   * Backend secret for session impersonation.
+   * Enables `forSession()` to act as any user.
+   */
+  backendSecret?: string;
+
+  /**
+   * Admin secret for schema/policy sync.
+   * Required to sync catalogue objects.
+   */
+  adminSecret?: string;
 }

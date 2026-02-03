@@ -10,7 +10,7 @@ export type {
   ColumnType,
   ColumnDescriptor,
   TableSchema,
-  Schema,
+  WasmSchema,
   WasmRow,
   RowDelta,
 } from "./types.js";

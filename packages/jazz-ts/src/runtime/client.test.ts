@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import type { Schema, Value } from "../drivers/types.js";
+import type { WasmSchema, Value } from "../drivers/types.js";
 import { JazzClient } from "./client.js";
 import type { AppContext } from "./context.js";
 import { SqliteNodeDriver } from "../drivers/sqlite-node.js";
@@ -15,7 +15,7 @@ const nodeVersion = parseInt(process.version.slice(1).split(".")[0], 10);
 const hasNodeSqlite = nodeVersion >= 22;
 
 describe.skipIf(!hasNodeSqlite)("JazzClient", () => {
-  const schema: Schema = {
+  const schema: WasmSchema = {
     tables: {
       todos: {
         columns: [

@@ -452,22 +452,136 @@ pub enum ErrorCode {
 }
 ```
 
-## Security Considerations
+## Authentication
 
-> **⚠️ SECURITY TODO: App Admin Token for Schema Pushes**
->
-> Currently, any client can push schema/lens objects to the server. This requires a separate **app admin token**:
->
-> - Normal session tokens: authorize data operations (CRUD on rows)
-> - App admin tokens: authorize schema operations (push schemas/lenses)
->
-> App admin tokens should be:
->
-> - Issued to developers/operators only
-> - Required in HTTP headers for catalogue object sync
-> - Validated server-side before accepting schema changes
->
-> See `schema_manager.md` for full details on the security gap.
+Jazz supports three independent authentication mechanisms, each serving a different use case:
+
+### 1. Frontend JWT Authentication
+
+Frontend/mobile clients authenticate via JWT tokens validated against HMAC secret (development) or JWKS (production).
+
+**Headers:**
+
+```
+Authorization: Bearer <JWT>
+```
+
+**JWT Payload:**
+
+```json
+{
+  "sub": "user-123", // Maps to session.user_id
+  "claims": {
+    // Maps to session.claims
+    "role": "admin",
+    "teams": ["eng"]
+  },
+  "exp": 1735689600
+}
+```
+
+**Server Configuration:**
+
+```bash
+# Development (HMAC secret)
+--jwt-secret <secret>
+JAZZ_JWT_SECRET=<secret>
+
+# Production (JWKS)
+--jwks-url <url>
+JAZZ_JWKS_URL=https://auth.example.com/.well-known/jwks.json
+```
+
+### 2. Backend Session Impersonation
+
+Backend applications can impersonate any user by providing the backend secret and a session header.
+
+**Headers:**
+
+```
+X-Jazz-Backend-Secret: <64-char-hex-secret>
+X-Jazz-Session: <base64-encoded-json>
+```
+
+**Session JSON (base64-encoded):**
+
+```json
+{
+  "user_id": "user-123",
+  "claims": { "role": "admin", "teams": ["eng"] }
+}
+```
+
+**Server Configuration:**
+
+```bash
+--backend-secret <secret>
+JAZZ_BACKEND_SECRET=<secret>
+```
+
+**Client Usage (Rust):**
+
+```rust
+let client = JazzClient::connect(AppContext {
+    backend_secret: Some("backend-secret-12345".to_string()),
+    // ...
+}).await?;
+
+// Impersonate user-123
+let user_client = client.for_session(Session::new("user-123"));
+let id = user_client.create("todos", vec![Value::Text("Buy milk".into())]).await?;
+```
+
+**Client Usage (TypeScript):**
+
+```typescript
+const client = await JazzClient.connect({
+  backendSecret: "backend-secret-12345",
+  // ...
+});
+
+// Impersonate user-123
+const userClient = client.forSession({ user_id: "user-123", claims: {} });
+const id = await userClient.create("todos", [{ type: "Text", value: "Buy milk" }]);
+```
+
+### 3. Admin Authentication
+
+Admin authentication is required for schema/lens/policy sync operations (catalogue objects).
+
+**Headers:**
+
+```
+X-Jazz-Admin-Secret: <64-char-hex-secret>
+```
+
+**Server Configuration:**
+
+```bash
+--admin-secret <secret>
+JAZZ_ADMIN_SECRET=<secret>
+```
+
+### Auth Matrix
+
+| Operation              | Frontend (JWT) | Backend (secret+session) | Admin        |
+| ---------------------- | -------------- | ------------------------ | ------------ |
+| `/events` (SSE)        | -              | -                        | -            |
+| `/sync` (regular data) | -              | -                        | -            |
+| `/sync` (catalogue)    | -              | -                        | **Required** |
+| `/sync/subscribe`      | ✓              | ✓                        | -            |
+| `/sync/object` (CRUD)  | ✓              | ✓                        | -            |
+
+### Session Resolution Priority
+
+When multiple auth mechanisms are present, resolution follows this priority:
+
+1. **Backend impersonation** (`X-Jazz-Backend-Secret` + `X-Jazz-Session`)
+2. **JWT auth** (`Authorization: Bearer`)
+3. **Request body session** (backwards compatibility, deprecated)
+4. **No session** (anonymous)
+
+## Security Considerations
 
 ### Client ID as Session Token
 
@@ -501,16 +615,22 @@ Current model treats `ClientId` as a bearer token:
 - [x] Automatic reconnection (fixed delay)
 - [x] Full sync on client connect
 - [x] ServerEvent types with client_id confirmation
+- [x] JWT authentication (frontend clients)
+- [x] Backend session impersonation
+- [x] Admin authentication for catalogue sync
+- [x] Header-based session resolution
+- [x] Rust client auth support (`for_session()`)
+- [x] TypeScript client auth support (`forSession()`)
 
 ### Partial
 
 - [ ] `/sync/subscribe` and `/sync/unsubscribe` are stubs (return hardcoded values)
 - [ ] No exponential backoff for reconnection
-- [ ] No connection state tracking API (`is_connected()`)
+- [ ] JWKS support (currently only HMAC secret)
 
 ### Future
 
-- [ ] Authentication/authorization layer
+- [ ] JWKS key rotation and caching
 - [ ] WebSocket alternative to SSE
 - [ ] Binary protocol option (MessagePack/CBOR)
 - [ ] Request signing/verification
