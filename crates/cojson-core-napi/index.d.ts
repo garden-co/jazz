@@ -237,6 +237,13 @@ export interface PrivateTransaction {
 export declare function seal(message: Uint8Array, senderSecret: string, recipientId: string, nonceMaterial: Uint8Array): Uint8Array
 
 /**
+ * Compute a short hash of a stable-stringified JSON value.
+ * The input should already be serialized using stableStringify on the JS side.
+ * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
+ */
+export declare function shortHash(value: string): string
+
+/**
  * NAPI-exposed function to sign a message using Ed25519.
  * - `message`: Raw bytes to sign
  * - `secret`: Raw Ed25519 signing key bytes

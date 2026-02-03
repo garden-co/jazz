@@ -397,3 +397,15 @@ impl SessionMap {
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 }
+
+// ============================================================================
+// Hash Functions
+// ============================================================================
+
+/// Compute a short hash of a stable-stringified JSON value.
+/// The input should already be serialized using stableStringify on the JS side.
+/// Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
+#[napi]
+pub fn short_hash(value: String) -> String {
+  cojson_core::hash::blake3::short_hash(&value)
+}

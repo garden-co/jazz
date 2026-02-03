@@ -1,5 +1,29 @@
 use blake3::*;
 
+/// The length of the short hash (19 bytes before base58 encoding)
+/// Matches TypeScript's `shortHashLength`
+pub const SHORT_HASH_LENGTH: usize = 19;
+
+/// Compute a short hash of a JSON value.
+/// This mirrors TypeScript's `shortHash` function in crypto.ts:
+/// 1. Serialize value to stable JSON (sorted keys)
+/// 2. BLAKE3 hash the JSON bytes
+/// 3. Take first 19 bytes
+/// 4. Base58 encode
+/// 5. Prefix with "shortHash_z"
+///
+/// The input should be a valid JSON value (already serialized via serde_json).
+pub fn short_hash(value: &str) -> String {
+    // BLAKE3 hash the JSON bytes
+    let hash = blake3_hash_once(value.as_bytes());
+
+    // Take first SHORT_HASH_LENGTH bytes and base58 encode
+    let short_hash = &hash[..SHORT_HASH_LENGTH];
+    let encoded = bs58::encode(short_hash).into_string();
+
+    format!("shortHash_z{}", encoded)
+}
+
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from
 /// Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -190,5 +214,50 @@ mod tests {
             expected_final_hash.to_vec(),
             "Final state should match expected hash"
         );
+    }
+
+    #[test]
+    fn test_short_hash_format() {
+        let value = r#"{"test":"value"}"#;
+        let hash = short_hash(value);
+
+        // Should start with "shortHash_z"
+        assert!(hash.starts_with("shortHash_z"));
+
+        // The base58 encoded part should be reasonable length
+        // 19 bytes base58 encoded is roughly 26 characters
+        assert!(hash.len() > 11); // "shortHash_z" is 11 chars
+    }
+
+    #[test]
+    fn test_short_hash_deterministic() {
+        let value = r#"{"hello":"world","number":42}"#;
+
+        // Same input should produce same hash
+        let hash1 = short_hash(value);
+        let hash2 = short_hash(value);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_short_hash_different_values() {
+        let hash1 = short_hash(r#"{"a":1}"#);
+        let hash2 = short_hash(r#"{"a":2}"#);
+        let hash3 = short_hash(r#"{"b":1}"#);
+
+        // Different values should produce different hashes
+        assert_ne!(hash1, hash2);
+        assert_ne!(hash1, hash3);
+        assert_ne!(hash2, hash3);
+    }
+
+    #[test]
+    fn test_short_hash_length() {
+        // Verify that SHORT_HASH_LENGTH is used correctly
+        assert_eq!(SHORT_HASH_LENGTH, 19);
+
+        let hash = short_hash("test");
+        // "shortHash_z" prefix (11 chars) + base58 encoded 19 bytes
+        assert!(hash.starts_with("shortHash_z"));
     }
 }

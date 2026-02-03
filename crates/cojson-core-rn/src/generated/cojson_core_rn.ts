@@ -557,6 +557,24 @@ export function seal(
   );
 }
 /**
+ * Compute a short hash of a stable-stringified JSON value.
+ * The input should already be serialized using stableStringify on the JS side.
+ * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
+ */
+export function shortHash(value: string): string {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_short_hash(
+          FfiConverterString.lower(value),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
  * Uniffi-exposed function to sign a message using Ed25519.
  * - `message`: Raw bytes to sign
  * - `secret`: UTF-8 encoded Ed25519 signing key string
@@ -2876,6 +2894,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_seal'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_short_hash() !==
+    26806
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_short_hash'
     );
   }
   if (

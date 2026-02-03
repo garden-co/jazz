@@ -6,6 +6,14 @@ pub enum Blake3Error {
     LockError,
 }
 
+/// Compute a short hash of a stable-stringified JSON value.
+/// The input should already be serialized using stableStringify on the JS side.
+/// Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
+#[uniffi::export]
+pub fn short_hash(value: String) -> String {
+    hash::blake3::short_hash(&value)
+}
+
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from
 /// Returns 24 bytes suitable for use as a nonce in cryptographic operations.

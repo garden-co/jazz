@@ -106,14 +106,7 @@ export abstract class CryptoProvider<Blake3State = any> {
     )}`;
   }
 
-  shortHash(value: JsonValue): ShortHash {
-    return `shortHash_z${base58.encode(
-      this.blake3HashOnce(textEncoder.encode(stableStringify(value))).slice(
-        0,
-        shortHashLength,
-      ),
-    )}`;
-  }
+  abstract shortHash(value: JsonValue): ShortHash;
 
   abstract encrypt<T extends JsonValue, N extends JsonValue>(
     value: T,

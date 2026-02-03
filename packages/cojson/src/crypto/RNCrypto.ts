@@ -23,6 +23,7 @@ import {
   SealerID,
   SealerSecret,
   SessionMapImpl,
+  ShortHash,
   SignerID,
   SignerSecret,
   textDecoder,
@@ -38,6 +39,7 @@ import {
   newX25519PrivateKey,
   getSealerId,
   getSignerId,
+  shortHash,
   sign,
   seal,
   unseal,
@@ -120,6 +122,11 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
       blake3HashOnceWithContext(toArrayBuffer(data), toArrayBuffer(context)),
     );
   }
+
+  shortHash(value: JsonValue): ShortHash {
+    return shortHash(stableStringify(value)) as ShortHash;
+  }
+
   seal<T extends JsonValue>({
     message,
     from,

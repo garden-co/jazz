@@ -12,6 +12,7 @@ import {
   newEd25519SigningKey,
   newX25519PrivateKey,
   seal,
+  shortHash,
   sign,
   unseal,
   verify,
@@ -30,6 +31,7 @@ import {
   SealerID,
   SealerSecret,
   SessionMapImpl,
+  ShortHash,
   Signature,
   SignerID,
   SignerSecret,
@@ -110,6 +112,10 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     { context }: { context: Uint8Array },
   ) {
     return blake3HashOnceWithContext(data, context);
+  }
+
+  shortHash(value: JsonValue): ShortHash {
+    return shortHash(stableStringify(value)) as ShortHash;
   }
 
   newEd25519SigningKey(): Uint8Array {
