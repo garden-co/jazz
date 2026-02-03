@@ -730,7 +730,6 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     SyncMessagesLog.clear();
 
     // Now client2 connects directly to core and makes an update
-    // Without the fix, this update would NOT reach client1 through edge
     const client2 = setupTestNode();
     client2.connectToSyncServer({
       ourName: "client2",
