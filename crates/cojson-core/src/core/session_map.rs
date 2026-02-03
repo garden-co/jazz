@@ -267,9 +267,6 @@ pub enum SessionMapError {
 // Header Validation
 // ============================================================================
 
-/// The length of the short hash used for CoValue IDs (19 bytes before base58 encoding)
-const SHORT_HASH_LENGTH: usize = 19;
-
 /// Validate the uniqueness field of a header.
 /// Returns Ok(()) if valid, Err with message if invalid.
 fn validate_uniqueness(uniqueness: &Uniqueness) -> Result<(), SessionMapError> {
@@ -304,14 +301,10 @@ fn compute_co_id_from_header(header: &CoValueHeader) -> Result<String, SessionMa
     // Serialize header to JSON - serde_json with BTreeMap gives sorted keys
     let header_json = serde_json::to_string(header)?;
 
-    // BLAKE3 hash the JSON bytes
-    let hash = crate::hash::blake3::blake3_hash_once(header_json.as_bytes());
-
-    // Take first SHORT_HASH_LENGTH bytes and base58 encode
-    let short_hash = &hash[..SHORT_HASH_LENGTH];
-    let encoded = bs58::encode(short_hash).into_string();
-
-    Ok(format!("co_z{}", encoded))
+    Ok(crate::hash::blake3::short_hash_with_prefix(
+        header_json.as_bytes(),
+        "co_z",
+    ))
 }
 
 // ============================================================================
@@ -376,7 +369,7 @@ impl SessionMapImpl {
             known_state: KnownState {
                 header: true,
                 id: co_id.to_string(),
-                sessions: BTreeMap::new(),
+                sessions: BTreeMap::new(), // maybe this should be a indexMap in the future.
             },
             known_state_with_streaming: None,
             streaming_known_state: None,

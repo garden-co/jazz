@@ -4,24 +4,31 @@ use blake3::*;
 /// Matches TypeScript's `shortHashLength`
 pub const SHORT_HASH_LENGTH: usize = 19;
 
-/// Compute a short hash of a JSON value.
-/// This mirrors TypeScript's `shortHash` function in crypto.ts:
-/// 1. Serialize value to stable JSON (sorted keys)
-/// 2. BLAKE3 hash the JSON bytes
-/// 3. Take first 19 bytes
-/// 4. Base58 encode
-/// 5. Prefix with "shortHash_z"
+/// Compute a short hash of data with a custom prefix.
+/// This is the common implementation used by `short_hash` and `compute_co_id_from_header`.
 ///
-/// The input should be a valid JSON value (already serialized via serde_json).
-pub fn short_hash(value: &str) -> String {
-    // BLAKE3 hash the JSON bytes
-    let hash = blake3_hash_once(value.as_bytes());
-
-    // Take first SHORT_HASH_LENGTH bytes and base58 encode
+/// Steps:
+/// 1. BLAKE3 hash the input bytes
+/// 2. Take first 19 bytes
+/// 3. Base58 encode
+/// 4. Prefix with the given prefix
+pub fn short_hash_with_prefix(data: &[u8], prefix: &str) -> String {
+    let hash = blake3_hash_once(data);
     let short_hash = &hash[..SHORT_HASH_LENGTH];
     let encoded = bs58::encode(short_hash).into_string();
+    format!("{}{}", prefix, encoded)
+}
 
-    format!("shortHash_z{}", encoded)
+/// Compute a short hash of a JSON value.
+/// This mirrors TypeScript's `shortHash` function in crypto.ts:
+/// 1. BLAKE3 hash the JSON bytes
+/// 2. Take first 19 bytes
+/// 3. Base58 encode
+/// 4. Prefix with "shortHash_z"
+///
+/// The input should be a stable-stringified JSON value.
+pub fn short_hash(value: &str) -> String {
+    short_hash_with_prefix(value.as_bytes(), "shortHash_z")
 }
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
