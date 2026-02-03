@@ -652,7 +652,6 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     // Client1 loads the covalue (syncs to edge storage)
     const mapOnClient1 = await loadCoValueOrFail(client1.node, map.id);
     expect(mapOnClient1.get("hello")).toEqual("world");
-    await mapOnClient1.core.waitForSync();
 
     // Verify the states match
     const client1KnownState = mapOnClient1.core.knownState();
