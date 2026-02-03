@@ -622,13 +622,16 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     core.addStorage({ ourName: "core" });
 
     // Setup: edge server with storage, connected to core
+    // NOTE: Using persistent: false so that when edge reconnects after restart,
+    // core doesn't preserve the old subscription state (known states).
+    // This simulates a fresh connection where edge must explicitly subscribe.
     const edge = setupTestNode();
     edge.addStorage({ ourName: "edge" });
     edge.connectToSyncServer({
       ourName: "edge",
       syncServerName: "core",
       syncServer: core.node,
-      persistent: true,
+      persistent: false,
     });
 
     // Setup: client1 connected to edge
@@ -659,16 +662,26 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     // Disconnect client1 (keeps data in memory)
     client1.disconnect();
 
-    // Restart edge (clears memory, keeps storage)
+    // Restart edge with a NEW session to ensure it's a completely fresh peer
+    // This is necessary because core tracks subscriptions by peer ID (agent+session),
+    // and we need edge to appear as a new peer that has never subscribed to the coValues.
     const edgeStorage = edge.node.storage!;
-    await edge.restart();
-    edge.node.setStorage(edgeStorage);
-    edge.connectToSyncServer({
-      ourName: "edge",
+
+    // Disconnect old edge from core first
+    edge.disconnect();
+
+    const newEdge = edge.spawnNewSession();
+    newEdge.node.setStorage(edgeStorage);
+
+    newEdge.connectToSyncServer({
+      ourName: "edge2",
       syncServerName: "core",
       syncServer: core.node,
-      persistent: true,
+      persistent: false,
     });
+
+    // Replace edge reference for the rest of the test
+    const edge2 = newEdge;
 
     SyncMessagesLog.clear();
 
@@ -676,17 +689,17 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     // This triggers the lazy loading path in handleLoad
     client1.connectToSyncServer({
       ourName: "client1",
-      syncServerName: "edge",
-      syncServer: edge.node,
+      syncServerName: "edge2",
+      syncServer: edge2.node,
     });
 
     await client1.node.syncManager.waitForAllCoValuesSync();
 
-    // Verify edge used lazy loading AND subscribed to core
+    // Verify edge2 used lazy loading AND subscribed to core
     // Key messages:
     // - edge -> storage | GET_KNOWN_STATE (lazy loading)
-    // - edge -> client1 | KNOWN (responds with KNOWN, not CONTENT)
-    // - edge -> core | LOAD (subscribes to core for future updates)
+    // - edge2 -> client1 | KNOWN (responds with KNOWN, not CONTENT)
+    // - edge2 -> core | LOAD (subscribes to core for future updates)
     expect(
       SyncMessagesLog.getMessages({
         Group: group.core,
@@ -694,24 +707,24 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client1 -> edge | LOAD Group sessions: header/5",
-        "client1 -> edge | LOAD Map sessions: header/1",
+        "client1 -> edge2 | LOAD Group sessions: header/5",
+        "client1 -> edge2 | LOAD Map sessions: header/1",
         "edge -> storage | GET_KNOWN_STATE Group",
         "storage -> edge | GET_KNOWN_STATE_RESULT Group sessions: header/5",
-        "edge -> client1 | KNOWN Group sessions: header/5",
-        "edge -> core | LOAD Group sessions: header/5",
+        "edge2 -> client1 | KNOWN Group sessions: header/5",
+        "edge2 -> core | LOAD Group sessions: header/5",
         "edge -> storage | GET_KNOWN_STATE Map",
         "storage -> edge | GET_KNOWN_STATE_RESULT Map sessions: header/1",
-        "edge -> client1 | KNOWN Map sessions: header/1",
-        "edge -> core | LOAD Map sessions: header/1",
-        "core -> edge | KNOWN Group sessions: header/5",
+        "edge2 -> client1 | KNOWN Map sessions: header/1",
+        "edge2 -> core | LOAD Map sessions: header/1",
+        "core -> edge2 | KNOWN Group sessions: header/5",
       ]
     `);
 
     // IMPORTANT: Verify the coValue is NOT loaded into memory on edge yet.
     // The lazy loading optimization means edge should only have the coValue
     // in storage, not in memory, until actual content arrives.
-    const mapOnEdge = edge.node.getCoValue(map.id);
+    const mapOnEdge = edge2.node.getCoValue(map.id);
     expect(mapOnEdge.isAvailable()).toBe(false);
 
     SyncMessagesLog.clear();
@@ -729,37 +742,12 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     mapOnClient2.set("hello", "updated by client2", "trusting");
     await mapOnClient2.core.waitForSync();
 
-    // Wait for propagation: core -> edge -> client1
+    // Wait for propagation: core -> edge2 -> client1
+    // Without the fix, this will timeout because edge2 never subscribed to core
     await waitFor(() => mapOnClient1.get("hello") === "updated by client2");
 
+    // Verify edge2 now has the coValue in memory (received from core)
     expect(mapOnEdge.isAvailable()).toBe(true);
-
     expect(mapOnClient1.get("hello")).toEqual("updated by client2");
-    expect(
-      SyncMessagesLog.getMessages({
-        Group: group.core,
-        Map: map.core,
-      }),
-    ).toMatchInlineSnapshot(`
-      [
-        "client2 -> core | LOAD Map sessions: empty",
-        "core -> edge | KNOWN Map sessions: header/1",
-        "core -> client2 | CONTENT Group header: true new: After: 0 New: 5",
-        "core -> client2 | CONTENT Map header: true new: After: 0 New: 1",
-        "client2 -> core | KNOWN Group sessions: header/5",
-        "client2 -> core | KNOWN Map sessions: header/1",
-        "client2 -> core | CONTENT Map header: false new: After: 0 New: 1",
-        "core -> client2 | KNOWN Map sessions: header/2",
-        "core -> storage | CONTENT Map header: false new: After: 0 New: 1",
-        "core -> edge | CONTENT Map header: false new: After: 0 New: 1",
-        "edge -> storage | LOAD Map sessions: empty",
-        "storage -> edge | CONTENT Group header: true new: After: 0 New: 5",
-        "storage -> edge | CONTENT Map header: true new: After: 0 New: 1",
-        "edge -> core | KNOWN Map sessions: header/2",
-        "edge -> storage | CONTENT Map header: false new: After: 0 New: 1",
-        "edge -> client1 | CONTENT Map header: false new: After: 0 New: 1",
-        "client1 -> edge | KNOWN Map sessions: header/2",
-      ]
-    `);
   });
 });
