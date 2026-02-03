@@ -66,9 +66,13 @@ impl SessionMap {
         max_tx_size: Option<u32>,
         skip_verify: Option<bool>,
     ) -> Result<SessionMap, CojsonCoreWasmError> {
-        let internal =
-            SessionMapImpl::new_with_skip_verify(&co_id, &header_json, max_tx_size, skip_verify.unwrap_or(false))
-                .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))?;
+        let internal = SessionMapImpl::new_with_skip_verify(
+            &co_id,
+            &header_json,
+            max_tx_size,
+            skip_verify.unwrap_or(false),
+        )
+        .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))?;
         Ok(SessionMap { internal })
     }
 

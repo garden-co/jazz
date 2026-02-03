@@ -103,9 +103,13 @@ impl SessionMap {
         max_tx_size: Option<u32>,
         skip_verify: Option<bool>,
     ) -> Result<Self, SessionMapError> {
-        let internal =
-            SessionMapImpl::new_with_skip_verify(&co_id, &header_json, max_tx_size, skip_verify.unwrap_or(false))
-                .map_err(|e| SessionMapError::Internal(e.to_string()))?;
+        let internal = SessionMapImpl::new_with_skip_verify(
+            &co_id,
+            &header_json,
+            max_tx_size,
+            skip_verify.unwrap_or(false),
+        )
+        .map_err(|e| SessionMapError::Internal(e.to_string()))?;
         Ok(SessionMap {
             internal: std::sync::Mutex::new(internal),
         })
