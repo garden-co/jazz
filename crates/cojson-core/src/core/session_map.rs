@@ -226,11 +226,11 @@ pub struct KnownState {
     // Alphabetical order: header, id, sessions
     pub header: bool,
     pub id: String,
-    pub sessions: BTreeMap<String, u32>, // BTreeMap for stable ordering!
+    pub sessions: IndexMap<String, u32>, // BTreeMap for stable ordering!
 }
 
 /// KnownStateSessions - uses BTreeMap for stable serialization
-pub type KnownStateSessions = BTreeMap<String, u32>;
+pub type KnownStateSessions = IndexMap<String, u32>;
 
 // ============================================================================
 // Error Types
@@ -369,7 +369,7 @@ impl SessionMapImpl {
             known_state: KnownState {
                 header: true,
                 id: co_id.to_string(),
-                sessions: BTreeMap::new(), // maybe this should be a indexMap in the future.
+                sessions: IndexMap::new(), // maybe this should be a indexMap in the future.
             },
             known_state_with_streaming: None,
             streaming_known_state: None,
@@ -767,7 +767,7 @@ impl SessionMapImpl {
         let mut new_known_state = KnownState {
             header: true,
             id: self.co_id.0.clone(),
-            sessions: BTreeMap::new(),
+            sessions: IndexMap::new(),
         };
 
         // Only keep delete session counts in known state
