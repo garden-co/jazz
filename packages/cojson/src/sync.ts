@@ -626,6 +626,17 @@ export class SyncManager {
           action: "known",
           ...storageKnownState,
         });
+
+        // Subscribe to server peers (e.g., core) to receive future updates.
+        // Even though we responded with KNOWN (client has everything), we need
+        // to establish a subscription so that updates from core flow to us.
+        // We use sendLoadRequest directly (instead of loadFromPeers) to avoid
+        // marking the coValue as "pending" which would incorrectly affect loading
+        // state tracking and potentially trigger loading into memory.
+        for (const serverPeer of this.getServerPeers(msg.id, peer.id)) {
+          serverPeer.sendLoadRequest(coValue, "low-priority");
+        }
+
         return;
       }
 
