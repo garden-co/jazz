@@ -192,7 +192,7 @@ test("should show Group members", async ({ page }) => {
 
   const row2 = table.getByRole("row").nth(2);
   await expect(row2.getByRole("cell").nth(0)).toHaveText(
-    `Inspector test account <${account.$jazz.id}>`,
+    `👤Inspector test account <${account.$jazz.id}>`,
   );
   await expect(row2.getByRole("cell").nth(1)).toHaveText("admin");
 
