@@ -626,6 +626,13 @@ export class SyncManager {
           action: "known",
           ...storageKnownState,
         });
+
+        // Subscribe to server peers (e.g., core) to receive future updates.
+        // Even though we responded with KNOWN (client has everything), we need
+        // to establish a subscription so that updates from core flow to us.
+        const serverPeers = this.getServerPeers(msg.id, peer.id);
+        coValue.loadFromPeers(serverPeers);
+
         return;
       }
 
