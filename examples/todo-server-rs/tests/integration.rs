@@ -76,6 +76,9 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         schema: test_schema(),
         server_url: String::new(),
         data_dir,
+        jwt_token: None,
+        backend_secret: None,
+        admin_secret: None,
     };
 
     let client = JazzClient::connect(context).await.unwrap();
@@ -432,9 +435,7 @@ async fn test_crud_operations() {
 }
 
 #[tokio::test]
-#[ignore = "Cold-start object loading not yet implemented"]
 async fn test_local_persistence() {
-    // TODO: ObjectManager doesn't reload objects from storage on cold start
     let temp_dir = TempDir::new().unwrap();
     let data_path = temp_dir.path().to_path_buf();
 
@@ -446,6 +447,9 @@ async fn test_local_persistence() {
             schema: test_schema(),
             server_url: String::new(),
             data_dir: data_path.clone(),
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
@@ -476,6 +480,9 @@ async fn test_local_persistence() {
             schema: test_schema(),
             server_url: String::new(),
             data_dir: data_path,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
@@ -599,23 +606,24 @@ fn get_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Test that data syncs through server between clients.
+/// Test that data syncs through server between clients via subscribe.
 ///
-/// This test verifies:
+/// This test verifies the subscribe-driven sync model:
 /// 1. Client syncs schema to server via catalogue
 /// 2. Client syncs row data to server
-/// 3. Server stores data and can replay to new clients
-/// 4. New client receives data from server
+/// 3. Server stores data
+/// 4. New client subscribes and receives data from server via sync
+///
+/// NOTE: This tests "subscribe triggers sync, data eventually arrives" behavior.
+/// We do NOT currently have upstream confirmation - "complete" means local graph
+/// settled, not that we've received all server data. See specs/sync_manager.md
+/// Future Work section.
 ///
 /// NOTE: The core lazy schema activation is tested in groove's
 /// `e2e_two_clients_server_schema_sync`. This integration test verifies
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]
-#[ignore = "Cold-start object loading not yet implemented + RocksDB lock issue"]
 async fn test_server_resync() {
-    // TODO: This test has two issues:
-    // 1. ObjectManager doesn't reload objects from storage on cold start
-    // 2. RocksDB lock isn't released properly on shutdown
     // 1. Start jazz-cli server
     let port = get_free_port();
     let server = TestServer::start(port).await;
@@ -634,6 +642,9 @@ async fn test_server_resync() {
             schema: test_schema(),
             server_url: server.base_url(),
             data_dir: data_path.clone(),
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
@@ -660,7 +671,7 @@ async fn test_server_resync() {
     std::fs::remove_dir_all(&data_path).unwrap();
     std::fs::create_dir_all(&data_path).unwrap();
 
-    // 4. New client should resync from server
+    // 4. New client should resync from server via subscribe
     {
         let context = AppContext {
             app_id: test_app_id,
@@ -668,18 +679,38 @@ async fn test_server_resync() {
             schema: test_schema(),
             server_url: server.base_url(),
             data_dir: data_path,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
         };
         let client = JazzClient::connect(context).await.unwrap();
 
-        // Wait for sync from server
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-
-        // Query todos - should have the one from before
+        // Subscribe and wait for data to arrive from server
+        // The subscribe triggers the server to send matching data
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let mut stream = client.subscribe(query).await.unwrap();
 
-        assert_eq!(results.len(), 1, "Todo should resync from server");
-        assert_eq!(results[0].1[0], Value::Text("Synced todo".to_string()));
+        // Wait for first delta with any added rows (with timeout)
+        // This validates the subscribe-triggers-sync behavior
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(delta) = stream.next().await {
+                    // Check if we got any added rows (the sync worked)
+                    if !delta.added.is_empty() {
+                        return true;
+                    }
+                } else {
+                    // Stream ended
+                    return false;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok() && result.unwrap(),
+            "Todo should resync from server via subscribe"
+        );
 
         client.shutdown().await.unwrap();
     }

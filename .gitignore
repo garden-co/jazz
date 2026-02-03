@@ -27,3 +27,4 @@ data/
 # Environment
 .env
 .env.local
+.turbo/

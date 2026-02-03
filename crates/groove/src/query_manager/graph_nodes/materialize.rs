@@ -71,26 +71,6 @@ impl MaterializeNode {
         Self::with_elements(input_desc, elements)
     }
 
-    /// Create a new materialize node with RowDescriptor (backward compatible).
-    /// Creates a single-element tuple descriptor and materializes it.
-    pub fn new(descriptor: RowDescriptor) -> Self {
-        let input_desc = TupleDescriptor::single("", descriptor.clone());
-        let elements: HashSet<usize> = [0].into_iter().collect();
-        let output_descriptor = input_desc.with_materialized(&elements);
-        Self {
-            output_descriptor,
-            descriptor,
-            elements_to_materialize: elements,
-            rows: AHashMap::new(),
-            current_tuples: AHashSet::new(),
-            pending_ids: AHashMap::new(),
-            updated_ids: AHashSet::new(),
-            deleted_ids: AHashSet::new(),
-            dirty: true,
-            default_pending_branch: String::new(),
-        }
-    }
-
     /// Get the output tuple descriptor.
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_descriptor
@@ -454,10 +434,15 @@ mod tests {
         }
     }
 
+    fn make_materialize_node() -> MaterializeNode {
+        let descriptor = test_descriptor();
+        let tuple_desc = TupleDescriptor::single("", descriptor);
+        MaterializeNode::new_all(tuple_desc)
+    }
+
     #[test]
     fn materialize_added_ids() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -487,8 +472,7 @@ mod tests {
 
     #[test]
     fn materialize_removed_ids() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let data1 = vec![1, 2, 3];
@@ -513,8 +497,7 @@ mod tests {
 
     #[test]
     fn check_update_detects_changes() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let data1 = vec![1, 2, 3];
@@ -537,8 +520,7 @@ mod tests {
 
     #[test]
     fn check_update_ignores_unchanged() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let data1 = vec![1, 2, 3];
@@ -559,8 +541,7 @@ mod tests {
 
     #[test]
     fn materialize_tracks_pending_when_loader_returns_none() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -601,8 +582,7 @@ mod tests {
 
     #[test]
     fn materialize_not_pending_when_all_loaded() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let data1 = vec![1, 2, 3];
@@ -626,8 +606,7 @@ mod tests {
 
     #[test]
     fn check_pending_emits_newly_loaded_rows() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -675,8 +654,7 @@ mod tests {
 
     #[test]
     fn remove_clears_from_pending() {
-        let descriptor = test_descriptor();
-        let mut node = MaterializeNode::new(descriptor);
+        let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
 

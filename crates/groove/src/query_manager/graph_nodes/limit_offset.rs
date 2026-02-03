@@ -22,22 +22,6 @@ pub struct LimitOffsetNode {
 }
 
 impl LimitOffsetNode {
-    /// Create a LimitOffsetNode with RowDescriptor (backward compatible).
-    pub fn new(descriptor: RowDescriptor, limit: Option<usize>, offset: usize) -> Self {
-        let output_tuple_descriptor =
-            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
-        Self {
-            descriptor,
-            output_tuple_descriptor,
-            limit,
-            offset,
-            all_tuples: Vec::new(),
-            windowed_tuples: Vec::new(),
-            current_tuples: AHashSet::new(),
-            dirty: true,
-        }
-    }
-
     /// Create a LimitOffsetNode with TupleDescriptor.
     pub fn with_tuple_descriptor(
         tuple_descriptor: TupleDescriptor,
@@ -201,10 +185,15 @@ mod tests {
         node.windowed_tuples.iter().map(|t| t.ids()[0]).collect()
     }
 
+    fn make_limit_offset_node(limit: Option<usize>, offset: usize) -> LimitOffsetNode {
+        let descriptor = test_descriptor();
+        let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
+        LimitOffsetNode::with_tuple_descriptor(tuple_desc, limit, offset)
+    }
+
     #[test]
     fn limit_only() {
-        let descriptor = test_descriptor();
-        let mut node = LimitOffsetNode::new(descriptor, Some(2), 0);
+        let mut node = make_limit_offset_node(Some(2), 0);
 
         let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
         let tuples: Vec<_> = ids
@@ -231,8 +220,7 @@ mod tests {
 
     #[test]
     fn offset_only() {
-        let descriptor = test_descriptor();
-        let mut node = LimitOffsetNode::new(descriptor, None, 2);
+        let mut node = make_limit_offset_node(None, 2);
 
         let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
         let tuples: Vec<_> = ids
@@ -260,8 +248,7 @@ mod tests {
 
     #[test]
     fn limit_and_offset() {
-        let descriptor = test_descriptor();
-        let mut node = LimitOffsetNode::new(descriptor, Some(2), 1);
+        let mut node = make_limit_offset_node(Some(2), 1);
 
         let ids: Vec<_> = (0..5).map(|_| ObjectId::new()).collect();
         let tuples: Vec<_> = ids
@@ -288,8 +275,7 @@ mod tests {
 
     #[test]
     fn removal_shifts_window() {
-        let descriptor = test_descriptor();
-        let mut node = LimitOffsetNode::new(descriptor, Some(2), 0);
+        let mut node = make_limit_offset_node(Some(2), 0);
 
         let ids: Vec<_> = (0..4).map(|_| ObjectId::new()).collect();
         let tuples: Vec<_> = ids
@@ -330,8 +316,7 @@ mod tests {
 
     #[test]
     fn offset_beyond_data() {
-        let descriptor = test_descriptor();
-        let mut node = LimitOffsetNode::new(descriptor, Some(10), 100);
+        let mut node = make_limit_offset_node(Some(10), 100);
 
         let id = ObjectId::new();
         let tuple = make_tuple(id, 1, "Row1");

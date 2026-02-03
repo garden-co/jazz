@@ -1,0 +1,8 @@
+{
+  "name": "@jazz/rust",
+  "private": true,
+  "scripts": {
+    "build": "cargo build --workspace",
+    "test": "cargo test --workspace"
+  }
+}

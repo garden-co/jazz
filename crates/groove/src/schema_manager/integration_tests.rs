@@ -362,8 +362,18 @@ mod tests {
 
     use crate::query_manager::graph::QueryGraph;
     use crate::query_manager::manager::QueryManager;
-    use crate::query_manager::query::QueryBuilder;
+    use crate::query_manager::query::{Query, QueryBuilder};
     use crate::sync_manager::SyncManager;
+
+    /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
+    fn execute_query(manager: &mut SchemaManager, query: Query) -> Vec<(ObjectId, Vec<Value>)> {
+        let qm = manager.query_manager_mut();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe(sub_id);
+        results
+    }
 
     /// Test QueryManager with schema context initialization.
     #[test]
@@ -629,22 +639,22 @@ mod tests {
         // Find Alice's row (from v1 branch) - should have 3 columns after transform
         let alice_row = results
             .iter()
-            .find(|r| {
-                r.iter()
+            .find(|(_, row)| {
+                row.iter()
                     .any(|v| matches!(v, Value::Text(s) if s == "Alice"))
             })
             .expect("Alice's row should be present");
 
         // Alice's row should have been transformed to v2 format (3 columns)
         assert_eq!(
-            alice_row.len(),
+            alice_row.1.len(),
             3,
             "Alice's row should have 3 columns after lens transform"
         );
-        assert_eq!(alice_row[0], Value::Uuid(old_row_id));
-        assert_eq!(alice_row[1], Value::Text("Alice".to_string()));
+        assert_eq!(alice_row.1[0], Value::Uuid(old_row_id));
+        assert_eq!(alice_row.1[1], Value::Text("Alice".to_string()));
         assert_eq!(
-            alice_row[2],
+            alice_row.1[2],
             Value::Null,
             "Added email column should be Null"
         );
@@ -652,13 +662,16 @@ mod tests {
         // Find Bob's row (from v2 branch) - already in v2 format
         let bob_row = results
             .iter()
-            .find(|r| r.iter().any(|v| matches!(v, Value::Text(s) if s == "Bob")))
+            .find(|(_, row)| {
+                row.iter()
+                    .any(|v| matches!(v, Value::Text(s) if s == "Bob"))
+            })
             .expect("Bob's row should be present");
 
-        assert_eq!(bob_row.len(), 3);
-        assert_eq!(bob_row[0], Value::Uuid(new_row_id));
-        assert_eq!(bob_row[1], Value::Text("Bob".to_string()));
-        assert_eq!(bob_row[2], Value::Text("bob@example.com".to_string()));
+        assert_eq!(bob_row.1.len(), 3);
+        assert_eq!(bob_row.1[0], Value::Uuid(new_row_id));
+        assert_eq!(bob_row.1[1], Value::Text("Bob".to_string()));
+        assert_eq!(bob_row.1[2], Value::Text("bob@example.com".to_string()));
     }
 
     // ========================================================================
@@ -833,7 +846,7 @@ mod tests {
         assert_eq!(results.len(), 3, "Expected 3 rows from all schema branches");
 
         // All rows should have 4 columns (v3 format)
-        for row in &results {
+        for (_, row) in &results {
             assert_eq!(
                 row.len(),
                 4,
@@ -844,41 +857,44 @@ mod tests {
         // Find Alice's row (from v1 branch - 2 hop transform)
         let alice_row = results
             .iter()
-            .find(|r| {
-                r.iter()
+            .find(|(_, row)| {
+                row.iter()
                     .any(|v| matches!(v, Value::Text(s) if s == "Alice"))
             })
             .expect("Alice's row should be present");
-        assert_eq!(alice_row[0], Value::Uuid(row1_id));
-        assert_eq!(alice_row[1], Value::Text("Alice".to_string()));
-        assert_eq!(alice_row[2], Value::Null); // email added in v1->v2
-        assert_eq!(alice_row[3], Value::Null); // role added in v2->v3
+        assert_eq!(alice_row.1[0], Value::Uuid(row1_id));
+        assert_eq!(alice_row.1[1], Value::Text("Alice".to_string()));
+        assert_eq!(alice_row.1[2], Value::Null); // email added in v1->v2
+        assert_eq!(alice_row.1[3], Value::Null); // role added in v2->v3
 
         // Find Bob's row (from v2 branch - 1 hop transform)
         let bob_row = results
             .iter()
-            .find(|r| r.iter().any(|v| matches!(v, Value::Text(s) if s == "Bob")))
+            .find(|(_, row)| {
+                row.iter()
+                    .any(|v| matches!(v, Value::Text(s) if s == "Bob"))
+            })
             .expect("Bob's row should be present");
-        assert_eq!(bob_row[0], Value::Uuid(row2_id));
-        assert_eq!(bob_row[1], Value::Text("Bob".to_string()));
-        assert_eq!(bob_row[2], Value::Text("bob@example.com".to_string())); // preserved
-        assert_eq!(bob_row[3], Value::Null); // role added in v2->v3
+        assert_eq!(bob_row.1[0], Value::Uuid(row2_id));
+        assert_eq!(bob_row.1[1], Value::Text("Bob".to_string()));
+        assert_eq!(bob_row.1[2], Value::Text("bob@example.com".to_string())); // preserved
+        assert_eq!(bob_row.1[3], Value::Null); // role added in v2->v3
 
         // Find Charlie's row (from v3 branch - no transform)
         let charlie_row = results
             .iter()
-            .find(|r| {
-                r.iter()
+            .find(|(_, row)| {
+                row.iter()
                     .any(|v| matches!(v, Value::Text(s) if s == "Charlie"))
             })
             .expect("Charlie's row should be present");
-        assert_eq!(charlie_row[0], Value::Uuid(row3_id));
-        assert_eq!(charlie_row[1], Value::Text("Charlie".to_string()));
+        assert_eq!(charlie_row.1[0], Value::Uuid(row3_id));
+        assert_eq!(charlie_row.1[1], Value::Text("Charlie".to_string()));
         assert_eq!(
-            charlie_row[2],
+            charlie_row.1[2],
             Value::Text("charlie@example.com".to_string())
         );
-        assert_eq!(charlie_row[3], Value::Text("admin".to_string()));
+        assert_eq!(charlie_row.1[3], Value::Text("admin".to_string()));
     }
 
     /// Test multi-hop with chained column renames across versions.
@@ -989,7 +1005,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Row should have v3 schema structure (2 columns, but with contact_email name)
-        let row = &results[0];
+        let (_, row) = &results[0];
         assert_eq!(row.len(), 2);
         assert_eq!(row[0], Value::Uuid(row_id));
         // Email value should be preserved through both renames
@@ -1085,7 +1101,7 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Row should be transformed - column renamed
-        let row = &results[0];
+        let (_, row) = &results[0];
         assert_eq!(row.len(), 2);
         assert_eq!(row[0], Value::Uuid(row_id));
         assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
@@ -2395,7 +2411,7 @@ mod tests {
 
         // Query on v1 branch should not find the row (it's on v2 branch)
         let query = QueryBuilder::new("users").branch(&v1_branch).build();
-        let results = client.execute(query).unwrap();
+        let results = execute_query(&mut client, query);
         assert_eq!(
             results.len(),
             0,
@@ -2464,7 +2480,7 @@ mod tests {
         // Note: v1 has 2 columns (id, name), so after transform we get 2 columns
         // Columns are alphabetically sorted: id, name
         assert_eq!(
-            results[0].len(),
+            results[0].1.len(),
             2,
             "Row should be transformed to v1 format (2 columns)"
         );
@@ -2485,7 +2501,7 @@ mod tests {
             .position(|c| c.name.as_str() == "name")
             .unwrap();
 
-        assert_eq!(results[0][id_idx], Value::Uuid(row_id));
-        assert_eq!(results[0][name_idx], Value::Text("Alice".to_string()));
+        assert_eq!(results[0].1[id_idx], Value::Uuid(row_id));
+        assert_eq!(results[0].1[name_idx], Value::Text("Alice".to_string()));
     }
 }

@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub use client::JazzClient;
+pub use client::{JazzClient, SessionClient};
 
 // Re-exports for convenience
 pub use groove::object::ObjectId;
@@ -65,6 +65,18 @@ pub struct AppContext {
     pub server_url: String,
     /// Local data directory for RocksDB storage.
     pub data_dir: PathBuf,
+
+    // Authentication fields
+
+    /// JWT token for frontend authentication.
+    /// Sent as `Authorization: Bearer <token>`.
+    pub jwt_token: Option<String>,
+    /// Backend secret for session impersonation.
+    /// Enables `for_session()` to act as any user.
+    pub backend_secret: Option<String>,
+    /// Admin secret for schema/policy sync.
+    /// Required to sync catalogue objects.
+    pub admin_secret: Option<String>,
 }
 
 /// Errors from Jazz client operations.
@@ -156,6 +168,9 @@ mod tests {
             schema: test_schema(),
             server_url: String::new(), // No server
             data_dir: temp_dir.path().to_path_buf(),
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
         };
 
         let client = JazzClient::connect(context).await.unwrap();
@@ -206,6 +221,9 @@ mod tests {
                 schema: test_schema(),
                 server_url: String::new(),
                 data_dir: data_path.clone(),
+                jwt_token: None,
+                backend_secret: None,
+                admin_secret: None,
             };
             let client = JazzClient::connect(context).await.unwrap();
 
@@ -229,9 +247,14 @@ mod tests {
                 schema: test_schema(),
                 server_url: String::new(),
                 data_dir: data_path,
+                jwt_token: None,
+                backend_secret: None,
+                admin_secret: None,
             };
             let client = JazzClient::connect(context).await.unwrap();
 
+            // Query should return persisted data immediately - no retry needed
+            // because one-shot queries now wait for pending local storage loads
             let query = QueryBuilder::new("todos").build();
             let results = client.query(query).await.unwrap();
 

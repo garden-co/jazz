@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 use groove::object::ObjectId;
 use groove::query_manager::query::Query;
-use groove::query_manager::session::Session;
 use groove::query_manager::types::Value;
 use groove::schema_manager::QuerySchemaContext;
 use groove::sync_manager::{ClientId, QueryId, SyncPayload};
@@ -36,6 +35,9 @@ pub struct ConnectionId(pub u64);
 // ============================================================================
 
 /// Request to subscribe to a query.
+///
+/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
+/// not from the request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeRequest {
     /// The query to subscribe to.
@@ -43,8 +45,6 @@ pub struct SubscribeRequest {
     /// Schema context for query execution.
     /// Tells the server which schema version the client uses.
     pub schema_context: QuerySchemaContext,
-    /// Session for policy evaluation.
-    pub session: Option<Session>,
 }
 
 /// Response to a subscribe request.
@@ -62,6 +62,9 @@ pub struct UnsubscribeRequest {
 }
 
 /// Request to create a new object/row.
+///
+/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
+/// not from the request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateObjectRequest {
     /// Table name.
@@ -71,8 +74,6 @@ pub struct CreateObjectRequest {
     /// Schema context for mutation execution.
     /// Tells the server which schema version the client uses.
     pub schema_context: QuerySchemaContext,
-    /// Session for policy evaluation.
-    pub session: Option<Session>,
 }
 
 /// Response to a create request.
@@ -83,6 +84,9 @@ pub struct CreateObjectResponse {
 }
 
 /// Request to update an existing object/row.
+///
+/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
+/// not from the request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateObjectRequest {
     /// ID of the object to update.
@@ -92,11 +96,12 @@ pub struct UpdateObjectRequest {
     /// Schema context for mutation execution.
     /// Tells the server which schema version the client uses.
     pub schema_context: QuerySchemaContext,
-    /// Session for policy evaluation.
-    pub session: Option<Session>,
 }
 
 /// Request to delete an object/row.
+///
+/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
+/// not from the request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteObjectRequest {
     /// ID of the object to delete.
@@ -104,8 +109,6 @@ pub struct DeleteObjectRequest {
     /// Schema context for mutation execution.
     /// Tells the server which schema version the client uses.
     pub schema_context: QuerySchemaContext,
-    /// Session for policy evaluation.
-    pub session: Option<Session>,
 }
 
 /// Request to sync object data (for peer-to-peer sync).
@@ -302,7 +305,6 @@ mod tests {
         let request = SubscribeRequest {
             query,
             schema_context,
-            session: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -310,7 +312,6 @@ mod tests {
         assert!(json.contains("schema_context"));
 
         let parsed: SubscribeRequest = serde_json::from_str(&json).unwrap();
-        assert!(parsed.session.is_none());
         assert_eq!(parsed.schema_context.env, "dev");
     }
 }

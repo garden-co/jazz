@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { table, col, migrate, getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
+import { table, col, migrate, getCollectedSchema, getCollectedMigration, resetCollectedState, } from "./dsl.js";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 describe("schemaToSql", () => {
     it("generates SQL matching schema_455a1f10a158 (v1: title + completed)", () => {

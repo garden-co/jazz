@@ -23,15 +23,17 @@ use wasm_bindgen::prelude::*;
 
 use groove::io_handler::IoHandler;
 use groove::object::ObjectId;
+use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, Value};
-use groove::runtime_core::{RuntimeCore, SubscriptionDelta, SubscriptionHandle};
+use groove::runtime_core::RuntimeCore;
+#[cfg(target_arch = "wasm32")]
+use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::{StorageRequest, StorageResponse};
+use groove::storage::StorageRequest;
 use groove::sync_manager::{InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
-use crate::driver_bridge::JsStorageDriver;
 use crate::query::parse_query;
-use crate::types::{WasmSchema, WasmValue};
+use crate::types::{storage_request_to_wasm, wasm_response_to_storage, WasmSchema, WasmStorageResponse, WasmValue};
 
 // ============================================================================
 // WasmIoHandler
@@ -74,9 +76,11 @@ impl WasmIoHandler {
 
 impl IoHandler for WasmIoHandler {
     fn send_storage_request(&mut self, request: StorageRequest) {
-        // Serialize request to JSON and send to JS
-        if let Ok(json) = serde_json::to_string(&request) {
-            let js_value = JsValue::from_str(&json);
+        // Convert to WASM type and serialize directly to JS object
+        // Use serialize_maps_as_objects to convert HashMap to plain objects (not JS Map)
+        let wasm_request = storage_request_to_wasm(request);
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        if let Ok(js_value) = wasm_request.serialize(&serializer) {
             let _ = self.storage_callback.call1(&JsValue::NULL, &js_value);
         }
     }
@@ -188,11 +192,14 @@ impl WasmRuntime {
     /// Called by JS when a storage response arrives.
     ///
     /// # Arguments
-    /// * `response_json` - JSON-encoded StorageResponse
+    /// * `response` - Storage response object (WasmStorageResponse)
     #[wasm_bindgen(js_name = onStorageResponse)]
-    pub fn on_storage_response(&self, response_json: &str) -> Result<(), JsError> {
-        let response: StorageResponse = serde_json::from_str(response_json)
+    pub fn on_storage_response(&self, response: JsValue) -> Result<(), JsError> {
+        let wasm_response: WasmStorageResponse = serde_wasm_bindgen::from_value(response)
             .map_err(|e| JsError::new(&format!("Invalid storage response: {}", e)))?;
+
+        let response = wasm_response_to_storage(wasm_response)
+            .map_err(|e| JsError::new(&format!("Failed to convert response: {}", e)))?;
 
         self.core.borrow_mut().park_storage_response(response);
         Ok(())
@@ -257,22 +264,38 @@ impl WasmRuntime {
     ///
     /// # Arguments
     /// * `query_json` - JSON-encoded query specification
+    /// * `session_json` - Optional JSON-encoded session for policy evaluation
     ///
     /// # Returns
     /// Promise that resolves to JSON-encoded array of `{id: string, values: Value[]}` objects.
     #[wasm_bindgen]
-    pub fn query(&self, query_json: &str) -> Result<js_sys::Promise, JsError> {
+    pub fn query(
+        &self,
+        query_json: &str,
+        session_json: Option<String>,
+    ) -> Result<js_sys::Promise, JsError> {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
+
+        // Parse session from JSON if provided
+        let session = if let Some(json) = session_json {
+            Some(
+                serde_json::from_str::<Session>(&json)
+                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
+            )
+        } else {
+            None
+        };
 
         // Get the query future from RuntimeCore
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query(query, None)
+            core.query(query, session)
         };
 
         // Convert to a JS Promise
         let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let results = future.await
+            let results = future
+                .await
                 .map_err(|e| JsValue::from_str(&format!("Query failed: {:?}", e)))?;
 
             // Convert results
@@ -287,8 +310,10 @@ impl WasmRuntime {
                 })
                 .collect();
 
-            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-            wasm_results.serialize(&serializer)
+            let serializer =
+                serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            wasm_results
+                .serialize(&serializer)
                 .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
         });
 
@@ -352,13 +377,29 @@ impl WasmRuntime {
     /// # Arguments
     /// * `query_json` - JSON-encoded query specification
     /// * `on_update` - Callback function invoked with updates (receives JSON delta)
+    /// * `session_json` - Optional JSON-encoded session for policy evaluation
     ///
     /// # Returns
     /// Subscription handle (u64) for later unsubscription.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
-    pub fn subscribe(&self, query_json: &str, on_update: Function) -> Result<f64, JsError> {
+    pub fn subscribe(
+        &self,
+        query_json: &str,
+        on_update: Function,
+        session_json: Option<String>,
+    ) -> Result<f64, JsError> {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
+
+        // Parse session from JSON if provided
+        let session = if let Some(json) = session_json {
+            Some(
+                serde_json::from_str::<Session>(&json)
+                    .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?,
+            )
+        } else {
+            None
+        };
 
         // Create a Rust callback that bridges to the JS function.
         // The callback serializes the delta to JSON and calls the JS function.
@@ -394,7 +435,7 @@ impl WasmRuntime {
         let handle = self
             .core
             .borrow_mut()
-            .subscribe(query, callback, None)
+            .subscribe(query, callback, session)
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
         // Return handle as f64 since JS doesn't have u64
@@ -439,31 +480,4 @@ impl WasmRuntime {
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
     }
 
-}
-
-// ============================================================================
-// Legacy API for backwards compatibility
-// ============================================================================
-
-/// Legacy constructor that takes a JsStorageDriver.
-///
-/// New code should use the main constructor with a storage callback.
-#[wasm_bindgen]
-pub fn create_wasm_runtime_legacy(
-    driver: JsStorageDriver,
-    schema_json: &str,
-    app_id: &str,
-    env: &str,
-    user_branch: &str,
-) -> Result<WasmRuntime, JsError> {
-    // Create a callback that uses the driver bridge
-    let driver_bridge = crate::driver_bridge::WasmDriverBridge::new(driver);
-
-    // For legacy mode, we need to handle this differently
-    // The old API expected async tick() calls
-    // For now, return an error directing to the new API
-    Err(JsError::new(
-        "Legacy JsStorageDriver API is no longer supported. \
-         Use the new constructor with a storage callback function instead."
-    ))
 }

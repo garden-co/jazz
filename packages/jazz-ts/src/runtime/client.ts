@@ -5,8 +5,8 @@
  * subscriptions, and sync.
  */
 
-import type { AppContext } from "./context.js";
-import type { Value, RowDelta, Schema } from "../drivers/types.js";
+import type { AppContext, Session } from "./context.js";
+import type { Value, RowDelta, WasmSchema, StorageRequest } from "../drivers/types.js";
 import type { WasmRuntime as GrooveWasmRuntime } from "groove-wasm";
 
 // Re-type the WasmRuntime to work with our local types
@@ -26,11 +26,120 @@ export interface Row {
 export type SubscriptionCallback = (delta: RowDelta) => void;
 
 /**
+ * Session-scoped client for backend operations.
+ *
+ * Created by `JazzClient.forSession()`. Allows backend applications
+ * to perform operations as a specific user via header-based authentication.
+ */
+export class SessionClient {
+  private client: JazzClient;
+  private session: Session;
+
+  constructor(client: JazzClient, session: Session) {
+    this.client = client;
+    this.session = session;
+  }
+
+  /**
+   * Create a new row as this session's user.
+   */
+  async create(table: string, values: Value[]): Promise<string> {
+    const serverUrl = this.client.getServerUrl();
+    if (!serverUrl) {
+      throw new Error("No server connection");
+    }
+
+    const response = await this.client.sendRequest(
+      `${serverUrl}/sync/object`,
+      "POST",
+      {
+        table,
+        values,
+        schema_context: this.client.getSchemaContext(),
+      },
+      this.session,
+    );
+
+    if (!response.ok) {
+      throw new Error(`Create failed: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    return result.object_id;
+  }
+
+  /**
+   * Update a row as this session's user.
+   */
+  async update(objectId: string, updates: Record<string, Value>): Promise<void> {
+    const serverUrl = this.client.getServerUrl();
+    if (!serverUrl) {
+      throw new Error("No server connection");
+    }
+
+    // Convert updates object to array of tuples
+    const updateArray = Object.entries(updates);
+
+    const response = await this.client.sendRequest(
+      `${serverUrl}/sync/object`,
+      "PUT",
+      {
+        object_id: objectId,
+        updates: updateArray,
+        schema_context: this.client.getSchemaContext(),
+      },
+      this.session,
+    );
+
+    if (!response.ok) {
+      throw new Error(`Update failed: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Delete a row as this session's user.
+   */
+  async delete(objectId: string): Promise<void> {
+    const serverUrl = this.client.getServerUrl();
+    if (!serverUrl) {
+      throw new Error("No server connection");
+    }
+
+    const response = await this.client.sendRequest(
+      `${serverUrl}/sync/object/delete`,
+      "POST",
+      {
+        object_id: objectId,
+        schema_context: this.client.getSchemaContext(),
+      },
+      this.session,
+    );
+
+    if (!response.ok) {
+      throw new Error(`Delete failed: ${response.statusText}`);
+    }
+  }
+
+  /**
+   * Query as this session's user.
+   */
+  async query(queryJson: string): Promise<Row[]> {
+    return this.client.queryInternal(queryJson, this.session);
+  }
+
+  /**
+   * Subscribe to a query as this session's user.
+   */
+  subscribe(queryJson: string, callback: SubscriptionCallback): number {
+    return this.client.subscribeInternal(queryJson, callback, this.session);
+  }
+}
+
+/**
  * High-level Jazz client.
  */
 export class JazzClient {
   private runtime: WasmRuntime;
-  private tickInterval: ReturnType<typeof setInterval> | null = null;
   private sseConnection: EventSource | null = null;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
@@ -48,13 +157,27 @@ export class JazzClient {
    */
   static async connect(context: AppContext): Promise<JazzClient> {
     // Load WASM module dynamically
-    // In a real implementation, this would import from groove-wasm
     const wasmModule = await loadWasmModule();
 
-    // Create WASM runtime with the JS driver
+    // Create storage callback that bridges WASM requests to the JS driver
+    // With tsify, requests come as typed JS objects (not JSON strings)
+    const storageCallback = async (request: StorageRequest) => {
+      try {
+        // Driver expects an array of requests
+        const responses = await context.driver.process([request]);
+        // Return first response as object (not JSON string)
+        if (responses.length > 0) {
+          runtime.onStorageResponse(responses[0]);
+        }
+      } catch (e) {
+        console.error("Storage callback error:", e);
+      }
+    };
+
+    // Create WASM runtime with storage callback
     const schemaJson = JSON.stringify(context.schema);
     const runtime = new wasmModule.WasmRuntime(
-      context.driver,
+      storageCallback,
       schemaJson,
       context.appId,
       context.env ?? "dev",
@@ -62,9 +185,6 @@ export class JazzClient {
     );
 
     const client = new JazzClient(runtime, context);
-
-    // Start tick loop
-    client.startTickLoop();
 
     // Set up sync if server URL provided
     if (context.serverUrl) {
@@ -75,15 +195,41 @@ export class JazzClient {
   }
 
   /**
+   * Create a session-scoped client for backend operations.
+   *
+   * This allows backend applications to perform operations as a specific user.
+   * Requires `backendSecret` to be configured in the `AppContext`.
+   *
+   * @param session Session to impersonate
+   * @returns SessionClient for performing operations as the given user
+   * @throws Error if backendSecret is not configured
+   *
+   * @example
+   * ```typescript
+   * const userSession = { user_id: "user-123", claims: {} };
+   * const userClient = client.forSession(userSession);
+   * const id = await userClient.create("todos", [{ type: "Text", value: "Buy milk" }]);
+   * ```
+   */
+  forSession(session: Session): SessionClient {
+    if (!this.context.backendSecret) {
+      throw new Error("backendSecret required for session impersonation");
+    }
+    if (!this.context.serverUrl) {
+      throw new Error("serverUrl required for session impersonation");
+    }
+    return new SessionClient(this, session);
+  }
+
+  /**
    * Insert a new row into a table.
    *
    * @param table Table name
    * @param values Array of column values
    * @returns The new row's ID (UUID string)
    */
-  async create(table: string, values: Value[]): Promise<string> {
-    const id = await this.runtime.insert(table, values);
-    return id;
+  create(table: string, values: Value[]): string {
+    return this.runtime.insert(table, values);
   }
 
   /**
@@ -93,7 +239,16 @@ export class JazzClient {
    * @returns Array of matching rows
    */
   async query(queryJson: string): Promise<Row[]> {
-    const results = await this.runtime.query(queryJson);
+    return this.queryInternal(queryJson, undefined);
+  }
+
+  /**
+   * Internal query with optional session.
+   * @internal
+   */
+  async queryInternal(queryJson: string, session?: Session): Promise<Row[]> {
+    const sessionJson = session ? JSON.stringify(session) : undefined;
+    const results = await this.runtime.query(queryJson, sessionJson);
     return results as Row[];
   }
 
@@ -103,8 +258,8 @@ export class JazzClient {
    * @param objectId Row ID (UUID string)
    * @param updates Object mapping column names to new values
    */
-  async update(objectId: string, updates: Record<string, Value>): Promise<void> {
-    await this.runtime.update(objectId, updates);
+  update(objectId: string, updates: Record<string, Value>): void {
+    this.runtime.update(objectId, updates);
   }
 
   /**
@@ -112,8 +267,8 @@ export class JazzClient {
    *
    * @param objectId Row ID (UUID string)
    */
-  async delete(objectId: string): Promise<void> {
-    await this.runtime.delete(objectId);
+  delete(objectId: string): void {
+    this.runtime.delete(objectId);
   }
 
   /**
@@ -123,10 +278,23 @@ export class JazzClient {
    * @param callback Called with delta whenever results change
    * @returns Subscription ID for unsubscribing
    */
-  async subscribe(queryJson: string, callback: SubscriptionCallback): Promise<number> {
-    const subId = await this.runtime.subscribe(queryJson, (delta: RowDelta) => {
-      callback(delta);
-    });
+  subscribe(queryJson: string, callback: SubscriptionCallback): number {
+    return this.subscribeInternal(queryJson, callback, undefined);
+  }
+
+  /**
+   * Internal subscribe with optional session.
+   * @internal
+   */
+  subscribeInternal(queryJson: string, callback: SubscriptionCallback, session?: Session): number {
+    const sessionJson = session ? JSON.stringify(session) : undefined;
+    const subId = this.runtime.subscribe(
+      queryJson,
+      (delta: RowDelta) => {
+        callback(delta);
+      },
+      sessionJson,
+    );
     this.subscriptions.set(subId, callback);
     return subId;
   }
@@ -144,20 +312,66 @@ export class JazzClient {
   /**
    * Get the current schema.
    */
-  getSchema(): Schema {
+  getSchema(): WasmSchema {
     return this.runtime.getSchema();
+  }
+
+  /**
+   * Get the server URL (for SessionClient).
+   * @internal
+   */
+  getServerUrl(): string | undefined {
+    return this.context.serverUrl;
+  }
+
+  /**
+   * Get schema context for server requests.
+   * @internal
+   */
+  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+    // TODO: Compute actual schema hash
+    return {
+      env: this.context.env ?? "dev",
+      schema_hash: "0".repeat(64), // Placeholder - should compute from schema
+      user_branch: this.context.userBranch ?? "main",
+    };
+  }
+
+  /**
+   * Send an HTTP request with appropriate auth headers.
+   * @internal
+   */
+  async sendRequest(
+    url: string,
+    method: string,
+    body: unknown,
+    session?: Session,
+  ): Promise<Response> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+
+    // Priority 1: Backend impersonation (via SessionClient)
+    if (session && this.context.backendSecret) {
+      headers["X-Jazz-Backend-Secret"] = this.context.backendSecret;
+      headers["X-Jazz-Session"] = btoa(JSON.stringify(session));
+    }
+    // Priority 2: Frontend JWT auth
+    else if (this.context.jwtToken) {
+      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
+    }
+
+    return fetch(url, {
+      method,
+      headers,
+      body: JSON.stringify(body),
+    });
   }
 
   /**
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    // Stop tick loop
-    if (this.tickInterval) {
-      clearInterval(this.tickInterval);
-      this.tickInterval = null;
-    }
-
     // Close SSE connection
     if (this.sseConnection) {
       this.sseConnection.close();
@@ -168,17 +382,6 @@ export class JazzClient {
     if (this.context.driver.close) {
       await this.context.driver.close();
     }
-  }
-
-  private startTickLoop(): void {
-    // Tick every 100ms to process async operations
-    this.tickInterval = setInterval(async () => {
-      try {
-        await this.runtime.tick();
-      } catch (e) {
-        console.error("Jazz tick error:", e);
-      }
-    }, 100);
   }
 
   private setupSync(serverUrl: string): void {
@@ -196,11 +399,25 @@ export class JazzClient {
 
   private async sendSyncMessage(serverUrl: string, message: string): Promise<void> {
     try {
-      const response = await fetch(`${serverUrl}/sync/payload`, {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+
+      // Check if this is a catalogue sync - add admin header
+      const parsed = JSON.parse(message);
+      if (this.isCataloguePayload(parsed)) {
+        if (this.context.adminSecret) {
+          headers["X-Jazz-Admin-Secret"] = this.context.adminSecret;
+        }
+      }
+      // Otherwise use JWT if available
+      else if (this.context.jwtToken) {
+        headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
+      }
+
+      const response = await fetch(`${serverUrl}/sync`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers,
         body: message,
       });
 
@@ -210,6 +427,20 @@ export class JazzClient {
     } catch (e) {
       console.error("Sync send error:", e);
     }
+  }
+
+  /**
+   * Check if a sync payload is for a catalogue object (schema or lens).
+   */
+  private isCataloguePayload(payload: {
+    payload?: { ObjectUpdated?: { metadata?: { metadata?: Record<string, string> } } };
+  }): boolean {
+    const metadata = payload?.payload?.ObjectUpdated?.metadata?.metadata;
+    if (metadata) {
+      const type = metadata["type"];
+      return type === "catalogue_schema" || type === "catalogue_lens";
+    }
+    return false;
   }
 
   private connectSSE(serverUrl: string): void {

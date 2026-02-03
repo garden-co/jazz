@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{
-    DeleteHandle, InsertHandle, QueryError, QueryHandle, QueryManager, QueryUpdate,
+    DeleteHandle, InsertHandle, QueryError, QueryManager, QueryUpdate,
 };
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
@@ -31,21 +31,17 @@ pub const CATALOGUE_TYPE_LENS: &str = "catalogue_lens";
 
 /// Result of a single tick cycle.
 ///
-/// Contains outbox entries (sync messages to send), subscription updates
-/// (query result changes to emit to subscribers), and completed one-shot queries.
+/// Contains outbox entries (sync messages to send) and subscription updates
+/// (query result changes to emit to subscribers).
 ///
 /// This is the shared output from both native and WASM runtimes after
 /// processing a tick cycle.
 #[derive(Debug, Clone)]
-#[allow(clippy::type_complexity)]
 pub struct TickResult {
     /// Sync messages to send to connected peers/servers.
     pub outbox: Vec<OutboxEntry>,
     /// Query subscription result changes.
     pub subscription_updates: Vec<QueryUpdate>,
-    /// One-shot queries that completed this tick.
-    /// Wrappers use these to fulfill platform-specific futures.
-    pub completed_queries: Vec<(QueryHandle, Result<Vec<(ObjectId, Vec<Value>)>, QueryError>)>,
 }
 
 /// SchemaManager coordinates schema evolution with query execution.
@@ -80,8 +76,11 @@ pub struct TickResult {
 /// // Insert data
 /// let handle = manager.insert("users", &[id, name])?;
 ///
-/// // Query across all schema versions
-/// let results = manager.execute(manager.query("users").build())?;
+/// // Query across all schema versions via subscription
+/// let sub_id = manager.query_manager_mut().subscribe(manager.query("users").build())?;
+/// manager.process();
+/// let results = manager.query_manager_mut().get_subscription_results(sub_id);
+/// manager.query_manager_mut().unsubscribe(sub_id);
 /// ```
 pub struct SchemaManager {
     context: SchemaContext,
@@ -655,93 +654,6 @@ impl SchemaManager {
         QueryBuilder::new(table)
     }
 
-    /// Execute a query and return results (one-shot).
-    ///
-    /// Automatically queries across all live schema versions.
-    /// Rows from old schemas are transformed via lens to current schema format.
-    pub fn execute(&mut self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
-        self.query_manager.execute(query)
-    }
-
-    /// Execute a query with explicit schema context (for server use).
-    ///
-    /// Servers don't have a fixed "current" schema - they serve multiple clients
-    /// with different schema versions. This method allows executing a query
-    /// using the client's schema as the "current" for that query.
-    ///
-    /// The schema must be in `known_schemas` (received via catalogue sync).
-    /// Returns `UnknownSchema` error if the schema is not known.
-    ///
-    /// Lens transforms still work - if the server has other schemas with lens
-    /// paths to the target schema, rows from those branches will be transformed.
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query to execute
-    /// * `ctx` - Schema context from the client (env, schema_hash, user_branch)
-    pub fn execute_with_schema_context(
-        &mut self,
-        query: Query,
-        ctx: &QuerySchemaContext,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
-        // Look up the target schema in known_schemas
-        let target_schema = self
-            .known_schemas
-            .get(&ctx.schema_hash)
-            .ok_or(QueryError::UnknownSchema(ctx.schema_hash))?
-            .clone();
-
-        // Build a SchemaContext with target as current
-        let mut temp_context =
-            SchemaContext::new(target_schema.clone(), &ctx.env, &ctx.user_branch);
-
-        // Add any other known schemas that have lens paths TO the target schema
-        // Copy lenses from our main context
-        for ((_source, _target), lens) in &self.context.lenses {
-            temp_context.register_lens(lens.clone());
-        }
-
-        // Add other known schemas as potential live schemas
-        for (hash, schema) in &self.known_schemas {
-            if *hash != ctx.schema_hash {
-                // Add to pending - will activate if lens path exists to target
-                temp_context.add_pending_schema(schema.clone());
-            }
-        }
-
-        // Try to activate any pending schemas that now have lens paths
-        temp_context.try_activate_pending();
-
-        // Ensure the client's branch is registered for indexing (server-mode)
-        let client_branch =
-            ComposedBranchName::new(&ctx.env, ctx.schema_hash, &ctx.user_branch).to_branch_name();
-        self.query_manager
-            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
-
-        // Ensure indices exist for all branches in the temp context
-        for branch_name in temp_context.all_branch_names() {
-            let branch_str = branch_name.as_str();
-            if let Some(composed) = ComposedBranchName::parse(&branch_name)
-                && let Some(schema) = self.known_schemas.get(&composed.schema_hash)
-            {
-                for (table_name, table_schema) in schema {
-                    self.query_manager.ensure_indices_for_branch(
-                        table_name.as_str(),
-                        branch_str,
-                        table_schema,
-                    );
-                }
-            }
-        }
-
-        // Retry any pending row updates that might now be processable
-        self.query_manager.retry_pending_row_updates();
-
-        // Execute using the temporary context
-        self.query_manager
-            .execute_with_explicit_context(query, &target_schema, &temp_context)
-    }
-
     /// Subscribe to a query with explicit schema context (for server use).
     ///
     /// Servers don't have a fixed "current" schema - they serve multiple clients
@@ -898,13 +810,9 @@ impl SchemaManager {
         // 3. Collect subscription updates
         let subscription_updates = self.query_manager.take_updates();
 
-        // 4. Retry pending queries (they may now complete after sync/process)
-        let completed_queries = self.query_manager.retry_pending_queries();
-
         TickResult {
             outbox,
             subscription_updates,
-            completed_queries,
         }
     }
 }
@@ -1212,8 +1120,14 @@ mod tests {
             .unwrap();
         manager.process();
 
-        // Query
-        let results = manager.execute(manager.query("users").build()).unwrap();
+        // Query via subscribe/process/unsubscribe pattern
+        let query = manager.query("users").build();
+        let qm = manager.query_manager_mut();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process();
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe(sub_id);
+
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[0], id_val);
     }

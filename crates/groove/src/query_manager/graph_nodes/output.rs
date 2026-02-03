@@ -46,24 +46,6 @@ pub struct OutputNode {
 }
 
 impl OutputNode {
-    /// Create an OutputNode with RowDescriptor (backward compatible).
-    pub fn new(descriptor: RowDescriptor, mode: OutputMode) -> Self {
-        let output_tuple_descriptor =
-            TupleDescriptor::single_with_materialization("", descriptor.clone(), true);
-        Self {
-            descriptor,
-            output_tuple_descriptor,
-            mode,
-            current_tuples: AHashSet::new(),
-            ordered_tuples: Vec::new(),
-            pending_tuple_deltas: Vec::new(),
-            held_pending: false,
-            subscriber_initialized: false,
-            held_tuple_changes: TupleDelta::new(),
-            dirty: true,
-        }
-    }
-
     /// Create an OutputNode with TupleDescriptor.
     /// The output descriptor is always fully materialized.
     pub fn with_tuple_descriptor(tuple_descriptor: TupleDescriptor, mode: OutputMode) -> Self {
@@ -300,10 +282,15 @@ mod tests {
         tuples.iter().any(|t| t.ids().contains(&id))
     }
 
+    fn make_output_node(mode: OutputMode) -> OutputNode {
+        let descriptor = test_descriptor();
+        let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
+        OutputNode::with_tuple_descriptor(tuple_desc, mode)
+    }
+
     #[test]
     fn output_stores_deltas() {
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Delta);
+        let mut node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
         let tuple1 = make_tuple(id1, 1, "Alice");
@@ -324,8 +311,7 @@ mod tests {
 
     #[test]
     fn output_decodes_current() {
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Full);
+        let mut node = make_output_node(OutputMode::Full);
 
         let id1 = ObjectId::new();
         let tuple1 = make_tuple(id1, 1, "Alice");
@@ -345,8 +331,7 @@ mod tests {
 
     #[test]
     fn output_decodes_delta() {
-        let descriptor = test_descriptor();
-        let node = OutputNode::new(descriptor, OutputMode::Delta);
+        let node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
         let row1 = Row::new(
@@ -375,8 +360,7 @@ mod tests {
 
     #[test]
     fn empty_delta_not_stored() {
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Delta);
+        let mut node = make_output_node(OutputMode::Delta);
 
         let delta = TupleDelta::new();
         node.process(delta);
@@ -387,8 +371,7 @@ mod tests {
 
     #[test]
     fn output_holds_back_when_pending() {
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Delta);
+        let mut node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
         let tuple1 = make_tuple(id1, 1, "Alice");
@@ -414,8 +397,7 @@ mod tests {
 
     #[test]
     fn output_emits_full_state_when_pending_clears() {
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Delta);
+        let mut node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -468,8 +450,7 @@ mod tests {
 
     #[test]
     fn output_normal_behavior_when_not_pending() {
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Delta);
+        let mut node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();
@@ -512,8 +493,7 @@ mod tests {
         // 2. Normal updates → delivered incrementally
         // 3. New pending → clears → only NEW changes emitted (not full snapshot)
 
-        let descriptor = test_descriptor();
-        let mut node = OutputNode::new(descriptor, OutputMode::Delta);
+        let mut node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
         let id2 = ObjectId::new();

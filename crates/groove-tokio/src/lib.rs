@@ -38,7 +38,7 @@ use groove::io_handler::IoHandler;
 use groove::object::ObjectId;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{RowDelta, Schema, Value};
+use groove::query_manager::types::{Schema, Value};
 pub use groove::runtime_core::SubscriptionHandle;
 use groove::runtime_core::{
     QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, SubscriptionDelta,
@@ -90,6 +90,11 @@ impl TokioIoHandler {
     fn set_core_ref(&mut self, core_ref: Weak<Mutex<RuntimeCore<TokioIoHandler>>>) {
         self.core_ref = core_ref;
     }
+
+    /// Check if a batched_tick is currently scheduled.
+    pub fn is_scheduled(&self) -> bool {
+        self.scheduled.load(Ordering::SeqCst)
+    }
 }
 
 impl IoHandler for TokioIoHandler {
@@ -112,15 +117,15 @@ impl IoHandler for TokioIoHandler {
             let flag = self.scheduled.clone();
 
             tokio::spawn(async move {
-                // Clear the scheduled flag
-                flag.store(false, Ordering::SeqCst);
-
                 // Call batched_tick on the core
                 if let Some(core_arc) = core_ref.upgrade() {
                     if let Ok(mut core) = core_arc.lock() {
                         core.batched_tick();
                     }
                 }
+
+                // Clear the scheduled flag AFTER tick completes
+                flag.store(false, Ordering::SeqCst);
             });
         }
     }
@@ -290,14 +295,59 @@ impl TokioRuntime {
         Ok(())
     }
 
-    /// Flush pending operations to storage synchronously.
+    /// Flush pending operations to storage.
     ///
     /// Call this after CRUD operations if you need to ensure data is persisted
-    /// before continuing. For most use cases, relying on IoHandler scheduling
-    /// via `schedule_batched_tick()` is sufficient.
-    pub fn flush(&self) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.batched_tick();
+    /// before continuing. This waits for any scheduled batched_tick to complete
+    /// and then runs additional ticks until all storage is flushed.
+    ///
+    /// For most use cases, relying on IoHandler scheduling via
+    /// `schedule_batched_tick()` is sufficient.
+    pub async fn flush(&self) -> Result<(), RuntimeError> {
+        // Keep flushing until everything is stable:
+        // - No scheduled tasks pending
+        // - No outbound messages after our final tick
+        let mut attempts = 0;
+        loop {
+            // First, wait for any scheduled batched_tick to complete
+            loop {
+                let is_scheduled = {
+                    let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+                    core.io_handler().is_scheduled()
+                };
+
+                if !is_scheduled {
+                    break;
+                }
+
+                // Sleep briefly to allow the scheduled task to run
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+                attempts += 1;
+                if attempts > 200 {
+                    // Safety valve
+                    break;
+                }
+            }
+
+            // Now do a synchronous tick and check if more work was generated
+            let has_more_work = {
+                let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+                core.batched_tick();
+                // Check if processing created more outbound work
+                core.has_outbound() || core.io_handler().is_scheduled()
+            };
+
+            if !has_more_work {
+                break;
+            }
+
+            attempts += 1;
+            if attempts > 200 {
+                break;
+            }
+        }
+
         Ok(())
     }
 
@@ -430,184 +480,6 @@ impl TokioRuntime {
     }
 }
 
-// ============================================================================
-// Legacy API Compatibility Layer
-// ============================================================================
-
-// The old JazzRuntime used a command channel pattern. For backwards compatibility
-// during the transition, we provide these types. They should be removed once
-// jazz-cli and jazz-rs are updated.
-
-/// Handle for interacting with a TokioRuntime (legacy compatibility).
-///
-/// This provides an async API similar to the old RuntimeHandle.
-/// New code should use TokioRuntime directly.
-#[derive(Clone)]
-pub struct RuntimeHandle {
-    runtime: TokioRuntime,
-}
-
-impl RuntimeHandle {
-    /// Create a RuntimeHandle from a TokioRuntime.
-    pub fn new(runtime: TokioRuntime) -> Self {
-        Self { runtime }
-    }
-
-    /// Subscribe to a query.
-    pub async fn subscribe(
-        &self,
-        _query: Query,
-        _session: Option<Session>,
-    ) -> Result<SubscriptionHandle, RuntimeError> {
-        // Legacy subscriptions used a different callback model
-        // For now, this is a stub - callers need to migrate to TokioRuntime.subscribe()
-        Err(RuntimeError::QueryError(
-            "Legacy subscribe not supported - use TokioRuntime.subscribe()".into(),
-        ))
-    }
-
-    /// Execute a one-shot query.
-    pub async fn query(
-        &self,
-        query: Query,
-        session: Option<Session>,
-    ) -> Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError> {
-        let future = self.runtime.query(query, session)?;
-        future
-            .await
-            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))
-    }
-
-    /// Insert a row into a table.
-    pub async fn insert(
-        &self,
-        table: &str,
-        values: Vec<Value>,
-        session: Option<Session>,
-    ) -> Result<ObjectId, RuntimeError> {
-        self.runtime.insert(table, values, session.as_ref())
-    }
-
-    /// Update a row.
-    pub async fn update(
-        &self,
-        object_id: ObjectId,
-        values: Vec<(String, Value)>,
-        session: Option<Session>,
-    ) -> Result<(), RuntimeError> {
-        self.runtime.update(object_id, values, session.as_ref())
-    }
-
-    /// Delete a row.
-    pub async fn delete(
-        &self,
-        object_id: ObjectId,
-        session: Option<Session>,
-    ) -> Result<(), RuntimeError> {
-        self.runtime.delete(object_id, session.as_ref())
-    }
-
-    /// Push a sync message to the inbox.
-    pub async fn push_sync_inbox(&self, entry: InboxEntry) -> Result<(), RuntimeError> {
-        self.runtime.push_sync_inbox(entry)
-    }
-
-    /// Add a server connection.
-    pub async fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
-        self.runtime.add_server(server_id)
-    }
-
-    /// Remove a server connection.
-    pub async fn remove_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
-        self.runtime.remove_server(server_id)
-    }
-
-    /// Add a client connection.
-    pub async fn add_client(
-        &self,
-        client_id: ClientId,
-        session: Option<Session>,
-    ) -> Result<(), RuntimeError> {
-        self.runtime.add_client(client_id, session)
-    }
-
-    /// Add a client connection and sync all data.
-    pub async fn add_client_with_full_sync(
-        &self,
-        client_id: ClientId,
-        session: Option<Session>,
-    ) -> Result<(), RuntimeError> {
-        self.runtime.add_client_with_full_sync(client_id, session)
-    }
-
-    /// Remove a client connection.
-    pub async fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
-        self.runtime.remove_client(client_id)
-    }
-
-    /// Get the current schema.
-    pub async fn get_schema(&self) -> Result<Schema, RuntimeError> {
-        self.runtime.current_schema()
-    }
-
-    /// Shutdown (no-op in new design - nothing to shut down).
-    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
-        // Flush any pending operations to storage
-        self.runtime.flush()
-    }
-
-    /// Subscribe with schema context.
-    pub async fn subscribe_with_schema_context(
-        &self,
-        query: Query,
-        schema_context: &QuerySchemaContext,
-        session: Option<Session>,
-    ) -> Result<QueryId, RuntimeError> {
-        self.runtime
-            .subscribe_with_schema_context(query, schema_context, session)
-    }
-}
-
-/// Event emitted by the runtime (legacy compatibility).
-#[derive(Debug, Clone)]
-pub enum RuntimeEvent {
-    /// Subscription results changed.
-    SubscriptionUpdate {
-        handle: SubscriptionHandle,
-        delta: RowDelta,
-    },
-    /// Sync message to send.
-    SyncOutbox(OutboxEntry),
-}
-
-/// Legacy JazzRuntime factory for compatibility.
-///
-/// Creates a TokioRuntime and wraps it in the legacy API.
-pub struct JazzRuntime;
-
-impl JazzRuntime {
-    /// Create a new runtime (legacy API).
-    ///
-    /// Returns a RuntimeHandle and event receiver for backwards compatibility.
-    /// New code should use TokioRuntime directly.
-    pub fn new<D: Driver + Send + 'static>(
-        schema_manager: SchemaManager,
-        driver: D,
-    ) -> (RuntimeHandle, tokio::sync::mpsc::Receiver<RuntimeEvent>) {
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
-        let event_tx_clone = event_tx.clone();
-
-        let runtime = TokioRuntime::new(schema_manager, driver, move |msg| {
-            let _ = event_tx_clone.try_send(RuntimeEvent::SyncOutbox(msg));
-        });
-
-        // Load indices
-        let _ = runtime.load_indices();
-
-        (RuntimeHandle::new(runtime), event_rx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,34 +566,6 @@ mod tests {
         let future = runtime.query(query, None).unwrap();
         let results = future.await.unwrap();
         assert_eq!(results.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_legacy_api() {
-        let schema = test_schema();
-        let app_id = AppId::from_name("test-legacy");
-        let sync_manager = SyncManager::new();
-        let schema_manager =
-            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-
-        let driver = groove::driver::TestDriver::new();
-        let (handle, _events) = JazzRuntime::new(schema_manager, driver);
-
-        // Insert via legacy API
-        let values = vec![
-            Value::Uuid(ObjectId::new()),
-            Value::Text("Dave".to_string()),
-        ];
-        let object_id = handle.insert("users", values, None).await.unwrap();
-        assert!(!object_id.0.is_nil());
-
-        // Query via legacy API
-        let query = Query::new("users");
-        let results = handle.query(query, None).await.unwrap();
-        assert_eq!(results.len(), 1);
-
-        // Shutdown (no-op but should not panic)
-        handle.shutdown().await.unwrap();
     }
 
     #[tokio::test]

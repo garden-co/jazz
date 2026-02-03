@@ -344,3 +344,27 @@ for pending in sm.take_pending_updates() {
    - Session state preservation across reconnects (`sent_tips` reused)
    - Consistent ID between SSE registration and HTTP requests
    - Reconnection without re-sending all data
+
+## Future Work
+
+### Query Settlement Confirmation from Upstream
+
+Currently, query results are considered "complete" when the local query graph
+settles with locally persisted data. There is no mechanism to know when results
+reflect data from all upstream server tiers.
+
+**Desired capability:** Option to specify "only fire subscription callback /
+complete query when we know the local query graph is settled on data confirmed
+by all tiers of upstream servers."
+
+**Use cases:**
+
+- Initial data load where client needs authoritative server state
+- Consistency-critical operations requiring server confirmation
+- Testing server sync behavior (see test_server_resync)
+
+**Potential approaches:**
+
+- Server sends "end of initial results" message after QueryRegistration
+- Query-level flag requesting sync confirmation
+- Explicit "sync barrier" request

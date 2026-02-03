@@ -8,9 +8,11 @@
 //! ```
 
 mod commands;
+mod middleware;
 mod routes;
 
 use clap::{Parser, Subcommand};
+use middleware::AuthConfig;
 
 #[derive(Parser)]
 #[command(name = "jazz")]
@@ -49,6 +51,22 @@ enum Commands {
         /// Data directory for persistent storage
         #[arg(short, long, default_value = "./data")]
         data_dir: String,
+
+        /// HMAC secret for JWT validation (development/testing)
+        #[arg(long, env = "JAZZ_JWT_SECRET")]
+        jwt_secret: Option<String>,
+
+        /// URL to fetch JWKS keys for JWT validation (production)
+        #[arg(long, env = "JAZZ_JWKS_URL")]
+        jwks_url: Option<String>,
+
+        /// Secret for backend session impersonation
+        #[arg(long, env = "JAZZ_BACKEND_SECRET")]
+        backend_secret: Option<String>,
+
+        /// Secret for admin operations (schema/policy sync)
+        #[arg(long, env = "JAZZ_ADMIN_SECRET")]
+        admin_secret: Option<String>,
     },
 }
 
@@ -91,8 +109,18 @@ async fn main() {
             app_id,
             port,
             data_dir,
+            jwt_secret,
+            jwks_url,
+            backend_secret,
+            admin_secret,
         } => {
-            if let Err(e) = commands::server::run(&app_id, port, &data_dir).await {
+            let auth_config = AuthConfig {
+                jwt_secret,
+                jwks_url,
+                backend_secret,
+                admin_secret,
+            };
+            if let Err(e) = commands::server::run(&app_id, port, &data_dir, auth_config).await {
                 eprintln!("Server error: {}", e);
                 std::process::exit(1);
             }

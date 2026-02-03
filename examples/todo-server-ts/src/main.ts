@@ -8,7 +8,7 @@ import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
 import { JazzClient, SqliteNodeDriver } from "jazz-ts";
-import type { Value, Schema as DriverSchema, StorageDriver } from "jazz-ts";
+import type { Value, WasmSchema, StorageDriver } from "jazz-ts";
 
 // ============================================================================
 // Types
@@ -48,7 +48,7 @@ export interface RunningServer extends TodoServer {
 // Schema
 // ============================================================================
 
-export const schema: DriverSchema = {
+export const schema: WasmSchema = {
   tables: {
     todos: {
       columns: [

@@ -1,16 +1,19 @@
 //! Type bridges for WASM boundary.
 //!
 //! Serializable versions of key Groove types for crossing the WASM/JS boundary.
+//! Types with `Tsify` derive automatically generate TypeScript definitions.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use tsify::Tsify;
 
 // ============================================================================
 // Value Serialization
 // ============================================================================
 
 /// Value type for WASM boundary (mirrors groove::query_manager::types::Value).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(tag = "type", content = "value")]
 pub enum WasmValue {
     Integer(i32),
@@ -77,14 +80,16 @@ impl TryFrom<WasmValue> for groove::query_manager::types::Value {
 // ============================================================================
 
 /// Serializable row for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmRow {
     pub id: String, // ObjectId as UUID string
     pub values: Vec<WasmValue>,
 }
 
 /// Delta for row-level changes (mirrors groove::query_manager::types::RowDelta).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmRowDelta {
     pub added: Vec<WasmRow>,
     pub removed: Vec<WasmRow>,
@@ -96,12 +101,46 @@ pub struct WasmRowDelta {
 // Storage Request/Response Serialization
 // ============================================================================
 
+/// Load depth for branch loading operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub enum WasmLoadDepth {
+    /// Just CommitIds of tips.
+    TipIdsOnly,
+    /// Full Commit structs for tips.
+    TipsOnly,
+    /// All commits in branch.
+    AllCommits,
+}
+
+impl From<groove::storage::LoadDepth> for WasmLoadDepth {
+    fn from(depth: groove::storage::LoadDepth) -> Self {
+        match depth {
+            groove::storage::LoadDepth::TipIdsOnly => WasmLoadDepth::TipIdsOnly,
+            groove::storage::LoadDepth::TipsOnly => WasmLoadDepth::TipsOnly,
+            groove::storage::LoadDepth::AllCommits => WasmLoadDepth::AllCommits,
+        }
+    }
+}
+
+impl From<WasmLoadDepth> for groove::storage::LoadDepth {
+    fn from(depth: WasmLoadDepth) -> Self {
+        match depth {
+            WasmLoadDepth::TipIdsOnly => groove::storage::LoadDepth::TipIdsOnly,
+            WasmLoadDepth::TipsOnly => groove::storage::LoadDepth::TipsOnly,
+            WasmLoadDepth::AllCommits => groove::storage::LoadDepth::AllCommits,
+        }
+    }
+}
+
 /// Serializable storage request for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(tag = "type")]
 pub enum WasmStorageRequest {
     CreateObject {
         id: String,
+        #[tsify(type = "Record<string, string>")]
         metadata: HashMap<String, String>,
     },
     AppendCommit {
@@ -112,10 +151,12 @@ pub enum WasmStorageRequest {
     LoadObjectBranch {
         object_id: String,
         branch_name: String,
-        depth: String, // "TipIdsOnly" | "TipsOnly" | "AllCommits"
+        depth: WasmLoadDepth,
     },
     StoreBlob {
         content_hash: String, // hex encoded
+        #[serde(with = "serde_bytes")]
+        #[tsify(type = "Uint8Array")]
         data: Vec<u8>,
     },
     LoadBlob {
@@ -144,6 +185,7 @@ pub enum WasmStorageRequest {
     SetBranchTails {
         object_id: String,
         branch_name: String,
+        #[tsify(optional)]
         tails: Option<Vec<String>>,
     },
     LoadIndexPage {
@@ -155,6 +197,8 @@ pub enum WasmStorageRequest {
         table: String,
         column: String,
         page_id: u64,
+        #[serde(with = "serde_bytes")]
+        #[tsify(type = "Uint8Array")]
         data: Vec<u8>,
     },
     DeleteIndexPage {
@@ -169,31 +213,42 @@ pub enum WasmStorageRequest {
     StoreIndexMeta {
         table: String,
         column: String,
+        #[serde(with = "serde_bytes")]
+        #[tsify(type = "Uint8Array")]
         data: Vec<u8>,
     },
 }
 
 /// Serializable commit for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmCommit {
     pub parents: Vec<String>, // CommitIds as hex strings
+    #[serde(with = "serde_bytes")]
+    #[tsify(type = "Uint8Array")]
     pub content: Vec<u8>,
     pub timestamp: u64,
     pub author: String, // ObjectId as UUID string
+    #[tsify(optional, type = "Record<string, string>")]
     pub metadata: Option<BTreeMap<String, String>>,
 }
 
 /// Serializable loaded branch for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmLoadedBranch {
     pub tips: Vec<String>,
+    #[tsify(optional)]
     pub tails: Option<Vec<String>>,
+    #[tsify(type = "Record<string, WasmCommit>")]
     pub commits: HashMap<String, WasmCommit>,
+    #[tsify(optional, type = "Record<string, string>")]
     pub metadata: Option<HashMap<String, String>>,
 }
 
 /// Serializable blob association for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmBlobAssociation {
     pub object_id: String,
     pub branch_name: String,
@@ -201,44 +256,55 @@ pub struct WasmBlobAssociation {
 }
 
 /// Serializable storage response for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(tag = "type")]
 pub enum WasmStorageResponse {
     CreateObject {
         id: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     AppendCommit {
         object_id: String,
         commit_id: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     LoadObjectBranch {
         object_id: String,
         branch_name: String,
+        #[tsify(optional)]
         branch: Option<WasmLoadedBranch>,
+        #[tsify(optional)]
         error: Option<String>,
     },
     StoreBlob {
         content_hash: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     LoadBlob {
         content_hash: String,
+        #[tsify(optional, type = "Uint8Array")]
         data: Option<Vec<u8>>,
+        #[tsify(optional)]
         error: Option<String>,
     },
     AssociateBlob {
         content_hash: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     LoadBlobAssociations {
         content_hash: String,
+        #[tsify(optional)]
         associations: Option<Vec<WasmBlobAssociation>>,
+        #[tsify(optional)]
         error: Option<String>,
     },
     DeleteCommit {
@@ -246,6 +312,7 @@ pub enum WasmStorageResponse {
         branch_name: String,
         commit_id: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     DissociateAndMaybeDeleteBlob {
@@ -253,20 +320,25 @@ pub enum WasmStorageResponse {
         object_id: String,
         branch_name: String,
         commit_id: String,
+        #[tsify(optional)]
         blob_deleted: Option<bool>,
+        #[tsify(optional)]
         error: Option<String>,
     },
     SetBranchTails {
         object_id: String,
         branch_name: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     LoadIndexPage {
         table: String,
         column: String,
         page_id: u64,
+        #[tsify(optional, type = "Uint8Array")]
         data: Option<Vec<u8>>,
+        #[tsify(optional)]
         error: Option<String>,
     },
     StoreIndexPage {
@@ -274,6 +346,7 @@ pub enum WasmStorageResponse {
         column: String,
         page_id: u64,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     DeleteIndexPage {
@@ -281,18 +354,22 @@ pub enum WasmStorageResponse {
         column: String,
         page_id: u64,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
     LoadIndexMeta {
         table: String,
         column: String,
+        #[tsify(optional, type = "Uint8Array")]
         data: Option<Vec<u8>>,
+        #[tsify(optional)]
         error: Option<String>,
     },
     StoreIndexMeta {
         table: String,
         column: String,
         success: bool,
+        #[tsify(optional)]
         error: Option<String>,
     },
 }
@@ -345,18 +422,11 @@ pub fn storage_request_to_wasm(req: groove::storage::StorageRequest) -> WasmStor
             object_id,
             branch_name,
             depth,
-        } => {
-            let depth_str = match depth {
-                groove::storage::LoadDepth::TipIdsOnly => "TipIdsOnly",
-                groove::storage::LoadDepth::TipsOnly => "TipsOnly",
-                groove::storage::LoadDepth::AllCommits => "AllCommits",
-            };
-            WasmStorageRequest::LoadObjectBranch {
-                object_id: object_id.uuid().to_string(),
-                branch_name: branch_name.as_str().to_string(),
-                depth: depth_str.to_string(),
-            }
-        }
+        } => WasmStorageRequest::LoadObjectBranch {
+            object_id: object_id.uuid().to_string(),
+            branch_name: branch_name.as_str().to_string(),
+            depth: depth.into(),
+        },
         StorageRequest::StoreBlob { content_hash, data } => WasmStorageRequest::StoreBlob {
             content_hash: bytes_to_hex(&content_hash.0),
             data,
@@ -766,7 +836,8 @@ pub fn wasm_response_to_storage(
 // ============================================================================
 
 /// Serializable column type for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(tag = "type")]
 pub enum WasmColumnType {
     Integer,
@@ -780,23 +851,28 @@ pub enum WasmColumnType {
 }
 
 /// Serializable column descriptor for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmColumnDescriptor {
     pub name: String,
     pub column_type: WasmColumnType,
     pub nullable: bool,
+    #[tsify(optional)]
     pub references: Option<String>,
 }
 
 /// Serializable table schema for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmTableSchema {
     pub columns: Vec<WasmColumnDescriptor>,
 }
 
 /// Serializable schema for WASM boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WasmSchema {
+    #[tsify(type = "Record<string, WasmTableSchema>")]
     pub tables: HashMap<String, WasmTableSchema>,
 }
 

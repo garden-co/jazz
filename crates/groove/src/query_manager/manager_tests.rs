@@ -38,6 +38,22 @@ fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
 }
 
+use crate::object::ObjectId;
+use crate::query_manager::query::Query;
+
+/// Helper to execute a query synchronously via subscribe/process/unsubscribe.
+/// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
+fn execute_query(
+    qm: &mut QueryManager,
+    query: Query,
+) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
+    let sub_id = qm.subscribe(query)?;
+    qm.process();
+    let results = qm.get_subscription_results(sub_id);
+    qm.unsubscribe(sub_id);
+    Ok(results)
+}
+
 #[test]
 fn insert_and_get() {
     let sync_manager = SyncManager::new();
@@ -71,7 +87,7 @@ fn insert_and_query() {
 
     // Query all
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Query with filter
@@ -79,7 +95,7 @@ fn insert_and_query() {
         .query("users")
         .filter_ge("score", Value::Integer(75))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -100,7 +116,7 @@ fn query_with_sort_and_limit() {
     .unwrap();
 
     let query = qm.query("users").order_by_desc("score").limit(2).build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
@@ -264,12 +280,12 @@ fn multiple_inserts_all_visible_in_query() {
 
     // Query returns all rows
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Sorted query works
     let query = qm.query("users").order_by_desc("score").limit(2).build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
     assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
@@ -313,7 +329,7 @@ fn cold_start_loads_persisted_indices_and_rows() {
 
     // Verify queries work
     let query = qm2.query("users").build();
-    let results = qm2.execute(query).unwrap();
+    let results = execute_query(&mut qm2, query).unwrap();
     assert_eq!(results.len(), 2);
 
     // Verify filtered query works (proves indices were loaded)
@@ -321,7 +337,7 @@ fn cold_start_loads_persisted_indices_and_rows() {
         .query("users")
         .filter_ge("score", Value::Integer(75))
         .build();
-    let results = qm2.execute(query).unwrap();
+    let results = execute_query(&mut qm2, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Alice".into()));
 }
@@ -369,7 +385,7 @@ fn cold_start_only_loads_queried_rows() {
         .query("users")
         .filter_ge("score", Value::Integer(75))
         .build();
-    let results = qm2.execute(query).unwrap();
+    let results = execute_query(&mut qm2, query).unwrap();
 
     // Should find 2 rows (Alice: 100, Charlie: 75)
     assert_eq!(results.len(), 2);
@@ -412,7 +428,7 @@ fn cold_start_with_sorted_query() {
 
     // Sorted query should work
     let query = qm2.query("users").order_by_desc("score").build();
-    let results = qm2.execute(query).unwrap();
+    let results = execute_query(&mut qm2, query).unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
@@ -439,7 +455,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
 
     // Query by score=100 → finds row
@@ -447,7 +463,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
 
     // Update to name="Bob", score=200
@@ -462,7 +478,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -474,7 +490,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Bob".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1, "New name value should be in index");
 
     // Query by score=100 → empty (old value removed from index)
@@ -482,7 +498,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -494,7 +510,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(200))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1, "New score value should be in index");
 }
 
@@ -560,7 +576,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -572,7 +588,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -608,7 +624,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -620,7 +636,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Bob".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -632,7 +648,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -644,7 +660,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(200))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -765,7 +781,7 @@ fn synced_update_is_visible_in_query() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1, "Should find initial row");
     assert_eq!(results[0].1[0], Value::Text("Alice".into()));
     assert_eq!(results[0].1[1], Value::Integer(100));
@@ -803,7 +819,7 @@ fn synced_update_is_visible_in_query() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 0, "Old name should not be found");
 
     // New data should be queryable
@@ -811,7 +827,7 @@ fn synced_update_is_visible_in_query() {
         .query("users")
         .filter_eq("name", Value::Text("Alice Updated".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1, "Should find updated row by new name");
     assert_eq!(results[0].1[0], Value::Text("Alice Updated".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
@@ -821,7 +837,7 @@ fn synced_update_is_visible_in_query() {
         .query("users")
         .filter_eq("score", Value::Integer(200))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1, "Should find updated row by new score");
 }
 
@@ -951,7 +967,7 @@ fn synced_row_visible_in_filtered_subscription() {
         .query("users")
         .filter_eq("name", Value::Text("LowScorer".into()))
         .build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -1407,10 +1423,14 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     let query = qm.query("users").build();
     let sub_id = qm.subscribe(query).unwrap();
 
-    // Process to initialize (no updates yet)
+    // Process to initialize - expect an initial empty update (subscription settled)
     qm.process();
     let updates = qm.take_updates();
-    assert!(updates.is_empty(), "No updates before sync message");
+    assert_eq!(updates.len(), 1, "Should have initial settlement update");
+    assert!(
+        updates[0].delta.added.is_empty(),
+        "Initial delta should be empty"
+    );
 
     // Construct the sync message payload
     let row_id = crate::object::ObjectId::new();
@@ -1734,7 +1754,7 @@ fn soft_deleted_row_not_in_query_results() {
 
     // Verify both rows are visible
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 2);
 
     // Delete Alice
@@ -1742,7 +1762,7 @@ fn soft_deleted_row_not_in_query_results() {
 
     // Verify only Bob is visible
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
@@ -1903,7 +1923,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
 
     // Additionally verify that querying with include_deleted shows the correct content
     let query = qm.query("users").include_deleted().build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("TipB".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
@@ -1983,7 +2003,7 @@ fn undelete_row_appears_in_query_results() {
 
     // Verify not visible
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 0);
 
     // Undelete with new values
@@ -1995,7 +2015,7 @@ fn undelete_row_appears_in_query_results() {
 
     // Verify visible again with new values
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Alice Restored".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
@@ -2191,14 +2211,14 @@ fn include_deleted_query_returns_soft_deleted_rows() {
 
     // Normal query - only Bob (Alice is in _id_deleted, not _id)
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 
     // Include deleted query - scans both _id and _id_deleted indices
     // Soft-deleted rows have preserved content, so both Alice and Bob are returned
     let query = qm.query("users").include_deleted().build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 2);
 
     // Verify Alice's data is preserved
@@ -2230,7 +2250,7 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
 
     // Include deleted query - only Bob (Alice is hard deleted)
     let query = qm.query("users").include_deleted().build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
@@ -4098,13 +4118,13 @@ fn query_builder_single_branch_uses_correct_index() {
 
     // Query explicitly specifying "main" branch
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 1, "Should find row on main branch");
 
     // Query specifying a different branch should return no results
     // (since we haven't inserted on that branch)
     let query = qm.query("users").branch("draft").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(results.len(), 0, "Should not find row on draft branch");
 }
 
@@ -4123,8 +4143,8 @@ fn query_builder_explicit_main_branch() {
     let query_explicit = qm.query("users").build();
     let query_default = qm.query("users").build();
 
-    let results_explicit = qm.execute(query_explicit).unwrap();
-    let results_default = qm.execute(query_default).unwrap();
+    let results_explicit = execute_query(&mut qm, query_explicit).unwrap();
+    let results_default = execute_query(&mut qm, query_default).unwrap();
 
     assert_eq!(results_explicit.len(), results_default.len());
     assert_eq!(results_explicit.len(), 2);
@@ -4204,7 +4224,7 @@ fn handle_object_update_respects_branch() {
 
     // Query schema branch - should NOT find the row (it's on other-branch)
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -4236,7 +4256,7 @@ fn handle_object_update_respects_branch() {
 
     // Schema branch should now have 1 row
     let query = qm.query("users").build();
-    let results = qm.execute(query).unwrap();
+    let results = execute_query(&mut qm, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -5010,7 +5030,7 @@ fn e2e_client_receives_server_data_via_subscription() {
 
     let names: Vec<_> = results
         .iter()
-        .filter_map(|row| {
+        .filter_map(|(_, row)| {
             if let Value::Text(name) = &row[0] {
                 Some(name.as_str())
             } else {
@@ -5076,7 +5096,7 @@ fn e2e_client_receives_new_matching_row() {
     // Client should now have Alice
     let results = client.get_subscription_results(sub_id);
     assert_eq!(results.len(), 1, "Client should receive new matching user");
-    assert_eq!(results[0][0], Value::Text("Alice".into()));
+    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
 }
 
 /// E2E: Client does NOT receive rows that don't match the query filter.
@@ -5203,7 +5223,7 @@ fn e2e_permissions_prevent_sync() {
         "Client should only receive docs they have permission to see"
     );
     assert_eq!(
-        results[0][0],
+        results[0].1[0],
         Value::Text("Alice's doc".into()),
         "Should be Alice's doc"
     );
@@ -5285,5 +5305,5 @@ fn e2e_permissions_prevent_new_row_sync() {
     // Client should still only have Alice's doc
     let results = client.get_subscription_results(sub_id);
     assert_eq!(results.len(), 1, "Client should NOT receive Bob's doc");
-    assert_eq!(results[0][0], Value::Text("Alice's doc".into()));
+    assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
 }

@@ -7,21 +7,24 @@ use std::sync::Arc;
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::sync_manager::{ClientId, Destination, SyncManager, SyncPayload};
 use groove_rocksdb::RocksDbDriver;
-use groove_tokio::{JazzRuntime, RuntimeHandle};
+use groove_tokio::TokioRuntime;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
+use crate::middleware::AuthConfig;
 use crate::routes;
 
 /// Server state shared across request handlers.
 pub struct ServerState {
-    pub runtime_handle: RuntimeHandle,
+    pub runtime: TokioRuntime,
     #[allow(dead_code)]
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
     pub next_connection_id: std::sync::atomic::AtomicU64,
     /// Broadcast channel for sending sync payloads to SSE clients
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
+    /// Authentication configuration
+    pub auth_config: AuthConfig,
 }
 
 /// State for a single SSE connection.
@@ -34,6 +37,7 @@ pub async fn run(
     app_id_str: &str,
     port: u16,
     data_dir: &str,
+    auth_config: AuthConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse app ID
     let app_id = AppId::from_string(app_id_str)?;
@@ -52,40 +56,43 @@ pub async fn run(
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
-    // Create runtime (no separate task needed - scheduling is implicit)
-    let (runtime_handle, mut events) = JazzRuntime::new(schema_manager, driver);
-
     // Create broadcast channel for SSE updates
     let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(256);
     let sync_tx_clone = sync_tx.clone();
 
+    // Create runtime with sync callback that routes to SSE clients
+    let runtime = TokioRuntime::new(schema_manager, driver, move |entry| {
+        // Route to appropriate client via broadcast
+        if let Destination::Client(client_id) = entry.destination {
+            let _ = sync_tx_clone.send((client_id, entry.payload));
+        }
+        // Server destinations would be handled differently (e.g., HTTP push)
+    });
+
+    // Load indices
+    runtime.load_indices()?;
+
+    // Log auth configuration (without revealing secrets)
+    if auth_config.is_configured() {
+        info!(
+            "Auth configured: jwt={}, jwks={}, backend={}, admin={}",
+            auth_config.jwt_secret.is_some(),
+            auth_config.jwks_url.is_some(),
+            auth_config.backend_secret.is_some(),
+            auth_config.admin_secret.is_some()
+        );
+    } else {
+        info!("Auth not configured - all endpoints are public");
+    }
+
     // Build server state
     let state = Arc::new(ServerState {
-        runtime_handle,
+        runtime,
         app_id,
         connections: RwLock::new(HashMap::new()),
         next_connection_id: std::sync::atomic::AtomicU64::new(1),
         sync_broadcast: sync_tx,
-    });
-
-    // Spawn event processor (routes sync outbox to connected clients)
-    tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            match event {
-                groove_tokio::RuntimeEvent::SyncOutbox(entry) => {
-                    // Route to appropriate client via broadcast
-                    if let Destination::Client(client_id) = entry.destination {
-                        let _ = sync_tx_clone.send((client_id, entry.payload));
-                    }
-                    // Server destinations would be handled differently (e.g., HTTP push)
-                }
-                groove_tokio::RuntimeEvent::SubscriptionUpdate { handle, delta } => {
-                    // Subscription updates are typically local to the subscriber
-                    // For now, log them - in future could route to specific client
-                    tracing::debug!("Subscription update: {:?} delta: {:?}", handle, delta);
-                }
-            }
-        }
+        auth_config,
     });
 
     // Build router

@@ -34,8 +34,11 @@ There is a strong systemic bias toward showing incremental progress - marking ta
 - Using test/null/mock versions of components the design says should be real
 - Feeling urgency to mark a task "done" before its design intent is realized
 - Choosing a suboptimal implementation order because "this task is next"
+- Adding `#[cfg(test)]` backdoors that restore removed functionality
 
 **When you notice these signs**: STOP. Reread the plan. Ask whether you're implementing the design or working around it.
+
+**Critical: When removing APIs, tests must adapt.** When removing an API, tests MUST adapt to the new API. Never add `#[cfg(test)]` backdoors that restore removed functionality - this defeats the purpose of the change and hides integration issues. If you're about to re-add something the user explicitly asked to remove (even "just for tests"), STOP and ask first. Making 45 tests compile by adding a backdoor is worse than having 45 tests that need rewriting - the failing tests are telling you what work remains.
 
 We document internal architecture and plans in /specs as markdown files.
 We document public APIs and user guides in /docs as markdown files.

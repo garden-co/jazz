@@ -2,11 +2,15 @@
   "scripts": {
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "lint": "oxlint ."
+    "lint": "oxlint .",
+    "build": "turbo run build",
+    "test": "turbo run test"
   },
   "devDependencies": {
     "lefthook": "^2.0.15",
     "oxfmt": "^0.27.0",
-    "oxlint": "^1.42.0"
-  }
+    "oxlint": "^1.42.0",
+    "turbo": "^2.0.0"
+  },
+  "packageManager": "pnpm@10.14.0"
 }
