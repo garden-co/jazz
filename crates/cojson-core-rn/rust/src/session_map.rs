@@ -170,12 +170,12 @@ impl SessionMap {
             .map_err(|_| SessionMapError::LockError)?;
         let signed_tx = internal
             .make_new_private_transaction(
-                &session_id,
-                &signer_secret,
+                session_id,
+                signer_secret,
                 &changes_json,
-                &key_id,
-                &key_secret,
-                meta_json.as_deref(),
+                key_id,
+                key_secret,
+                meta_json,
                 made_at as u64,
             )
             .map_err(|e| SessionMapError::Internal(e.to_string()))?;
@@ -204,10 +204,10 @@ impl SessionMap {
             .map_err(|_| SessionMapError::LockError)?;
         let signed_tx = internal
             .make_new_trusting_transaction(
-                &session_id,
-                &signer_secret,
+                session_id,
+                signer_secret,
                 &changes_json,
-                meta_json.as_deref(),
+                meta_json,
                 made_at as u64,
             )
             .map_err(|e| SessionMapError::Internal(e.to_string()))?;

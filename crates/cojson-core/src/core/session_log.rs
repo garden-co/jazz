@@ -838,7 +838,7 @@ mod tests {
         // Call the function we are testing
         let (new_signature, _new_tx) = session
             .add_new_transaction(
-                changes_json,
+                &changes_json,
                 TransactionMode::Private { key_id, key_secret },
                 &signing_key.into(),
                 made_at,
@@ -1223,7 +1223,7 @@ mod tests {
 
         let (signature, transaction) = session
             .add_new_transaction(
-                changes_json,
+                &changes_json,
                 TransactionMode::Trusting,
                 &signing_key.into(),
                 made_at,
@@ -1376,7 +1376,7 @@ mod tests {
 
         let (_, transaction) = session
             .add_new_transaction(
-                changes_json,
+                &changes_json,
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
@@ -1487,7 +1487,7 @@ mod tests {
         // Add a valid transaction
         let (_, _) = session_with_tx
             .add_new_transaction(
-                r#"{"test": "data"}"#,
+                &r#"{"test": "data"}"#,
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),

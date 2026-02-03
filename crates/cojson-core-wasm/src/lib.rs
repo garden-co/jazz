@@ -123,12 +123,12 @@ impl SessionMap {
         let signed_tx = self
             .internal
             .make_new_private_transaction(
-                &session_id,
-                &signer_secret,
+                session_id,
+                signer_secret,
                 &changes_json,
-                &key_id,
-                &key_secret,
-                meta_json.as_deref(),
+                key_id,
+                key_secret,
+                meta_json,
                 made_at as u64,
             )
             .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))?;
@@ -155,10 +155,10 @@ impl SessionMap {
         let signed_tx = self
             .internal
             .make_new_trusting_transaction(
-                &session_id,
-                &signer_secret,
+                session_id,
+                signer_secret,
                 &changes_json,
-                meta_json.as_deref(),
+                meta_json,
                 made_at as u64,
             )
             .map_err(|e| CojsonCoreWasmError::Js(JsValue::from_str(&e.to_string())))?;

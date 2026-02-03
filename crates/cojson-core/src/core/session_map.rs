@@ -510,26 +510,29 @@ impl SessionMapImpl {
     /// Returns the signature and transaction data
     pub fn make_new_private_transaction(
         &mut self,
-        session_id: &str,
-        signer_secret: &str,
+        session_id: String,
+        signer_secret: String,
         changes_json: &str,
-        key_id: &str,
-        key_secret: &str,
-        meta_json: Option<&str>,
+        key_id: String,
+        key_secret: String,
+        meta_json: Option<String>,
         made_at: u64,
     ) -> Result<SignedTransaction, SessionMapError> {
         if self.is_deleted {
             return Err(SessionMapError::DeletedCoValue(self.co_id.0.clone()));
         }
 
+        // Clone session_id once for reuse (used in entry key, SessionID, and known_state inserts)
+        let session_id_for_state = session_id.clone();
+
         // Get or create session log
         let session_log = self
             .sessions
-            .entry(session_id.to_string())
+            .entry(session_id.clone())
             .or_insert_with(|| {
                 SessionLogInternal::new(
                     self.co_id.clone(),
-                    SessionID(session_id.to_string()),
+                    SessionID(session_id),
                     None, // signerID derived from secret
                 )
             });
@@ -538,12 +541,12 @@ impl SessionMapImpl {
         let (signature, transaction) = session_log.add_new_transaction(
             changes_json,
             TransactionMode::Private {
-                key_id: KeyID(key_id.to_string()),
-                key_secret: KeySecret(key_secret.to_string()),
+                key_id: KeyID(key_id),
+                key_secret: KeySecret(key_secret),
             },
-            &SignerSecret(signer_secret.to_string()),
+            &SignerSecret(signer_secret),
             made_at,
-            meta_json.map(|s| s.to_string()),
+            meta_json,
         )?;
 
         // Track size for in-between signatures (use encrypted changes length)
@@ -563,13 +566,13 @@ impl SessionMapImpl {
 
         self.known_state
             .sessions
-            .insert(session_id.to_string(), tx_count);
+            .insert(session_id_for_state.clone(), tx_count);
 
         // Update known_state_with_streaming if present
         if let Some(ref mut ks_streaming) = self.known_state_with_streaming {
             ks_streaming
                 .sessions
-                .insert(session_id.to_string(), tx_count);
+                .insert(session_id_for_state, tx_count);
         }
 
         Ok(SignedTransaction {
@@ -582,24 +585,27 @@ impl SessionMapImpl {
     /// Returns the signature and transaction data
     pub fn make_new_trusting_transaction(
         &mut self,
-        session_id: &str,
-        signer_secret: &str,
+        session_id: String,
+        signer_secret: String,
         changes_json: &str,
-        meta_json: Option<&str>,
+        meta_json: Option<String>,
         made_at: u64,
     ) -> Result<SignedTransaction, SessionMapError> {
         if self.is_deleted {
             return Err(SessionMapError::DeletedCoValue(self.co_id.0.clone()));
         }
 
+        // Clone session_id once for reuse (used in entry key, SessionID, and known_state inserts)
+        let session_id_for_state = session_id.clone();
+
         // Get or create session log
         let session_log = self
             .sessions
-            .entry(session_id.to_string())
+            .entry(session_id.clone())
             .or_insert_with(|| {
                 SessionLogInternal::new(
                     self.co_id.clone(),
-                    SessionID(session_id.to_string()),
+                    SessionID(session_id),
                     None, // signerID derived from secret
                 )
             });
@@ -608,9 +614,9 @@ impl SessionMapImpl {
         let (signature, transaction) = session_log.add_new_transaction(
             changes_json,
             TransactionMode::Trusting,
-            &SignerSecret(signer_secret.to_string()),
+            &SignerSecret(signer_secret),
             made_at,
-            meta_json.map(|s| s.to_string()),
+            meta_json,
         )?;
 
         // Track size for in-between signatures
@@ -630,13 +636,13 @@ impl SessionMapImpl {
 
         self.known_state
             .sessions
-            .insert(session_id.to_string(), tx_count);
+            .insert(session_id_for_state.clone(), tx_count);
 
         // Update known_state_with_streaming if present
         if let Some(ref mut ks_streaming) = self.known_state_with_streaming {
             ks_streaming
                 .sessions
-                .insert(session_id.to_string(), tx_count);
+                .insert(session_id_for_state, tx_count);
         }
 
         Ok(SignedTransaction {
