@@ -210,6 +210,7 @@ test("init the list correctly", () => {
     "universe",
     "hello",
   ]);
+  expect(content.core.verified.header.createdAt).toBeDefined();
 });
 
 test("Items prepended to start appear with latest first", () => {
