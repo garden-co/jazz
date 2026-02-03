@@ -2339,7 +2339,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
     const person = Person.create({ name: "John" });
 
     const createdAt = person.$jazz.createdAt;
-    expect(person.$jazz.lastUpdatedAt).toEqual(createdAt);
+    const setNameJohnTx = person.$jazz.raw.core.verifiedTransactions[0];
+    expect(person.$jazz.createdAt).toEqual(createdAt);
+    expect(person.$jazz.lastUpdatedAt).toEqual(setNameJohnTx!.madeAt);
 
     const createdBy = person.$jazz.createdBy;
     expect(createdBy).toEqual(me.$jazz.id);
@@ -2347,8 +2349,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
     await new Promise((r) => setTimeout(r, 10));
     person.$jazz.set("name", "Jane");
 
+    const setNameJaneTx = person.$jazz.raw.core.verifiedTransactions[1];
     expect(person.$jazz.createdAt).toEqual(createdAt);
-    expect(person.$jazz.lastUpdatedAt).not.toEqual(createdAt);
+    expect(person.$jazz.lastUpdatedAt).toEqual(setNameJaneTx!.madeAt);
 
     // Double check after update.
     expect(createdBy).toEqual(me.$jazz.id);
