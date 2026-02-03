@@ -1,5 +1,10 @@
-import { beforeEach, describe, expect, test } from "vitest";
-import { RawCoMap } from "../exports";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  cojsonInternals,
+  LocalNode,
+  RawCoMap,
+  StorageReconciliationAcquireResult,
+} from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -8,6 +13,8 @@ import {
 } from "./testUtils";
 import {
   setStorageReconciliationBatchSize,
+  setStorageReconciliationInterval,
+  setStorageReconciliationLockTTL,
   STORAGE_RECONCILIATION_CONFIG,
 } from "../config";
 
@@ -16,11 +23,16 @@ TEST_NODE_CONFIG.withAsyncPeers = true;
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 const originalBatchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
+const originalLockTTL = STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+const originalInterval =
+  STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS;
 
 beforeEach(async () => {
   SyncMessagesLog.clear();
   jazzCloud = setupTestNode({ isSyncServer: true });
   setStorageReconciliationBatchSize(originalBatchSize);
+  setStorageReconciliationLockTTL(originalLockTTL);
+  setStorageReconciliationInterval(originalInterval);
 });
 
 describe("full storage reconciliation", () => {
@@ -48,11 +60,7 @@ describe("full storage reconciliation", () => {
     )!;
     anotherClient.node.syncManager.startStorageReconciliation(serverPeer);
 
-    const pendingReconciliationAck =
-      anotherClient.node.syncManager.pendingReconciliationAck;
-    expect(pendingReconciliationAck.size).toEqual(1);
-
-    await waitFor(() => pendingReconciliationAck.size === 0);
+    await waitForStorageReconciliationToComplete(anotherClient.node);
 
     const messages = SyncMessagesLog.getMessages({
       Group: group.core,
@@ -105,11 +113,7 @@ describe("full storage reconciliation", () => {
     )!;
     client.node.syncManager.startStorageReconciliation(serverPeer);
 
-    const pendingReconciliationAck =
-      client.node.syncManager.pendingReconciliationAck;
-    expect(pendingReconciliationAck.size).toEqual(1);
-
-    await waitFor(() => pendingReconciliationAck.size === 0);
+    await waitForStorageReconciliationToComplete(client.node);
 
     const messages = SyncMessagesLog.getMessages({
       Group: group.core,
@@ -196,11 +200,7 @@ describe("full storage reconciliation", () => {
     )!;
     anotherClient.node.syncManager.startStorageReconciliation(serverPeer);
 
-    const pendingReconciliationAck =
-      anotherClient.node.syncManager.pendingReconciliationAck;
-    expect(pendingReconciliationAck.size).toEqual(1);
-
-    await waitFor(() => pendingReconciliationAck.size === 0);
+    await waitForStorageReconciliationToComplete(anotherClient.node);
 
     const messages = SyncMessagesLog.getMessages({
       Group: group.core,
@@ -318,7 +318,7 @@ describe("full storage reconciliation", () => {
   });
 
   describe("scheduling", () => {
-    test("full storage reconciliation is ran when adding a new persistent server peer", async () => {
+    test("full storage reconciliation is run when adding a new persistent server peer", async () => {
       const client = setupTestNode();
       const { storage } = client.addStorage();
 
@@ -338,36 +338,189 @@ describe("full storage reconciliation", () => {
         persistent: true,
       });
 
-      const pendingReconciliationAck =
-        anotherClient.node.syncManager.pendingReconciliationAck;
-      expect(pendingReconciliationAck.size).toEqual(1);
-
-      await waitFor(() => pendingReconciliationAck.size === 0);
+      await waitForStorageReconciliationToComplete(anotherClient.node);
 
       const messages = SyncMessagesLog.getMessages({
         Group: group.core,
         Map: map.core,
       });
       expect(messages).toMatchInlineSnapshot(`
-      [
-        "client -> storage | GET_KNOWN_STATE Group",
-        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
-        "client -> storage | GET_KNOWN_STATE Map",
-        "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/1",
-        "client -> server | RECONCILE",
-        "server -> client | KNOWN Group sessions: empty",
-        "server -> client | KNOWN Map sessions: empty",
-        "server -> client | RECONCILE_ACK",
-        "client -> storage | LOAD Group sessions: empty",
-        "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> storage | LOAD Map sessions: empty",
-        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> client | KNOWN Group sessions: header/3",
-        "server -> client | KNOWN Map sessions: header/1",
-      ]
-    `);
+        [
+          "client -> storage | GET_KNOWN_STATE Group",
+          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+          "client -> storage | GET_KNOWN_STATE Map",
+          "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/1",
+          "client -> server | RECONCILE",
+          "client -> server | LOAD Group sessions: header/3",
+          "client -> server | LOAD Map sessions: header/1",
+          "server -> client | KNOWN Group sessions: empty",
+          "server -> client | KNOWN Map sessions: empty",
+          "server -> client | RECONCILE_ACK",
+          "server -> client | KNOWN Group sessions: empty",
+          "server -> client | KNOWN Map sessions: empty",
+          "client -> storage | LOAD Group sessions: empty",
+          "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
+          "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+          "client -> storage | LOAD Map sessions: empty",
+          "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
+          "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+          "server -> client | KNOWN Group sessions: header/3",
+          "server -> client | KNOWN Map sessions: header/1",
+        ]
+      `);
+    });
+
+    test("reconciliation is not run again until the reconciliation interval passed", async () => {
+      const client = setupTestNode();
+      const { storage } = client.addStorage();
+      // Connecting to the sync server triggers full storage reconciliation
+      const { peer } = client.connectToSyncServer({ persistent: true });
+
+      const group = client.node.createGroup();
+      await group.core.waitForSync();
+
+      const storageReconciliationLock =
+        await new Promise<StorageReconciliationAcquireResult>((resolve) =>
+          storage.tryAcquireStorageReconciliationLock(
+            client.node.currentSessionID,
+            peer.id,
+            resolve,
+          ),
+        );
+      expect(storageReconciliationLock.acquired).toBe(false);
+      if (!storageReconciliationLock.acquired) {
+        expect(storageReconciliationLock.reason).toBe("not_due");
+      }
+
+      const anotherClient = setupTestNode();
+      anotherClient.addStorage({ storage });
+
+      SyncMessagesLog.clear();
+
+      // Since the previous storage reconciliation was run, no other will be run for 30 days
+      anotherClient.connectToSyncServer({ persistent: true });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const messages = SyncMessagesLog.getMessages({
+        Group: group.core,
+      });
+      expect(messages).toMatchInlineSnapshot(`[]`);
+    });
+
+    test("reconciliation is run for the same peer after reconciliation interval passes", async () => {
+      cojsonInternals.setStorageReconciliationInterval(100);
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage();
+      // Connecting to the sync server triggers full storage reconciliation
+      client.connectToSyncServer({ persistent: true });
+
+      const group = client.node.createGroup();
+      await group.core.waitForSync();
+
+      // Wait for the next reconciliation window to start
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const anotherClient = setupTestNode();
+      anotherClient.addStorage({ storage });
+
+      SyncMessagesLog.clear();
+
+      // Runs storage reconciliation again
+      anotherClient.connectToSyncServer({ persistent: true });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const messages = SyncMessagesLog.getMessages({
+        Group: group.core,
+      });
+      expect(messages).toMatchInlineSnapshot(`
+        [
+          "client -> storage | GET_KNOWN_STATE Group",
+          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+          "client -> server | RECONCILE",
+          "client -> server | LOAD Group sessions: header/3",
+          "server -> client | RECONCILE_ACK",
+          "server -> client | KNOWN Group sessions: header/3",
+          "client -> storage | LOAD Group sessions: empty",
+          "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
+        ]
+      `);
+    });
+
+    test("if reconciliation is interrupted, it is not run again until the lock TTL expires", async () => {
+      cojsonInternals.setStorageReconciliationInterval(0);
+      cojsonInternals.setStorageReconciliationLockTTL(100);
+
+      let client = setupTestNode();
+      const { storage } = client.addStorage();
+      client.connectToSyncServer({ persistent: true });
+
+      const group = client.node.createGroup();
+      await group.core.waitForSync();
+      await client.node.gracefulShutdown();
+
+      client = setupTestNode();
+      client.addStorage({ storage });
+
+      // Connecting to the sync server triggers full storage reconciliation
+      const { peer } = client.connectToSyncServer({ persistent: true });
+
+      // Kill the node before the reconciliation completes
+      await client.node.gracefulShutdown();
+
+      // Try to acquire the lock again, fails because the lock is held by the previous node
+      const storageReconciliationLock =
+        await new Promise<StorageReconciliationAcquireResult>((resolve) =>
+          storage.tryAcquireStorageReconciliationLock(
+            client.node.currentSessionID,
+            peer.id,
+            resolve,
+          ),
+        );
+      expect(storageReconciliationLock.acquired).toBe(false);
+      if (!storageReconciliationLock.acquired) {
+        expect(storageReconciliationLock.reason).toBe("lock_held");
+      }
+
+      // Wait for the lock to expire
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      client = setupTestNode();
+      client.addStorage({ storage });
+
+      SyncMessagesLog.clear();
+
+      // Runs storage reconciliation again
+      client.connectToSyncServer({ persistent: true });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const messages = SyncMessagesLog.getMessages({
+        Group: group.core,
+      });
+      expect(messages).toMatchInlineSnapshot(`
+        [
+          "client -> storage | GET_KNOWN_STATE Group",
+          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+          "client -> server | RECONCILE",
+          "client -> server | LOAD Group sessions: header/3",
+          "server -> client | RECONCILE_ACK",
+          "server -> client | KNOWN Group sessions: header/3",
+          "client -> storage | LOAD Group sessions: empty",
+          "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
+        ]
+      `);
     });
   });
 });
+
+function waitForStorageReconciliationToComplete(
+  node: LocalNode,
+): Promise<void> {
+  const pendingReconciliationAck = node.syncManager.pendingReconciliationAck;
+  expect(pendingReconciliationAck.size).toEqual(1);
+
+  return waitFor(() => pendingReconciliationAck.size === 0);
+}

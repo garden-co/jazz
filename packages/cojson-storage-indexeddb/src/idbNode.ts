@@ -70,7 +70,7 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
         });
       }
       if (ev.oldVersion <= 6) {
-        db.createObjectStore("storageReconciliationMetadata", {
+        db.createObjectStore("storageReconciliationLocks", {
           keyPath: "key",
         });
       }

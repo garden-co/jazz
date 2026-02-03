@@ -48,7 +48,7 @@ export const migrations: Record<number, string[]> = {
     "CREATE INDEX IF NOT EXISTS deletedCoValuesByStatus ON deletedCoValues (status);",
   ],
   6: [
-    `CREATE TABLE IF NOT EXISTS storage_reconciliation_metadata (
+    `CREATE TABLE IF NOT EXISTS storage_reconciliation_locks (
       key TEXT PRIMARY KEY,
       holder_session_id TEXT,
       acquired_at INTEGER,

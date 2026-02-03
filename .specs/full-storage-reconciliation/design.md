@@ -389,13 +389,13 @@ Add the two methods to `StorageAPI`; implementations delegate to the underlying 
 
 **IndexedDB** (`packages/cojson-storage-indexeddb`):
 
-- Add object store `storageReconciliationMetadata` with keyPath `"key"` (bump DB version).
+- Add object store `storageReconciliationLocks` with keyPath `"key"` (bump DB version).
 - Rows: `{ key: "lock#<peerId>", holderSessionId, acquiredAt, expiresAt }`, `{ key: "lastRun#<peerId>", timestamp }`.
 - Implement using IndexedDB transactions.
 
 **SQLite** (`packages/cojson-storage-sqlite`):
 
-- Add table `storage_reconciliation_metadata` with columns for peerId and lock/lastRun (e.g. composite key `(peerId, key)` or `peer_id`, `key`, `holder_session_id`, `acquired_at`, `expires_at`, `timestamp`).
+- Add table `storage_reconciliation_locks` with columns for peerId and lock/lastRun (e.g. composite key `(peerId, key)` or `peer_id`, `key`, `holder_session_id`, `acquired_at`, `expires_at`, `timestamp`).
 - Implement using SQLite transactions.
 
 #### 5.4. Integration point

@@ -96,6 +96,8 @@ import {
   setMaxOutgoingMessagesChunkBytes,
   setMaxRecommendedTxSize,
   setStorageReconciliationBatchSize,
+  setStorageReconciliationLockTTL,
+  setStorageReconciliationInterval,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
@@ -151,6 +153,8 @@ export const cojsonInternals = {
   setMaxInFlightLoadsPerPeer,
   STORAGE_RECONCILIATION_CONFIG,
   setStorageReconciliationBatchSize,
+  setStorageReconciliationLockTTL,
+  setStorageReconciliationInterval,
 };
 
 export {

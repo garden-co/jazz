@@ -1,4 +1,12 @@
-import { LocalNode, RawCoMap, StorageApiAsync, cojsonInternals } from "cojson";
+import {
+  LocalNode,
+  RawCoMap,
+  SessionID,
+  StorageAPI,
+  StorageApiAsync,
+  StorageReconciliationAcquireResult,
+  cojsonInternals,
+} from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
@@ -907,5 +915,109 @@ describe("full storage reconciliation", () => {
     for (const map of maps) {
       await waitFor(() => syncServer.hasCoValue(map.id));
     }
+  });
+
+  describe("scheduling", () => {
+    const originalLockTTL =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+    const originalInterval =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS;
+
+    beforeEach(() => {
+      cojsonInternals.setStorageReconciliationLockTTL(originalLockTTL);
+      cojsonInternals.setStorageReconciliationInterval(originalInterval);
+    });
+
+    function tryAcquireStorageReconciliationLock(
+      client: LocalNode,
+    ): Promise<StorageReconciliationAcquireResult> {
+      const sessionId = client.currentSessionID;
+      const peerId = Object.values(client.syncManager.peers).find(
+        (p) => p.role === "server" && p.persistent,
+      )!.id;
+      return new Promise((resolve) => {
+        client.storage!.tryAcquireStorageReconciliationLock(
+          sessionId,
+          peerId,
+          resolve,
+        );
+      });
+    }
+
+    test("full storage reconciliation is run when adding a new persistent server peer", async () => {
+      const client = createTestNode();
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      const group = client.createGroup();
+      const map = group.createMap();
+      map.set("hello", "world", "trusting");
+
+      await map.core.waitForSync();
+
+      const anotherClient = createTestNode();
+      anotherClient.setStorage(storage);
+
+      const syncServer = createTestNode();
+      connectToSyncServer(anotherClient, syncServer, false);
+
+      await waitFor(() => syncServer.hasCoValue(group.id));
+      await waitFor(() => syncServer.hasCoValue(map.id));
+    });
+
+    test("reconciliation is not run again until the reconciliation interval passed", async () => {
+      cojsonInternals.setStorageReconciliationInterval(100);
+
+      const syncServer = createTestNode();
+      const client = createTestNode();
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      connectToSyncServer(client, syncServer, false);
+
+      const group = client.createGroup();
+      await group.core.waitForSync();
+
+      // Lock cannot be acquired after reconciliation was completed
+      await waitFor(async () => {
+        const lock = await tryAcquireStorageReconciliationLock(client);
+        return lock.acquired === false && lock.reason === "not_due";
+      });
+
+      // Wait for the reconciliation interval to pass
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const lock = await tryAcquireStorageReconciliationLock(client);
+      expect(lock.acquired).toBe(true);
+    });
+
+    test("if reconciliation is interrupted, it is not run again until the lock TTL expires", async () => {
+      cojsonInternals.setStorageReconciliationInterval(0);
+      cojsonInternals.setStorageReconciliationLockTTL(100);
+
+      const syncServer = createTestNode();
+      let client = createTestNode();
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      const group = client.createGroup();
+      await group.core.waitForSync();
+
+      connectToSyncServer(client, syncServer, false);
+
+      // Kill the node before the reconciliation completes
+      client.gracefulShutdown();
+
+      const lockResult = await tryAcquireStorageReconciliationLock(client);
+      expect(lockResult.acquired).toBe(false);
+      if (!lockResult.acquired) {
+        expect(lockResult.reason).toBe("lock_held");
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const lockResult2 = await tryAcquireStorageReconciliationLock(client);
+      expect(lockResult2.acquired).toBe(true);
+    });
   });
 });

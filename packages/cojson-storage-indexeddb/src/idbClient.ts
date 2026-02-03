@@ -27,6 +27,14 @@ type DeletedCoValueQueueEntry = {
   status?: "pending" | "done";
 };
 
+type StorageReconciliationLock = {
+  key: string;
+  holderSessionId: string;
+  acquiredAt: number;
+  expiresAt: number;
+  releasedAt?: number;
+};
+
 /**
  * Contains operations that should run as part of a readwrite transaction.
  *
@@ -217,6 +225,22 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     peerId: string;
   }): Promise<void> {
     await this.run((tx) => tx.getObjectStore("unsyncedCoValues").put(record));
+  }
+
+  async getStorageReconciliationLocks(
+    key: string,
+  ): Promise<StorageReconciliationLock | undefined> {
+    return this.run((tx) =>
+      tx.getObjectStore("storageReconciliationLocks").get(key),
+    );
+  }
+
+  async putStorageReconciliationLock(
+    entry: StorageReconciliationLock,
+  ): Promise<void> {
+    await this.run((tx) =>
+      tx.getObjectStore("storageReconciliationLocks").put(entry),
+    );
   }
 }
 
@@ -414,40 +438,36 @@ export class IDBClient implements DBClientInterfaceAsync {
     const { LOCK_TTL_MS, RECONCILIATION_INTERVAL_MS } =
       cojsonInternals.STORAGE_RECONCILIATION_CONFIG;
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction(
-        ["storageReconciliationMetadata"],
-        "readwrite",
-      );
-      const store = tx.objectStore("storageReconciliationMetadata");
-
-      const lockReq = store.get(lockKey);
-      lockReq.onsuccess = () => {
-        const lock = lockReq.result as
-          | { releasedAt?: number; expiresAt?: number }
-          | undefined;
+    let result: StorageReconciliationAcquireResult;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLocks(lockKey);
         if (
           lock?.releasedAt &&
           now - lock.releasedAt < RECONCILIATION_INTERVAL_MS
         ) {
-          resolve({ acquired: false, reason: "not_due" });
+          result = { acquired: false, reason: "not_due" };
           return;
         }
-        if (lock?.expiresAt !== undefined && lock.expiresAt >= now) {
-          resolve({ acquired: false, reason: "lock_held" });
+        if (
+          !lock?.releasedAt &&
+          lock?.expiresAt !== undefined &&
+          lock.expiresAt >= now
+        ) {
+          result = { acquired: false, reason: "lock_held" };
           return;
         }
-        store.put({
+        await tx.putStorageReconciliationLock({
           key: lockKey,
           holderSessionId: sessionId,
           acquiredAt: now,
           expiresAt: now + LOCK_TTL_MS,
         });
-        resolve({ acquired: true });
-      };
-      lockReq.onerror = () => reject(lockReq.error);
-      tx.onerror = () => reject(tx.error);
-    });
+        result = { acquired: true };
+      },
+      ["storageReconciliationLocks"],
+    );
+    return result!;
   }
 
   async releaseStorageReconciliationLock(
@@ -457,28 +477,18 @@ export class IDBClient implements DBClientInterfaceAsync {
     const lockKey = `lock#${peerId}`;
     const releasedAt = Date.now();
 
-    return new Promise((resolve, reject) => {
-      const tx = this.db.transaction(
-        ["storageReconciliationMetadata"],
-        "readwrite",
-      );
-      const store = tx.objectStore("storageReconciliationMetadata");
-
-      const lockReq = store.get(lockKey);
-      lockReq.onsuccess = () => {
-        const lock = lockReq.result as { holderSessionId?: string } | undefined;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLocks(lockKey);
         if (lock?.holderSessionId === sessionId) {
-          store.put({
+          await tx.putStorageReconciliationLock({
             ...lock,
             releasedAt,
           });
         }
-        resolve();
-      };
-      lockReq.onerror = () => reject(lockReq.error);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+      },
+      ["storageReconciliationLocks"],
+    );
   }
 
   async getCoValueKnownState(
