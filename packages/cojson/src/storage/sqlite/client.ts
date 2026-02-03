@@ -320,7 +320,7 @@ export class SQLiteClient
       acquired: false,
       reason: "not_due",
     };
-    this.db.transaction(() => {
+    this.transaction(() => {
       const now = Date.now();
       const lockKey = `lock#${peerId}`;
 
@@ -355,7 +355,7 @@ export class SQLiteClient
   }
 
   releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
-    this.db.transaction(() => {
+    this.transaction(() => {
       const lockKey = `lock#${peerId}`;
       const releasedAt = Date.now();
       const lockRow = this.db.get<{ holder_session_id: string }>(

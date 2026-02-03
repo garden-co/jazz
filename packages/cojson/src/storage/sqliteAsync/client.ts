@@ -354,7 +354,7 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
       acquired: false,
       reason: "not_due",
     };
-    await this.db.transaction(async () => {
+    await this.transaction(async () => {
       const now = Date.now();
       const lockKey = `lock#${peerId}`;
 
@@ -392,7 +392,7 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     sessionId: SessionID,
     peerId: PeerID,
   ): Promise<void> {
-    await this.db.transaction(async () => {
+    await this.transaction(async () => {
       const lockKey = `lock#${peerId}`;
       const releasedAt = Date.now();
       const lockRow = await this.db.get<{ holder_session_id: string }>(

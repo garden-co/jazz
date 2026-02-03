@@ -6,12 +6,15 @@ import {
   StorageReconciliationAcquireResult,
 } from "../exports";
 import {
+  loadCoValueOrFail,
   SyncMessagesLog,
   TEST_NODE_CONFIG,
   setupTestNode,
   waitFor,
 } from "./testUtils";
 import {
+  GARBAGE_COLLECTOR_CONFIG,
+  setGarbageCollectorMaxAge,
   setStorageReconciliationBatchSize,
   setStorageReconciliationInterval,
   setStorageReconciliationLockTTL,
@@ -227,6 +230,94 @@ describe("full storage reconciliation", () => {
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
+  });
+
+  test("CoValues without loaded content are reconciled", async () => {
+    const client = setupTestNode();
+    const { storage } = client.addStorage({ ourName: "client" });
+    client.connectToSyncServer({ persistent: true });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    // Restart client to clear memory
+    await client.restart();
+    client.addStorage({ storage });
+    client.connectToSyncServer({ persistent: true });
+
+    const loadedGroup = client.node.getCoValue(group.id);
+    const loadedMap = client.node.getCoValue(map.id);
+    await new Promise((resolve) =>
+      loadedGroup.getKnownStateFromStorage(resolve),
+    );
+    await new Promise((resolve) => loadedMap.getKnownStateFromStorage(resolve));
+    expect(loadedGroup.loadingState).toBe("onlyKnownState");
+    expect(loadedMap.loadingState).toBe("onlyKnownState");
+
+    SyncMessagesLog.clear();
+
+    const serverPeer = Object.values(client.node.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    client.node.syncManager.startStorageReconciliation(serverPeer);
+
+    await waitForStorageReconciliationToComplete(client.node);
+
+    // Edge does not fetch the covalue's known state from storage, since it's already in memory
+    const messages = SyncMessagesLog.getMessages({
+      Group: group.core,
+      Map: map.core,
+    });
+    expect(messages).toMatchInlineSnapshot(`
+      [
+        "client -> server | RECONCILE",
+        "server -> client | RECONCILE_ACK",
+      ]
+    `);
+  });
+
+  test("garbage collected CoValues are reconciled", async () => {
+    const originalGarbageCollectorMaxAge = GARBAGE_COLLECTOR_CONFIG.MAX_AGE;
+    setGarbageCollectorMaxAge(-1);
+
+    const client = setupTestNode();
+    client.addStorage();
+    client.connectToSyncServer({ persistent: true });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    // force the garbage collector to run
+    client.node.garbageCollector?.collect();
+
+    SyncMessagesLog.clear();
+
+    const serverPeer = Object.values(client.node.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    client.node.syncManager.startStorageReconciliation(serverPeer);
+
+    await waitForStorageReconciliationToComplete(client.node);
+
+    const messages = SyncMessagesLog.getMessages({
+      Group: group.core,
+      Map: map.core,
+    });
+    expect(messages).toMatchInlineSnapshot(`
+      [
+        "client -> server | RECONCILE",
+        "server -> client | RECONCILE_ACK",
+      ]
+    `);
+
+    setGarbageCollectorMaxAge(originalGarbageCollectorMaxAge);
   });
 
   test("'reconcile' message is not sent if there are no CoValues to reconcile", async () => {

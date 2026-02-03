@@ -366,7 +366,8 @@ export class SyncManager {
     const processStorageBatch = (offset: number) => {
       this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
         // Skip in-memory CoValues
-        const pending = batch.filter(({ id }) => !this.local.hasCoValue(id));
+        const coValues = batch.map(({ id }) => this.local.getCoValue(id));
+        const pending = coValues.filter((coValue) => !coValue.isAvailable());
         let done = 0;
         const entries: [RawCoID, string][] = [];
         const sendReconcileMessageWhenDone = () => {
@@ -380,12 +381,11 @@ export class SyncManager {
             }
           }
         };
-        for (const { id } of pending) {
-          const coValue = this.local.getCoValue(id);
+        for (const coValue of pending) {
           coValue.getKnownStateFromStorage((storageKnownState) => {
             if (storageKnownState) {
               entries.push([
-                id,
+                coValue.id,
                 this.hashKnownStateSessions(storageKnownState.sessions),
               ]);
             }
@@ -891,7 +891,7 @@ export class SyncManager {
 
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
-    } else if (coValue.isPartiallyLoaded()) {
+    } else if (coValue.loadingState === "onlyKnownState") {
       // Validate if content is missing before loading it from storage
       if (!this.syncState.isSynced(peer, msg.id)) {
         this.local.loadCoValueCore(msg.id).then(() => {
