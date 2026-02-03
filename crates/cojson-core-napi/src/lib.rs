@@ -211,7 +211,7 @@ impl SessionMap {
     meta_json: Option<String>,
     made_at: f64,
   ) -> napi::Result<String> {
-    self
+    let signed_tx = self
       .internal
       .make_new_private_transaction(
         &session_id,
@@ -222,7 +222,14 @@ impl SessionMap {
         meta_json.as_deref(),
         made_at as u64,
       )
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+
+    let tx_json = serde_json::to_string(&signed_tx.transaction)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+    Ok(format!(
+      r#"{{"signature":"{}","transaction":{}}}"#,
+      signed_tx.signature.0, tx_json
+    ))
   }
 
   /// Create new trusting transaction (for local writes)
@@ -236,7 +243,7 @@ impl SessionMap {
     meta_json: Option<String>,
     made_at: f64,
   ) -> napi::Result<String> {
-    self
+    let signed_tx = self
       .internal
       .make_new_trusting_transaction(
         &session_id,
@@ -245,7 +252,14 @@ impl SessionMap {
         meta_json.as_deref(),
         made_at as u64,
       )
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+
+    let tx_json = serde_json::to_string(&signed_tx.transaction)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+    Ok(format!(
+      r#"{{"signature":"{}","transaction":{}}}"#,
+      signed_tx.signature.0, tx_json
+    ))
   }
 
   // === Session Queries ===

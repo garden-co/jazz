@@ -168,7 +168,7 @@ impl SessionMap {
             .internal
             .lock()
             .map_err(|_| SessionMapError::LockError)?;
-        internal
+        let signed_tx = internal
             .make_new_private_transaction(
                 &session_id,
                 &signer_secret,
@@ -178,7 +178,14 @@ impl SessionMap {
                 meta_json.as_deref(),
                 made_at as u64,
             )
-            .map_err(|e| SessionMapError::Internal(e.to_string()))
+            .map_err(|e| SessionMapError::Internal(e.to_string()))?;
+
+        let tx_json = serde_json::to_string(&signed_tx.transaction)
+            .map_err(|e| SessionMapError::Internal(e.to_string()))?;
+        Ok(format!(
+            r#"{{"signature":"{}","transaction":{}}}"#,
+            signed_tx.signature.0, tx_json
+        ))
     }
 
     /// Create new trusting transaction (for local writes)
@@ -195,7 +202,7 @@ impl SessionMap {
             .internal
             .lock()
             .map_err(|_| SessionMapError::LockError)?;
-        internal
+        let signed_tx = internal
             .make_new_trusting_transaction(
                 &session_id,
                 &signer_secret,
@@ -203,7 +210,14 @@ impl SessionMap {
                 meta_json.as_deref(),
                 made_at as u64,
             )
-            .map_err(|e| SessionMapError::Internal(e.to_string()))
+            .map_err(|e| SessionMapError::Internal(e.to_string()))?;
+
+        let tx_json = serde_json::to_string(&signed_tx.transaction)
+            .map_err(|e| SessionMapError::Internal(e.to_string()))?;
+        Ok(format!(
+            r#"{{"signature":"{}","transaction":{}}}"#,
+            signed_tx.signature.0, tx_json
+        ))
     }
 
     // === Session Queries ===

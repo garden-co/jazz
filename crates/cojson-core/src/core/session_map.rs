@@ -10,6 +10,13 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Result of creating a new transaction, containing the signature and transaction data
+#[derive(Debug, Clone)]
+pub struct SignedTransaction {
+    pub signature: Signature,
+    pub transaction: Transaction,
+}
+
 /// SessionMap implementation - one instance per CoValue
 /// Owns the header and all session data for a single CoValue
 #[derive(Debug)]
@@ -231,6 +238,9 @@ pub type KnownStateSessions = BTreeMap<String, u32>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionMapError {
+    #[error("Invalid transaction: {0}")]
+    InvalidTransaction(String),
+
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
@@ -424,21 +434,35 @@ impl SessionMapImpl {
         }
 
         // Add transactions to staging area
-        for tx in &transactions {
+        for tx in transactions.into_iter() {
             match tx {
                 Transaction::Private(private_tx) => {
                     session_log.add_existing_private_transaction(
-                        private_tx.encrypted_changes.value.clone(),
-                        private_tx.key_used.0.clone(),
-                        private_tx.made_at.as_u64().unwrap_or(0),
-                        private_tx.meta.as_ref().map(|m| m.value.clone()),
+                        private_tx.encrypted_changes.value,
+                        private_tx.key_used.0,
+                        private_tx.made_at.as_u64().map_or_else(
+                            || {
+                                Err(SessionMapError::InvalidTransaction(
+                                    "Failed to convert made_at to u64".to_string(),
+                                ))
+                            },
+                            |u| Ok(u),
+                        )?,
+                        private_tx.meta.map(|m| m.value),
                     )?;
                 }
                 Transaction::Trusting(trusting_tx) => {
                     session_log.add_existing_trusting_transaction(
-                        trusting_tx.changes.clone(),
-                        trusting_tx.made_at.as_u64().unwrap_or(0),
-                        trusting_tx.meta.clone(),
+                        trusting_tx.changes,
+                        trusting_tx.made_at.as_u64().map_or_else(
+                            || {
+                                Err(SessionMapError::InvalidTransaction(
+                                    "Failed to convert made_at to u64".to_string(),
+                                ))
+                            },
+                            |u| Ok(u),
+                        )?,
+                        trusting_tx.meta,
                     )?;
                 }
             }
@@ -483,7 +507,7 @@ impl SessionMapImpl {
     }
 
     /// Create new private transaction (for local writes)
-    /// Returns JSON: { signature: string, transaction: Transaction }
+    /// Returns the signature and transaction data
     pub fn make_new_private_transaction(
         &mut self,
         session_id: &str,
@@ -493,7 +517,7 @@ impl SessionMapImpl {
         key_secret: &str,
         meta_json: Option<&str>,
         made_at: u64,
-    ) -> Result<String, SessionMapError> {
+    ) -> Result<SignedTransaction, SessionMapError> {
         if self.is_deleted {
             return Err(SessionMapError::DeletedCoValue(self.co_id.0.clone()));
         }
@@ -548,18 +572,14 @@ impl SessionMapImpl {
                 .insert(session_id.to_string(), tx_count);
         }
 
-        // Build result JSON
-        let tx_json = serde_json::to_string(&transaction)?;
-        let result = format!(
-            r#"{{"signature":"{}","transaction":{}}}"#,
-            signature.0, tx_json
-        );
-
-        Ok(result)
+        Ok(SignedTransaction {
+            signature,
+            transaction,
+        })
     }
 
     /// Create new trusting transaction (for local writes)
-    /// Returns JSON: { signature: string, transaction: Transaction }
+    /// Returns the signature and transaction data
     pub fn make_new_trusting_transaction(
         &mut self,
         session_id: &str,
@@ -567,7 +587,7 @@ impl SessionMapImpl {
         changes_json: &str,
         meta_json: Option<&str>,
         made_at: u64,
-    ) -> Result<String, SessionMapError> {
+    ) -> Result<SignedTransaction, SessionMapError> {
         if self.is_deleted {
             return Err(SessionMapError::DeletedCoValue(self.co_id.0.clone()));
         }
@@ -619,14 +639,10 @@ impl SessionMapImpl {
                 .insert(session_id.to_string(), tx_count);
         }
 
-        // Build result JSON
-        let tx_json = serde_json::to_string(&transaction)?;
-        let result = format!(
-            r#"{{"signature":"{}","transaction":{}}}"#,
-            signature.0, tx_json
-        );
-
-        Ok(result)
+        Ok(SignedTransaction {
+            signature,
+            transaction,
+        })
     }
 
     // === Session Queries ===

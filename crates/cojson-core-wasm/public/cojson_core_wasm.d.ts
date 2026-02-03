@@ -19,47 +19,6 @@ export function decryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, cip
  */
 export function encryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, plaintext: Uint8Array): Uint8Array;
 /**
- * WASM-exposed function to encrypt bytes with a key secret and nonce material.
- * - `value`: The raw bytes to encrypt
- * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce
- * Returns the encrypted bytes or throws a JsError if encryption fails.
- */
-export function encrypt(value: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to decrypt bytes with a key secret and nonce material.
- * - `ciphertext`: The encrypted bytes to decrypt
- * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match encryption)
- * Returns the decrypted bytes or throws a JsError if decryption fails.
- */
-export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * Generate a new X25519 private key using secure random number generation.
- * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
- * This key can be reused for multiple Diffie-Hellman exchanges.
- */
-export function newX25519PrivateKey(): Uint8Array;
-/**
- * WASM-exposed function to derive an X25519 public key from a private key.
- * - `private_key`: 32 bytes of private key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- */
-export function x25519PublicKey(private_key: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to derive a sealer ID from a sealer secret.
- * - `secret`: Raw bytes of the sealer secret
- * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
- */
-export function getSealerId(secret: Uint8Array): string;
-/**
- * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
- * - `private_key`: 32 bytes of private key material
- * - `public_key`: 32 bytes of public key material
- * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
- */
-export function x25519DiffieHellman(private_key: Uint8Array, public_key: Uint8Array): Uint8Array;
-/**
  * WASM-exposed function to verify an Ed25519 signature.
  * - `signature`: Raw signature bytes
  * - `message`: Raw bytes that were signed
@@ -122,6 +81,47 @@ export function unseal(sealed_message: Uint8Array, recipient_secret: string, sen
  * Returns sealed bytes or throws JsError if sealing fails.
  */
 export function seal(message: Uint8Array, sender_secret: string, recipient_id: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * Generate a new X25519 private key using secure random number generation.
+ * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
+ * This key can be reused for multiple Diffie-Hellman exchanges.
+ */
+export function newX25519PrivateKey(): Uint8Array;
+/**
+ * WASM-exposed function to derive an X25519 public key from a private key.
+ * - `private_key`: 32 bytes of private key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ */
+export function x25519PublicKey(private_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to derive a sealer ID from a sealer secret.
+ * - `secret`: Raw bytes of the sealer secret
+ * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
+ */
+export function getSealerId(secret: Uint8Array): string;
+/**
+ * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
+ * - `private_key`: 32 bytes of private key material
+ * - `public_key`: 32 bytes of public key material
+ * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
+ */
+export function x25519DiffieHellman(private_key: Uint8Array, public_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to encrypt bytes with a key secret and nonce material.
+ * - `value`: The raw bytes to encrypt
+ * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns the encrypted bytes or throws a JsError if encryption fails.
+ */
+export function encrypt(value: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to decrypt bytes with a key secret and nonce material.
+ * - `ciphertext`: The encrypted bytes to decrypt
+ * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match encryption)
+ * Returns the decrypted bytes or throws a JsError if decryption fails.
+ */
+export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function to sign a message using Ed25519.
  * - `signing_key`: 32 bytes of signing key material
@@ -299,15 +299,9 @@ export interface InitOutput {
   readonly sessionmap_setStreamingKnownState: (a: number, b: number, c: number) => [number, number];
   readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly getSealerId: (a: number, b: number) => [number, number, number, number];
   readonly getSignerId: (a: number, b: number) => [number, number, number, number];
-  readonly newX25519PrivateKey: () => [number, number];
   readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
-  readonly x25519DiffieHellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly x25519PublicKey: (a: number, b: number) => [number, number, number, number];
   readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
   readonly blake3HashOnce: (a: number, b: number) => [number, number];
   readonly blake3HashOnceWithContext: (a: number, b: number, c: number, d: number) => [number, number];
@@ -315,9 +309,15 @@ export interface InitOutput {
   readonly blake3hasher_finalize: (a: number) => [number, number];
   readonly blake3hasher_new: () => number;
   readonly blake3hasher_update: (a: number, b: number, c: number) => void;
+  readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly generateNonce: (a: number, b: number) => [number, number];
+  readonly getSealerId: (a: number, b: number) => [number, number, number, number];
+  readonly newX25519PrivateKey: () => [number, number];
   readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+  readonly x25519DiffieHellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly x25519PublicKey: (a: number, b: number) => [number, number, number, number];
   readonly ed25519Sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly ed25519SignatureFromBytes: (a: number, b: number) => [number, number, number, number];
   readonly ed25519SigningKeyFromBytes: (a: number, b: number) => [number, number, number, number];
