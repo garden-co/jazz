@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { table, col, resetCollectedState, getCollectedSchema } from "../dsl.js";
 import { schemaToWasm } from "./schema-reader.js";
 import { generateTypes } from "./type-generator.js";
-import { generateClient } from "./index.js";
+import { generateClient, analyzeRelations } from "./index.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 describe("schemaToWasm", () => {
   beforeEach(() => {
@@ -189,6 +190,7 @@ describe("generateTypes", () => {
   });
 
   it("maps ref columns to string type", () => {
+    table("users", { name: col.string() });
     table("todos", { owner_id: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -264,5 +266,235 @@ describe("generateClient", () => {
     expect(output).toContain('"type": "Boolean"');
     expect(output).toContain('"type": "Uuid"');
     expect(output).toContain('"references": "todos"');
+  });
+});
+
+describe("analyzeRelations", () => {
+  it("derives forward relations from references", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        users: { columns: [] },
+      },
+    };
+
+    const relations = analyzeRelations(schema);
+    const todoRels = relations.get("todos")!;
+
+    expect(todoRels).toContainEqual(
+      expect.objectContaining({
+        name: "owner",
+        type: "forward",
+        toTable: "users",
+        isArray: false,
+        nullable: false,
+      }),
+    );
+  });
+
+  it("derives reverse relations", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        users: { columns: [] },
+      },
+    };
+
+    const relations = analyzeRelations(schema);
+    const userRels = relations.get("users")!;
+
+    expect(userRels).toContainEqual(
+      expect.objectContaining({
+        name: "todosViaOwner",
+        type: "reverse",
+        toTable: "todos",
+        isArray: true,
+      }),
+    );
+  });
+
+  it("handles self-referential relations", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            {
+              name: "parent_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "todos",
+            },
+          ],
+        },
+      },
+    };
+
+    const relations = analyzeRelations(schema);
+    const todoRels = relations.get("todos")!;
+
+    // Forward: parent
+    expect(todoRels).toContainEqual(
+      expect.objectContaining({ name: "parent", type: "forward", nullable: true }),
+    );
+    // Reverse: todosViaParent
+    expect(todoRels).toContainEqual(
+      expect.objectContaining({ name: "todosViaParent", type: "reverse", isArray: true }),
+    );
+  });
+
+  it("handles multiple relations on same table", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+            {
+              name: "assignee_id",
+              column_type: { type: "Uuid" },
+              nullable: true,
+              references: "users",
+            },
+          ],
+        },
+        users: { columns: [] },
+      },
+    };
+
+    const relations = analyzeRelations(schema);
+    const todoRels = relations.get("todos")!;
+    const userRels = relations.get("users")!;
+
+    // Forward relations on todos
+    expect(todoRels).toContainEqual(expect.objectContaining({ name: "owner" }));
+    expect(todoRels).toContainEqual(expect.objectContaining({ name: "assignee" }));
+
+    // Reverse relations on users
+    expect(userRels).toContainEqual(expect.objectContaining({ name: "todosViaOwner" }));
+    expect(userRels).toContainEqual(expect.objectContaining({ name: "todosViaAssignee" }));
+  });
+
+  it("throws error when referencing unknown table", () => {
+    const schema: WasmSchema = {
+      tables: {
+        todos: {
+          columns: [
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        // Note: "users" table is NOT defined
+      },
+    };
+
+    expect(() => analyzeRelations(schema)).toThrow(
+      'Table "todos" references unknown table "users" via column "owner_id"',
+    );
+  });
+});
+
+describe("generateTypes with relations", () => {
+  beforeEach(() => {
+    resetCollectedState();
+  });
+
+  it("generates Include types", () => {
+    table("todos", { owner_id: col.ref("users") });
+    table("users", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface TodoInclude {");
+    expect(output).toContain("owner?: boolean | UserInclude;");
+  });
+
+  it("generates Relations types", () => {
+    table("todos", { owner_id: col.ref("users") });
+    table("users", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface TodoRelations {");
+    expect(output).toContain("owner: User;");
+  });
+
+  it("generates reverse relations as arrays", () => {
+    table("todos", { owner_id: col.ref("users") });
+    table("users", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface UserRelations {");
+    expect(output).toContain("todosViaOwner: Todo[];");
+  });
+
+  it("generates WithIncludes types", () => {
+    table("todos", { owner_id: col.ref("users") });
+    table("users", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export type TodoWithIncludes<I extends TodoInclude = {}>");
+    expect(output).toContain("export type UserWithIncludes<I extends UserInclude = {}>");
+  });
+
+  it("generates Include types for self-referential tables", () => {
+    table("todos", {
+      title: col.string(),
+      parent_id: col.ref("todos").optional(),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface TodoInclude {");
+    expect(output).toContain("parent?: boolean | TodoInclude;");
+    expect(output).toContain("todosViaParent?: boolean | TodoInclude;");
+  });
+
+  it("does not generate relation types for tables without relations", () => {
+    table("items", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    // Should still have base and init types
+    expect(output).toContain("export interface Item {");
+    expect(output).toContain("export interface ItemInit {");
+
+    // Should NOT have Include/Relations/WithIncludes since no relations
+    expect(output).not.toContain("export interface ItemInclude {");
+    expect(output).not.toContain("export interface ItemRelations {");
+    expect(output).not.toContain("export type ItemWithIncludes");
   });
 });

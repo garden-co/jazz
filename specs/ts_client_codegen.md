@@ -1066,6 +1066,10 @@ Files to create:
 
 - `packages/jazz-ts/src/codegen/query-builder-generator.ts`
 
+Notes:
+
+- Include types should allow QueryBuilder as an alternative to boolean/IncludeType for filtered includes (e.g., `parent?: boolean | TodoInclude | TodoQueryBuilder`)
+
 Deliverable: `app.todos.where({...}).include({...})` compiles and type-checks
 
 ### Phase 5: Runtime Integration
