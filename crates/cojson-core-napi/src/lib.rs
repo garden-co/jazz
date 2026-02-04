@@ -223,7 +223,9 @@ impl SessionMap {
     session_id: String,
     from_index: u32,
   ) -> Option<Vec<String>> {
-    self.internal.get_session_transactions(&session_id, from_index)
+    self
+      .internal
+      .get_session_transactions(&session_id, from_index)
   }
 
   /// Get last signature for a session (returns undefined if session not found)

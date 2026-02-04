@@ -519,16 +519,13 @@ impl SessionMapImpl {
         let session_id_for_state = session_id.clone();
 
         // Get or create session log
-        let session_log = self
-            .sessions
-            .entry(session_id.clone())
-            .or_insert_with(|| {
-                SessionLogInternal::new(
-                    self.co_id.clone(),
-                    SessionID(session_id),
-                    None, // signerID derived from secret
-                )
-            });
+        let session_log = self.sessions.entry(session_id.clone()).or_insert_with(|| {
+            SessionLogInternal::new(
+                self.co_id.clone(),
+                SessionID(session_id),
+                None, // signerID derived from secret
+            )
+        });
 
         // Add new transaction
         let (signature, transaction) = session_log.add_new_transaction(
@@ -563,9 +560,7 @@ impl SessionMapImpl {
 
         // Update known_state_with_streaming if present
         if let Some(ref mut ks_streaming) = self.known_state_with_streaming {
-            ks_streaming
-                .sessions
-                .insert(session_id_for_state, tx_count);
+            ks_streaming.sessions.insert(session_id_for_state, tx_count);
         }
 
         Ok(SignedTransaction {
@@ -592,16 +587,13 @@ impl SessionMapImpl {
         let session_id_for_state = session_id.clone();
 
         // Get or create session log
-        let session_log = self
-            .sessions
-            .entry(session_id.clone())
-            .or_insert_with(|| {
-                SessionLogInternal::new(
-                    self.co_id.clone(),
-                    SessionID(session_id),
-                    None, // signerID derived from secret
-                )
-            });
+        let session_log = self.sessions.entry(session_id.clone()).or_insert_with(|| {
+            SessionLogInternal::new(
+                self.co_id.clone(),
+                SessionID(session_id),
+                None, // signerID derived from secret
+            )
+        });
 
         // Add new transaction
         let (signature, transaction) = session_log.add_new_transaction(
@@ -633,9 +625,7 @@ impl SessionMapImpl {
 
         // Update known_state_with_streaming if present
         if let Some(ref mut ks_streaming) = self.known_state_with_streaming {
-            ks_streaming
-                .sessions
-                .insert(session_id_for_state, tx_count);
+            ks_streaming.sessions.insert(session_id_for_state, tx_count);
         }
 
         Ok(SignedTransaction {
