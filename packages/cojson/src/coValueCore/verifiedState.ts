@@ -166,7 +166,7 @@ export class VerifiedState {
       // Create new cache entry
       const sessionLog: SessionLog = {
         signerID,
-        transactions: [...newTransactions],
+        transactions: newTransactions.slice(),
         lastSignature: newSignature,
         signatureAfter: {},
         sessionID,
