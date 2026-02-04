@@ -10,7 +10,7 @@ import type { MapOpPayload } from "cojson/dist/coValues/coMap.js";
 import type {
   BinaryStreamChunk,
   BinaryStreamEnd,
-} from "cojson/dist/coValues/coStream.js";
+} from "cojson/dist/coValues/binaryCoStream.js";
 import { isCoId } from "../viewer/types";
 
 export const isGroupExtension = (

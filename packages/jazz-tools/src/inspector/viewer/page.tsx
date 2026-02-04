@@ -1,6 +1,7 @@
 import {
   CoID,
   LocalNode,
+  RawBinaryCoStream,
   RawCoList,
   RawCoMap,
   RawCoPlainText,
@@ -15,6 +16,7 @@ import { Text } from "../ui/text.js";
 import { AccountOrGroupText } from "./account-or-group-text.js";
 import { AccountView } from "./account-view.js";
 import { CoPlainTextView } from "./co-plain-text-view.js";
+import { CoBinaryStreamView } from "./co-binary-stream-view.js";
 import { CoStreamView } from "./co-stream-view.js";
 import { GridView } from "./grid-view.js";
 import { GroupView } from "./group-view.js";
@@ -112,6 +114,10 @@ function View(
   const { type, extendedType } = props.coValue;
   const { snapshot, value } = props.coValue;
   const { node, onNavigate } = props;
+
+  if (type === "costream" && extendedType === "file") {
+    return <CoBinaryStreamView value={value as RawBinaryCoStream} />;
+  }
 
   if (!snapshot || snapshot === "unavailable") return;
 

@@ -7,13 +7,16 @@
     "cojson": "workspace:*",
     "cojson-core-napi": "workspace:*",
     "cojson-core-wasm": "workspace:*",
+    "cojson-latest": "npm:cojson@0.20.7",
     "cronometro": "^5.3.0",
     "jazz-tools": "workspace:*",
+    "jazz-tools-latest": "npm:jazz-tools@0.20.7",
     "vitest": "catalog:default"
   },
   "scripts": {
     "bench:cojson": "vitest bench",
-    "bench:jazz-tools": "pnpm exec tsx ./jazz-tools/comap.create.jazz-tools.bench.ts"
+    "bench:jazz-tools": "pnpm exec tsx ./jazz-tools/comap.create.jazz-tools.bench.ts",
+    "bench:binaryCoStream": "node --experimental-strip-types --no-warnings ./jazz-tools/binaryCoStream.jazz-tools.bench.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.3",

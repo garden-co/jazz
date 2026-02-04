@@ -2,10 +2,9 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { expectStream } from "../coValue.js";
 import {
   BinaryStreamItem,
-  CoStreamItem,
   RawBinaryCoStream,
-  RawCoStreamView,
-} from "../coValues/coStream.js";
+} from "../coValues/binaryCoStream.js";
+import { CoStreamItem, RawCoStreamView } from "../coValues/coStream.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";

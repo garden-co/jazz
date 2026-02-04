@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { RawCoList } from "../coValues/coList.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { RawCoStream } from "../coValues/coStream.js";
-import { RawBinaryCoStream } from "../coValues/coStream.js";
+import { RawBinaryCoStream } from "../coValues/binaryCoStream.js";
 import type { RawCoValue, RawGroup } from "../exports.js";
 import type { NewContentMessage } from "../sync.js";
 import {

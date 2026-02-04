@@ -837,22 +837,41 @@ export class FileStream extends CoValueBase implements CoValue {
     allowUnfinished?: boolean;
     dataURL?: boolean;
   }): string | undefined {
-    const chunks = this.getChunks(options);
+    const data = this.getChunks({
+      allowUnfinished: options?.allowUnfinished,
+    });
 
-    if (!chunks) return undefined;
+    if (!data) return undefined;
 
-    const output = [];
-
-    for (const chunk of chunks.chunks) {
-      for (const byte of chunk) {
-        output.push(String.fromCharCode(byte));
-      }
+    let totalLen = 0;
+    for (const chunk of data.chunks) {
+      totalLen += chunk.length;
     }
 
-    const base64 = btoa(output.join(""));
+    const merged = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const chunk of data.chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    const CHUNK_SIZE = 32768;
+    const parts: string[] = [];
+    for (let i = 0; i < totalLen; i += CHUNK_SIZE) {
+      parts.push(
+        String.fromCharCode.apply(
+          null,
+          merged.subarray(
+            i,
+            Math.min(i + CHUNK_SIZE, totalLen),
+          ) as unknown as number[],
+        ),
+      );
+    }
+    const base64 = btoa(parts.join(""));
 
     if (options?.dataURL) {
-      return `data:${chunks.mimeType};base64,${base64}`;
+      return `data:${data.mimeType};base64,${base64}`;
     }
 
     return base64;

@@ -1,12 +1,5 @@
-import {
-  CoID,
-  LocalNode,
-  RawBinaryCoStream,
-  RawCoStream,
-  RawCoValue,
-} from "cojson";
+import { CoID, LocalNode, RawBinaryCoStream, RawCoValue } from "cojson";
 import { useEffect, useState } from "react";
-import { detectCoStreamType } from "./co-stream-view.js";
 
 export type CoJsonType = "comap" | "costream" | "colist" | "coplaintext";
 export type ExtendedCoJsonType =
@@ -127,9 +120,7 @@ function subscribeToCoValue(
           extendedType = "group";
         }
       } else if (type === "costream") {
-        const coStream = detectCoStreamType(value as RawCoStream);
-
-        if (coStream.type === "binary") {
+        if (value instanceof RawBinaryCoStream) {
           extendedType = "file";
         }
       }

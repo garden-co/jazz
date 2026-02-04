@@ -2,7 +2,7 @@ import { type RawCoValue } from "../coValue.js";
 import { RawCoList } from "../coValues/coList.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { RawCoStream } from "../coValues/coStream.js";
-import { RawBinaryCoStream } from "../coValues/coStream.js";
+import { RawBinaryCoStream } from "../coValues/binaryCoStream.js";
 import type { JsonValue } from "../jsonValue.js";
 
 export function isCoValue(
