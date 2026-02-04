@@ -432,7 +432,8 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoInclude {");
-    expect(output).toContain("owner?: boolean | UserInclude;");
+    // Include types now include QueryBuilder union
+    expect(output).toContain("owner?: boolean | UserInclude | UserQueryBuilder;");
   });
 
   it("generates Relations types", () => {
@@ -478,8 +479,9 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoInclude {");
-    expect(output).toContain("parent?: boolean | TodoInclude;");
-    expect(output).toContain("todosViaParent?: boolean | TodoInclude;");
+    // Include types now include QueryBuilder union
+    expect(output).toContain("parent?: boolean | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;");
   });
 
   it("does not generate relation types for tables without relations", () => {
@@ -496,5 +498,197 @@ describe("generateTypes with relations", () => {
     expect(output).not.toContain("export interface ItemInclude {");
     expect(output).not.toContain("export interface ItemRelations {");
     expect(output).not.toContain("export type ItemWithIncludes");
+  });
+});
+
+describe("generateWhereInputTypes", () => {
+  beforeEach(() => {
+    resetCollectedState();
+  });
+
+  it("generates WhereInput types for basic columns", () => {
+    table("todos", { title: col.string(), done: col.boolean(), priority: col.int() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface TodoWhereInput {");
+    expect(output).toContain("title?: string | { eq?: string; ne?: string; contains?: string };");
+    expect(output).toContain("done?: boolean;");
+    expect(output).toContain(
+      "priority?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };",
+    );
+  });
+
+  it("generates id filter with in operator", () => {
+    table("todos", { title: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("id?: string | { eq?: string; ne?: string; in?: string[] };");
+  });
+
+  it("generates FK filter with isNull for nullable refs", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users").optional() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("owner_id?: string | { eq?: string; ne?: string; isNull?: boolean };");
+  });
+
+  it("generates FK filter without isNull for required refs", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("owner_id?: string | { eq?: string; ne?: string };");
+  });
+});
+
+describe("generateQueryBuilderClasses", () => {
+  beforeEach(() => {
+    resetCollectedState();
+  });
+
+  it("generates QueryBuilder classes", () => {
+    table("todos", { title: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export class TodoQueryBuilder<I extends Record<string, never> = {}>");
+    expect(output).toContain("where(conditions: TodoWhereInput)");
+    expect(output).toContain("orderBy(column: keyof Todo");
+    expect(output).toContain("limit(n: number)");
+    expect(output).toContain("offset(n: number)");
+    expect(output).toContain("_build(): string");
+  });
+
+  it("generates QueryBuilder with Include constraint for tables with relations", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export class TodoQueryBuilder<I extends TodoInclude = {}>");
+  });
+
+  it("generates include method for tables with relations", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
+  });
+
+  it("does not generate include method for tables without relations", () => {
+    table("items", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    // ItemQueryBuilder should exist
+    expect(output).toContain("export class ItemQueryBuilder");
+    // But should not have include method - look for the specific signature
+    const itemQueryBuilderMatch = output.match(/export class ItemQueryBuilder[\s\S]*?^}/m);
+    expect(itemQueryBuilderMatch).toBeTruthy();
+    expect(itemQueryBuilderMatch![0]).not.toContain("include<NewI extends");
+  });
+
+  it("updates Include types with QueryBuilder union", () => {
+    table("users", { name: col.string() });
+    table("todos", { owner_id: col.ref("users") });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("owner?: boolean | UserInclude | UserQueryBuilder;");
+  });
+
+  it("QueryBuilder._build() returns valid JSON structure", () => {
+    table("todos", { title: col.string(), done: col.boolean() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    // Verify _build method structure exists
+    expect(output).toContain("_build(): string {");
+    expect(output).toContain("return JSON.stringify({");
+    expect(output).toContain("table: this._table,");
+    expect(output).toContain("conditions: this._conditions,");
+    expect(output).toContain("includes: this._includes,");
+    expect(output).toContain("orderBy: this._orderBys,");
+    expect(output).toContain("limit: this._limitVal,");
+    expect(output).toContain("offset: this._offsetVal,");
+  });
+
+  it("generates private _clone method for immutability", () => {
+    table("todos", { title: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("private _clone(): TodoQueryBuilder<I> {");
+    expect(output).toContain("const clone = new TodoQueryBuilder<I>();");
+    expect(output).toContain("clone._conditions = [...this._conditions];");
+  });
+});
+
+describe("generateAppExport", () => {
+  beforeEach(() => {
+    resetCollectedState();
+  });
+
+  it("generates app export with table proxies", () => {
+    table("todos", { title: col.string() });
+    table("users", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export const app = {");
+    expect(output).toContain("todos: new TodoQueryBuilder(),");
+    expect(output).toContain("users: new UserQueryBuilder(),");
+    expect(output).toContain("wasmSchema,");
+  });
+
+  it("app export includes wasmSchema reference", () => {
+    table("items", { name: col.string() });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    // Verify wasmSchema is defined before app and included in app
+    const wasmSchemaIndex = output.indexOf("export const wasmSchema");
+    const appIndex = output.indexOf("export const app = {");
+    expect(wasmSchemaIndex).toBeLessThan(appIndex);
+    expect(output).toContain("wasmSchema,");
+  });
+});
+
+describe("QueryBuilder self-referential relations", () => {
+  beforeEach(() => {
+    resetCollectedState();
+  });
+
+  it("generates Include with QueryBuilder for self-referential tables", () => {
+    table("todos", {
+      title: col.string(),
+      parent_id: col.ref("todos").optional(),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("parent?: boolean | TodoInclude | TodoQueryBuilder;");
+    expect(output).toContain("todosViaParent?: boolean | TodoInclude | TodoQueryBuilder;");
   });
 });
