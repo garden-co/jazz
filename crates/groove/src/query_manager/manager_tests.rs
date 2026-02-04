@@ -50,7 +50,7 @@ fn execute_query(
     let sub_id = qm.subscribe(query)?;
     qm.process();
     let results = qm.get_subscription_results(sub_id);
-    qm.unsubscribe(sub_id);
+    qm.unsubscribe_with_sync(sub_id);
     Ok(results)
 }
 

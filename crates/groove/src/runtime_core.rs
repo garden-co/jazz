@@ -224,13 +224,16 @@ impl<H: IoHandler> RuntimeCore<H> {
     /// to process the change and schedule any required I/O.
     pub fn immediate_tick(&mut self) -> TickOutput {
         // 1. Process logical updates (sync, subscriptions)
-        let tick_result = self.schema_manager.tick_settled();
+        self.schema_manager.process();
+
+        // 2. Collect subscription updates
+        let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
 
         // Track one-shot queries that completed this tick
         let mut completed_one_shots: Vec<SubscriptionHandle> = Vec::new();
 
-        // 2. Call subscription callbacks AND handle one-shot queries
-        for update in &tick_result.subscription_updates {
+        // 3. Call subscription callbacks AND handle one-shot queries
+        for update in &subscription_updates {
             if let Some(&handle) = self.subscription_reverse.get(&update.subscription_id) {
                 // Check if this is a one-shot query
                 if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
@@ -274,13 +277,13 @@ impl<H: IoHandler> RuntimeCore<H> {
             }
         }
 
-        // 3. Schedule batched_tick if outbound messages exist
+        // 4. Schedule batched_tick if outbound messages exist
         if self.has_outbound() {
             self.io_handler.schedule_batched_tick();
         }
 
         TickOutput {
-            subscription_updates: tick_result.subscription_updates,
+            subscription_updates,
         }
     }
 
@@ -319,9 +322,13 @@ impl<H: IoHandler> RuntimeCore<H> {
         self.parked_storage_responses.extend(pending);
 
         // 4. Process parked storage responses
+        // (calls immediate_tick internally, which may generate new outbox entries
+        // and schedule another batched_tick to send them)
         self.handle_storage();
 
         // 5. Process parked sync messages
+        // (calls immediate_tick internally, which may generate new outbox entries
+        // and schedule another batched_tick to send them)
         self.handle_sync_messages();
     }
 
@@ -416,16 +423,20 @@ impl<H: IoHandler> RuntimeCore<H> {
     }
 
     /// Internal subscribe implementation.
+    ///
+    /// Uses `subscribe_with_sync` so that subscriptions flow through the outbox
+    /// and are sent to connected servers.
     fn subscribe_impl(
         &mut self,
         query: Query,
         callback: SubscriptionCallback,
         session: Option<Session>,
     ) -> Result<SubscriptionHandle, RuntimeError> {
+        // Use subscribe_with_sync to ensure subscriptions flow through outbox
         let query_sub_id = self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_session(query, session)
+            .subscribe_with_sync(query, session)
             .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
 
         let handle = SubscriptionHandle(self.next_subscription_handle);
@@ -440,6 +451,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         );
         self.subscription_reverse.insert(query_sub_id, handle);
 
+        self.immediate_tick();
         Ok(handle)
     }
 
@@ -449,7 +461,7 @@ impl<H: IoHandler> RuntimeCore<H> {
             self.subscription_reverse.remove(&state.query_sub_id);
             self.schema_manager
                 .query_manager_mut()
-                .unsubscribe(state.query_sub_id);
+                .unsubscribe_with_sync(state.query_sub_id);
         }
     }
 
@@ -469,6 +481,7 @@ impl<H: IoHandler> RuntimeCore<H> {
             .subscribe_with_schema_context(query, schema_context, session)
             .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
 
+        self.immediate_tick();
         Ok(crate::sync_manager::QueryId(query_sub_id.0))
     }
 
@@ -532,6 +545,7 @@ impl<H: IoHandler> RuntimeCore<H> {
             .schema_manager
             .insert_with_session(table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        self.immediate_tick();
         Ok(result.row_id)
     }
 
@@ -570,6 +584,7 @@ impl<H: IoHandler> RuntimeCore<H> {
             .update_with_session(object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
+        self.immediate_tick();
         Ok(())
     }
 
@@ -583,6 +598,7 @@ impl<H: IoHandler> RuntimeCore<H> {
             .query_manager_mut()
             .delete_with_session(object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        self.immediate_tick();
         Ok(())
     }
 
@@ -604,6 +620,7 @@ impl<H: IoHandler> RuntimeCore<H> {
             .query_manager_mut()
             .sync_manager_mut()
             .add_server(server_id);
+        self.immediate_tick();
     }
 
     /// Remove a server connection.
@@ -621,6 +638,34 @@ impl<H: IoHandler> RuntimeCore<H> {
         if let Some(s) = session {
             sm.set_client_session(client_id, s);
         }
+        self.immediate_tick();
+    }
+
+    /// Ensure a client exists with the given session.
+    ///
+    /// If the client already exists with the same session, this is a no-op.
+    /// If the client exists with a different session, we currently panic with todo!()
+    /// as session migration is not yet implemented.
+    /// If the client doesn't exist, it's added with the given session.
+    pub fn ensure_client_with_session(&mut self, client_id: ClientId, session: Option<Session>) {
+        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
+        if let Some(existing) = sm.get_client(client_id) {
+            // Client exists - check session matches
+            if existing.session != session {
+                todo!(
+                    "Client {:?} exists with different session - handle session change",
+                    client_id
+                );
+            }
+            // Session matches, nothing to do
+        } else {
+            // Client doesn't exist, add it
+            sm.add_client(client_id);
+            if let Some(s) = session {
+                sm.set_client_session(client_id, s);
+            }
+            self.immediate_tick();
+        }
     }
 
     /// Add a client connection and sync all data to them.
@@ -630,6 +675,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         if let Some(s) = session {
             sm.set_client_session(client_id, s);
         }
+        self.immediate_tick();
     }
 
     /// Remove a client connection.
@@ -707,7 +753,7 @@ mod tests {
         let sub_id = qm.subscribe(query).unwrap();
         qm.process();
         let results = qm.get_subscription_results(sub_id);
-        qm.unsubscribe(sub_id);
+        qm.unsubscribe_with_sync(sub_id);
         results
     }
 

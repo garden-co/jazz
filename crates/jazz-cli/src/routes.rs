@@ -17,9 +17,7 @@ use axum::{
 use futures::stream::Stream;
 use groove::sync_manager::SyncPayload;
 use jazz_transport::{
-    ConnectionId, CreateObjectRequest, CreateObjectResponse, DeleteObjectRequest, ErrorResponse,
-    ServerEvent, SubscribeRequest, SubscribeResponse, SuccessResponse, SyncPayloadRequest,
-    UnsubscribeRequest, UpdateObjectRequest,
+    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
 use serde::Deserialize;
 use tower_http::cors::CorsLayer;
@@ -33,13 +31,8 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
         // SSE events endpoint
         .route("/events", get(events_handler))
-        // Sync endpoints
+        // Unified sync endpoint - all client→server communication flows through here
         .route("/sync", post(sync_handler))
-        .route("/sync/subscribe", post(subscribe_handler))
-        .route("/sync/unsubscribe", post(unsubscribe_handler))
-        .route("/sync/object", post(create_object_handler))
-        .route("/sync/object", axum::routing::put(update_object_handler))
-        .route("/sync/object/delete", post(delete_object_handler))
         // Health check
         .route("/health", get(health_handler))
         // Add middleware
@@ -58,6 +51,7 @@ struct EventsParams {
 /// SSE events endpoint - clients connect here for all updates.
 async fn events_handler(
     State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Query(params): Query<EventsParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
     // Parse client_id from query param - error if malformed, generate if missing
@@ -67,13 +61,22 @@ async fn events_handler(
         None => groove::sync_manager::ClientId::new(),
     };
 
+    // Extract session from headers (JWT or backend impersonation)
+    // Propagate auth errors (invalid JWT, wrong backend secret, etc.) as 401
+    let session = match extract_session(&headers, &state.auth_config) {
+        Ok(s) => s,
+        Err((status, msg)) => {
+            return Err((status, msg.to_string()));
+        }
+    };
+
     // Generate connection ID
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Register client with runtime - sync is query-driven, not full-sync on connect
-    let _ = state.runtime.add_client(client_id, None);
+    // Register client with runtime and bind session at connection time
+    let _ = state.runtime.add_client(client_id, session);
 
     // Subscribe to broadcast channel for this client's events
     let mut sync_rx = state.sync_broadcast.subscribe();
@@ -164,6 +167,7 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
 /// Push a sync payload to the server's inbox.
 ///
 /// Catalogue objects (schema/lens) require admin authentication.
+/// Session is extracted from headers and bound to the client_id.
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -182,141 +186,39 @@ async fn sync_handler(
         }
     }
 
+    // Extract session from headers (JWT or backend impersonation)
+    // Propagate auth errors (invalid JWT, wrong backend secret, etc.) as 401
+    let session = match extract_session(&headers, &state.auth_config) {
+        Ok(s) => s,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    // Ensure client is registered with session bound
+    if let Err(e) = state
+        .runtime
+        .ensure_client_with_session(request.client_id, session)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(e.to_string())),
+        )
+            .into_response();
+    }
+
+    eprintln!(
+        "DEBUG [server /sync]: client_id={}, payload={}",
+        request.client_id,
+        request.payload.variant_name()
+    );
+
     let entry = InboxEntry {
         source: Source::Client(request.client_id),
         payload: request.payload,
     };
 
     match state.runtime.push_sync_inbox(entry) {
-        Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
-        )
-            .into_response(),
-    }
-}
-
-/// Subscribe to a query.
-///
-/// Session is resolved from headers (JWT or backend impersonation).
-async fn subscribe_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<SubscribeRequest>,
-) -> impl IntoResponse {
-    // Resolve session from headers only
-    let session = match extract_session(&headers, &state.auth_config) {
-        Ok(s) => s,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    match state
-        .runtime
-        .subscribe_with_schema_context(request.query, &request.schema_context, session)
-    {
-        Ok(query_id) => Json(SubscribeResponse { query_id }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
-        )
-            .into_response(),
-    }
-}
-
-/// Unsubscribe from a query.
-async fn unsubscribe_handler(
-    State(_state): State<Arc<ServerState>>,
-    Json(_request): Json<UnsubscribeRequest>,
-) -> impl IntoResponse {
-    // TODO: Implement unsubscribe through runtime
-    Json(SuccessResponse::default())
-}
-
-/// Create a new object.
-///
-/// Session is resolved from headers (JWT or backend impersonation).
-async fn create_object_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<CreateObjectRequest>,
-) -> impl IntoResponse {
-    // Resolve session from headers only
-    let session = match extract_session(&headers, &state.auth_config) {
-        Ok(s) => s,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    match state
-        .runtime
-        .insert(&request.table, request.values, session.as_ref())
-    {
-        Ok(object_id) => (
-            StatusCode::CREATED,
-            Json(CreateObjectResponse { object_id }),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
-        )
-            .into_response(),
-    }
-}
-
-/// Update an existing object.
-///
-/// Session is resolved from headers (JWT or backend impersonation).
-async fn update_object_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<UpdateObjectRequest>,
-) -> impl IntoResponse {
-    // Resolve session from headers only
-    let session = match extract_session(&headers, &state.auth_config) {
-        Ok(s) => s,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    match state
-        .runtime
-        .update(request.object_id, request.updates, session.as_ref())
-    {
-        Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
-        )
-            .into_response(),
-    }
-}
-
-/// Delete an object.
-///
-/// Session is resolved from headers (JWT or backend impersonation).
-async fn delete_object_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<DeleteObjectRequest>,
-) -> impl IntoResponse {
-    // Resolve session from headers only
-    let session = match extract_session(&headers, &state.auth_config) {
-        Ok(s) => s,
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    match state
-        .runtime
-        .delete(request.object_id, session.as_ref())
-    {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

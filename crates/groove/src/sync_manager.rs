@@ -200,6 +200,21 @@ pub enum SyncPayload {
     Error(SyncError),
 }
 
+impl SyncPayload {
+    /// Get the variant name for debugging.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
+            SyncPayload::ObjectTruncated { .. } => "ObjectTruncated",
+            SyncPayload::BlobRequest { .. } => "BlobRequest",
+            SyncPayload::BlobResponse { .. } => "BlobResponse",
+            SyncPayload::QuerySubscription { .. } => "QuerySubscription",
+            SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
+            SyncPayload::Error(_) => "Error",
+        }
+    }
+}
+
 /// Destination for an outbox entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Destination {

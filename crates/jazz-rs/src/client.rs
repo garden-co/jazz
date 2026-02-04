@@ -7,12 +7,12 @@ use std::time::Duration;
 use futures::StreamExt;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{RowDelta, SchemaHash, Value};
-use groove::schema_manager::{QuerySchemaContext, SchemaManager};
+use groove::query_manager::types::{RowDelta, Value};
+use groove::schema_manager::SchemaManager;
 use groove::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncManager};
 use groove_rocksdb::RocksDbDriver;
-use groove_tokio::{TokioRuntime, SubscriptionHandle as RuntimeSubHandle};
-use jazz_transport::{ServerEvent, SubscribeRequest};
+use groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
+use jazz_transport::ServerEvent;
 use reqwest_eventsource::{Event, EventSource};
 use tokio::sync::{RwLock, mpsc};
 
@@ -27,17 +27,9 @@ pub struct JazzClient {
     runtime: TokioRuntime,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
-    /// This client's unique ID.
-    client_id: ClientId,
     /// Client configuration.
     #[allow(dead_code)]
     context: AppContext,
-    /// Schema hash for this client (used in server subscriptions).
-    schema_hash: groove::query_manager::types::SchemaHash,
-    /// Environment name (used in server subscriptions).
-    env: String,
-    /// User-facing branch name (used in server subscriptions).
-    user_branch: String,
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Subscription delta senders (for routing deltas from callbacks to streams).
@@ -130,6 +122,10 @@ impl JazzClient {
         let runtime = TokioRuntime::new(schema_manager, driver, move |entry| {
             // Send to server if connected and destination is server
             if let Destination::Server(_) = entry.destination {
+                eprintln!(
+                    "DEBUG [client sync_cb]: Sending to server: {:?}",
+                    entry.payload.variant_name()
+                );
                 if let Some(ref conn) = server_conn_for_sync {
                     let conn = conn.clone();
                     let payload = entry.payload.clone();
@@ -139,6 +135,8 @@ impl JazzClient {
                             tracing::warn!("Failed to push sync to server: {}", e);
                         }
                     });
+                } else {
+                    eprintln!("DEBUG [client sync_cb]: No server connection!");
                 }
             }
         });
@@ -179,13 +177,20 @@ impl JazzClient {
                                 tracing::info!("SSE connection opened");
                             }
                             Ok(Event::Message(msg)) => {
+                                eprintln!(
+                                    "DEBUG [client SSE]: Received message: {}",
+                                    &msg.data[..std::cmp::min(200, msg.data.len())]
+                                );
                                 // Parse the server event from JSON data
                                 match serde_json::from_str::<ServerEvent>(&msg.data) {
                                     Ok(server_event) => {
-                                        if let Err(e) = handle_server_event(
-                                            server_event,
-                                            &runtime_for_sse,
-                                        ) {
+                                        eprintln!(
+                                            "DEBUG [client SSE]: Parsed event: {:?}",
+                                            server_event.variant_name()
+                                        );
+                                        if let Err(e) =
+                                            handle_server_event(server_event, &runtime_for_sse)
+                                        {
                                             tracing::warn!("Error handling server event: {}", e);
                                         }
                                     }
@@ -211,19 +216,10 @@ impl JazzClient {
             None
         };
 
-        // Compute schema hash for server subscriptions
-        let schema_hash = SchemaHash::compute(&context.schema);
-        let env = "client".to_string();
-        let user_branch = "main".to_string();
-
         Ok(Self {
             runtime,
             server_connection,
-            client_id,
             context,
-            schema_hash,
-            env,
-            user_branch,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscription_senders,
             next_handle: std::sync::atomic::AtomicU64::new(1),
@@ -280,24 +276,9 @@ impl JazzClient {
             senders.insert(runtime_handle, tx);
         }
 
-        // Subscribe to server for sync
-        let server_query_id = if let Some(conn) = &self.server_connection {
-            let schema_context =
-                QuerySchemaContext::new(&self.env, self.schema_hash, &self.user_branch);
-            let request = SubscribeRequest {
-                query: query.clone(),
-                schema_context,
-            };
-            match conn.subscribe(request).await {
-                Ok(response) => Some(response.query_id),
-                Err(e) => {
-                    tracing::warn!("Failed to subscribe to server: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Subscriptions now flow through outbox automatically via subscribe_with_sync.
+        // The RuntimeCore.subscribe() -> QueryManager.subscribe_with_sync() path
+        // sends QuerySubscription to connected servers via the outbox.
 
         // Track subscription metadata
         {
@@ -307,7 +288,7 @@ impl JazzClient {
                 SubscriptionState {
                     query,
                     runtime_handle,
-                    server_query_id,
+                    server_query_id: None, // Server query ID not tracked separately anymore
                 },
             );
         }
@@ -377,37 +358,23 @@ impl JazzClient {
     /// Create a session-scoped client for backend operations.
     ///
     /// This allows backend applications to perform operations as a specific user.
-    /// Requires `backend_secret` to be configured in the `AppContext`.
+    /// The session is used for policy evaluation on all operations.
+    ///
+    /// Operations go through the local runtime and sync to servers via the outbox,
+    /// just like regular operations. The session context flows with the data.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let user_session = Session::new("user-123");
-    /// let user_client = client.for_session(user_session)?;
+    /// let user_client = client.for_session(user_session);
     /// let id = user_client.create("todos", vec![Value::Text("Buy milk".into())]).await?;
     /// ```
-    pub fn for_session(&self, session: Session) -> Result<SessionClient<'_>> {
-        // Check that we have a server connection with backend secret
-        let conn = self
-            .server_connection
-            .as_ref()
-            .ok_or_else(|| JazzError::Connection("No server connection".to_string()))?;
-
-        if !conn.has_backend_secret() {
-            return Err(JazzError::Connection(
-                "backend_secret required for session impersonation".to_string(),
-            ));
-        }
-
-        Ok(SessionClient {
+    pub fn for_session(&self, session: Session) -> SessionClient<'_> {
+        SessionClient {
             client: self,
             session,
-        })
-    }
-
-    /// Get the schema context for server requests.
-    fn schema_context(&self) -> QuerySchemaContext {
-        QuerySchemaContext::new(&self.env, self.schema_hash, &self.user_branch)
+        }
     }
 
     /// Shutdown the client and release resources.
@@ -434,7 +401,11 @@ impl JazzClient {
 /// Session-scoped client for backend operations.
 ///
 /// Created by `JazzClient::for_session()`. Allows backend applications
-/// to perform operations as a specific user via header-based authentication.
+/// to perform operations as a specific user.
+///
+/// Operations go through the local runtime with the session context,
+/// then sync to the server via the outbox (same as regular operations).
+/// The session is used for policy evaluation.
 pub struct SessionClient<'a> {
     client: &'a JazzClient,
     session: Session,
@@ -442,58 +413,40 @@ pub struct SessionClient<'a> {
 
 impl<'a> SessionClient<'a> {
     /// Create a new row in a table as this session's user.
+    ///
+    /// The session is used for policy evaluation. Changes sync to server
+    /// via the outbox with ObjectUpdated payloads.
     pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
-        let conn = self
-            .client
-            .server_connection
-            .as_ref()
-            .ok_or_else(|| JazzError::Connection("No server connection".to_string()))?;
-
-        conn.create_object_with_session(
-            table,
-            values,
-            &self.session,
-            self.client.schema_context(),
-        )
-        .await
+        self.client
+            .runtime
+            .insert(table, values, Some(&self.session))
+            .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Update a row as this session's user.
+    ///
+    /// The session is used for policy evaluation.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
-        let conn = self
-            .client
-            .server_connection
-            .as_ref()
-            .ok_or_else(|| JazzError::Connection("No server connection".to_string()))?;
-
-        conn.update_object_with_session(
-            object_id,
-            updates,
-            &self.session,
-            self.client.schema_context(),
-        )
-        .await
+        self.client
+            .runtime
+            .update(object_id, updates, Some(&self.session))
+            .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Delete a row as this session's user.
+    ///
+    /// The session is used for policy evaluation.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
-        let conn = self
-            .client
-            .server_connection
-            .as_ref()
-            .ok_or_else(|| JazzError::Connection("No server connection".to_string()))?;
-
-        conn.delete_object_with_session(object_id, &self.session, self.client.schema_context())
-            .await
+        self.client
+            .runtime
+            .delete(object_id, Some(&self.session))
+            .map_err(|e| JazzError::Write(e.to_string()))
     }
 
     /// Query as this session's user.
     ///
-    /// Note: For local-first applications, queries are typically done locally.
-    /// This method sends the query to the server with session context.
+    /// The session is used for policy evaluation (row-level filtering).
     pub async fn query(&self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>> {
-        // For now, use local query with session
-        // In the future, this could be a server-side query
         let future = self
             .client
             .runtime
@@ -505,6 +458,8 @@ impl<'a> SessionClient<'a> {
     }
 
     /// Subscribe to a query as this session's user.
+    ///
+    /// The session is used for policy evaluation (row-level filtering).
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
         self.client
             .subscribe_internal(query, Some(self.session.clone()))

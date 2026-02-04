@@ -127,21 +127,28 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
         parts: &mut Parts,
         state: &Arc<ServerState>,
     ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts.headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+        let auth_header = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
 
         let Some(auth_value) = auth_header else {
             return Ok(JwtAuth(None));
         };
 
         let Some(token) = auth_value.strip_prefix("Bearer ") else {
-            return Err((StatusCode::BAD_REQUEST, "Invalid Authorization header format"));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid Authorization header format",
+            ));
         };
 
         match validate_jwt(token, &state.auth_config) {
             Ok(session) => Ok(JwtAuth(Some(session))),
-            Err(JwtError::NoKeyConfigured) => {
-                Err((StatusCode::INTERNAL_SERVER_ERROR, "JWT validation not configured"))
-            }
+            Err(JwtError::NoKeyConfigured) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "JWT validation not configured",
+            )),
             Err(JwtError::Invalid(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid JWT")),
             Err(JwtError::Expired) => Err((StatusCode::UNAUTHORIZED, "JWT has expired")),
         }
@@ -232,10 +239,7 @@ pub fn validate_jwt(token: &str, config: &AuthConfig) -> Result<Session, JwtErro
                 });
             }
             Err(e) => {
-                if matches!(
-                    e.kind(),
-                    jsonwebtoken::errors::ErrorKind::ExpiredSignature
-                ) {
+                if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
                     return Err(JwtError::Expired);
                 }
                 return Err(JwtError::Invalid(e.to_string()));
@@ -262,10 +266,7 @@ pub fn extract_session(
     config: &AuthConfig,
 ) -> Result<Option<Session>, (StatusCode, &'static str)> {
     // Priority 1: Backend impersonation
-    if let Some(session_b64) = headers
-        .get("X-Jazz-Session")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
         let backend_secret = headers
             .get("X-Jazz-Backend-Secret")
             .and_then(|v| v.to_str().ok());
@@ -321,14 +322,15 @@ pub fn extract_session(
 
 /// Decode base64-encoded session JSON from X-Jazz-Session header.
 fn decode_session_header(b64: &str) -> Option<Session> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let json_str = std::str::from_utf8(&bytes).ok()?;
     serde_json::from_str(json_str).ok()
 }
 
 /// Check if admin secret is valid.
+///
+/// Catalogue operations (schema/lens sync) require admin authentication.
+/// If admin_secret is not configured, catalogue sync is disabled.
 pub fn validate_admin_secret(
     provided: Option<&str>,
     config: &AuthConfig,
@@ -340,6 +342,9 @@ pub fn validate_admin_secret(
             StatusCode::UNAUTHORIZED,
             "Admin secret required for this operation",
         )),
+        // TODO: Consider making catalogue sync opt-in or handling this more gracefully.
+        // Currently, if admin auth isn't configured, clients can't sync schemas to server.
+        // This is correct for security but may cause silent failures in dev setups.
         (None, _) => Err((StatusCode::FORBIDDEN, "Admin auth not configured")),
     }
 }
@@ -459,7 +464,10 @@ mod tests {
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
-        headers.insert("X-Jazz-Backend-Secret", "backend-secret-12345".parse().unwrap());
+        headers.insert(
+            "X-Jazz-Backend-Secret",
+            "backend-secret-12345".parse().unwrap(),
+        );
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
         let result = extract_session(&headers, &config).unwrap();
@@ -514,7 +522,10 @@ mod tests {
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
-        headers.insert("X-Jazz-Backend-Secret", "backend-secret-12345".parse().unwrap());
+        headers.insert(
+            "X-Jazz-Backend-Secret",
+            "backend-secret-12345".parse().unwrap(),
+        );
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
         let claims = JwtClaims {

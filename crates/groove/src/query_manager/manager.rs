@@ -1697,11 +1697,6 @@ impl QueryManager {
         Ok(id)
     }
 
-    /// Unsubscribe from a query.
-    pub fn unsubscribe(&mut self, id: QuerySubscriptionId) {
-        self.subscriptions.remove(&id);
-    }
-
     /// Subscribe with explicit schema and context (for server use).
     ///
     /// This is the core subscription method for server-side query processing.
@@ -1784,11 +1779,17 @@ impl QueryManager {
         // Create local subscription
         let sub_id = self.subscribe_with_session(query.clone(), session.clone())?;
 
+        // Expand branches for sync payload - server needs explicit branch to resolve schema
+        let mut sync_query = query;
+        if sync_query.branches.is_empty() && self.schema_context.is_initialized() {
+            sync_query.branches = vec![self.schema_context.branch_name().as_str().to_string()];
+        }
+
         // Send QuerySubscription to all servers
         // Use the subscription ID as the query ID for simplicity
         let query_id = crate::sync_manager::QueryId(sub_id.0);
         self.sync_manager
-            .send_query_subscription_to_servers(query_id, query, session);
+            .send_query_subscription_to_servers(query_id, sync_query, session);
 
         Ok(sub_id)
     }
@@ -1916,23 +1917,26 @@ impl QueryManager {
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox();
 
-        // 2. Process pending query subscriptions from downstream clients
-        self.process_pending_query_subscriptions();
-
-        // 2b. Process pending query unsubscriptions from downstream clients
-        self.process_pending_query_unsubscriptions();
-
-        // 3. Pick up new permission check intents from SyncManager
-        self.pick_up_pending_permission_checks();
-
-        // 3. Settle policy graphs and finalize completed checks
-        self.settle_policy_checks();
-
-        // 4. Process object updates from SyncManager
+        // 2. Process object updates from SyncManager FIRST
+        // This ensures indices are updated before query subscriptions are processed,
+        // so new subscriptions can find data that arrived in the same batch.
         let updates = self.sync_manager.object_manager.take_all_object_updates();
         for update in updates {
             self.handle_object_update(update);
         }
+
+        // 3. Process pending query subscriptions from downstream clients
+        // (after indices are updated, so initial settle finds existing data)
+        self.process_pending_query_subscriptions();
+
+        // 3b. Process pending query unsubscriptions from downstream clients
+        self.process_pending_query_unsubscriptions();
+
+        // 4. Pick up new permission check intents from SyncManager
+        self.pick_up_pending_permission_checks();
+
+        // 4b. Settle policy graphs and finalize completed checks
+        self.settle_policy_checks();
 
         // 5. Index storage is handled by IoHandler via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullIoHandler.
@@ -1941,10 +1945,10 @@ impl QueryManager {
         // This ensures settle() will be called to check pending rows
         self.mark_subscriptions_with_pending_dirty();
 
-        // 6b. Recompile any subscriptions marked as stale due to schema changes
+        // 7. Recompile any subscriptions marked as stale due to schema changes
         self.recompile_stale_subscriptions();
 
-        // 7. Settle all subscriptions - row_loader reads from subscription's branches
+        // 8. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
         let indices = &self.indices;
@@ -2073,10 +2077,10 @@ impl QueryManager {
                 .request_load(object_id, branch);
         }
 
-        // 8. Settle server-side subscriptions and update scopes
+        // 9. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions();
 
-        // 9. Clear index deltas after all subscriptions have settled
+        // 10. Clear index deltas after all subscriptions have settled
         // This increments the epoch so the next process() cycle uses fresh deltas
         for index in self.indices.values_mut() {
             if index.has_deltas() {
@@ -2104,10 +2108,32 @@ impl QueryManager {
         let pending = self.sync_manager.take_pending_query_subscriptions();
 
         for sub in pending {
+            // Resolve schema: use self.schema if available, otherwise look up from known_schemas (server mode)
+            let schema_for_compile: Arc<Schema> = if !self.schema.is_empty() {
+                self.schema.clone()
+            } else {
+                // Server mode: resolve schema from known_schemas via branch name (short hash prefix match)
+                let schema = sub
+                    .query
+                    .branches
+                    .first()
+                    .and_then(|b| ComposedBranchName::parse(&BranchName::new(b)))
+                    .and_then(|composed| {
+                        // Use prefix match since branch only contains short hash
+                        self.find_schema_by_short_hash(&composed.schema_hash)
+                    })
+                    .and_then(|full_hash| self.known_schemas.get(&full_hash))
+                    .cloned();
+                match schema {
+                    Some(s) => Arc::new(s),
+                    None => continue,
+                }
+            };
+
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let graph = QueryGraph::compile_with_schema_context(
                 &sub.query,
-                &self.schema,
+                &schema_for_compile,
                 sub.session.clone(),
                 &self.schema_context,
             );
@@ -3345,9 +3371,16 @@ impl QueryManager {
     /// This triggers content change detection during settle().
     /// Checks all tables involved in the subscription (including joined tables).
     fn mark_row_updated_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+        // Mark local subscriptions
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_updated(id);
+            }
+        }
+        // Mark server subscriptions (serving downstream clients)
+        for server_sub in self.server_subscriptions.values_mut() {
+            if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_row_updated(id);
             }
         }
     }
@@ -3356,9 +3389,16 @@ impl QueryManager {
     /// This triggers removal delta emission during settle().
     /// Checks all tables involved in the subscription (including joined tables).
     fn mark_row_deleted_in_subscriptions(&mut self, table: &str, id: ObjectId) {
+        // Mark local subscriptions
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_row_deleted(id);
+            }
+        }
+        // Mark server subscriptions (serving downstream clients)
+        for server_sub in self.server_subscriptions.values_mut() {
+            if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_row_deleted(id);
             }
         }
     }

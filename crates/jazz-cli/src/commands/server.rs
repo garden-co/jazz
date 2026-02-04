@@ -64,6 +64,11 @@ pub async fn run(
     let runtime = TokioRuntime::new(schema_manager, driver, move |entry| {
         // Route to appropriate client via broadcast
         if let Destination::Client(client_id) = entry.destination {
+            eprintln!(
+                "DEBUG [server sync_cb]: Broadcasting {} to client {}",
+                entry.payload.variant_name(),
+                client_id
+            );
             let _ = sync_tx_clone.send((client_id, entry.payload));
         }
         // Server destinations would be handled differently (e.g., HTTP push)

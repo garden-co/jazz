@@ -5,25 +5,19 @@
 //!
 //! # Protocol Overview
 //!
-//! - Clients connect to a single SSE endpoint (`/events`) for all subscription updates
-//! - Mutations and subscriptions use REST endpoints with JSON bodies
-//! - Server pushes all sync updates and query notifications via SSE
+//! - Clients connect to `/events` (SSE) for all subscription updates
+//! - All client→server communication flows through a single `/sync` endpoint
+//! - Session is bound at connection time via HTTP headers
 //!
 //! # Endpoints
 //!
 //! | Route | Method | Description |
 //! |-------|--------|-------------|
 //! | `/events` | GET | SSE stream for all subscription updates |
-//! | `/sync/subscribe` | POST | Subscribe to a query |
-//! | `/sync/unsubscribe` | POST | Unsubscribe from a query |
-//! | `/sync/object` | POST/PUT | Create or write to objects |
+//! | `/sync` | POST | Unified sync endpoint for all SyncPayload variants |
 
 use serde::{Deserialize, Serialize};
 
-use groove::object::ObjectId;
-use groove::query_manager::query::Query;
-use groove::query_manager::types::Value;
-use groove::schema_manager::QuerySchemaContext;
 use groove::sync_manager::{ClientId, QueryId, SyncPayload};
 
 /// Unique identifier for a client's SSE connection.
@@ -34,94 +28,14 @@ pub struct ConnectionId(pub u64);
 // Client -> Server Requests
 // ============================================================================
 
-/// Request to subscribe to a query.
-///
-/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
-/// not from the request body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeRequest {
-    /// The query to subscribe to.
-    pub query: Query,
-    /// Schema context for query execution.
-    /// Tells the server which schema version the client uses.
-    pub schema_context: QuerySchemaContext,
-}
-
-/// Response to a subscribe request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeResponse {
-    /// ID for this subscription (used to unsubscribe).
-    pub query_id: QueryId,
-}
-
-/// Request to unsubscribe from a query.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnsubscribeRequest {
-    /// ID of the subscription to cancel.
-    pub query_id: QueryId,
-}
-
-/// Request to create a new object/row.
-///
-/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
-/// not from the request body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateObjectRequest {
-    /// Table name.
-    pub table: String,
-    /// Column values for the new row.
-    pub values: Vec<Value>,
-    /// Schema context for mutation execution.
-    /// Tells the server which schema version the client uses.
-    pub schema_context: QuerySchemaContext,
-}
-
-/// Response to a create request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateObjectResponse {
-    /// ID of the created object.
-    pub object_id: ObjectId,
-}
-
-/// Request to update an existing object/row.
-///
-/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
-/// not from the request body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateObjectRequest {
-    /// ID of the object to update.
-    pub object_id: ObjectId,
-    /// Column name -> new value pairs.
-    pub updates: Vec<(String, Value)>,
-    /// Schema context for mutation execution.
-    /// Tells the server which schema version the client uses.
-    pub schema_context: QuerySchemaContext,
-}
-
-/// Request to delete an object/row.
-///
-/// Session context for policy evaluation comes from HTTP headers (JWT or backend impersonation),
-/// not from the request body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteObjectRequest {
-    /// ID of the object to delete.
-    pub object_id: ObjectId,
-    /// Schema context for mutation execution.
-    /// Tells the server which schema version the client uses.
-    pub schema_context: QuerySchemaContext,
-}
-
-/// Request to sync object data (for peer-to-peer sync).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncObjectRequest {
-    /// The sync payload containing commits.
-    pub payload: SyncPayload,
-}
-
 /// Request to push a sync payload to the server's inbox.
+///
+/// This is the unified request type for all client→server communication.
+/// Session context is extracted from HTTP headers at connection time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPayloadRequest {
     /// The sync payload from the client's outbox.
+    /// Can be any SyncPayload variant: ObjectUpdated, QuerySubscription, etc.
     pub payload: SyncPayload,
     /// Client ID for source tracking.
     pub client_id: ClientId,
@@ -157,6 +71,19 @@ pub enum ServerEvent {
 
     /// Heartbeat to keep connection alive.
     Heartbeat,
+}
+
+impl ServerEvent {
+    /// Get the variant name for debugging.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ServerEvent::Connected { .. } => "Connected",
+            ServerEvent::Subscribed { .. } => "Subscribed",
+            ServerEvent::SyncUpdate { .. } => "SyncUpdate",
+            ServerEvent::Error { .. } => "Error",
+            ServerEvent::Heartbeat => "Heartbeat",
+        }
+    }
 }
 
 /// Error codes for server errors.
@@ -295,23 +222,27 @@ mod tests {
     }
 
     #[test]
-    fn test_subscribe_request_serialization() {
-        use groove::query_manager::query::QueryBuilder;
-        use groove::query_manager::types::{SchemaHash, TableName};
+    fn test_sync_payload_request_serialization() {
+        use groove::object::BranchName;
+        use groove::object::ObjectId;
+        use groove::sync_manager::ClientId;
 
-        let query = QueryBuilder::new(TableName::new("users")).build();
-        let schema_context =
-            QuerySchemaContext::new("dev", SchemaHash::from_bytes([0; 32]), "main");
-        let request = SubscribeRequest {
-            query,
-            schema_context,
+        let payload = SyncPayload::ObjectUpdated {
+            object_id: ObjectId::new(),
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        };
+        let request = SyncPayloadRequest {
+            payload,
+            client_id: ClientId::new(),
         };
 
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("users"));
-        assert!(json.contains("schema_context"));
+        assert!(json.contains("ObjectUpdated"));
+        assert!(json.contains("main"));
 
-        let parsed: SubscribeRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.schema_context.env, "dev");
+        let parsed: SyncPayloadRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed.payload, SyncPayload::ObjectUpdated { .. }));
     }
 }

@@ -73,9 +73,8 @@ impl WasmDriverBridge {
             .map_err(|e| format!("JavaScript driver error: {:?}", e))?;
 
         // Deserialize responses
-        let wasm_responses: Vec<WasmStorageResponse> =
-            serde_wasm_bindgen::from_value(js_responses)
-                .map_err(|e| format!("Failed to deserialize responses: {}", e))?;
+        let wasm_responses: Vec<WasmStorageResponse> = serde_wasm_bindgen::from_value(js_responses)
+            .map_err(|e| format!("Failed to deserialize responses: {}", e))?;
 
         // Convert back to Groove types
         wasm_responses
