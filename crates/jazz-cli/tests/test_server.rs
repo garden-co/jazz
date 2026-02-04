@@ -42,7 +42,10 @@ impl TestServer {
                 data_dir.path().to_str().unwrap(),
             ])
             .env("JAZZ_JWT_SECRET", "test-jwt-secret-for-integration")
-            .env("JAZZ_BACKEND_SECRET", "backend-secret-for-integration-tests")
+            .env(
+                "JAZZ_BACKEND_SECRET",
+                "backend-secret-for-integration-tests",
+            )
             .env("JAZZ_ADMIN_SECRET", "admin-secret-for-integration-tests")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

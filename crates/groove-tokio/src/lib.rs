@@ -255,8 +255,7 @@ impl TokioRuntime {
     ) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core.insert(table, values, session)?;
-        core.immediate_tick();
-        // IoHandler::schedule_batched_tick() is called automatically by immediate_tick
+        // immediate_tick is called by RuntimeCore::insert
         Ok(result)
     }
 
@@ -273,8 +272,7 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.update(object_id, values, session)?;
-        core.immediate_tick();
-        // IoHandler::schedule_batched_tick() is called automatically by immediate_tick
+        // immediate_tick is called by RuntimeCore::update
         Ok(())
     }
 
@@ -290,8 +288,7 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.delete(object_id, session)?;
-        core.immediate_tick();
-        // IoHandler::schedule_batched_tick() is called automatically by immediate_tick
+        // immediate_tick is called by RuntimeCore::delete
         Ok(())
     }
 
@@ -410,7 +407,7 @@ impl TokioRuntime {
     pub fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.add_server(server_id);
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::add_server
         Ok(())
     }
 
@@ -429,7 +426,23 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.add_client(client_id, session);
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::add_client
+        Ok(())
+    }
+
+    /// Ensure a client exists with the given session.
+    ///
+    /// If the client already exists with the same session, this is a no-op.
+    /// If the client exists with a different session, we currently panic with todo!()
+    /// as session migration is not yet implemented.
+    /// If the client doesn't exist, it's added with the given session.
+    pub fn ensure_client_with_session(
+        &self,
+        client_id: ClientId,
+        session: Option<Session>,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_with_session(client_id, session);
         Ok(())
     }
 
@@ -441,7 +454,7 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.add_client_with_full_sync(client_id, session);
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::add_client_with_full_sync
         Ok(())
     }
 

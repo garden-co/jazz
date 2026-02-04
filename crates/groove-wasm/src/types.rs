@@ -58,8 +58,7 @@ impl TryFrom<WasmValue> for groove::query_manager::types::Value {
             WasmValue::Text(s) => Value::Text(s),
             WasmValue::Timestamp(t) => Value::Timestamp(t),
             WasmValue::Uuid(s) => {
-                let uuid = uuid::Uuid::parse_str(&s)
-                    .map_err(|e| format!("Invalid UUID: {}", e))?;
+                let uuid = uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {}", e))?;
                 Value::Uuid(ObjectId::from_uuid(uuid))
             }
             WasmValue::Array(arr) => {
@@ -535,8 +534,7 @@ pub fn wasm_response_to_storage(
     use smallvec::SmallVec;
 
     fn parse_object_id(s: &str) -> Result<ObjectId, String> {
-        let uuid =
-            uuid::Uuid::parse_str(s).map_err(|e| format!("Invalid ObjectId UUID: {}", e))?;
+        let uuid = uuid::Uuid::parse_str(s).map_err(|e| format!("Invalid ObjectId UUID: {}", e))?;
         Ok(ObjectId::from_uuid(uuid))
     }
 

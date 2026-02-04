@@ -69,23 +69,17 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
-/// Create a valid subscribe request body.
-fn subscribe_body() -> String {
+/// Create a valid sync request body (SyncPayloadRequest).
+fn sync_body() -> String {
     json!({
-        "query": {
-            "table": "todos",
-            "branches": ["main"],
-            "joins": [],
-            "disjuncts": [],
-            "order_by": [],
-            "offset": 0,
-            "include_deleted": false,
-            "array_subqueries": []
-        },
-        "schema_context": {
-            "env": "test",
-            "schema_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-            "user_branch": "main"
+        "client_id": "01234567-89ab-cdef-0123-456789abcdef",
+        "payload": {
+            "ObjectUpdated": {
+                "object_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "metadata": null,
+                "branch_name": "main",
+                "commits": []
+            }
         }
     })
     .to_string()
@@ -153,22 +147,22 @@ mod integration_tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// Test JWT authentication on subscribe endpoint.
+    /// Test JWT authentication on sync endpoint.
     #[tokio::test]
-    async fn test_jwt_auth_subscribe() {
+    async fn test_jwt_auth_sync() {
         let server = TestServer::start().await;
         let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
 
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();
 
-        // Auth should pass (not 401) - may get 500 if table doesn't exist
+        // Auth should pass (not 401) - may get other status if operation fails
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -178,10 +172,10 @@ mod integration_tests {
         let server = TestServer::start().await;
 
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("Authorization", "Bearer invalid-token")
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();
@@ -197,16 +191,16 @@ mod integration_tests {
         let session_b64 = encode_session(&session);
 
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("X-Jazz-Backend-Secret", BACKEND_SECRET)
             .header("X-Jazz-Session", session_b64)
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();
 
-        // Auth should pass (not 401) - may get 500 if table doesn't exist
+        // Auth should pass (not 401) - may get other status if operation fails
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -218,11 +212,11 @@ mod integration_tests {
         let session_b64 = encode_session(&session);
 
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("X-Jazz-Backend-Secret", "wrong-secret")
             .header("X-Jazz-Session", session_b64)
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();
@@ -238,10 +232,10 @@ mod integration_tests {
         let session_b64 = encode_session(&session);
 
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("X-Jazz-Session", session_b64)
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();
@@ -259,17 +253,17 @@ mod integration_tests {
 
         // Both JWT and backend auth provided - backend should win
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("Authorization", format!("Bearer {}", jwt_token))
             .header("X-Jazz-Backend-Secret", BACKEND_SECRET)
             .header("X-Jazz-Session", session_b64)
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();
 
-        // Auth should pass (not 401) - may get 500 if table doesn't exist
+        // Auth should pass (not 401) - may get other status if operation fails
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -280,10 +274,10 @@ mod integration_tests {
         let token = make_expired_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
 
         let resp = client()
-            .post(format!("{}/sync/subscribe", server.base_url()))
+            .post(format!("{}/sync", server.base_url()))
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
-            .body(subscribe_body())
+            .body(sync_body())
             .send()
             .await
             .unwrap();

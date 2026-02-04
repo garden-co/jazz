@@ -9,7 +9,7 @@ use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-use groove_wasm::{WasmQueryBuilder, generate_id, current_timestamp, parse_schema};
+use groove_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
 
 #[wasm_bindgen_test]
 fn test_generate_id() {
@@ -78,11 +78,10 @@ fn test_query_builder_with_filters() {
     let value = JsValue::from_serde(&serde_json::json!({
         "type": "Boolean",
         "value": true
-    })).unwrap();
+    }))
+    .unwrap();
 
-    let result = builder
-        .branch("main")
-        .filter_eq("completed", value);
+    let result = builder.branch("main").filter_eq("completed", value);
 
     assert!(result.is_ok());
 
@@ -147,22 +146,20 @@ fn test_query_builder_or() {
     let value1 = JsValue::from_serde(&serde_json::json!({
         "type": "Text",
         "value": "urgent"
-    })).unwrap();
+    }))
+    .unwrap();
 
     let value2 = JsValue::from_serde(&serde_json::json!({
         "type": "Boolean",
         "value": true
-    })).unwrap();
+    }))
+    .unwrap();
 
-    let result = builder
-        .branch("main")
-        .filter_eq("priority", value1);
+    let result = builder.branch("main").filter_eq("priority", value1);
 
     assert!(result.is_ok());
 
-    let result2 = result.unwrap()
-        .or()
-        .filter_eq("urgent", value2);
+    let result2 = result.unwrap().or().filter_eq("urgent", value2);
 
     assert!(result2.is_ok());
 

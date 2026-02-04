@@ -261,26 +261,41 @@ impl ArraySubquerySpec {
 pub struct Query {
     pub table: TableName,
     /// Optional table alias (for self-joins).
+    #[serde(default)]
     pub alias: Option<String>,
     /// Branches to query (required - at least one must be specified).
     /// For multi-branch queries, results are combined with LWW merge for same ObjectId.
+    #[serde(default)]
     pub branches: Vec<String>,
     /// Joined tables.
+    #[serde(default)]
     pub joins: Vec<JoinSpec>,
     /// OR groups (disjunction of conjunctions).
+    #[serde(default = "default_disjuncts")]
     pub disjuncts: Vec<Conjunction>,
     /// Order by specification.
+    #[serde(default)]
     pub order_by: Vec<(String, SortDirection)>,
     /// Limit.
+    #[serde(default)]
     pub limit: Option<usize>,
     /// Offset.
+    #[serde(default)]
     pub offset: usize,
     /// If true, also scan _id_deleted to include soft-deleted rows.
+    #[serde(default)]
     pub include_deleted: bool,
     /// Columns to select (None = all columns).
+    #[serde(default)]
     pub select_columns: Option<Vec<String>>,
     /// Array subqueries (correlated subqueries producing array columns).
+    #[serde(default)]
     pub array_subqueries: Vec<ArraySubquerySpec>,
+}
+
+/// Default disjuncts - one empty conjunction (matches all rows).
+fn default_disjuncts() -> Vec<Conjunction> {
+    vec![Conjunction::new()]
 }
 
 impl Query {

@@ -67,7 +67,6 @@ pub struct AppContext {
     pub data_dir: PathBuf,
 
     // Authentication fields
-
     /// JWT token for frontend authentication.
     /// Sent as `Authorization: Bearer <token>`.
     pub jwt_token: Option<String>,

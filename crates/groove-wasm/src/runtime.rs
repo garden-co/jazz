@@ -33,7 +33,9 @@ use groove::storage::StorageRequest;
 use groove::sync_manager::{InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload};
 
 use crate::query::parse_query;
-use crate::types::{storage_request_to_wasm, wasm_response_to_storage, WasmSchema, WasmStorageResponse, WasmValue};
+use crate::types::{
+    storage_request_to_wasm, wasm_response_to_storage, WasmSchema, WasmStorageResponse, WasmValue,
+};
 
 // ============================================================================
 // WasmIoHandler
@@ -165,9 +167,14 @@ impl WasmRuntime {
         let sync_manager = SyncManager::new();
 
         // Create schema manager
-        let schema_manager =
-            SchemaManager::new(sync_manager, schema, AppId::from_name(app_id), env, user_branch)
-                .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+        let schema_manager = SchemaManager::new(
+            sync_manager,
+            schema,
+            AppId::from_name(app_id),
+            env,
+            user_branch,
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create IoHandler
         let io_handler = WasmIoHandler::new(storage_callback);
@@ -226,7 +233,10 @@ impl WasmRuntime {
     /// Register a callback for outgoing sync messages.
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.core.borrow_mut().io_handler_mut().set_sync_callback(callback);
+        self.core
+            .borrow_mut()
+            .io_handler_mut()
+            .set_sync_callback(callback);
     }
 
     // =========================================================================
@@ -255,7 +265,7 @@ impl WasmRuntime {
         let result = core
             .insert(table, groove_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::insert
 
         Ok(result.uuid().to_string())
     }
@@ -310,8 +320,7 @@ impl WasmRuntime {
                 })
                 .collect();
 
-            let serializer =
-                serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
             wasm_results
                 .serialize(&serializer)
                 .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
@@ -345,7 +354,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::update
 
         Ok(())
     }
@@ -363,7 +372,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::delete
 
         Ok(())
     }
@@ -464,7 +473,7 @@ impl WasmRuntime {
         let server_id = ServerId::new();
         let mut core = self.core.borrow_mut();
         core.add_server(server_id);
-        core.immediate_tick();
+        // immediate_tick is called by RuntimeCore::add_server
     }
 
     // =========================================================================
@@ -479,5 +488,4 @@ impl WasmRuntime {
         let wasm_schema = WasmSchema::from(schema);
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
     }
-
 }

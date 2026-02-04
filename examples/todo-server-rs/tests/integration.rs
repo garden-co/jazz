@@ -12,8 +12,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::sse::{Event, Sse};
-use futures_util::stream::Stream;
 use futures_util::StreamExt as _;
+use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz_rs::{AppContext, AppId, ColumnType, JazzClient, SchemaBuilder, TableSchema};
 use serde::{Deserialize, Serialize};
@@ -512,6 +512,9 @@ struct TestServer {
     data_dir: TempDir,
 }
 
+/// Test admin secret for catalogue sync.
+const TEST_ADMIN_SECRET: &str = "test-admin-secret-12345";
+
 impl TestServer {
     /// Start a test server on the given port.
     async fn start(port: u16) -> Self {
@@ -531,9 +534,11 @@ impl TestServer {
                 &port.to_string(),
                 "--data-dir",
                 data_dir.path().to_str().unwrap(),
+                "--admin-secret",
+                TEST_ADMIN_SECRET,
             ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to spawn jazz server at {:?}: {}", jazz_binary, e));
 
@@ -635,6 +640,7 @@ async fn test_server_resync() {
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
 
     // 2. Create client with todos schema, add data
+    // This client has admin_secret so it can sync the catalogue (schema) to server
     {
         let context = AppContext {
             app_id: test_app_id,
@@ -644,7 +650,7 @@ async fn test_server_resync() {
             data_dir: data_path.clone(),
             jwt_token: None,
             backend_secret: None,
-            admin_secret: None,
+            admin_secret: Some(TEST_ADMIN_SECRET.to_string()),
         };
         let client = JazzClient::connect(context).await.unwrap();
 
@@ -672,6 +678,7 @@ async fn test_server_resync() {
     std::fs::create_dir_all(&data_path).unwrap();
 
     // 4. New client should resync from server via subscribe
+    // No admin_secret - this client relies on server already having schema from client 1
     {
         let context = AppContext {
             app_id: test_app_id,
@@ -681,31 +688,40 @@ async fn test_server_resync() {
             data_dir: data_path,
             jwt_token: None,
             backend_secret: None,
-            admin_secret: None,
+            admin_secret: None, // Intentionally no admin - server should already have schema
         };
         let client = JazzClient::connect(context).await.unwrap();
 
         // Subscribe and wait for data to arrive from server
         // The subscribe triggers the server to send matching data
         let query = QueryBuilder::new("todos").build();
+        eprintln!("DEBUG: Subscribing to todos query");
         let mut stream = client.subscribe(query).await.unwrap();
+        eprintln!("DEBUG: Subscription created, waiting for data...");
 
         // Wait for first delta with any added rows (with timeout)
         // This validates the subscribe-triggers-sync behavior
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(delta) = stream.next().await {
+                    eprintln!(
+                        "DEBUG: Received delta with {} added, {} removed",
+                        delta.added.len(),
+                        delta.removed.len()
+                    );
                     // Check if we got any added rows (the sync worked)
                     if !delta.added.is_empty() {
                         return true;
                     }
                 } else {
+                    eprintln!("DEBUG: Stream ended");
                     // Stream ended
                     return false;
                 }
             }
         })
         .await;
+        eprintln!("DEBUG: Result = {:?}", result);
 
         assert!(
             result.is_ok() && result.unwrap(),
