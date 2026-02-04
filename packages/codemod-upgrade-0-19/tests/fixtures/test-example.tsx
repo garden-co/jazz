@@ -3,7 +3,11 @@
 // Test file demonstrating Jazz hook patterns that will be migrated
 // This file shows examples of what the codemod will transform
 
-import { useAccount, useCoState, useAgent, useLogOut } from "jazz-tools/react";
+import {
+  useAccount,
+  useCoStateWithSelector,
+  useAccountWithSelector,
+} from "jazz-tools/react";
 import { co, Account, z } from "jazz-tools";
 
 const TodoItem = co.map({
@@ -24,16 +28,10 @@ const MyAccount = co
     }
   });
 
-// $onError: 'catch' should become $onError: 'catch'
+// $onError: null should become $onError: 'catch'
 function ExampleOnErrorNull() {
-  const me = useAccount(MyAccount, {
-    resolve: { root: { todos: { $each: { $onError: "catch" } } } },
-    select: (me) =>
-      me.$isLoaded
-        ? me
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
+  const { me } = useAccount(MyAccount, {
+    resolve: { root: { todos: { $each: { $onError: null } } } },
   });
 
   return <div>{me?.root.todos[0]?.text}</div>;
@@ -42,14 +40,9 @@ function ExampleOnErrorNull() {
 // useCoStateWithSelector should become useCoState
 function ExampleCoState({ todoId }: { todoId: string }) {
   // Should be transformed to useCoState
-  const todo = useCoState(TodoItem, todoId, {
+  const todo = useCoStateWithSelector(TodoItem, todoId, {
     resolve: { text: true, done: true },
-    select: (todo) =>
-      todo.$isLoaded
-        ? todo
-        : todo.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
+    select: (todo) => todo,
   });
 
   return (
@@ -63,14 +56,9 @@ function ExampleCoState({ todoId }: { todoId: string }) {
 // useAccountWithSelector should become useAccount
 function ExampleAccount() {
   // Should be transformed to useAccount
-  const todos = useAccount(MyAccount, {
-    resolve: { root: { todos: { $each: { $onError: "catch" } } } },
-    select: (me) =>
-      me.$isLoaded
-        ? me.root.todos
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
+  const todos = useAccountWithSelector(MyAccount, {
+    resolve: { root: { todos: { $each: { $onError: null } } } },
+    select: (me) => me?.root.todos,
   });
 
   return (
@@ -85,25 +73,15 @@ function ExampleAccount() {
 // Multiple usages in same component
 function ComplexComponent({ itemId }: { itemId: string }) {
   // Should be transformed to useCoState
-  const item = useCoState(TodoItem, itemId, {
+  const item = useCoStateWithSelector(TodoItem, itemId, {
     resolve: { text: true },
-    select: (item) =>
-      item.$isLoaded
-        ? item
-        : item.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
+    select: (item) => item,
   });
 
   // Should be transformed to useAccount
-  const account = useAccount(MyAccount, {
+  const account = useAccountWithSelector(MyAccount, {
     resolve: { root: true },
-    select: (me) =>
-      me.$isLoaded
-        ? me
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
+    select: (me) => me,
   });
 
   return (
@@ -119,16 +97,7 @@ function OldUseAccountPattern() {
   // const me = useAccount();
   // const agent = useAgent();
   // const logOut = useLogOut();
-  const me = useAccount(undefined, {
-    select: (me) =>
-      me.$isLoaded
-        ? me
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
-  const agent = useAgent();
-  const logOut = useLogOut();
+  const { me, agent, logOut } = useAccount();
 
   return (
     <div>
@@ -143,15 +112,7 @@ function OldUseAccountPattern() {
 function PartialUseAccountPattern() {
   // const me = useAccount();
   // const logOut = useLogOut();
-  const me = useAccount(undefined, {
-    select: (me) =>
-      me.$isLoaded
-        ? me
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
-  const logOut = useLogOut();
+  const { me, logOut } = useAccount();
 
   return (
     <div>
@@ -164,14 +125,7 @@ function PartialUseAccountPattern() {
 // Old useAccount pattern with only me
 function OnlyMePattern() {
   // const me = useAccount();
-  const me = useAccount(undefined, {
-    select: (me) =>
-      me.$isLoaded
-        ? me
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
+  const { me } = useAccount();
 
   return <div>{me?.profile?.name}</div>;
 }
@@ -180,15 +134,7 @@ function OnlyMePattern() {
 function AliasedPattern() {
   // const currentUser = useAccount();
   // const myAgent = useAgent();
-  const currentUser = useAccount(undefined, {
-    select: (currentUser) =>
-      currentUser.$isLoaded
-        ? currentUser
-        : currentUser.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
-  const myAgent = useAgent();
+  const { me: currentUser, agent: myAgent } = useAccount();
 
   return (
     <div>
@@ -203,25 +149,16 @@ function NoDestructuringWithAccountAgentLogOut() {
   // const account = useAccount();
   // const agent = useAgent();
   // const logOut = useLogOut();
-  const account = useAccount(undefined, {
-    select: (account) =>
-      account.$isLoaded
-        ? account
-        : account.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
-  const agent = useAgent();
-  const logOut = useLogOut();
+  const account = useAccount();
 
   return (
     <div>
       {/* account?.profile?.name */}
-      <p>{account?.profile?.name}</p>
+      <p>{account.me?.profile?.name}</p>
       {/* logOut */}
-      <button onClick={logOut}>Log out</button>
+      <button onClick={account.logOut}>Log out</button>
       {/* agent */}
-      <pre>{JSON.stringify(agent, null, 2)}</pre>
+      <pre>{JSON.stringify(account.agent, null, 2)}</pre>
     </div>
   );
 }
@@ -238,12 +175,6 @@ function HookWithoutExistingSelector() {
   // });
   const account = useAccount(MyAccount, {
     resolve: { profile: true },
-    select: (account) =>
-      account.$isLoaded
-        ? account
-        : account.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
   });
 
   return <div>{account?.profile?.name}</div>;
@@ -259,14 +190,9 @@ function HookWithExistingExpressionSelector() {
   //      ? undefined
   //      : null
   // });
-  const profileName = useAccount(MyAccount, {
+  const profileName = useAccountWithSelector(MyAccount, {
     resolve: { profile: true },
-    select: (account) =>
-      account.$isLoaded
-        ? account.profile?.name
-        : account.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
+    select: (account) => account?.profile?.name,
   });
 
   return <div>{profileName}</div>;
@@ -275,7 +201,7 @@ function HookWithExistingExpressionSelector() {
 // Hook with existing block selector
 function HookWithExistingBlockSelector() {
   // Skip migration for block body selectors
-  const profileName = useAccount(MyAccount, {
+  const profileName = useAccountWithSelector(MyAccount, {
     resolve: { profile: true },
     select: (account) => {
       return account?.profile.name;
@@ -288,14 +214,7 @@ function HookWithExistingBlockSelector() {
 // Hook with no options argument at all
 function HookWithNoOptions() {
   // Should add: useAccount() -> useAccount(undefined, { select: (me) => ... })
-  const me = useAccount(undefined, {
-    select: (me) =>
-      me.$isLoaded
-        ? me
-        : me.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
+  const me = useAccount();
 
   return <div>{me?.profile?.name}</div>;
 }
@@ -303,14 +222,7 @@ function HookWithNoOptions() {
 // Hook with schema but no options
 function HookWithSchemaNoOptions() {
   // Should add: useAccount(MyAccount) -> useAccount(undefined, { select: (account) => ... })
-  const account = useAccount(MyAccount, {
-    select: (account) =>
-      account.$isLoaded
-        ? account
-        : account.$jazz.loadingState === "loading"
-          ? undefined
-          : null,
-  });
+  const account = useAccount(MyAccount);
 
   return <div>{account?.profile?.name}</div>;
 }
@@ -322,7 +234,7 @@ async function MaybeLoadedCoValueIfCheck() {
   });
 
   // if (!account.$isLoaded)
-  if (!account.$isLoaded) {
+  if (!account) {
     return "Loading...";
   }
 
@@ -342,7 +254,7 @@ async function OptionalMaybeLoadedCoValueIfCheck({
     : undefined;
 
   // if (!optionalAccount?.$isLoaded)
-  if (!optionalAccount?.$isLoaded) {
+  if (!optionalAccount) {
     return "Loading...";
   }
 
@@ -355,12 +267,12 @@ async function MaybeLoadedNestedCoValueIfCheck() {
     resolve: true,
   });
 
-  if (!account.$isLoaded) {
+  if (!account) {
     return "Loading...";
   }
 
   // if (!account.profile.$isLoaded)
-  if (!account.profile.$isLoaded) {
+  if (!account.profile) {
     return "Loading...";
   }
 
@@ -377,7 +289,7 @@ async function MaybeLoadedOrCheck() {
   });
 
   // Should transform: if (!account.$isLoaded || !account2.$isLoaded)
-  if (!account.$isLoaded || !account2.$isLoaded) {
+  if (!account || !account2) {
     return "Loading...";
   }
 
@@ -392,7 +304,7 @@ async function MaybeLoadedAndCheck() {
   const account2 = await Account.load("account-id-2");
 
   // Should transform: if (account.$isLoaded && account2.$isLoaded)
-  if (account.$isLoaded && account2.$isLoaded) {
+  if (account && account2) {
     return account.profile.name;
   }
 
@@ -406,7 +318,7 @@ async function MaybeLoadedMixedCheck() {
   const isAdmin = true;
 
   // Should transform: if (account.$isLoaded && (account2.$isLoaded || isAdmin))
-  if (account.$isLoaded && (account2.$isLoaded || isAdmin)) {
+  if (account && (account2 || isAdmin)) {
     return "Loaded";
   }
 
@@ -419,7 +331,7 @@ async function MaybeLoadedNegationAndCheck() {
   const account2 = await Account.load("account-id-2");
 
   // Should transform: if (!account.$isLoaded && account2.$isLoaded)
-  if (!account.$isLoaded && account2.$isLoaded) {
+  if (!account && account2) {
     return "Account not loaded but account2 is";
   }
 
@@ -433,7 +345,7 @@ async function MaybeLoadedParenthesesCheck() {
   const ready = true;
 
   // Should transform: if ((account.$isLoaded && account2.$isLoaded) || ready)
-  if ((account.$isLoaded && account2.$isLoaded) || ready) {
+  if ((account && account2) || ready) {
     return "Ready or loaded";
   }
 
