@@ -1,11 +1,12 @@
 // Schema type definitions
 
-export type SqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL";
+export type SqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
 
 export interface Column {
   name: string;
   sqlType: SqlType;
   nullable: boolean;
+  references?: string; // Target table name for foreign key
 }
 
 export interface Table {
