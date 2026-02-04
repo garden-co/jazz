@@ -740,12 +740,13 @@ describe("SessionMap - Transaction Flow", () => {
     // Transaction count should be 1
     expect(sessionMap.getTransactionCount(sessionId)).toBe(1);
 
-    // Get the transaction - now returns native object
-    const tx = sessionMap.getTransaction(sessionId, 0);
-    expect(tx).toBeDefined();
-    expect(tx!.privacy).toBe("trusting");
-    expect((tx as any).changes).toBe(changes);
-    expect((tx as any).madeAt).toBe(madeAt);
+    // Get the transaction - returns JSON string
+    const txJson = sessionMap.getTransaction(sessionId, 0);
+    expect(txJson).toBeDefined();
+    const tx = JSON.parse(txJson!);
+    expect(tx.privacy).toBe("trusting");
+    expect(tx.changes).toBe(changes);
+    expect(tx.madeAt).toBe(madeAt);
 
     // Known state should reflect the transaction
     const knownState = sessionMap.getKnownState();
@@ -812,23 +813,24 @@ describe("SessionMap - Transaction Flow", () => {
     // Should have 5 transactions
     expect(sessionMap.getTransactionCount(sessionId)).toBe(5);
 
-    // Verify each transaction - now returns native objects
+    // Verify each transaction - returns JSON strings
     for (let i = 0; i < 5; i++) {
-      const tx = sessionMap.getTransaction(sessionId, i);
-      expect(tx).toBeDefined();
-      expect(tx!.privacy).toBe("trusting");
-      expect(JSON.parse((tx as any).changes).index).toBe(i);
+      const txJson = sessionMap.getTransaction(sessionId, i);
+      expect(txJson).toBeDefined();
+      const tx = JSON.parse(txJson!);
+      expect(tx.privacy).toBe("trusting");
+      expect(JSON.parse(tx.changes).index).toBe(i);
     }
 
-    // Get all transactions at once
-    const allTx = sessionMap.getSessionTransactions(sessionId, 0);
-    expect(allTx).toBeDefined();
-    expect(allTx!.length).toBe(5);
+    // Get all transactions at once - returns array of JSON strings
+    const allTxJsons = sessionMap.getSessionTransactions(sessionId, 0);
+    expect(allTxJsons).toBeDefined();
+    expect(allTxJsons!.length).toBe(5);
 
     // Get transactions from index 2
-    const partialTx = sessionMap.getSessionTransactions(sessionId, 2);
-    expect(partialTx).toBeDefined();
-    expect(partialTx!.length).toBe(3);
+    const partialTxJsons = sessionMap.getSessionTransactions(sessionId, 2);
+    expect(partialTxJsons).toBeDefined();
+    expect(partialTxJsons!.length).toBe(3);
 
     // Known state should show 5 transactions
     const knownState = sessionMap.getKnownState();
@@ -932,10 +934,11 @@ describe("SessionMap - Transaction Flow", () => {
       madeAt
     );
 
-    // Get the transaction and verify meta - now returns native object
-    const tx = sessionMap.getTransaction(sessionId, 0);
-    expect(tx).toBeDefined();
-    expect((tx as any).meta).toBe(meta);
+    // Get the transaction and verify meta - returns JSON string
+    const txJson = sessionMap.getTransaction(sessionId, 0);
+    expect(txJson).toBeDefined();
+    const tx = JSON.parse(txJson!);
+    expect(tx.meta).toBe(meta);
   });
 
   test("private transaction with encrypted meta", () => {
@@ -999,12 +1002,12 @@ describe("SessionMap - Transaction Flow", () => {
     );
     const { signature: sig2, transaction: tx2 } = JSON.parse(result2);
 
-    // getSessionTransactions now returns native Transaction objects
-    // For addTransactions, we need to stringify them back to JSON
-    const allTx = sessionMap1.getSessionTransactions(sessionId, 0);
-    expect(allTx).toBeDefined();
+    // getSessionTransactions returns JSON strings
+    const allTxJsons = sessionMap1.getSessionTransactions(sessionId, 0);
+    expect(allTxJsons).toBeDefined();
 
-    // Stringify the native transaction objects for addTransactions
+    // Parse each JSON string and re-stringify as array for addTransactions
+    const allTx = allTxJsons!.map(json => JSON.parse(json));
     const txArrayJson = JSON.stringify(allTx);
 
     // Add to peer 2 (skip verification for simplicity in test)
@@ -1019,11 +1022,12 @@ describe("SessionMap - Transaction Flow", () => {
     // Peer 2 should now have the same transactions
     expect(sessionMap2.getTransactionCount(sessionId)).toBe(2);
 
-    // Verify transaction content - now returns native object
-    const tx = sessionMap2.getTransaction(sessionId, 0);
-    expect(tx).toBeDefined();
-    expect(tx!.privacy).toBe("trusting");
-    expect(JSON.parse((tx as any).changes).from).toBe("peer1");
+    // Verify transaction content - returns JSON string
+    const txJson = sessionMap2.getTransaction(sessionId, 0);
+    expect(txJson).toBeDefined();
+    const tx = JSON.parse(txJson!);
+    expect(tx.privacy).toBe("trusting");
+    expect(JSON.parse(tx.changes).from).toBe("peer1");
   });
 
   test("streaming known state management", () => {
