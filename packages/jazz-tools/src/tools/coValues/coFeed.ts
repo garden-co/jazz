@@ -50,6 +50,17 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
+import {
+  executeValidation,
+  resolveValidationMode,
+  type LocalValidationMode,
+} from "../implementation/zodSchema/validationSettings.js";
+import {
+  extractFieldElementFromUnionSchema,
+  normalizeZodSchema,
+} from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -93,6 +104,7 @@ export { CoFeed as CoStream };
  * @category CoValues
  */
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
+  static coValueSchema?: CoreCoValueSchema;
   declare $jazz: CoFeedJazzApi<this>;
 
   /**
@@ -203,7 +215,12 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoFeedJazzApi(this, options.fromRaw),
+        value: new CoFeedJazzApi(
+          this,
+          options.fromRaw,
+          // coValueSchema is defined in /implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.ts
+          (this.constructor as typeof CoFeed).coValueSchema,
+        ),
         enumerable: false,
       },
     });
@@ -219,14 +236,33 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | {
+          owner?: Account | Group;
+          validation?: LocalValidationMode;
+        }
+      | Account
+      | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     const raw = owner.$jazz.raw.createStream();
     const instance = new this({ fromRaw: raw });
 
     if (init) {
-      instance.$jazz.push(...init);
+      const validation =
+        options && typeof options === "object" && "validation" in options
+          ? options.validation
+          : undefined;
+      const validationMode = resolveValidationMode(validation);
+
+      // Validate using the full schema - init is an array, so it will match the array branch
+      // of the union (instanceof CoFeed | array of items)
+      const coValueSchema = (this as unknown as typeof CoFeed).coValueSchema;
+      if (validationMode !== "loose" && coValueSchema) {
+        const fullSchema = coValueSchema.getValidationSchema();
+        executeValidation(fullSchema, init, validationMode) as typeof init;
+      }
+      instance.$jazz.pushLoose(...init);
     }
     return instance;
   }
@@ -333,8 +369,26 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   constructor(
     private coFeed: F,
     public raw: RawCoStream,
+    private coFeedSchema?: CoreCoValueSchema,
   ) {
     super(coFeed);
+  }
+
+  private getItemSchema(): z.ZodType {
+    /**
+     * coFeedSchema may be undefined if the CoFeed is created directly with its constructor,
+     * without using a co.feed().create() to create it.
+     * In that case, we can't validate the values.
+     */
+    if (this.coFeedSchema === undefined) {
+      return z.any();
+    }
+
+    const fieldSchema = extractFieldElementFromUnionSchema(
+      this.coFeedSchema.getValidationSchema(),
+    );
+
+    return normalizeZodSchema(fieldSchema);
   }
 
   get owner(): Group {
@@ -362,12 +416,31 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * @category Content
    */
   push(...items: CoFieldInit<CoFeedItem<F>>[]): void {
+    const validationMode = resolveValidationMode();
+    if (validationMode !== "loose" && this.coFeedSchema) {
+      const schema = z.array(this.getItemSchema());
+      executeValidation(schema, items, validationMode) as CoFieldInit<
+        CoFeedItem<F>
+      >[];
+    }
+    this.pushLoose(...items);
+  }
+
+  /**
+   * Push items to this `CoFeed` without applying schema validation.
+   *
+   * @category Content
+   */
+  pushLoose(...items: CoFieldInit<CoFeedItem<F>>[]): void {
     for (const item of items) {
-      this.pushItem(item);
+      this.pushItem(item, { validationMode: "loose" });
     }
   }
 
-  private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
+  private pushItem(
+    item: CoFieldInit<CoFeedItem<F>>,
+    { validationMode }: { validationMode?: LocalValidationMode },
+  ) {
     const itemDescriptor = this.schema[ItemsSym] as Schema;
 
     if (itemDescriptor === "json") {
@@ -386,6 +459,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
           this.owner,
           newOwnerStrategy,
           onCreate,
+          validationMode,
         );
         refId = coValue.$jazz.id;
       }

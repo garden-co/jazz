@@ -1,4 +1,10 @@
-import { FileStream, ImageDefinition, co, z } from "jazz-tools";
+import {
+  FileStream,
+  ImageDefinition,
+  co,
+  z,
+  setDefaultValidationMode,
+} from "jazz-tools";
 import {
   Issue,
   Organization,
@@ -6,6 +12,8 @@ import {
   type ReactionType,
   ReactionsList,
 } from "./schema";
+
+setDefaultValidationMode("strict");
 
 const projectsData: {
   name: string;
@@ -73,7 +81,9 @@ export const createFile = () => {
 
 export const createImage = () => {
   return ImageDefinition.create({
+    original: FileStream.create(),
     originalSize: [1920, 1080],
+    progressive: false,
     placeholderDataURL: "data:image/jpeg;base64,...",
   });
 };
@@ -82,6 +92,8 @@ export const createOrganization = () => {
   return Organization.create({
     name: "Garden Computing",
     image: ImageDefinition.create({
+      original: FileStream.create(),
+      progressive: false,
       originalSize: [1920, 1080],
       placeholderDataURL: "data:image/jpeg;base64,...",
     }),

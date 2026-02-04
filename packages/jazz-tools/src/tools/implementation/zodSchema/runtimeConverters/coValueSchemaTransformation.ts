@@ -20,6 +20,7 @@ import {
   isCoValueClass,
   Group,
   CoVector,
+  CoreCoMapSchema,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 
@@ -94,6 +95,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
 
     const coValueClass = class ZCoMap extends ClassToExtend {
+      static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoMap } | undefined) {
         super(options);
         for (const [fieldName, fieldType] of Object.entries(def.shape)) {
@@ -114,10 +116,13 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
         ? new AccountSchema(schema as any, coValueClass as any)
         : new CoMapSchema(schema as any, coValueClass as any);
 
+    coValueClass.coValueSchema = coValueSchema;
+
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
+      static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoList } | undefined) {
         super(options);
         (this as any)[coField.items] = schemaFieldToCoFieldDef(
@@ -127,6 +132,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     };
 
     const coValueSchema = new CoListSchema(element, coValueClass as any);
+    coValueClass.coValueSchema = coValueSchema;
 
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
@@ -134,6 +140,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       schemaFieldToCoFieldDef(schema.element as SchemaField),
     );
     const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
+    coValueClass.coValueSchema = coValueSchema;
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {
     const coValueClass = FileStream;

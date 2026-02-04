@@ -31,7 +31,14 @@ export class UserRepository extends JazzRepository {
       throw new Error("Email already exists");
     }
 
-    const user = await super.create(model, data, uniqueId);
+    const user = await super.create(
+      model,
+      {
+        sessions: [],
+        ...data,
+      },
+      uniqueId,
+    );
 
     await this.updateEmailIndex(userEmail, user.$jazz.id);
 

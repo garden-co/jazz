@@ -1,4 +1,6 @@
-import { co, z } from "jazz-tools";
+import { co, z, setDefaultValidationMode } from "jazz-tools";
+
+setDefaultValidationMode("strict");
 
 /** Walkthrough: Defining the data model with CoJSON
  *
