@@ -1082,16 +1082,34 @@ Files to modify:
 
 Deliverable: `db.all(query)`, `db.one(query)`, `db.insert()` work at runtime
 
-### Phase 6: Subscription Support
+### Phase 6: Mutations & Subscriptions
 
-**Goal**: Implement full-state subscription management
+**Goal**: Add mutations to Db class and implement full-state subscription management
+
+**Mutations** (deferred from Phase 5):
+
+- `db.insert(app.todos, { title, done, ... })` - typed insert using Init types
+- `db.update(id, { done: true })` - partial update
+- `db.delete(id)` - soft delete
+
+**Subscriptions**:
+
+- `db.subscribeAll(query, callback)` with `{ all, added, updated, removed }`
+- SubscriptionManager to maintain full result set and compute deltas
+- Object identity preservation for unchanged items (React optimization)
+
+**Filtered includes** (deferred from Phase 5):
+
+- Allow passing QueryBuilder to include for filtered nested results
+- e.g., `app.users.include({ todosViaOwner: app.todos.where({ done: false }) })`
 
 Files to create/modify:
 
-- `packages/jazz-ts/src/runtime/subscription-manager.ts`
-- `packages/jazz-ts/src/runtime/client.ts` - Add subscribeAll
+- `packages/jazz-ts/src/runtime/db.ts` - Add insert/update/delete methods
+- `packages/jazz-ts/src/runtime/subscription-manager.ts` - Delta management
+- `packages/jazz-ts/src/runtime/query-adapter.ts` - Support QueryBuilder in includes
 
-Deliverable: `db.subscribeAll(query, callback)` with `{ all, added, updated, removed }`
+Deliverable: Full CRUD via Db class + `db.subscribeAll(query, callback)` with typed deltas
 
 ### Phase 7: Example App
 
