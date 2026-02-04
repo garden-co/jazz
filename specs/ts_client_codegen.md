@@ -1082,32 +1082,42 @@ Files to modify:
 
 Deliverable: `db.all(query)`, `db.one(query)`, `db.insert()` work at runtime
 
-### Phase 6: Mutations & Subscriptions
+### Phase 6: Mutations & Subscriptions ✓
 
 **Goal**: Add mutations to Db class and implement full-state subscription management
 
-**Mutations** (deferred from Phase 5):
+**Key Design**: `createDb()` is async (pre-loads WASM), mutations are sync.
 
-- `db.insert(app.todos, { title, done, ... })` - typed insert using Init types
-- `db.update(id, { done: true })` - partial update
-- `db.delete(id)` - soft delete
+```typescript
+const db = await createDb(config); // Pre-loads WASM
+const id = db.insert(app.todos, data); // Sync!
+db.update(app.todos, id, { done: true }); // Sync!
+```
 
-**Subscriptions**:
+**Mutations** (implemented):
+
+- `db.insert(table, data)` - sync insert, returns id
+- `db.update(table, id, data)` - sync partial update
+- `db.deleteFrom(table, id)` - sync delete
+
+**Subscriptions** (implemented):
 
 - `db.subscribeAll(query, callback)` with `{ all, added, updated, removed }`
 - SubscriptionManager to maintain full result set and compute deltas
-- Object identity preservation for unchanged items (React optimization)
+- Returns unsubscribe function
 
-**Filtered includes** (deferred from Phase 5):
+**Value conversion** (implemented):
 
-- Allow passing QueryBuilder to include for filtered nested results
-- e.g., `app.users.include({ todosViaOwner: app.todos.where({ done: false }) })`
+- `toValue(value, columnType)` - convert JS value to WasmValue
+- `toValueArray(data, schema, table)` - convert Init object to Value[]
+- `toUpdateRecord(data, schema, table)` - convert partial update to Record
 
-Files to create/modify:
+Files created/modified:
 
-- `packages/jazz-ts/src/runtime/db.ts` - Add insert/update/delete methods
+- `packages/jazz-ts/src/runtime/db.ts` - Async createDb, sync mutations, subscribeAll
+- `packages/jazz-ts/src/runtime/client.ts` - Added connectSync, exported loadWasmModule
 - `packages/jazz-ts/src/runtime/subscription-manager.ts` - Delta management
-- `packages/jazz-ts/src/runtime/query-adapter.ts` - Support QueryBuilder in includes
+- `packages/jazz-ts/src/runtime/value-converter.ts` - JS to WasmValue conversion
 
 Deliverable: Full CRUD via Db class + `db.subscribeAll(query, callback)` with typed deltas
 
@@ -1145,3 +1155,5 @@ Deliverable: CI-ready test suite covering types, query building, and E2E sync
 1. **React/Vue bindings**: Generate framework-specific hooks (e.g., `useTodos()`) - deferred
 2. **Conflict resolution**: Surface merge conflicts to application layer - not yet
 3. **Cursor-based pagination**: For very large result sets with stable ordering - evaluate later
+4. **Filtered includes**: Allow `QueryBuilder` as alternative to `boolean` for filtered relation loading (e.g., `include({ posts: postsQuery.where({ published: true }) })`)
+5. **Explicit joins**: Investigate join support beyond array subqueries for cross-table queries

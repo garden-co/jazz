@@ -23,8 +23,9 @@ use wasm_bindgen::prelude::*;
 
 use groove::io_handler::IoHandler;
 use groove::object::ObjectId;
+use groove::query_manager::encoding::decode_row;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, Value};
+use groove::query_manager::types::{Row, RowDescriptor, Schema, Value};
 use groove::runtime_core::RuntimeCore;
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
@@ -411,29 +412,33 @@ impl WasmRuntime {
         };
 
         // Create a Rust callback that bridges to the JS function.
-        // The callback serializes the delta to JSON and calls the JS function.
+        // The callback decodes row data, converts to WasmValues, and serializes.
         let callback = move |delta: SubscriptionDelta| {
-            // Serialize the delta for JS
-            // Row has id, data (binary), commit_id - we expose id for now
+            // Helper to decode a row and convert to WasmRow JSON format
+            let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
+                let values = decode_row(descriptor, &row.data)
+                    .map(|vals| vals.into_iter().map(|v| WasmValue::from(v)).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "id": row.id.uuid().to_string(),
+                    "values": values
+                })
+            };
+
+            let descriptor = &delta.descriptor;
+
+            // Build WasmRowDelta-compatible JSON
             let delta_json = serde_json::json!({
-                "handle": delta.handle.0,
-                "delta": {
-                    "added": delta.delta.added.iter().map(|row| {
-                        serde_json::json!({
-                            "id": row.id.uuid().to_string()
-                        })
-                    }).collect::<Vec<_>>(),
-                    "updated": delta.delta.updated.iter().map(|(old, new)| {
-                        serde_json::json!({
-                            "oldId": old.id.uuid().to_string(),
-                            "newId": new.id.uuid().to_string()
-                        })
-                    }).collect::<Vec<_>>(),
-                    "removed": delta.delta.removed.iter().map(|row| {
-                        row.id.uuid().to_string()
-                    }).collect::<Vec<_>>(),
-                    "pending": delta.delta.pending
-                }
+                "added": delta.delta.added.iter()
+                    .map(|row| row_to_json(row, descriptor))
+                    .collect::<Vec<_>>(),
+                "removed": delta.delta.removed.iter()
+                    .map(|row| row_to_json(row, descriptor))
+                    .collect::<Vec<_>>(),
+                "updated": delta.delta.updated.iter()
+                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
+                    .collect::<Vec<_>>(),
+                "pending": delta.delta.pending
             });
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {

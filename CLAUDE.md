@@ -35,8 +35,12 @@ There is a strong systemic bias toward showing incremental progress - marking ta
 - Feeling urgency to mark a task "done" before its design intent is realized
 - Choosing a suboptimal implementation order because "this task is next"
 - Adding `#[cfg(test)]` backdoors that restore removed functionality
+- Weakening or removing test assertions to make failing tests pass
+- Explaining away test failures with plausible-sounding stories ("timing is flaky") without investigating
 
 **When you notice these signs**: STOP. Reread the plan. Ask whether you're implementing the design or working around it.
+
+**The completion bias is internalized, not just situational.** You will unconsciously rationalize problems away to reach "done" state. Weak tests that pass feel better than strong tests that fail, even though the opposite is true. When you catch yourself writing plausible-sounding explanations for why failing tests were removed or weakened, be suspicious of your own reasoning.
 
 **Critical: When removing APIs, tests must adapt.** When removing an API, tests MUST adapt to the new API. Never add `#[cfg(test)]` backdoors that restore removed functionality - this defeats the purpose of the change and hides integration issues. If you're about to re-add something the user explicitly asked to remove (even "just for tests"), STOP and ask first. Making 45 tests compile by adding a backdoor is worse than having 45 tests that need rewriting - the failing tests are telling you what work remains.
 
@@ -46,3 +50,12 @@ We document public APIs and user guides in /docs as markdown files.
 Tests should err on the side of E2E coverage using high-level abstractions (e.g., SchemaManager, SyncManager) rather than calling internal helpers directly. This catches integration issues and ensures the public API works as intended. The only exception is tiny unit tests for isolated pure functions.
 
 When writing tests or implementing features, if you discover that functionality doesn't work as expected, STOP and surface the issue immediately. Do not write workarounds, ignore the test, or make it look like things pass when they don't. The gap between "what we thought worked" and "what actually works" is critical information.
+
+## Builds and Tests
+
+Use turbo for all TypeScript and Rust builds and tests:
+
+```bash
+pnpm build   # builds everything (TS + Rust + WASM)
+pnpm test    # tests everything
+```

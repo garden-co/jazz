@@ -195,6 +195,54 @@ export class JazzClient {
   }
 
   /**
+   * Create client synchronously with a pre-loaded WASM module.
+   *
+   * Use this after loading WASM via `loadWasmModule()` to avoid
+   * async client creation. This enables sync mutations in the Db class.
+   *
+   * @param wasmModule Pre-loaded WASM module from loadWasmModule()
+   * @param context Application context with driver and schema
+   * @returns Connected JazzClient instance (created synchronously)
+   */
+  static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
+    // Create storage callback that bridges WASM requests to the JS driver
+    // With tsify, requests come as typed JS objects (not JSON strings)
+    // Note: runtime is accessed via closure after creation
+    let runtime: WasmRuntime;
+    const storageCallback = async (request: StorageRequest) => {
+      try {
+        // Driver expects an array of requests
+        const responses = await context.driver.process([request]);
+        // Return first response as object (not JSON string)
+        if (responses.length > 0) {
+          runtime.onStorageResponse(responses[0]);
+        }
+      } catch (e) {
+        console.error("Storage callback error:", e);
+      }
+    };
+
+    // Create WASM runtime with storage callback
+    const schemaJson = JSON.stringify(context.schema);
+    runtime = new wasmModule.WasmRuntime(
+      storageCallback,
+      schemaJson,
+      context.appId,
+      context.env ?? "dev",
+      context.userBranch ?? "main",
+    );
+
+    const client = new JazzClient(runtime, context);
+
+    // Set up sync if server URL provided
+    if (context.serverUrl) {
+      client.setupSync(context.serverUrl);
+    }
+
+    return client;
+  }
+
+  /**
    * Create a session-scoped client for backend operations.
    *
    * This allows backend applications to perform operations as a specific user.
@@ -290,7 +338,10 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const subId = this.runtime.subscribe(
       queryJson,
-      (delta: RowDelta) => {
+      (deltaJsonOrObject: RowDelta | string) => {
+        // WASM runtime passes delta as JSON string, need to parse it
+        const delta: RowDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
         callback(delta);
       },
       sessionJson,
@@ -475,9 +526,17 @@ export class JazzClient {
 }
 
 /**
- * Load and initialize the WASM module.
+ * WASM module type for sync client creation.
+ * This is the type of the groove-wasm module after dynamic import.
  */
-async function loadWasmModule() {
+export type WasmModule = typeof import("groove-wasm");
+
+/**
+ * Load and initialize the WASM module.
+ *
+ * Exported so that `createDb()` can pre-load the module for sync mutations.
+ */
+export async function loadWasmModule(): Promise<WasmModule> {
   const wasmModule = await import("groove-wasm");
 
   // In Node.js, we need to read the .wasm file and use initSync
