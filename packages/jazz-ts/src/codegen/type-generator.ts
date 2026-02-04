@@ -3,6 +3,7 @@
  */
 
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
+import { analyzeRelations, type Relation } from "./relation-analyzer.js";
 
 /**
  * Convert a WasmColumnType to TypeScript type string.
@@ -79,7 +80,7 @@ function singularize(word: string): string {
  *   user_profiles -> UserProfile
  *   categories -> Category
  */
-function tableNameToInterface(name: string): string {
+export function tableNameToInterface(name: string): string {
   // Convert snake_case to words, singularize the last word, then PascalCase
   const parts = name.split("_");
   // Singularize only the last part (table names are typically plural)
@@ -89,12 +90,127 @@ function tableNameToInterface(name: string): string {
 }
 
 /**
+ * Generate Include types for nested relation loading.
+ *
+ * Example output:
+ *   export interface TodoInclude {
+ *     parent?: boolean | TodoInclude;
+ *     owner?: boolean | UserInclude;
+ *   }
+ */
+function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
+  const lines: string[] = [];
+
+  for (const [tableName, rels] of relations) {
+    if (rels.length === 0) continue;
+
+    const interfaceName = tableNameToInterface(tableName) + "Include";
+    lines.push(`export interface ${interfaceName} {`);
+    for (const rel of rels) {
+      const targetInterface = tableNameToInterface(rel.toTable);
+      const targetInclude = targetInterface + "Include";
+      lines.push(`  ${rel.name}?: boolean | ${targetInclude};`);
+    }
+    lines.push(`}`);
+    lines.push(``);
+  }
+
+  return lines;
+}
+
+/**
+ * Generate Relations types mapping relation names to their result types.
+ *
+ * Example output:
+ *   export interface TodoRelations {
+ *     parent: Todo;
+ *     owner: User;
+ *   }
+ */
+function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
+  const lines: string[] = [];
+
+  for (const [tableName, rels] of relations) {
+    if (rels.length === 0) continue;
+
+    const interfaceName = tableNameToInterface(tableName) + "Relations";
+    lines.push(`export interface ${interfaceName} {`);
+    for (const rel of rels) {
+      const targetInterface = tableNameToInterface(rel.toTable);
+      const type = rel.isArray ? `${targetInterface}[]` : targetInterface;
+      lines.push(`  ${rel.name}: ${type};`);
+    }
+    lines.push(`}`);
+    lines.push(``);
+  }
+
+  return lines;
+}
+
+/**
+ * Generate WithIncludes types for type-safe include results.
+ *
+ * Example output:
+ *   export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
+ *     [K in keyof I & keyof TodoRelations]?: I[K] extends true
+ *       ? TodoRelations[K]
+ *       : I[K] extends object
+ *         ? TodoRelations[K] extends (infer E)[]
+ *           ? WithIncludesArray<E, I[K]>
+ *           : TodoRelations[K] & WithIncludesFor<TodoRelations[K], I[K]>
+ *         : never;
+ *   };
+ */
+function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
+  const lines: string[] = [];
+
+  // First, generate helper types
+  lines.push(`// Helper types for nested includes`);
+  lines.push(`type WithIncludesFor<T, I> = T extends { id: string }`);
+  lines.push(`  ? T & { [K in keyof I & string]?: unknown }`);
+  lines.push(`  : T;`);
+  lines.push(``);
+  lines.push(`type WithIncludesArray<E, I> = E extends { id: string }`);
+  lines.push(`  ? Array<E & { [K in keyof I & string]?: unknown }>`);
+  lines.push(`  : E[];`);
+  lines.push(``);
+
+  for (const [tableName, rels] of relations) {
+    if (rels.length === 0) continue;
+
+    const baseInterface = tableNameToInterface(tableName);
+    const includeInterface = baseInterface + "Include";
+    const relationsInterface = baseInterface + "Relations";
+
+    lines.push(
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = ${baseInterface} & {`,
+    );
+    lines.push(`  [K in keyof I & keyof ${relationsInterface}]?: I[K] extends true`);
+    lines.push(`    ? ${relationsInterface}[K]`);
+    lines.push(`    : I[K] extends object`);
+    lines.push(`      ? ${relationsInterface}[K] extends (infer E)[]`);
+    lines.push(`        ? WithIncludesArray<E, I[K]>`);
+    lines.push(
+      `        : ${relationsInterface}[K] & WithIncludesFor<${relationsInterface}[K], I[K]>`,
+    );
+    lines.push(`      : never;`);
+    lines.push(`};`);
+    lines.push(``);
+  }
+
+  return lines;
+}
+
+/**
  * Generate TypeScript code from a WasmSchema.
  *
  * Produces:
  * 1. Base interfaces with id field (e.g., Todo)
  * 2. Init interfaces without id (e.g., TodoInit)
- * 3. Exported wasmSchema constant
+ * 3. Include types for relation loading (e.g., TodoInclude)
+ * 4. Relations types mapping relation names to types (e.g., TodoRelations)
+ * 5. WithIncludes types for type-safe results (e.g., TodoWithIncludes)
+ * 6. Exported wasmSchema constant
  */
 export function generateTypes(schema: WasmSchema): string {
   const lines: string[] = [
@@ -127,6 +243,18 @@ export function generateTypes(schema: WasmSchema): string {
     lines.push("}");
     lines.push("");
   }
+
+  // Analyze relations and generate relation types
+  const relations = analyzeRelations(schema);
+
+  // Include types (for specifying which relations to load)
+  lines.push(...generateIncludeTypes(relations));
+
+  // Relations types (mapping relation names to their result types)
+  lines.push(...generateRelationsTypes(relations));
+
+  // WithIncludes types (type-safe results based on include spec)
+  lines.push(...generateWithIncludesTypes(relations));
 
   // Export WasmSchema JSON
   lines.push(`export const wasmSchema: WasmSchema = ${JSON.stringify(schema, null, 2)};`);
