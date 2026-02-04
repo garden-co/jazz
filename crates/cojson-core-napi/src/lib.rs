@@ -1,6 +1,4 @@
-use cojson_core::core::{
-  CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl, Transaction as RustTransaction,
-};
+use cojson_core::core::{CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
@@ -25,74 +23,6 @@ impl From<RustKnownState> for KnownState {
       id: ks.id,
       header: ks.header,
       sessions: ks.sessions.into_iter().collect(),
-    }
-  }
-}
-
-// ============================================================================
-// Transaction - Native JavaScript Object
-// ============================================================================
-
-/// PrivateTransaction as a native JavaScript object
-#[napi(object)]
-#[derive(Clone, Debug)]
-pub struct PrivateTransaction {
-  pub privacy: String,
-  #[napi(js_name = "madeAt")]
-  pub made_at: f64,
-  #[napi(js_name = "keyUsed")]
-  pub key_used: String,
-  #[napi(js_name = "encryptedChanges")]
-  pub encrypted_changes: String,
-  pub meta: Option<String>,
-}
-
-/// TrustingTransaction as a native JavaScript object
-#[napi(object)]
-#[derive(Clone, Debug)]
-pub struct TrustingTransaction {
-  pub privacy: String,
-  #[napi(js_name = "madeAt")]
-  pub made_at: f64,
-  pub changes: String,
-  pub meta: Option<String>,
-}
-
-/// Transaction enum represented as Either for NAPI
-/// In TypeScript this becomes: PrivateTransaction | TrustingTransaction
-pub enum Transaction {
-  Private(PrivateTransaction),
-  Trusting(TrustingTransaction),
-}
-
-impl From<RustTransaction> for Transaction {
-  fn from(tx: RustTransaction) -> Self {
-    match tx {
-      RustTransaction::Private(p) => Transaction::Private(PrivateTransaction {
-        privacy: p.privacy,
-        made_at: p.made_at.as_f64().unwrap_or(0.0),
-        key_used: p.key_used.0,
-        encrypted_changes: p.encrypted_changes.value,
-        meta: p.meta.map(|m| m.value),
-      }),
-      RustTransaction::Trusting(t) => Transaction::Trusting(TrustingTransaction {
-        privacy: t.privacy,
-        made_at: t.made_at.as_f64().unwrap_or(0.0),
-        changes: t.changes,
-        meta: t.meta,
-      }),
-    }
-  }
-}
-
-impl ToNapiValue for Transaction {
-  unsafe fn to_napi_value(
-    env: napi::sys::napi_env,
-    val: Self,
-  ) -> napi::Result<napi::sys::napi_value> {
-    match val {
-      Transaction::Private(p) => PrivateTransaction::to_napi_value(env, p),
-      Transaction::Trusting(t) => TrustingTransaction::to_napi_value(env, t),
     }
   }
 }
@@ -280,33 +210,20 @@ impl SessionMap {
       .unwrap_or(-1)
   }
 
-  /// Get single transaction by index as native JS object (returns undefined if not found)
+  /// Get single transaction by index as JSON string (returns undefined if not found)
   #[napi]
-  pub fn get_transaction(&self, session_id: String, tx_index: u32) -> Option<Transaction> {
-    self
-      .internal
-      .get_transaction(&session_id, tx_index)
-      .and_then(|tx_json| serde_json::from_str::<RustTransaction>(&tx_json).ok())
-      .map(Transaction::from)
+  pub fn get_transaction(&self, session_id: String, tx_index: u32) -> Option<String> {
+    self.internal.get_transaction(&session_id, tx_index)
   }
 
-  /// Get transactions for a session from index as native JS objects (returns undefined if session not found)
+  /// Get transactions for a session from index as JSON strings (returns undefined if session not found)
   #[napi]
   pub fn get_session_transactions(
     &self,
     session_id: String,
     from_index: u32,
-  ) -> Option<Vec<Transaction>> {
-    self
-      .internal
-      .get_session_transactions(&session_id, from_index)
-      .map(|tx_jsons| {
-        tx_jsons
-          .iter()
-          .filter_map(|tx_json| serde_json::from_str::<RustTransaction>(tx_json).ok())
-          .map(Transaction::from)
-          .collect()
-      })
+  ) -> Option<Vec<String>> {
+    self.internal.get_session_transactions(&session_id, from_index)
   }
 
   /// Get last signature for a session (returns undefined if session not found)

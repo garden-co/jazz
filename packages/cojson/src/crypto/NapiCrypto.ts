@@ -265,7 +265,7 @@ class SessionMapAdapter implements SessionMapImpl {
   getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
     const result = this.sessionMap.getTransaction(sessionId, txIndex);
     if (!result) return undefined;
-    return result as unknown as Transaction;
+    return JSON.parse(result) as Transaction;
   }
 
   getSessionTransactions(
@@ -274,7 +274,7 @@ class SessionMapAdapter implements SessionMapImpl {
   ): Transaction[] | undefined {
     const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
     if (!result) return undefined;
-    return result as unknown as Transaction[];
+    return result.map((tx) => JSON.parse(tx) as Transaction);
   }
 
   getLastSignature(sessionId: string): string | undefined {

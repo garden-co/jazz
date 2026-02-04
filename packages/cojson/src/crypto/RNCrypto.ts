@@ -1,7 +1,6 @@
 import {
   JsonValue,
   RawCoID,
-  SessionID,
   Stringified,
   base64URLtoBytes,
   bytesToBase64url,
@@ -9,16 +8,10 @@ import {
 import { CojsonInternalTypes } from "../exports.js";
 import { TransactionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
-import { JsonObject } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import {
-  PrivateTransaction,
-  Transaction,
-  TrustingTransaction,
-} from "../coValueCore/verifiedState.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 import {
   CryptoProvider,
-  KeyID,
   Sealed,
   SealerID,
   SealerSecret,
@@ -45,37 +38,8 @@ import {
   unseal,
   Blake3Hasher,
   SessionMap as RNSessionMap,
-  Transaction as RNTransaction,
-  Transaction_Tags,
-  PrivateTransaction as RNPrivateTransaction,
-  TrustingTransaction as RNTrustingTransaction,
 } from "cojson-core-rn";
 import { WasmCrypto } from "./WasmCrypto.js";
-
-/**
- * Convert a Uniffi Transaction enum to the TypeScript Transaction type.
- * Uniffi enums have a `tag` property and `inner` containing the data.
- */
-function convertRNTransaction(rnTx: RNTransaction): Transaction {
-  if (rnTx.tag === Transaction_Tags.Private) {
-    const inner = rnTx.inner.tx as RNPrivateTransaction;
-    return {
-      privacy: "private",
-      madeAt: inner.madeAt,
-      keyUsed: inner.keyUsed as KeyID,
-      encryptedChanges: inner.encryptedChanges,
-      meta: inner.meta,
-    } as PrivateTransaction;
-  } else {
-    const inner = rnTx.inner.tx as RNTrustingTransaction;
-    return {
-      privacy: "trusting",
-      madeAt: inner.madeAt,
-      changes: inner.changes as Stringified<JsonValue[]>,
-      meta: inner.meta as Stringified<JsonObject> | undefined,
-    } as TrustingTransaction;
-  }
-}
 
 type Blake3State = Blake3Hasher;
 
@@ -326,7 +290,7 @@ class SessionMapAdapter implements SessionMapImpl {
   getTransaction(sessionId: string, txIndex: number): Transaction | undefined {
     const result = this.sessionMap.getTransaction(sessionId, txIndex);
     if (!result) return undefined;
-    return convertRNTransaction(result);
+    return JSON.parse(result) as Transaction;
   }
 
   getSessionTransactions(
@@ -335,7 +299,7 @@ class SessionMapAdapter implements SessionMapImpl {
   ): Transaction[] | undefined {
     const result = this.sessionMap.getSessionTransactions(sessionId, fromIndex);
     if (!result) return undefined;
-    return result.map(convertRNTransaction);
+    return result.map((tx) => JSON.parse(tx) as Transaction);
   }
 
   getLastSignature(sessionId: string): string | undefined {

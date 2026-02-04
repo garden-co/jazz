@@ -1,6 +1,4 @@
-use cojson_core::core::{
-    KnownState as RustKnownState, SessionMapImpl, Transaction as RustTransaction,
-};
+use cojson_core::core::{KnownState as RustKnownState, SessionMapImpl};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -26,60 +24,6 @@ impl From<&RustKnownState> for KnownState {
             id: ks.id.clone(),
             header: ks.header,
             sessions: ks.sessions.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        }
-    }
-}
-
-// ============================================================================
-// Transaction - Native Record types
-// ============================================================================
-
-/// PrivateTransaction as a native Record
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct PrivateTransaction {
-    pub privacy: String,
-    pub made_at: f64,
-    pub key_used: String,
-    pub encrypted_changes: String,
-    pub meta: Option<String>,
-}
-
-/// TrustingTransaction as a native Record
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct TrustingTransaction {
-    pub privacy: String,
-    pub made_at: f64,
-    pub changes: String,
-    pub meta: Option<String>,
-}
-
-/// Transaction enum - either Private or Trusting
-#[derive(uniffi::Enum, Clone, Debug)]
-pub enum Transaction {
-    Private { tx: PrivateTransaction },
-    Trusting { tx: TrustingTransaction },
-}
-
-impl From<RustTransaction> for Transaction {
-    fn from(tx: RustTransaction) -> Self {
-        match tx {
-            RustTransaction::Private(p) => Transaction::Private {
-                tx: PrivateTransaction {
-                    privacy: p.privacy,
-                    made_at: p.made_at.as_f64().unwrap_or(0.0),
-                    key_used: p.key_used.0,
-                    encrypted_changes: p.encrypted_changes.value,
-                    meta: p.meta.map(|m| m.value),
-                },
-            },
-            RustTransaction::Trusting(t) => Transaction::Trusting {
-                tx: TrustingTransaction {
-                    privacy: t.privacy,
-                    made_at: t.made_at.as_f64().unwrap_or(0.0),
-                    changes: t.changes,
-                    meta: t.meta,
-                },
-            },
         }
     }
 }
@@ -243,41 +187,30 @@ impl SessionMap {
             .unwrap_or(-1))
     }
 
-    /// Get single transaction by index as native object (returns None if not found)
+    /// Get single transaction by index as JSON string (returns None if not found)
     pub fn get_transaction(
         &self,
         session_id: String,
         tx_index: u32,
-    ) -> Result<Option<Transaction>, SessionMapError> {
+    ) -> Result<Option<String>, SessionMapError> {
         let internal = self
             .internal
             .lock()
             .map_err(|_| SessionMapError::LockError)?;
-        Ok(internal
-            .get_transaction(&session_id, tx_index)
-            .and_then(|tx_json| serde_json::from_str::<RustTransaction>(&tx_json).ok())
-            .map(Transaction::from))
+        Ok(internal.get_transaction(&session_id, tx_index))
     }
 
-    /// Get transactions for a session from index as native objects (returns None if session not found)
+    /// Get transactions for a session from index as JSON strings (returns None if session not found)
     pub fn get_session_transactions(
         &self,
         session_id: String,
         from_index: u32,
-    ) -> Result<Option<Vec<Transaction>>, SessionMapError> {
+    ) -> Result<Option<Vec<String>>, SessionMapError> {
         let internal = self
             .internal
             .lock()
             .map_err(|_| SessionMapError::LockError)?;
-        Ok(internal
-            .get_session_transactions(&session_id, from_index)
-            .map(|tx_jsons| {
-                tx_jsons
-                    .iter()
-                    .filter_map(|tx_json| serde_json::from_str::<RustTransaction>(tx_json).ok())
-                    .map(Transaction::from)
-                    .collect()
-            }))
+        Ok(internal.get_session_transactions(&session_id, from_index))
     }
 
     /// Get last signature for a session (returns None if session not found)

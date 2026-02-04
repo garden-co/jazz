@@ -1,34 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * Hash data once using BLAKE3.
- * - `data`: Raw bytes to hash
- * Returns 32 bytes of hash output.
- * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
- */
-export function blake3HashOnce(data: Uint8Array): Uint8Array;
-/**
- * Compute a short hash of a stable-stringified JSON value.
- * The input should already be serialized using stableStringify on the JS side.
- * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
- */
-export function shortHash(value: string): string;
-/**
- * Hash data once using BLAKE3 with a context prefix.
- * - `data`: Raw bytes to hash
- * - `context`: Context bytes to prefix to the data
- * Returns 32 bytes of hash output.
- * This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
- */
-export function blake3HashOnceWithContext(data: Uint8Array, context: Uint8Array): Uint8Array;
-/**
- * Generate a 24-byte nonce from input material using BLAKE3.
- * - `nonce_material`: Raw bytes to derive the nonce from
- * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
- * This function is deterministic - the same input will produce the same nonce.
- */
-export function generateNonce(nonce_material: Uint8Array): Uint8Array;
-/**
  * WASM-exposed function for XSalsa20 decryption without authentication.
  * - `key`: 32-byte key for decryption (must match encryption key)
  * - `nonce_material`: Raw bytes used to generate a 24-byte nonce (must match encryption)
@@ -47,46 +19,33 @@ export function decryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, cip
  */
 export function encryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, plaintext: Uint8Array): Uint8Array;
 /**
- * WASM-exposed function to sign a message using Ed25519.
- * - `message`: Raw bytes to sign
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
+ * Generate a 24-byte nonce from input material using BLAKE3.
+ * - `nonce_material`: Raw bytes to derive the nonce from
+ * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
+ * This function is deterministic - the same input will produce the same nonce.
  */
-export function sign(message: Uint8Array, secret: Uint8Array): string;
+export function generateNonce(nonce_material: Uint8Array): Uint8Array;
 /**
- * WASM-exposed function to verify an Ed25519 signature.
- * - `signature`: Raw signature bytes
- * - `message`: Raw bytes that were signed
- * - `id`: Raw Ed25519 verifying key bytes
- * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
+ * Compute a short hash of a stable-stringified JSON value.
+ * The input should already be serialized using stableStringify on the JS side.
+ * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
  */
-export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Array): boolean;
+export function shortHash(value: string): string;
 /**
- * WASM-exposed function to derive a signer ID from a signing key.
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
+ * Hash data once using BLAKE3 with a context prefix.
+ * - `data`: Raw bytes to hash
+ * - `context`: Context bytes to prefix to the data
+ * Returns 32 bytes of hash output.
+ * This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
  */
-export function getSignerId(secret: Uint8Array): string;
+export function blake3HashOnceWithContext(data: Uint8Array, context: Uint8Array): Uint8Array;
 /**
- * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated encryption with perfect forward secrecy.
- * - `message`: Raw bytes to seal
- * - `sender_secret`: Base58-encoded sender's private key with "sealerSecret_z" prefix
- * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce
- * Returns sealed bytes or throws JsError if sealing fails.
+ * Hash data once using BLAKE3.
+ * - `data`: Raw bytes to hash
+ * Returns 32 bytes of hash output.
+ * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
  */
-export function seal(message: Uint8Array, sender_secret: string, recipient_id: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated decryption with perfect forward secrecy.
- * - `sealed_message`: The sealed bytes to decrypt
- * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
- * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
- * Returns unsealed bytes or throws JsError if unsealing fails.
- */
-export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
+export function blake3HashOnce(data: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function to derive a sealer ID from a sealer secret.
  * - `secret`: Raw bytes of the sealer secret
@@ -94,17 +53,17 @@ export function unseal(sealed_message: Uint8Array, recipient_secret: string, sen
  */
 export function getSealerId(secret: Uint8Array): string;
 /**
- * WASM-exposed function to derive an X25519 public key from a private key.
- * - `private_key`: 32 bytes of private key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- */
-export function x25519PublicKey(private_key: Uint8Array): Uint8Array;
-/**
  * Generate a new X25519 private key using secure random number generation.
  * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
  * This key can be reused for multiple Diffie-Hellman exchanges.
  */
 export function newX25519PrivateKey(): Uint8Array;
+/**
+ * WASM-exposed function to derive an X25519 public key from a private key.
+ * - `private_key`: 32 bytes of private key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ */
+export function x25519PublicKey(private_key: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
  * - `private_key`: 32 bytes of private key material
@@ -129,6 +88,47 @@ export function encrypt(value: Uint8Array, key_secret: string, nonce_material: U
  */
 export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
 /**
+ * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated encryption with perfect forward secrecy.
+ * - `message`: Raw bytes to seal
+ * - `sender_secret`: Base58-encoded sender's private key with "sealerSecret_z" prefix
+ * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns sealed bytes or throws JsError if sealing fails.
+ */
+export function seal(message: Uint8Array, sender_secret: string, recipient_id: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated decryption with perfect forward secrecy.
+ * - `sealed_message`: The sealed bytes to decrypt
+ * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+ * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+ * Returns unsealed bytes or throws JsError if unsealing fails.
+ */
+export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to sign a message using Ed25519.
+ * - `message`: Raw bytes to sign
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
+ */
+export function sign(message: Uint8Array, secret: Uint8Array): string;
+/**
+ * WASM-exposed function to verify an Ed25519 signature.
+ * - `signature`: Raw signature bytes
+ * - `message`: Raw bytes that were signed
+ * - `id`: Raw Ed25519 verifying key bytes
+ * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
+ */
+export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Array): boolean;
+/**
+ * WASM-exposed function to derive a signer ID from a signing key.
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
+ */
+export function getSignerId(secret: Uint8Array): string;
+/**
  * WASM-exposed function to validate and copy Ed25519 signature bytes.
  * - `bytes`: 64 bytes of signature material to validate
  * Returns the same 64 bytes if valid or throws JsError if invalid.
@@ -141,11 +141,22 @@ export function ed25519SignatureFromBytes(bytes: Uint8Array): Uint8Array;
  */
 export function ed25519VerifyingKeyFromBytes(bytes: Uint8Array): Uint8Array;
 /**
- * WASM-exposed function to validate and copy Ed25519 signing key bytes.
- * - `bytes`: 32 bytes of signing key material to validate
- * Returns the same 32 bytes if valid or throws JsError if invalid.
+ * WASM-exposed function to derive the public key from an Ed25519 signing key.
+ * - `signing_key`: 32 bytes of signing key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
  */
-export function ed25519SigningKeyFromBytes(bytes: Uint8Array): Uint8Array;
+export function ed25519SigningKeyToPublic(signing_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to derive an Ed25519 verifying key from a signing key.
+ * - `signing_key`: 32 bytes of signing key material
+ * Returns 32 bytes of verifying key material or throws JsError if key is invalid.
+ */
+export function ed25519VerifyingKey(signing_key: Uint8Array): Uint8Array;
+/**
+ * Generate a new Ed25519 signing key using secure random number generation.
+ * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
+ */
+export function newEd25519SigningKey(): Uint8Array;
 /**
  * WASM-exposed function to sign a message using Ed25519.
  * - `signing_key`: 32 bytes of signing key material
@@ -154,16 +165,11 @@ export function ed25519SigningKeyFromBytes(bytes: Uint8Array): Uint8Array;
  */
 export function ed25519Sign(signing_key: Uint8Array, message: Uint8Array): Uint8Array;
 /**
- * Generate a new Ed25519 signing key using secure random number generation.
- * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
+ * WASM-exposed function to validate and copy Ed25519 signing key bytes.
+ * - `bytes`: 32 bytes of signing key material to validate
+ * Returns the same 32 bytes if valid or throws JsError if invalid.
  */
-export function newEd25519SigningKey(): Uint8Array;
-/**
- * WASM-exposed function to derive the public key from an Ed25519 signing key.
- * - `signing_key`: 32 bytes of signing key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- */
-export function ed25519SigningKeyToPublic(signing_key: Uint8Array): Uint8Array;
+export function ed25519SigningKeyFromBytes(bytes: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function to verify an Ed25519 signature.
  * - `verifying_key`: 32 bytes of verifying key material
@@ -179,12 +185,6 @@ export function ed25519Verify(verifying_key: Uint8Array, message: Uint8Array, si
  * Returns 64 bytes of signature material or throws JsError if signing fails.
  */
 export function ed25519SigningKeySign(signing_key: Uint8Array, message: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to derive an Ed25519 verifying key from a signing key.
- * - `signing_key`: 32 bytes of signing key material
- * Returns 32 bytes of verifying key material or throws JsError if key is invalid.
- */
-export function ed25519VerifyingKey(signing_key: Uint8Array): Uint8Array;
 export class Blake3Hasher {
   free(): void;
   constructor();
@@ -303,6 +303,8 @@ export interface InitOutput {
   readonly sessionmap_markAsDeleted: (a: number) => void;
   readonly sessionmap_new: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly sessionmap_setStreamingKnownState: (a: number, b: number, c: number) => [number, number];
+  readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
   readonly blake3HashOnce: (a: number, b: number) => [number, number];
   readonly blake3HashOnceWithContext: (a: number, b: number, c: number, d: number) => [number, number];
@@ -312,19 +314,17 @@ export interface InitOutput {
   readonly blake3hasher_update: (a: number, b: number, c: number) => void;
   readonly generateNonce: (a: number, b: number) => [number, number];
   readonly shortHash: (a: number, b: number) => [number, number];
-  readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly getSignerId: (a: number, b: number) => [number, number, number, number];
-  readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly getSealerId: (a: number, b: number) => [number, number, number, number];
   readonly newX25519PrivateKey: () => [number, number];
-  readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-  readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly x25519DiffieHellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly x25519PublicKey: (a: number, b: number) => [number, number, number, number];
+  readonly getSignerId: (a: number, b: number) => [number, number, number, number];
+  readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+  readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+  readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly ed25519Sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly ed25519SignatureFromBytes: (a: number, b: number) => [number, number, number, number];
   readonly ed25519SigningKeyFromBytes: (a: number, b: number) => [number, number, number, number];

@@ -33,10 +33,10 @@ export declare class SessionMap {
   getSessionIds(): Array<string>
   /** Get transaction count for a session (returns -1 if session not found) */
   getTransactionCount(sessionId: string): number
-  /** Get single transaction by index as native JS object (returns undefined if not found) */
-  getTransaction(sessionId: string, txIndex: number): Transaction | null
-  /** Get transactions for a session from index as native JS objects (returns undefined if session not found) */
-  getSessionTransactions(sessionId: string, fromIndex: number): Array<Transaction> | null
+  /** Get single transaction by index as JSON string (returns undefined if not found) */
+  getTransaction(sessionId: string, txIndex: number): string | null
+  /** Get transactions for a session from index as JSON strings (returns undefined if session not found) */
+  getSessionTransactions(sessionId: string, fromIndex: number): Array<string> | null
   /** Get last signature for a session (returns undefined if session not found) */
   getLastSignature(sessionId: string): string | null
   /** Get signature after specific transaction index */
@@ -216,15 +216,6 @@ export declare function newEd25519SigningKey(): Uint8Array
  */
 export declare function newX25519PrivateKey(): Uint8Array
 
-/** PrivateTransaction as a native JavaScript object */
-export interface PrivateTransaction {
-  privacy: string
-  madeAt: number
-  keyUsed: string
-  encryptedChanges: string
-  meta?: string
-}
-
 /**
  * NAPI-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
  * Provides authenticated encryption with perfect forward secrecy.
@@ -250,14 +241,6 @@ export declare function shortHash(value: string): string
  * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
  */
 export declare function sign(message: Uint8Array, secret: Uint8Array): string
-
-/** TrustingTransaction as a native JavaScript object */
-export interface TrustingTransaction {
-  privacy: string
-  madeAt: number
-  changes: string
-  meta?: string
-}
 
 /**
  * NAPI-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.

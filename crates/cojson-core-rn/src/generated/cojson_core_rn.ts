@@ -49,7 +49,6 @@ import {
   FfiConverterUInt64,
   RustBuffer,
   UniffiAbstractObject,
-  UniffiEnum,
   UniffiError,
   UniffiInternalError,
   UniffiRustCaller,
@@ -768,148 +767,6 @@ const FfiConverterTypeKnownState = (() => {
         FfiConverterString.allocationSize(value.id) +
         FfiConverterBool.allocationSize(value.header) +
         FfiConverterMapStringUInt32.allocationSize(value.sessions)
-      );
-    }
-  }
-  return new FFIConverter();
-})();
-
-/**
- * PrivateTransaction as a native Record
- */
-export type PrivateTransaction = {
-  privacy: string;
-  madeAt: /*f64*/ number;
-  keyUsed: string;
-  encryptedChanges: string;
-  meta: string | undefined;
-};
-
-/**
- * Generated factory for {@link PrivateTransaction} record objects.
- */
-export const PrivateTransaction = (() => {
-  const defaults = () => ({});
-  const create = (() => {
-    return uniffiCreateRecord<PrivateTransaction, ReturnType<typeof defaults>>(
-      defaults
-    );
-  })();
-  return Object.freeze({
-    /**
-     * Create a frozen instance of {@link PrivateTransaction}, with defaults specified
-     * in Rust, in the {@link cojson_core_rn} crate.
-     */
-    create,
-
-    /**
-     * Create a frozen instance of {@link PrivateTransaction}, with defaults specified
-     * in Rust, in the {@link cojson_core_rn} crate.
-     */
-    new: create,
-
-    /**
-     * Defaults specified in the {@link cojson_core_rn} crate.
-     */
-    defaults: () => Object.freeze(defaults()) as Partial<PrivateTransaction>,
-  });
-})();
-
-const FfiConverterTypePrivateTransaction = (() => {
-  type TypeName = PrivateTransaction;
-  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-    read(from: RustBuffer): TypeName {
-      return {
-        privacy: FfiConverterString.read(from),
-        madeAt: FfiConverterFloat64.read(from),
-        keyUsed: FfiConverterString.read(from),
-        encryptedChanges: FfiConverterString.read(from),
-        meta: FfiConverterOptionalString.read(from),
-      };
-    }
-    write(value: TypeName, into: RustBuffer): void {
-      FfiConverterString.write(value.privacy, into);
-      FfiConverterFloat64.write(value.madeAt, into);
-      FfiConverterString.write(value.keyUsed, into);
-      FfiConverterString.write(value.encryptedChanges, into);
-      FfiConverterOptionalString.write(value.meta, into);
-    }
-    allocationSize(value: TypeName): number {
-      return (
-        FfiConverterString.allocationSize(value.privacy) +
-        FfiConverterFloat64.allocationSize(value.madeAt) +
-        FfiConverterString.allocationSize(value.keyUsed) +
-        FfiConverterString.allocationSize(value.encryptedChanges) +
-        FfiConverterOptionalString.allocationSize(value.meta)
-      );
-    }
-  }
-  return new FFIConverter();
-})();
-
-/**
- * TrustingTransaction as a native Record
- */
-export type TrustingTransaction = {
-  privacy: string;
-  madeAt: /*f64*/ number;
-  changes: string;
-  meta: string | undefined;
-};
-
-/**
- * Generated factory for {@link TrustingTransaction} record objects.
- */
-export const TrustingTransaction = (() => {
-  const defaults = () => ({});
-  const create = (() => {
-    return uniffiCreateRecord<TrustingTransaction, ReturnType<typeof defaults>>(
-      defaults
-    );
-  })();
-  return Object.freeze({
-    /**
-     * Create a frozen instance of {@link TrustingTransaction}, with defaults specified
-     * in Rust, in the {@link cojson_core_rn} crate.
-     */
-    create,
-
-    /**
-     * Create a frozen instance of {@link TrustingTransaction}, with defaults specified
-     * in Rust, in the {@link cojson_core_rn} crate.
-     */
-    new: create,
-
-    /**
-     * Defaults specified in the {@link cojson_core_rn} crate.
-     */
-    defaults: () => Object.freeze(defaults()) as Partial<TrustingTransaction>,
-  });
-})();
-
-const FfiConverterTypeTrustingTransaction = (() => {
-  type TypeName = TrustingTransaction;
-  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-    read(from: RustBuffer): TypeName {
-      return {
-        privacy: FfiConverterString.read(from),
-        madeAt: FfiConverterFloat64.read(from),
-        changes: FfiConverterString.read(from),
-        meta: FfiConverterOptionalString.read(from),
-      };
-    }
-    write(value: TypeName, into: RustBuffer): void {
-      FfiConverterString.write(value.privacy, into);
-      FfiConverterFloat64.write(value.madeAt, into);
-      FfiConverterString.write(value.changes, into);
-      FfiConverterOptionalString.write(value.meta, into);
-    }
-    allocationSize(value: TypeName): number {
-      return (
-        FfiConverterString.allocationSize(value.privacy) +
-        FfiConverterFloat64.allocationSize(value.madeAt) +
-        FfiConverterString.allocationSize(value.changes) +
-        FfiConverterOptionalString.allocationSize(value.meta)
       );
     }
   }
@@ -1697,148 +1554,6 @@ const FfiConverterTypeSessionMapError = (() => {
   return new FFIConverter();
 })();
 
-// Enum: Transaction
-export enum Transaction_Tags {
-  Private = 'Private',
-  Trusting = 'Trusting',
-}
-/**
- * Transaction enum - either Private or Trusting
- */
-export const Transaction = (() => {
-  type Private__interface = {
-    tag: Transaction_Tags.Private;
-    inner: Readonly<{ tx: PrivateTransaction }>;
-  };
-
-  class Private_ extends UniffiEnum implements Private__interface {
-    /**
-     * @private
-     * This field is private and should not be used, use `tag` instead.
-     */
-    readonly [uniffiTypeNameSymbol] = 'Transaction';
-    readonly tag = Transaction_Tags.Private;
-    readonly inner: Readonly<{ tx: PrivateTransaction }>;
-    constructor(inner: { tx: PrivateTransaction }) {
-      super('Transaction', 'Private');
-      this.inner = Object.freeze(inner);
-    }
-
-    static new(inner: { tx: PrivateTransaction }): Private_ {
-      return new Private_(inner);
-    }
-
-    static instanceOf(obj: any): obj is Private_ {
-      return obj.tag === Transaction_Tags.Private;
-    }
-  }
-
-  type Trusting__interface = {
-    tag: Transaction_Tags.Trusting;
-    inner: Readonly<{ tx: TrustingTransaction }>;
-  };
-
-  class Trusting_ extends UniffiEnum implements Trusting__interface {
-    /**
-     * @private
-     * This field is private and should not be used, use `tag` instead.
-     */
-    readonly [uniffiTypeNameSymbol] = 'Transaction';
-    readonly tag = Transaction_Tags.Trusting;
-    readonly inner: Readonly<{ tx: TrustingTransaction }>;
-    constructor(inner: { tx: TrustingTransaction }) {
-      super('Transaction', 'Trusting');
-      this.inner = Object.freeze(inner);
-    }
-
-    static new(inner: { tx: TrustingTransaction }): Trusting_ {
-      return new Trusting_(inner);
-    }
-
-    static instanceOf(obj: any): obj is Trusting_ {
-      return obj.tag === Transaction_Tags.Trusting;
-    }
-  }
-
-  function instanceOf(obj: any): obj is Transaction {
-    return obj[uniffiTypeNameSymbol] === 'Transaction';
-  }
-
-  return Object.freeze({
-    instanceOf,
-    Private: Private_,
-    Trusting: Trusting_,
-  });
-})();
-
-/**
- * Transaction enum - either Private or Trusting
- */
-
-export type Transaction = InstanceType<
-  (typeof Transaction)[keyof Omit<typeof Transaction, 'instanceOf'>]
->;
-
-// FfiConverter for enum Transaction
-const FfiConverterTypeTransaction = (() => {
-  const ordinalConverter = FfiConverterInt32;
-  type TypeName = Transaction;
-  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
-    read(from: RustBuffer): TypeName {
-      switch (ordinalConverter.read(from)) {
-        case 1:
-          return new Transaction.Private({
-            tx: FfiConverterTypePrivateTransaction.read(from),
-          });
-        case 2:
-          return new Transaction.Trusting({
-            tx: FfiConverterTypeTrustingTransaction.read(from),
-          });
-        default:
-          throw new UniffiInternalError.UnexpectedEnumCase();
-      }
-    }
-    write(value: TypeName, into: RustBuffer): void {
-      switch (value.tag) {
-        case Transaction_Tags.Private: {
-          ordinalConverter.write(1, into);
-          const inner = value.inner;
-          FfiConverterTypePrivateTransaction.write(inner.tx, into);
-          return;
-        }
-        case Transaction_Tags.Trusting: {
-          ordinalConverter.write(2, into);
-          const inner = value.inner;
-          FfiConverterTypeTrustingTransaction.write(inner.tx, into);
-          return;
-        }
-        default:
-          // Throwing from here means that Transaction_Tags hasn't matched an ordinal.
-          throw new UniffiInternalError.UnexpectedEnumCase();
-      }
-    }
-    allocationSize(value: TypeName): number {
-      switch (value.tag) {
-        case Transaction_Tags.Private: {
-          const inner = value.inner;
-          let size = ordinalConverter.allocationSize(1);
-          size += FfiConverterTypePrivateTransaction.allocationSize(inner.tx);
-          return size;
-        }
-        case Transaction_Tags.Trusting: {
-          const inner = value.inner;
-          let size = ordinalConverter.allocationSize(2);
-          size += FfiConverterTypeTrustingTransaction.allocationSize(inner.tx);
-          return size;
-        }
-        default:
-          throw new UniffiInternalError.UnexpectedEnumCase();
-      }
-    }
-  }
-  return new FFIConverter();
-})();
-
 // FfiConverter for Map<string, /*u32*/number>
 const FfiConverterMapStringUInt32 = new FfiConverterMap(
   FfiConverterString,
@@ -2064,12 +1779,12 @@ export interface SessionMapInterface {
    */
   getSessionIds() /*throws*/ : Array<string>;
   /**
-   * Get transactions for a session from index as native objects (returns None if session not found)
+   * Get transactions for a session from index as JSON strings (returns None if session not found)
    */
   getSessionTransactions(
     sessionId: string,
     fromIndex: /*u32*/ number
-  ) /*throws*/ : Array<Transaction> | undefined;
+  ) /*throws*/ : Array<string> | undefined;
   /**
    * Get signature after specific transaction index
    */
@@ -2078,12 +1793,12 @@ export interface SessionMapInterface {
     txIndex: /*u32*/ number
   ) /*throws*/ : string | undefined;
   /**
-   * Get single transaction by index as native object (returns None if not found)
+   * Get single transaction by index as JSON string (returns None if not found)
    */
   getTransaction(
     sessionId: string,
     txIndex: /*u32*/ number
-  ) /*throws*/ : Transaction | undefined;
+  ) /*throws*/ : string | undefined;
   /**
    * Get transaction count for a session (returns -1 if session not found)
    */
@@ -2375,13 +2090,13 @@ export class SessionMap
   }
 
   /**
-   * Get transactions for a session from index as native objects (returns None if session not found)
+   * Get transactions for a session from index as JSON strings (returns None if session not found)
    */
   public getSessionTransactions(
     sessionId: string,
     fromIndex: /*u32*/ number
-  ): Array<Transaction> | undefined /*throws*/ {
-    return FfiConverterOptionalArrayTypeTransaction.lift(
+  ): Array<string> | undefined /*throws*/ {
+    return FfiConverterOptionalArrayString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
           FfiConverterTypeSessionMapError
@@ -2425,13 +2140,13 @@ export class SessionMap
   }
 
   /**
-   * Get single transaction by index as native object (returns None if not found)
+   * Get single transaction by index as JSON string (returns None if not found)
    */
   public getTransaction(
     sessionId: string,
     txIndex: /*u32*/ number
-  ): Transaction | undefined /*throws*/ {
-    return FfiConverterOptionalTypeTransaction.lift(
+  ): string | undefined /*throws*/ {
+    return FfiConverterOptionalString.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
           FfiConverterTypeSessionMapError
@@ -2702,19 +2417,9 @@ const FfiConverterOptionalUInt32 = new FfiConverterOptional(FfiConverterUInt32);
 // FfiConverter for Array<string>
 const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
 
-// FfiConverter for Transaction | undefined
-const FfiConverterOptionalTypeTransaction = new FfiConverterOptional(
-  FfiConverterTypeTransaction
-);
-
-// FfiConverter for Array<Transaction>
-const FfiConverterArrayTypeTransaction = new FfiConverterArray(
-  FfiConverterTypeTransaction
-);
-
-// FfiConverter for Array<Transaction> | undefined
-const FfiConverterOptionalArrayTypeTransaction = new FfiConverterOptional(
-  FfiConverterArrayTypeTransaction
+// FfiConverter for Array<string> | undefined
+const FfiConverterOptionalArrayString = new FfiConverterOptional(
+  FfiConverterArrayString
 );
 
 /**
@@ -3039,7 +2744,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions() !==
-    14061
+    59047
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions'
@@ -3055,7 +2760,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction() !==
-    48857
+    50009
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction'
@@ -3134,10 +2839,7 @@ export default Object.freeze({
     FfiConverterTypeBlake3Hasher,
     FfiConverterTypeCryptoErrorUniffi,
     FfiConverterTypeKnownState,
-    FfiConverterTypePrivateTransaction,
     FfiConverterTypeSessionMap,
     FfiConverterTypeSessionMapError,
-    FfiConverterTypeTransaction,
-    FfiConverterTypeTrustingTransaction,
   },
 });
