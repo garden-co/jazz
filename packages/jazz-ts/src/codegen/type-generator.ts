@@ -171,16 +171,21 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
 function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[] {
   const lines: string[] = [];
 
-  // First, generate helper types
-  lines.push(`// Helper types for nested includes`);
-  lines.push(`type WithIncludesFor<T, I> = T extends { id: string }`);
-  lines.push(`  ? T & { [K in keyof I & string]?: unknown }`);
-  lines.push(`  : T;`);
-  lines.push(``);
-  lines.push(`type WithIncludesArray<E, I> = E extends { id: string }`);
-  lines.push(`  ? Array<E & { [K in keyof I & string]?: unknown }>`);
-  lines.push(`  : E[];`);
-  lines.push(``);
+  // Check if any table has relations - only emit helper types if needed
+  const hasAnyRelations = [...relations.values()].some((rels) => rels.length > 0);
+
+  if (hasAnyRelations) {
+    // Generate helper types only when there are relations that use them
+    lines.push(`// Helper types for nested includes`);
+    lines.push(`type WithIncludesFor<T, I> = T extends { id: string }`);
+    lines.push(`  ? T & { [K in keyof I & string]?: unknown }`);
+    lines.push(`  : T;`);
+    lines.push(``);
+    lines.push(`type WithIncludesArray<E, I> = E extends { id: string }`);
+    lines.push(`  ? Array<E & { [K in keyof I & string]?: unknown }>`);
+    lines.push(`  : E[];`);
+    lines.push(``);
+  }
 
   for (const [tableName, rels] of relations) {
     if (rels.length === 0) continue;
@@ -225,7 +230,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
 export function generateTypes(schema: WasmSchema): string {
   const lines: string[] = [
     "// AUTO-GENERATED FILE - DO NOT EDIT",
-    'import type { WasmSchema } from "jazz-ts";',
+    'import type { WasmSchema, QueryBuilder } from "jazz-ts";',
     "",
   ];
 
