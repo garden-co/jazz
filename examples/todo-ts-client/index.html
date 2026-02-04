@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Todo App - Jazz TypeScript Client</title>
+    <style>
+      body {
+        font-family: system-ui;
+        max-width: 600px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      .done {
+        text-decoration: line-through;
+        opacity: 0.6;
+      }
+      li {
+        padding: 0.5rem 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .delete-btn {
+        margin-left: auto;
+        cursor: pointer;
+      }
+      small {
+        color: #666;
+      }
+      form {
+        margin-bottom: 1rem;
+        display: flex;
+        gap: 0.5rem;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Todos</h1>
+    <form id="add-form">
+      <input type="text" id="title-input" placeholder="What needs to be done?" required />
+      <button type="submit">Add</button>
+    </form>
+    <ul id="todo-list"></ul>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

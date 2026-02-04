@@ -86,15 +86,16 @@ function generateQueryBuilderClass(
   // Determine Include type - use the interface if it exists, otherwise empty object
   const includeConstraint = hasRelations ? `${interfaceName}Include` : "Record<string, never>";
 
-  lines.push(`export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}> {`);
-  lines.push(`  private _table = "${tableName}";`);
+  lines.push(
+    `export class ${interfaceName}QueryBuilder<I extends ${includeConstraint} = {}> implements QueryBuilder<${interfaceName}> {`,
+  );
+  lines.push(`  readonly _table = "${tableName}";`);
+  lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
   lines.push(`  private _includes: Partial<${includeConstraint}> = {};`);
   lines.push(`  private _orderBys: Array<[string, "asc" | "desc"]> = [];`);
   lines.push(`  private _limitVal?: number;`);
   lines.push(`  private _offsetVal?: number;`);
-  lines.push(``);
-  lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
   lines.push(``);
 
   // where() method
