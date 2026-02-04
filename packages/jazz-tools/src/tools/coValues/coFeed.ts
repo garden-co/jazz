@@ -848,6 +848,8 @@ export class FileStream extends CoValueBase implements CoValue {
       totalLen += chunk.length;
     }
 
+    // We merge all the chunks together to make it more
+    // simple to apply fromCharCode with a safe amount of arguments
     const merged = new Uint8Array(totalLen);
     let offset = 0;
     for (const chunk of data.chunks) {
@@ -855,9 +857,14 @@ export class FileStream extends CoValueBase implements CoValue {
       offset += chunk.length;
     }
 
+    // The CHUNK_SIZE is the safest max amount of arguments
+    // we can pass at once in a JS function
+    // V8 has around 64k limit, so the half of that should be safe
     const CHUNK_SIZE = 32768;
     const parts: string[] = [];
     for (let i = 0; i < totalLen; i += CHUNK_SIZE) {
+      // We try to combine as many bytes as possible in a single part
+      // to reduce the amount of strings we generate
       parts.push(
         String.fromCharCode.apply(
           null,
