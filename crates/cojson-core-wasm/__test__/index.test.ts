@@ -1203,4 +1203,34 @@ describe("SessionMap - Transaction Flow", () => {
     expect(sessionMap.getTransaction(sessionId, 1)).toBeUndefined();
     expect(sessionMap.getTransaction(sessionId, 100)).toBeUndefined();
   });
+
+  test("decryptTransaction returns undefined for nonexistent session", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+
+    // Decrypting from a non-existent session should return undefined, not throw
+    const result = sessionMap.decryptTransaction(
+      "nonexistent_session",
+      0,
+      "keySecret_z11111111111111111111111111111111"
+    );
+
+    expect(result).toBeUndefined();
+  });
+
+  test("decryptTransactionMeta returns undefined for nonexistent session", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+
+    // Decrypting meta from a non-existent session should return undefined, not throw
+    const result = sessionMap.decryptTransactionMeta(
+      "nonexistent_session",
+      0,
+      "keySecret_z11111111111111111111111111111111"
+    );
+
+    expect(result).toBeUndefined();
+  });
 });

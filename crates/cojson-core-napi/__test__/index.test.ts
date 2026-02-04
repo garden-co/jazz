@@ -1265,4 +1265,34 @@ describe("SessionMap - Transaction Flow", () => {
     // Check that we have the expected number of transactions
     expect(sessionMap.getTransactionCount(sessionId)).toBe(100);
   });
+
+  test("decryptTransaction returns undefined for nonexistent session", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+
+    // Decrypting from a non-existent session should return undefined, not throw
+    const result = sessionMap.decryptTransaction(
+      "nonexistent_session",
+      0,
+      "keySecret_z11111111111111111111111111111111"
+    );
+
+    expect(result).toBeNull();
+  });
+
+  test("decryptTransactionMeta returns undefined for nonexistent session", () => {
+    const coId = "co_zTestCoValue123";
+    const header = createUnsafeHeader();
+    const sessionMap = new SessionMap(coId, header, undefined, true);
+
+    // Decrypting meta from a non-existent session should return undefined, not throw
+    const result = sessionMap.decryptTransactionMeta(
+      "nonexistent_session",
+      0,
+      "keySecret_z11111111111111111111111111111111"
+    );
+
+    expect(result).toBeNull();
+  });
 });

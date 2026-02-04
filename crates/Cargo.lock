@@ -528,6 +528,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cojson-core",
+ "indexmap 2.11.4",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

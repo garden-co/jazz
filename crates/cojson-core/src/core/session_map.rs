@@ -782,34 +782,34 @@ impl SessionMapImpl {
 
     // === Decryption ===
 
-    /// Decrypt transaction changes
+    /// Decrypt transaction changes (returns None if session not found)
     pub fn decrypt_transaction(
         &self,
         session_id: &str,
         tx_index: u32,
         key_secret: &str,
     ) -> Result<Option<String>, SessionMapError> {
-        let session_log = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| SessionMapError::SessionNotFound(session_id.to_string()))?;
+        let session_log = match self.sessions.get(session_id) {
+            Some(log) => log,
+            None => return Ok(None),
+        };
 
         let decrypted = session_log
             .decrypt_next_transaction_changes_json(tx_index, KeySecret(key_secret.to_string()))?;
         Ok(Some(decrypted))
     }
 
-    /// Decrypt transaction meta
+    /// Decrypt transaction meta (returns None if session not found)
     pub fn decrypt_transaction_meta(
         &self,
         session_id: &str,
         tx_index: u32,
         key_secret: &str,
     ) -> Result<Option<String>, SessionMapError> {
-        let session_log = self
-            .sessions
-            .get(session_id)
-            .ok_or_else(|| SessionMapError::SessionNotFound(session_id.to_string()))?;
+        let session_log = match self.sessions.get(session_id) {
+            Some(log) => log,
+            None => return Ok(None),
+        };
 
         Ok(session_log
             .decrypt_next_transaction_meta_json(tx_index, KeySecret(key_secret.to_string()))?)
@@ -1212,5 +1212,35 @@ mod tests {
         map.insert("".to_string(), "value".to_string());
         let uniqueness = Uniqueness::Object(map);
         assert!(validate_uniqueness(&uniqueness).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_transaction_returns_none_for_nonexistent_session() {
+        let session_map = create_test_session_map("co_test", TEST_HEADER);
+
+        // Decrypting from a non-existent session should return None, not an error
+        let result = session_map.decrypt_transaction(
+            "nonexistent_session",
+            0,
+            "keySecret_z11111111111111111111111111111111",
+        );
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_decrypt_transaction_meta_returns_none_for_nonexistent_session() {
+        let session_map = create_test_session_map("co_test", TEST_HEADER);
+
+        // Decrypting meta from a non-existent session should return None, not an error
+        let result = session_map.decrypt_transaction_meta(
+            "nonexistent_session",
+            0,
+            "keySecret_z11111111111111111111111111111111",
+        );
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }
