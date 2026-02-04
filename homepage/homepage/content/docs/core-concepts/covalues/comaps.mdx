@@ -223,26 +223,14 @@ Consider a scenario where one wants to identify a CoMap using some unique identi
 ```
 </CodeGroup>
 
-To make it possible to use human-readable identifiers Jazz lets you to define a `unique` property on CoMaps.
+Jazz provides the `getOrCreateUnique` method on CoMaps to support human-readable or application-specific identifiers.
 
-Then the CoValue ID is deterministically derived from the `unique` property and the owner of the CoMap.
+When you call `getOrCreateUnique`, the CoValue ID is deterministically derived from the provided `unique` identifier (together with the owner), ensuring that the same `unique` value always refers to the same CoMap within that scope.
 
-<CodeGroup>
-```ts uniqueness.ts#Create
-```
-</CodeGroup>
-
-Now you can use `CoMap.loadUnique` to easily load the CoMap using the human-readable identifier:
+This allows you to easily load or create a CoMap using a readable identifier. If no such value exists, it will be created using the provided data.
 
 <CodeGroup>
-```ts uniqueness.ts#LoadUnique
-```
-</CodeGroup>
-
-It's also possible to combine the create+load operation using `CoMap.upsertUnique`:
-
-<CodeGroup>
-```ts uniqueness.ts#UpsertUnique
+```ts uniqueness.ts#GetOrCreateUnique
 ```
 </CodeGroup>
 

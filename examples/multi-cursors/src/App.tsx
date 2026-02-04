@@ -1,34 +1,11 @@
-import { useAccount } from "jazz-tools/react";
-import { useEffect, useState } from "react";
+import { useSuspenseAccount } from "jazz-tools/react";
 import { CursorAccount } from "./schema";
 import { Logo } from "./Logo";
 import Container from "./components/Container";
 import { getName } from "./utils/getName";
-import { loadCursorContainer } from "./utils/loadCursorContainer";
-
-const cursorFeedIDToLoad = import.meta.env.VITE_CURSOR_FEED_ID;
-const groupIDToLoad = import.meta.env.VITE_GROUP_ID;
 
 function App() {
-  const me = useAccount(CursorAccount, { resolve: { profile: true } });
-  const [loaded, setLoaded] = useState(false);
-  const [cursorFeedID, setCursorFeedID] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!me.$isLoaded) return;
-    const loadCursorFeed = async () => {
-      const id = await loadCursorContainer(
-        me,
-        cursorFeedIDToLoad,
-        groupIDToLoad,
-      );
-      if (id) {
-        setCursorFeedID(id);
-        setLoaded(true);
-      }
-    };
-    loadCursorFeed();
-  }, [me.$jazz.id, me.$isLoaded]);
+  const me = useSuspenseAccount(CursorAccount, { resolve: { profile: true } });
 
   const profileName = me.$isLoaded ? me.profile.name : undefined;
   const sessionID = me.$isLoaded ? me.$jazz.sessionID : undefined;
@@ -36,11 +13,7 @@ function App() {
   return (
     <>
       <main className="h-screen">
-        {loaded && cursorFeedID ? (
-          <Container cursorFeedID={cursorFeedID} />
-        ) : (
-          <div>Loading...</div>
-        )}
+        <Container />
       </main>
 
       <footer className="fixed bottom-4 right-4 flex items-center gap-4">
