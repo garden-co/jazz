@@ -11,7 +11,7 @@ import {
   SQLiteDatabaseDriverAsync,
   getSqliteStorageAsync,
 } from "../storage/sqliteAsync";
-import { SyncMessagesLog, SyncTestMessage } from "./testUtils";
+import { SyncMessagesLog } from "./testUtils";
 import { knownStateFromContent } from "../coValueContentMessage";
 
 class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
@@ -37,11 +37,11 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
     return this.db.prepare(sql).get(params) as T | undefined;
   }
 
-  async transaction(callback: () => unknown) {
+  async transaction(callback: (tx: LibSQLSqliteAsyncDriver) => unknown) {
     await this.run("BEGIN TRANSACTION", []);
 
     try {
-      await callback();
+      await callback(this);
       await this.run("COMMIT", []);
     } catch (error) {
       await this.run("ROLLBACK", []);

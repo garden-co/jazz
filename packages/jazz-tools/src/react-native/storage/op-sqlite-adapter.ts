@@ -10,8 +10,14 @@ type OPSQLiteDB = ReturnType<typeof opSQLite.open>;
 import { type SQLiteDatabaseDriverAsync } from "jazz-tools/react-native-core";
 
 export class OPSQLiteAdapter implements SQLiteDatabaseDriverAsync {
-  private db: OPSQLiteDB | null = null;
+  private db: OPSQLiteDB | opSQLite.Transaction | null = null;
   private dbName: string;
+
+  static withDB(db: OPSQLiteDB | opSQLite.Transaction): OPSQLiteAdapter {
+    const adapter = new OPSQLiteAdapter();
+    adapter.db = db;
+    return adapter;
+  }
 
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
@@ -58,19 +64,28 @@ export class OPSQLiteAdapter implements SQLiteDatabaseDriverAsync {
       throw new Error("Database not initialized");
     }
 
-    await this.db.executeRaw(sql, params as any[]);
+    "executeRaw" in this.db
+      ? await this.db.executeRaw(sql, params as any[])
+      : await this.db.execute(sql, params as any[]);
   }
 
-  public async transaction(callback: () => unknown) {
-    await this.run("BEGIN TRANSACTION");
-
-    try {
-      await callback();
-      await this.run("COMMIT");
-    } catch (error) {
-      await this.run("ROLLBACK");
-      throw error;
+  public async transaction(callback: (tx: OPSQLiteAdapter) => unknown) {
+    if (!this.db) {
+      throw new Error("Database not initialized");
     }
+    if (!("transaction" in this.db)) {
+      throw new Error("Cannot perform nested transactions");
+    }
+
+    await this.db.transaction(async (tx) => {
+      try {
+        await callback(OPSQLiteAdapter.withDB(tx));
+        await tx.commit();
+      } catch (error) {
+        await tx.rollback();
+        throw error;
+      }
+    });
   }
 
   public async closeDb(): Promise<void> {

@@ -171,44 +171,48 @@ export class SQLiteClientAsync
       return;
     }
 
-    await this.transaction(async () => {
-      await this.db.run(
-        `DELETE FROM transactions
+    await this.transaction(async (tx) => {
+      await tx.deleteCoValueContent(coValueRow);
+    });
+  }
+
+  async deleteCoValueContent(coValueRow: StoredCoValueRow): Promise<void> {
+    await this.db.run(
+      `DELETE FROM transactions
        WHERE ses IN (
          SELECT rowID FROM sessions
          WHERE coValue = ?
            AND sessionID NOT LIKE '%$'
        )`,
-        [coValueRow.rowID],
-      );
+      [coValueRow.rowID],
+    );
 
-      await this.db.run(
-        `DELETE FROM signatureAfter
+    await this.db.run(
+      `DELETE FROM signatureAfter
        WHERE ses IN (
          SELECT rowID FROM sessions
          WHERE coValue = ?
            AND sessionID NOT LIKE '%$'
        )`,
-        [coValueRow.rowID],
-      );
+      [coValueRow.rowID],
+    );
 
-      await this.db.run(
-        `DELETE FROM sessions
+    await this.db.run(
+      `DELETE FROM sessions
        WHERE coValue = ?
          AND sessionID NOT LIKE '%$'`,
-        [coValueRow.rowID],
-      );
+      [coValueRow.rowID],
+    );
 
-      await this.db.run(
-        `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+    await this.db.run(
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
        ON CONFLICT(coValueID) DO UPDATE SET status=?`,
-        [
-          coValueId,
-          DeletedCoValueDeletionStatus.Done,
-          DeletedCoValueDeletionStatus.Done,
-        ],
-      );
-    });
+      [
+        coValueRow.id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
+    );
   }
 
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
