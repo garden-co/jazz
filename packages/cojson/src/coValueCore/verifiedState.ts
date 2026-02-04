@@ -144,7 +144,9 @@ export class VerifiedState {
 
     if (cached) {
       // Append to existing cache
-      cached.transactions.push(...newTransactions);
+for (const tx of  newTransactions) {
+   cached.transactions.push(tx);
+}
       cached.lastSignature = newSignature;
       if (signerID) {
         cached.signerID = signerID;
