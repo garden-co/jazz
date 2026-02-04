@@ -532,17 +532,21 @@ export function parseGroupCreateOptions(
   options:
     | {
         owner?: Account;
+        name?: string;
       }
     | Account
     | undefined,
-) {
+): { owner: Account; name?: string } {
   if (!options) {
     return { owner: activeAccountContext.get() };
   }
 
-  return TypeSym in options && isAccountInstance(options)
-    ? { owner: options }
-    : { owner: options.owner ?? activeAccountContext.get() };
+  if (TypeSym in options && isAccountInstance(options)) {
+    return { owner: options };
+  }
+
+  const owner = options.owner ?? activeAccountContext.get();
+  return options.name !== undefined ? { owner, name: options.name } : { owner };
 }
 
 export function getIdFromHeader(
