@@ -71,6 +71,71 @@ describe("schemaToSql", () => {
     expect(sql).toContain("real REAL NOT NULL");
     expect(sql).toContain("real_null REAL");
   });
+
+  it("generates UUID REFERENCES for required ref", () => {
+    resetCollectedState();
+    table("todos", {
+      title: col.string(),
+      owner_id: col.ref("users"),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("owner_id UUID REFERENCES users NOT NULL");
+  });
+
+  it("generates nullable UUID REFERENCES for optional ref", () => {
+    resetCollectedState();
+    table("todos", {
+      title: col.string(),
+      parent_id: col.ref("todos").optional(),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("parent_id UUID REFERENCES todos");
+    expect(sql).not.toContain("parent_id UUID REFERENCES todos NOT NULL");
+  });
+
+  it("stores references in Column metadata", () => {
+    resetCollectedState();
+    table("todos", {
+      owner_id: col.ref("users"),
+      parent_id: col.ref("todos").optional(),
+    });
+    const schema = getCollectedSchema();
+
+    const owner = schema.tables[0].columns.find((c) => c.name === "owner_id")!;
+    expect(owner.sqlType).toBe("UUID");
+    expect(owner.references).toBe("users");
+    expect(owner.nullable).toBe(false);
+
+    const parent = schema.tables[0].columns.find((c) => c.name === "parent_id")!;
+    expect(parent.sqlType).toBe("UUID");
+    expect(parent.references).toBe("todos");
+    expect(parent.nullable).toBe(true);
+  });
+
+  it("generates complete table with mixed columns and refs", () => {
+    resetCollectedState();
+    table("todos", {
+      title: col.string(),
+      parent_id: col.ref("todos").optional(),
+      owner_id: col.ref("users"),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toBe(`CREATE TABLE todos (
+    title TEXT NOT NULL,
+    parent_id UUID REFERENCES todos,
+    owner_id UUID REFERENCES users NOT NULL
+);
+`);
+  });
 });
 
 describe("lensToSql", () => {

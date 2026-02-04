@@ -81,6 +81,7 @@ enum Token {
     Default,
     True,
     False,
+    References,
     // Punctuation
     LParen,
     RParen,
@@ -233,6 +234,7 @@ impl<'a> Tokenizer<'a> {
                     "DEFAULT" => Token::Default,
                     "TRUE" => Token::True,
                     "FALSE" => Token::False,
+                    "REFERENCES" => Token::References,
                     _ => Token::Ident(ident),
                 }
             }
@@ -353,26 +355,40 @@ impl Parser {
         let column_type = self.parse_column_type()?;
 
         let mut nullable = true;
+        let mut references = None;
 
-        // Check for NOT NULL
-        if self.peek() == Some(&Token::Not) {
-            self.advance();
-            self.expect(&Token::Null)?;
-            nullable = false;
-        } else if self.peek() == Some(&Token::Null) {
-            self.advance();
-            nullable = true;
-        }
-
-        // Skip DEFAULT in schema (we don't store defaults in schema, only in lenses)
-        if self.peek() == Some(&Token::Default) {
-            self.advance();
-            self.parse_value()?; // consume and discard
+        // Parse optional modifiers: REFERENCES, NOT NULL, DEFAULT (in any order)
+        loop {
+            match self.peek() {
+                Some(Token::Not) => {
+                    self.advance();
+                    self.expect(&Token::Null)?;
+                    nullable = false;
+                }
+                Some(Token::Null) => {
+                    self.advance();
+                    nullable = true;
+                }
+                Some(Token::References) => {
+                    self.advance();
+                    let ref_table = self.expect_ident()?;
+                    references = Some(TableName::new(ref_table));
+                }
+                Some(Token::Default) => {
+                    // Skip DEFAULT in schema (we don't store defaults in schema, only in lenses)
+                    self.advance();
+                    self.parse_value()?; // consume and discard
+                }
+                _ => break,
+            }
         }
 
         let mut desc = ColumnDescriptor::new(ColumnName::new(&name), column_type);
         if nullable {
             desc = desc.nullable();
+        }
+        if let Some(ref_table) = references {
+            desc = desc.references(ref_table);
         }
         Ok(desc)
     }
@@ -639,9 +655,19 @@ fn table_schema_to_sql(table_name: &str, schema: &TableSchema) -> String {
 
 fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
     let type_str = column_type_to_sql(&col.column_type);
+    let ref_str = match &col.references {
+        Some(table) => format!(" REFERENCES {}", table.as_str()),
+        None => String::new(),
+    };
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
 
-    format!("{} {}{}", col.name.as_str(), type_str, nullable_str)
+    format!(
+        "{} {}{}{}",
+        col.name.as_str(),
+        type_str,
+        ref_str,
+        nullable_str
+    )
 }
 
 /// Generate SQL ALTER TABLE statements from a LensTransform.
@@ -1058,5 +1084,140 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn parse_column_with_references() {
+        let sql = "CREATE TABLE todos (owner_id UUID REFERENCES users NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(col.name.as_str(), "owner_id");
+        assert_eq!(col.column_type, ColumnType::Uuid);
+        assert_eq!(col.references, Some(TableName::new("users")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn parse_nullable_column_with_references() {
+        let sql = "CREATE TABLE todos (parent_id UUID REFERENCES todos);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+
+        assert_eq!(col.references, Some(TableName::new("todos")));
+        assert!(col.nullable);
+    }
+
+    #[test]
+    fn parse_references_before_not_null() {
+        // Order: REFERENCES then NOT NULL
+        let sql = "CREATE TABLE t (fk UUID REFERENCES other NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+
+        assert_eq!(col.references, Some(TableName::new("other")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn parse_not_null_before_references() {
+        // Order: NOT NULL then REFERENCES (should also work)
+        let sql = "CREATE TABLE t (fk UUID NOT NULL REFERENCES other);";
+        let schema = parse_schema(sql).unwrap();
+        let col = &schema.get(&TableName::new("t")).unwrap().descriptor.columns[0];
+
+        assert_eq!(col.references, Some(TableName::new("other")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn schema_to_sql_includes_references() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new(ColumnName::new("owner_id"), ColumnType::Uuid)
+                    .references(TableName::new("users")),
+            ])),
+        );
+        let sql = schema_to_sql(&schema);
+
+        assert!(sql.contains("owner_id UUID REFERENCES users NOT NULL"));
+    }
+
+    #[test]
+    fn schema_to_sql_nullable_with_references() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new(ColumnName::new("parent_id"), ColumnType::Uuid)
+                    .nullable()
+                    .references(TableName::new("todos")),
+            ])),
+        );
+        let sql = schema_to_sql(&schema);
+
+        assert!(sql.contains("parent_id UUID REFERENCES todos"));
+        assert!(!sql.contains("parent_id UUID REFERENCES todos NOT NULL"));
+    }
+
+    #[test]
+    fn sql_round_trip_with_references() {
+        let sql = "CREATE TABLE todos (owner_id UUID REFERENCES users NOT NULL);";
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+
+        assert!(regenerated.contains("REFERENCES users"));
+        assert!(regenerated.contains("NOT NULL"));
+
+        // Parse regenerated SQL and verify
+        let reparsed = parse_schema(&regenerated).unwrap();
+        let col = &reparsed
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .descriptor
+            .columns[0];
+        assert_eq!(col.references, Some(TableName::new("users")));
+        assert!(!col.nullable);
+    }
+
+    #[test]
+    fn parse_table_with_mixed_columns_and_refs() {
+        let sql = r#"
+            CREATE TABLE todos (
+                title TEXT NOT NULL,
+                parent_id UUID REFERENCES todos,
+                owner_id UUID REFERENCES users NOT NULL
+            );
+        "#;
+        let schema = parse_schema(sql).unwrap();
+        let table = schema.get(&TableName::new("todos")).unwrap();
+
+        assert_eq!(table.descriptor.columns.len(), 3);
+
+        let title = &table.descriptor.columns[0];
+        assert_eq!(title.name.as_str(), "title");
+        assert_eq!(title.column_type, ColumnType::Text);
+        assert!(title.references.is_none());
+        assert!(!title.nullable);
+
+        let parent = &table.descriptor.columns[1];
+        assert_eq!(parent.name.as_str(), "parent_id");
+        assert_eq!(parent.references, Some(TableName::new("todos")));
+        assert!(parent.nullable);
+
+        let owner = &table.descriptor.columns[2];
+        assert_eq!(owner.name.as_str(), "owner_id");
+        assert_eq!(owner.references, Some(TableName::new("users")));
+        assert!(!owner.nullable);
     }
 }

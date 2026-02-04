@@ -38,6 +38,30 @@ class ColumnBuilder {
 }
 
 // ============================================================================
+// Ref Builder (for foreign key references in schema context)
+// ============================================================================
+
+class RefBuilder {
+  private _nullable = false;
+
+  constructor(private _targetTable: string) {}
+
+  optional(): this {
+    this._nullable = true;
+    return this;
+  }
+
+  _build(name: string): Column {
+    return {
+      name,
+      sqlType: "UUID",
+      nullable: this._nullable,
+      references: this._targetTable,
+    };
+  }
+}
+
+// ============================================================================
 // Add Builder (for migration context)
 // ============================================================================
 
@@ -91,6 +115,7 @@ export const col = {
   boolean: () => new ColumnBuilder("BOOLEAN"),
   int: () => new ColumnBuilder("INTEGER"),
   float: () => new ColumnBuilder("REAL"),
+  ref: (targetTable: string) => new RefBuilder(targetTable),
 
   // Migration context
   add: () => new AddBuilder(),
@@ -105,7 +130,7 @@ export const col = {
 let collectedTables: Table[] = [];
 let collectedMigrations: TableMigration[] = [];
 
-export function table(name: string, columns: Record<string, ColumnBuilder>): void {
+export function table(name: string, columns: Record<string, ColumnBuilder | RefBuilder>): void {
   const cols: Column[] = [];
   for (const [colName, builder] of Object.entries(columns)) {
     cols.push(builder._build(colName));
