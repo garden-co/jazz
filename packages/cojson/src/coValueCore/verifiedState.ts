@@ -144,50 +144,75 @@ export class VerifiedState {
 
     if (cached) {
       // Append to existing cache
-for (const tx of  newTransactions) {
-   cached.transactions.push(tx);
-}
+      for (const tx of newTransactions) {
+        cached.transactions.push(tx);
+      }
       cached.lastSignature = newSignature;
       if (signerID) {
         cached.signerID = signerID;
       }
       // Check if we need to update signatureAfter (in-between signature)
-      const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
-      if (
-        lastCheckpoint !== undefined &&
-        lastCheckpoint !== null &&
-        lastCheckpoint >= 0
-      ) {
-        const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
-        if (sig) {
-          cached.signatureAfter[lastCheckpoint] = sig as Signature;
-        }
-      }
+      this.updateLastCheckpointSignature(sessionID, cached.signatureAfter);
       this.sessionLogCacheValid.set(sessionID, currentTxCount);
     } else {
       // Create new cache entry
+      const signatureAfter: { [txIdx: number]: Signature | undefined } = {};
+      this.updateLastCheckpointSignature(sessionID, signatureAfter);
       const sessionLog: SessionLog = {
         signerID,
         transactions: newTransactions.slice(),
         lastSignature: newSignature,
-        signatureAfter: {},
+        signatureAfter,
         sessionID,
       };
-      // Check for in-between signature
-      const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
-      if (
-        lastCheckpoint !== undefined &&
-        lastCheckpoint !== null &&
-        lastCheckpoint >= 0
-      ) {
-        const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
-        if (sig) {
-          sessionLog.signatureAfter[lastCheckpoint] = sig as Signature;
-        }
-      }
       this.sessionLogCache.set(sessionID, sessionLog);
       this.sessionLogCacheValid.set(sessionID, currentTxCount);
     }
+  }
+
+  /**
+   * Update the signatureAfter map with the latest checkpoint signature.
+   * Used when updating cache incrementally.
+   */
+  private updateLastCheckpointSignature(
+    sessionID: SessionID,
+    signatureAfter: { [txIdx: number]: Signature | undefined },
+  ): void {
+    const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+    if (
+      lastCheckpoint !== undefined &&
+      lastCheckpoint !== null &&
+      lastCheckpoint >= 0
+    ) {
+      const sig = this.impl.getSignatureAfter(sessionID, lastCheckpoint);
+      if (sig) {
+        signatureAfter[lastCheckpoint] = sig as Signature;
+      }
+    }
+  }
+
+  /**
+   * Build the signatureAfter map for a session by iterating through all checkpoints.
+   * Used when building a fresh SessionLog from Rust data.
+   */
+  private buildSignatureAfterMap(sessionID: SessionID): {
+    [txIdx: number]: Signature | undefined;
+  } {
+    const signatureAfter: { [txIdx: number]: Signature | undefined } = {};
+    const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
+    if (
+      lastCheckpoint !== undefined &&
+      lastCheckpoint !== null &&
+      lastCheckpoint >= 0
+    ) {
+      for (let i = 0; i <= lastCheckpoint; i++) {
+        const sig = this.impl.getSignatureAfter(sessionID, i);
+        if (sig) {
+          signatureAfter[i] = sig as Signature;
+        }
+      }
+    }
+    return signatureAfter;
   }
 
   private getSessionLog(sessionID: SessionID): SessionLog {
@@ -200,9 +225,6 @@ for (const tx of  newTransactions) {
       if (cached) return cached;
     }
 
-    // Build fresh SessionLog from Rust data
-    const signatureAfter: { [txIdx: number]: Signature | undefined } = {};
-
     // Fetch all transactions from Rust
     const transactions: Transaction[] =
       currentTxCount > 0
@@ -210,20 +232,7 @@ for (const tx of  newTransactions) {
         : [];
 
     // Build signatureAfter map
-    const lastCheckpoint = this.impl.getLastSignatureCheckpoint(sessionID);
-    if (
-      lastCheckpoint !== undefined &&
-      lastCheckpoint !== null &&
-      lastCheckpoint >= 0
-    ) {
-      // We need to find all checkpoints - iterate from 0 to lastCheckpoint
-      for (let i = 0; i <= lastCheckpoint; i++) {
-        const sig = this.impl.getSignatureAfter(sessionID, i);
-        if (sig) {
-          signatureAfter[i] = sig as Signature;
-        }
-      }
-    }
+    const signatureAfter = this.buildSignatureAfterMap(sessionID);
 
     const lastSignature = this.impl.getLastSignature(sessionID) as
       | Signature
@@ -484,20 +493,6 @@ for (const tx of  newTransactions) {
     const sessionIds = this.impl.getSessionIds() as SessionID[];
     for (const sessionID of sessionIds) {
       yield [sessionID, this.getSessionLog(sessionID)];
-    }
-  }
-
-  *sessionValues(): IterableIterator<SessionLog> {
-    const sessionIds = this.impl.getSessionIds() as SessionID[];
-    for (const sessionID of sessionIds) {
-      yield this.getSessionLog(sessionID);
-    }
-  }
-
-  *sessionKeys(): IterableIterator<SessionID> {
-    const sessionIds = this.impl.getSessionIds() as SessionID[];
-    for (const sessionID of sessionIds) {
-      yield sessionID;
     }
   }
 
