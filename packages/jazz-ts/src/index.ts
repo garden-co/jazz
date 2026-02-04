@@ -24,6 +24,9 @@ export type {
   RenameOp,
 } from "./schema.js";
 
+// Codegen
+export { generateClient, schemaToWasm, generateTypes } from "./codegen/index.js";
+
 // Storage drivers
 export * from "./drivers/index.js";
 

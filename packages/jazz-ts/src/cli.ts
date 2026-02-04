@@ -8,6 +8,7 @@ import { join, basename } from "path";
 import { pathToFileURL } from "url";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
+import { generateClient } from "./codegen/index.js";
 import type { Lens } from "./schema.js";
 
 interface BuildOptions {
@@ -32,15 +33,20 @@ function parseArgs(): { command: string; options: BuildOptions } {
   return { command, options: { jazzBin, schemaDir } };
 }
 
+// Counter for cache-busting dynamic imports
+let importCounter = 0;
+
 async function loadSchemaModule(filePath: string): Promise<void> {
   resetCollectedState();
-  const url = pathToFileURL(filePath).href;
+  // Add cache-busting query param since Node.js caches dynamic imports
+  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
   await import(url);
 }
 
 async function loadMigrationModule(filePath: string): Promise<Lens | null> {
   resetCollectedState();
-  const url = pathToFileURL(filePath).href;
+  // Add cache-busting query param since Node.js caches dynamic imports
+  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
   await import(url);
   return getCollectedMigration();
 }
@@ -52,6 +58,17 @@ async function generateSqlForSchemaFile(tsFile: string): Promise<void> {
   const sqlFile = tsFile.replace(/\.ts$/, ".sql");
   await writeFile(sqlFile, sql);
   console.log(`Generated: ${basename(sqlFile)}`);
+}
+
+async function generateAppTs(schemaDir: string): Promise<void> {
+  // Reload the schema since SQL generation consumed the collected state
+  const schemaFile = join(schemaDir, "current.ts");
+  await loadSchemaModule(schemaFile);
+  const schema = getCollectedSchema();
+  const output = generateClient(schema);
+  const appTsPath = join(schemaDir, "app.ts");
+  await writeFile(appTsPath, output);
+  console.log(`Generated: app.ts`);
 }
 
 /**
@@ -149,6 +166,7 @@ async function build(options: BuildOptions): Promise<void> {
       await generateSqlForMigrationFile(filePath);
     } else if (file === "current.ts") {
       await generateSqlForSchemaFile(filePath);
+      await generateAppTs(schemaDir);
     }
   }
 

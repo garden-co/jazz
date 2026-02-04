@@ -37,6 +37,7 @@ With **shared storage shards** behind the core servers:
 **The challenge**: Indices act as a source of truth for enumeration (all rows in table, filtered rows). With multiple core servers having overlapping but different views, how do we maintain consistency?
 
 **Constraints**:
+
 - Index updates should be locally consistent on write (if core-1 writes a row, core-1's view must immediately reflect it)
 - Global index consistency can be eventual
 - Tables can have billions of rows
@@ -62,6 +63,7 @@ We chose **smart shards with local indices** over replicated indices at cores:
 ```
 
 **Rationale**:
+
 - No N-way index replication between cores
 - Index size scales with shard count, not core server count
 - Core servers can be truly stateless/autoscaling
@@ -83,12 +85,14 @@ Query for (app, table):
 ```
 
 **Why this works**:
+
 - "Do I have data for table X?" is O(1) (hash set of known tables, derived from index)
 - Empty response is trivial (no data, no serialization)
 - Parallel fan-out: latency ≈ slowest shard, not sum of shards
 - No coordination, no registry, no synchronization
 
 **Cost model**:
+
 ```
 N = 1000 shards
 Small table (100 rows): ~100 shards respond "empty", ~1-10 return data
@@ -102,6 +106,7 @@ The overhead for small tables is N network round-trips with ~1 byte payload - ac
 ### The Problem with Uniform Hashing
 
 If we hash `(app, table, object_id)` uniformly, even small tables spread across many shards. We want:
+
 - Small tables: concentrated on few shards
 - Large tables: spread across many shards
 - No object movement as tables grow
@@ -121,6 +126,7 @@ Table lifecycle:
 ```
 
 **Properties**:
+
 - Small tables: exactly 1 shard (optimal)
 - Large tables: proportional shards (optimal)
 - No object movement (writes stay where they landed)
@@ -148,6 +154,7 @@ fn get_shard(app: AppId, table: TableId, slot: u32) -> ShardId {
 ```
 
 **Properties**:
+
 - Adding a shard: only keys where new shard scores highest move to it (~1/N fraction)
 - Removing a shard: only keys on that shard redistribute
 - Deterministic, no central coordinator needed
@@ -248,16 +255,19 @@ fn query(app: AppId, table: TableId, query: Query) -> Results {
 ### Failure Handling
 
 **Primary fails**:
+
 - Core detects timeout, fails over to replica
 - Replica serves reads and accepts writes
 - When primary recovers: sync from replica, resume role
 
 **Replica fails**:
+
 - Primary continues serving
 - Writes not replicated (degraded mode)
 - When replica recovers: sync from primary, resume role
 
 **Both fail**:
+
 - Slot unavailable
 - Queries return partial results (other slots work)
 - Writes to that slot fail
@@ -271,10 +281,12 @@ With subscriptions, we can't determine relevant shards at subscribe time - new d
 ### Solution: Table-Level + Query-Level Subscriptions
 
 **Level 1** (always present on all shards):
+
 - "Core C is interested in table T"
 - Very cheap: just a `(core_id, table_id)` pair
 
 **Level 2** (only on shards with data):
+
 - Full query details: predicates, projections
 - Sent on-demand when shard first gets data for table
 
@@ -356,6 +368,7 @@ struct SlotAssignment {
 ### Migration Flow
 
 **Phase 1: Copying**
+
 ```
 1. Cluster membership changes (new shard added)
 2. Recalculate rendezvous hash: identify affected slots
@@ -365,6 +378,7 @@ struct SlotAssignment {
 ```
 
 **Phase 2: DualWrite**
+
 ```
 1. New primary caught up (replication lag ≈ 0)
 2. Home shard broadcasts: "slot X entering DualWrite, epoch 1→2"
@@ -373,6 +387,7 @@ struct SlotAssignment {
 ```
 
 **Phase 3: Draining**
+
 ```
 1. Old shard observes: no epoch-1 writes for T seconds
 2. Old shard transitions to Draining:
@@ -382,6 +397,7 @@ struct SlotAssignment {
 ```
 
 **Phase 4: Complete (safe to delete)**
+
 ```
 1. Old shard observes: no requests for this slot for T seconds
 2. Old shard deletes data
@@ -410,6 +426,7 @@ fn handle_write(req: WriteRequest) -> Result<(), Error> {
 ### Safety Property
 
 **Old shard only deletes after observing silence**:
+
 - No old-epoch writes for T1 (e.g., 5 minutes)
 - No requests at all for T2 (e.g., 1 hour)
 
@@ -419,9 +436,9 @@ fn handle_write(req: WriteRequest) -> Result<(), Error> {
 
 ```yaml
 migration:
-  catchup_timeout: 30s        # max time for new shard to sync
+  catchup_timeout: 30s # max time for new shard to sync
   dual_write_quiet_period: 5m # no old-epoch writes before Draining
-  drain_quiet_period: 1h      # no requests before delete
+  drain_quiet_period: 1h # no requests before delete
   max_migration_duration: 24h # absolute maximum before forced delete
 ```
 
