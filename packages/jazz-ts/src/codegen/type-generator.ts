@@ -4,6 +4,11 @@
 
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "./relation-analyzer.js";
+import {
+  generateWhereInputTypes,
+  generateQueryBuilderClasses,
+  generateAppExport,
+} from "./query-builder-generator.js";
 
 /**
  * Convert a WasmColumnType to TypeScript type string.
@@ -94,8 +99,8 @@ export function tableNameToInterface(name: string): string {
  *
  * Example output:
  *   export interface TodoInclude {
- *     parent?: boolean | TodoInclude;
- *     owner?: boolean | UserInclude;
+ *     parent?: boolean | TodoInclude | TodoQueryBuilder;
+ *     owner?: boolean | UserInclude | UserQueryBuilder;
  *   }
  */
 function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
@@ -109,7 +114,9 @@ function generateIncludeTypes(relations: Map<string, Relation[]>): string[] {
     for (const rel of rels) {
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
-      lines.push(`  ${rel.name}?: boolean | ${targetInclude};`);
+      const targetQueryBuilder = targetInterface + "QueryBuilder";
+      // Add QueryBuilder to union for type-safe filtered includes
+      lines.push(`  ${rel.name}?: boolean | ${targetInclude} | ${targetQueryBuilder};`);
     }
     lines.push(`}`);
     lines.push(``);
@@ -207,10 +214,13 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
  * Produces:
  * 1. Base interfaces with id field (e.g., Todo)
  * 2. Init interfaces without id (e.g., TodoInit)
- * 3. Include types for relation loading (e.g., TodoInclude)
- * 4. Relations types mapping relation names to types (e.g., TodoRelations)
- * 5. WithIncludes types for type-safe results (e.g., TodoWithIncludes)
- * 6. Exported wasmSchema constant
+ * 3. WhereInput types for filtering (e.g., TodoWhereInput)
+ * 4. Include types for relation loading (e.g., TodoInclude)
+ * 5. Relations types mapping relation names to types (e.g., TodoRelations)
+ * 6. WithIncludes types for type-safe results (e.g., TodoWithIncludes)
+ * 7. QueryBuilder classes (e.g., TodoQueryBuilder)
+ * 8. Exported wasmSchema constant
+ * 9. App export with table proxies
  */
 export function generateTypes(schema: WasmSchema): string {
   const lines: string[] = [
@@ -244,6 +254,9 @@ export function generateTypes(schema: WasmSchema): string {
     lines.push("");
   }
 
+  // WhereInput types (for type-safe filtering)
+  lines.push(...generateWhereInputTypes(schema));
+
   // Analyze relations and generate relation types
   const relations = analyzeRelations(schema);
 
@@ -259,6 +272,12 @@ export function generateTypes(schema: WasmSchema): string {
   // Export WasmSchema JSON
   lines.push(`export const wasmSchema: WasmSchema = ${JSON.stringify(schema, null, 2)};`);
   lines.push("");
+
+  // QueryBuilder classes
+  lines.push(...generateQueryBuilderClasses(schema, relations));
+
+  // App export with table proxies
+  lines.push(...generateAppExport(schema));
 
   return lines.join("\n");
 }

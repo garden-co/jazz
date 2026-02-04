@@ -9,6 +9,11 @@ import { generateTypes } from "./type-generator.js";
 export { schemaToWasm } from "./schema-reader.js";
 export { generateTypes, tableNameToInterface } from "./type-generator.js";
 export { analyzeRelations, type Relation } from "./relation-analyzer.js";
+export {
+  generateWhereInputTypes,
+  generateQueryBuilderClasses,
+  generateAppExport,
+} from "./query-builder-generator.js";
 
 /**
  * Generate TypeScript client code from a schema.
