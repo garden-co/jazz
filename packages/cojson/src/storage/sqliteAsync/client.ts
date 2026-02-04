@@ -38,9 +38,124 @@ export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-export class SQLiteClientAsync
-  implements DBClientInterfaceAsync, DBTransactionInterfaceAsync
-{
+/**
+ * Executes storage operations inside a single DB transaction.
+ */
+export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
+  constructor(private readonly tx: SQLiteDatabaseDriverAsync) {}
+
+  async getSingleCoValueSession(
+    coValueRowId: number,
+    sessionID: SessionID,
+  ): Promise<StoredSessionRow | undefined> {
+    return this.tx.get<StoredSessionRow>(
+      "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
+      [coValueRowId, sessionID],
+    );
+  }
+
+  async markCoValueAsDeleted(id: RawCoID): Promise<void> {
+    await this.tx.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
+  }
+
+  async addSessionUpdate({
+    sessionUpdate,
+  }: {
+    sessionUpdate: SessionRow;
+    sessionRow?: StoredSessionRow;
+  }): Promise<number> {
+    const result = await this.tx.get<{ rowID: number }>(
+      `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(coValue, sessionID) DO UPDATE SET lastIdx=excluded.lastIdx, lastSignature=excluded.lastSignature, bytesSinceLastSignature=excluded.bytesSinceLastSignature
+                            RETURNING rowID`,
+      [
+        sessionUpdate.coValue,
+        sessionUpdate.sessionID,
+        sessionUpdate.lastIdx,
+        sessionUpdate.lastSignature,
+        sessionUpdate.bytesSinceLastSignature,
+      ],
+    );
+
+    if (!result) {
+      throw new Error("Failed to add session update");
+    }
+
+    return result.rowID;
+  }
+
+  async addTransaction(
+    sessionRowID: number,
+    nextIdx: number,
+    newTransaction: Transaction,
+  ): Promise<void> {
+    await this.tx.run(
+      "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
+      [sessionRowID, nextIdx, JSON.stringify(newTransaction)],
+    );
+  }
+
+  async addSignatureAfter({
+    sessionRowID,
+    idx,
+    signature,
+  }: {
+    sessionRowID: number;
+    idx: number;
+    signature: Signature;
+  }): Promise<void> {
+    await this.tx.run(
+      "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
+      [sessionRowID, idx, signature],
+    );
+  }
+
+  async deleteCoValueContent(
+    coValueRow: Pick<StoredCoValueRow, "rowID" | "id">,
+  ): Promise<void> {
+    await this.tx.run(
+      `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%$'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.tx.run(
+      `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%$'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.tx.run(
+      `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%$'`,
+      [coValueRow.rowID],
+    );
+
+    await this.tx.run(
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+      [
+        coValueRow.id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
+    );
+  }
+}
+
+export class SQLiteClientAsync implements DBClientInterfaceAsync {
   private readonly db: SQLiteDatabaseDriverAsync;
 
   constructor(db: SQLiteDatabaseDriverAsync) {
@@ -77,16 +192,6 @@ export class SQLiteClientAsync
     return this.db.query<StoredSessionRow>(
       "SELECT * FROM sessions WHERE coValue = ?",
       [coValueRowId],
-    );
-  }
-
-  async getSingleCoValueSession(
-    coValueRowId: number,
-    sessionID: SessionID,
-  ): Promise<StoredSessionRow | undefined> {
-    return this.db.get<StoredSessionRow>(
-      "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
-      [coValueRowId, sessionID],
     );
   }
 
@@ -151,15 +256,6 @@ export class SQLiteClientAsync
     return result.rowID;
   }
 
-  async markCoValueAsDeleted(id: RawCoID) {
-    // Work queue entry. Table only stores the coValueID.
-    // Idempotent by design.
-    await this.db.run(
-      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
-      [id],
-    );
-  }
-
   async eraseCoValueButKeepTombstone(coValueId: RawCoID) {
     const coValueRow = await this.db.get<RawCoValueRow & { rowID: number }>(
       "SELECT * FROM coValues WHERE id = ?",
@@ -176,45 +272,6 @@ export class SQLiteClientAsync
     });
   }
 
-  async deleteCoValueContent(coValueRow: StoredCoValueRow): Promise<void> {
-    await this.db.run(
-      `DELETE FROM transactions
-       WHERE ses IN (
-         SELECT rowID FROM sessions
-         WHERE coValue = ?
-           AND sessionID NOT LIKE '%$'
-       )`,
-      [coValueRow.rowID],
-    );
-
-    await this.db.run(
-      `DELETE FROM signatureAfter
-       WHERE ses IN (
-         SELECT rowID FROM sessions
-         WHERE coValue = ?
-           AND sessionID NOT LIKE '%$'
-       )`,
-      [coValueRow.rowID],
-    );
-
-    await this.db.run(
-      `DELETE FROM sessions
-       WHERE coValue = ?
-         AND sessionID NOT LIKE '%$'`,
-      [coValueRow.rowID],
-    );
-
-    await this.db.run(
-      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
-       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
-      [
-        coValueRow.id,
-        DeletedCoValueDeletionStatus.Done,
-        DeletedCoValueDeletionStatus.Done,
-      ],
-    );
-  }
-
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
     const rows = await this.db.query<DeletedCoValueQueueRow>(
       `SELECT coValueID as id
@@ -225,62 +282,12 @@ export class SQLiteClientAsync
     return rows.map((r) => r.id);
   }
 
-  async addSessionUpdate({
-    sessionUpdate,
-  }: {
-    sessionUpdate: SessionRow;
-  }): Promise<number> {
-    const result = await this.db.get<{ rowID: number }>(
-      `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(coValue, sessionID) DO UPDATE SET lastIdx=excluded.lastIdx, lastSignature=excluded.lastSignature, bytesSinceLastSignature=excluded.bytesSinceLastSignature
-                            RETURNING rowID`,
-      [
-        sessionUpdate.coValue,
-        sessionUpdate.sessionID,
-        sessionUpdate.lastIdx,
-        sessionUpdate.lastSignature,
-        sessionUpdate.bytesSinceLastSignature,
-      ],
-    );
-
-    if (!result) {
-      throw new Error("Failed to add session update");
-    }
-
-    return result.rowID;
-  }
-
-  addTransaction(
-    sessionRowID: number,
-    nextIdx: number,
-    newTransaction: Transaction,
-  ) {
-    this.db.run("INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)", [
-      sessionRowID,
-      nextIdx,
-      JSON.stringify(newTransaction),
-    ]);
-  }
-
-  async addSignatureAfter({
-    sessionRowID,
-    idx,
-    signature,
-  }: {
-    sessionRowID: number;
-    idx: number;
-    signature: Signature;
-  }) {
-    this.db.run(
-      "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
-      [sessionRowID, idx, signature],
-    );
-  }
-
   async transaction(
     operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
-  ) {
-    return this.db.transaction(() => operationsCallback(this));
+  ): Promise<unknown> {
+    return this.db.transaction((tx) =>
+      operationsCallback(new SQLiteTransactionAsync(tx)),
+    );
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
