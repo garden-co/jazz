@@ -29,11 +29,15 @@ bench/
 
 ## File Naming
 
-Benchmark files follow the pattern: `<subject>.<package>.bench.ts`
+Benchmark files follow the pattern: `<subject>.<operation>.bench.ts`
+
+Each file should focus on **a single benchmark** comparing multiple implementations (e.g., `@latest` vs `@workspace`).
 
 Examples:
-- `comap.create.jazz-tools.bench.ts`
-- `asBase64.jazz-tools.bench.ts`
+- `comap.create.jazz-tools.bench.ts` — benchmarks CoMap creation
+- `filestream.getChunks.bench.ts` — benchmarks FileStream.getChunks()
+- `filestream.asBase64.bench.ts` — benchmarks FileStream.asBase64()
+- `binaryCoStream.write.bench.ts` — benchmarks binary stream writes
 
 ## Benchmark Library: cronometro
 
@@ -44,27 +48,39 @@ Benchmarks use [cronometro](https://github.com/ShogunPanda/cronometro), which ru
 ```ts
 import cronometro from "cronometro";
 
+const TOTAL_BYTES = 5 * 1024 * 1024;
 let data: SomeType;
 
 await cronometro(
   {
-    "descriptive test name": {
+    "operation - @latest": {
       async before() {
         // Setup — runs once before the test iterations
-        data = prepareTestData();
+        data = prepareTestData(TOTAL_BYTES);
       },
       test() {
         // The code being benchmarked — runs many times
-        doWork(data);
+        latestImplementation(data);
       },
       async after() {
         // Cleanup — runs once after all iterations
         cleanup();
       },
     },
+    "operation - @workspace": {
+      async before() {
+        data = prepareTestData(TOTAL_BYTES);
+      },
+      test() {
+        workspaceImplementation(data);
+      },
+      async after() {
+        cleanup();
+      },
+    },
   },
   {
-    iterations: 20,
+    iterations: 50,
     warmup: true,
     print: {
       colors: true,
@@ -78,44 +94,43 @@ await cronometro(
 );
 ```
 
-### Comparing Two Implementations
+### Single Cronometro Instance Per Benchmark
 
-The typical pattern is to define both old and new implementations as standalone functions, then benchmark them side by side:
+Each benchmark file should have **a single `cronometro()` call** that compares multiple implementations of the same operation. This makes results easier to read and compare:
 
 ```ts
 import cronometro from "cronometro";
 
-function oldImplementation(input: InputType): OutputType {
-  // original code
-}
-
-function newImplementation(input: InputType): OutputType {
-  // optimized code
-}
-
+const TOTAL_BYTES = 5 * 1024 * 1024;
 let data: InputType;
 
 await cronometro(
   {
-    "old (description)": {
+    "operationName - @latest": {
       async before() {
-        data = generateInput();
+        data = generateInput(TOTAL_BYTES);
       },
       test() {
-        oldImplementation(data);
+        latestImplementation(data);
+      },
+      async after() {
+        cleanup();
       },
     },
-    "new (description)": {
+    "operationName - @workspace": {
       async before() {
-        data = generateInput();
+        data = generateInput(TOTAL_BYTES);
       },
       test() {
-        newImplementation(data);
+        workspaceImplementation(data);
+      },
+      async after() {
+        cleanup();
       },
     },
   },
   {
-    iterations: 20,
+    iterations: 50,
     warmup: true,
     print: { colors: true, compare: true },
     onTestError: (testName: string, error: unknown) => {
@@ -125,6 +140,12 @@ await cronometro(
   },
 );
 ```
+
+Key principles:
+- **One file = one benchmark** (e.g., `getChunks`, `asBase64`, `write`)
+- **One cronometro call** comparing `@latest` vs `@workspace` (or old vs new)
+- **Fixed data size** at the top of the file (e.g., `const TOTAL_BYTES = 5 * 1024 * 1024`)
+- **Descriptive test names** with format `"operation - @implementation"`
 
 ### Comparing workspace vs published package
 
@@ -185,37 +206,30 @@ Key points:
 - Use `MockSessionProvider` — avoids real session persistence
 - Call `(ctx.node as any).gracefulShutdown()` in `after()` to clean up
 
-### Multiple cronometro runs in one file
-
-You can `await` multiple `cronometro()` calls sequentially to separate different benchmark categories (e.g. write vs read):
-
-```ts
-console.log("\n=== Write Benchmark ===\n");
-await cronometro({ /* write tests */ }, options);
-
-console.log("\n=== Read Benchmark ===\n");
-await cronometro({ /* read tests */ }, options);
-```
-
-This is useful when:
-- Write tests create data inside `test()` (measures creation)
-- Read tests create data in `before()` and only measure reads in `test()`
-
 ### Test data strategy
 
-**Pre-generate at module level** when the data itself isn't what you're measuring:
+**Define a fixed data size constant at the top of the file**, then generate test data inside the `before` hook:
 
 ```ts
-const chunks100k = makeChunks(100 * 1024, CHUNK_SIZE);
-const chunks1m = makeChunks(1024 * 1024, CHUNK_SIZE);
-const chunks5m = makeChunks(5 * 1024 * 1024, CHUNK_SIZE);
+const TOTAL_BYTES = 5 * 1024 * 1024; // 5MB
+
+let chunks: Uint8Array[];
+
+await cronometro({
+  "operationName - @workspace": {
+    async before() {
+      chunks = makeChunks(TOTAL_BYTES, CHUNK_SIZE);
+    },
+    test() {
+      doWork(chunks);
+    },
+  },
+}, options);
 ```
 
-Note: cronometro workers re-import the file, so module-level data is regenerated per worker. This is fine — it just adds a small startup cost, not measurement noise.
+**Choose a size large enough to measure meaningfully.** Small data (e.g., 100KB) may complete so fast that measurement noise dominates. 5MB is typically a good default for file/stream operations.
 
-**Choose chunk sizes to stress the right thing.** Small chunks (e.g. 4KB) create many transactions, exposing per-transaction overhead. Multiple total sizes (100KB, 1MB, 5MB) show how performance scales.
-
-**Skip sizes that are too fast to measure meaningfully** — e.g. reading 100KB might complete so fast that measurement noise dominates.
+**All fixture generation must be done inside the `before` hook**, not at module level. This ensures data is created in the same worker thread that runs the test.
 
 ## Running Benchmarks
 
@@ -299,91 +313,116 @@ Keep benchmark files to simple TypeScript that only uses type annotations, inter
 
 ## Example: Full Benchmark
 
+This example shows a benchmark comparing `getChunks()` between the published package and workspace code:
+
 ```ts
 import cronometro from "cronometro";
+import * as localTools from "jazz-tools";
+import * as latestPublishedTools from "jazz-tools-latest";
+import { WasmCrypto as LocalWasmCrypto } from "cojson/crypto/WasmCrypto";
+import { cojsonInternals } from "cojson";
+import { WasmCrypto as LatestPublishedWasmCrypto } from "cojson-latest/crypto/WasmCrypto";
 
-function makeTestData(size: number) {
+const CHUNK_SIZE = cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
+const TOTAL_BYTES = 5 * 1024 * 1024;
+
+function makeChunks(totalBytes: number, chunkSize: number): Uint8Array[] {
   const chunks: Uint8Array[] = [];
-  let remaining = size;
+  let remaining = totalBytes;
   while (remaining > 0) {
-    const chunkSize = Math.min(4096, remaining);
-    const chunk = new Uint8Array(chunkSize);
-    for (let i = 0; i < chunkSize; i++) {
+    const size = Math.min(chunkSize, remaining);
+    const chunk = new Uint8Array(size);
+    for (let i = 0; i < size; i++) {
       chunk[i] = Math.floor(Math.random() * 256);
     }
     chunks.push(chunk);
-    remaining -= chunkSize;
+    remaining -= size;
   }
-  return { chunks };
+  return chunks;
 }
 
-function oldApproach(data: { chunks: Uint8Array[] }): string {
-  let binary = "";
-  for (const chunk of data.chunks) {
-    for (let i = 0; i < chunk.length; i++) {
-      binary += String.fromCharCode(chunk[i]!);
-    }
-  }
-  return btoa(binary);
+type Tools = typeof localTools;
+
+async function createContext(tools: Tools, wasmCrypto: typeof LocalWasmCrypto) {
+  const ctx = await tools.createJazzContextForNewAccount({
+    creationProps: { name: "Bench Account" },
+    peers: [],
+    crypto: await wasmCrypto.create(),
+    sessionProvider: new tools.MockSessionProvider(),
+  });
+  return { account: ctx.account, node: ctx.node, FileStream: tools.FileStream };
 }
 
-function newApproach(data: { chunks: Uint8Array[] }): string {
-  let totalLen = 0;
-  for (const chunk of data.chunks) totalLen += chunk.length;
-  const merged = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const chunk of data.chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  const CHUNK = 32768;
-  const parts: string[] = [];
-  for (let i = 0; i < totalLen; i += CHUNK) {
-    parts.push(
-      String.fromCharCode.apply(
-        null,
-        merged.subarray(i, Math.min(i + CHUNK, totalLen)) as unknown as number[],
-      ),
-    );
-  }
-  return btoa(parts.join(""));
+function populateStream(ctx: Awaited<ReturnType<typeof createContext>>, chunks: Uint8Array[]) {
+  let totalBytes = 0;
+  for (const c of chunks) totalBytes += c.length;
+  const stream = ctx.FileStream.create({ owner: ctx.account });
+  stream.start({ mimeType: "application/octet-stream", totalSizeBytes: totalBytes });
+  for (const chunk of chunks) stream.push(chunk);
+  stream.end();
+  return stream;
 }
 
-let data: { chunks: Uint8Array[] };
+const benchOptions = {
+  iterations: 50,
+  warmup: true,
+  print: { colors: true, compare: true },
+  onTestError: (testName: string, error: unknown) => {
+    console.error(`\nError in test "${testName}":`);
+    console.error(error);
+  },
+};
+
+let readCtx: Awaited<ReturnType<typeof createContext>>;
+let readStream: ReturnType<typeof populateStream>;
 
 await cronometro(
   {
-    "old - 1MB": {
-      async before() { data = makeTestData(1024 * 1024); },
-      test() { oldApproach(data); },
+    "getChunks - @latest": {
+      async before() {
+        readCtx = await createContext(
+          // @ts-expect-error version mismatch
+          latestPublishedTools,
+          LatestPublishedWasmCrypto,
+        );
+        readStream = populateStream(readCtx, makeChunks(TOTAL_BYTES, CHUNK_SIZE));
+      },
+      test() {
+        readStream.getChunks();
+      },
+      async after() {
+        (readCtx.node as any).gracefulShutdown();
+      },
     },
-    "new - 1MB": {
-      async before() { data = makeTestData(1024 * 1024); },
-      test() { newApproach(data); },
+    "getChunks - @workspace": {
+      async before() {
+        readCtx = await createContext(localTools, LocalWasmCrypto);
+        readStream = populateStream(readCtx, makeChunks(TOTAL_BYTES, CHUNK_SIZE));
+      },
+      test() {
+        readStream.getChunks();
+      },
+      async after() {
+        (readCtx.node as any).gracefulShutdown();
+      },
     },
   },
-  {
-    iterations: 20,
-    warmup: true,
-    print: { colors: true, compare: true },
-    onTestError: (testName: string, error: unknown) => {
-      console.error(`\nError in test "${testName}":`);
-      console.error(error);
-    },
-  },
+  benchOptions,
 );
 ```
 
 ## Checklist
 
+- [ ] One benchmark file per operation (e.g., `filestream.getChunks.bench.ts`)
+- [ ] Single `cronometro()` call comparing `@latest` vs `@workspace`
+- [ ] Fixed data size constant at top of file (e.g., `const TOTAL_BYTES = 5 * 1024 * 1024`)
 - [ ] Benchmark file placed in `bench/jazz-tools/` with `*.bench.ts` naming
 - [ ] Script added to `bench/package.json` using `node --experimental-strip-types --no-warnings`
 - [ ] `before`/`after` hooks are `async` (not plain sync)
-- [ ] `iterations` set to at least 20 for stable results
+- [ ] `iterations` set to at least 50 for stable results
 - [ ] `warmup: true` enabled
 - [ ] `onTestError` handler included to surface worker failures
-- [ ] Test names are descriptive (include what's being compared and data size)
+- [ ] Test names follow format `"operation - @implementation"` (e.g., `"getChunks - @workspace"`)
 - [ ] When comparing vs published: npm aliases added to `bench/package.json` and `pnpm install` run
 - [ ] When using Jazz context: `gracefulShutdown()` called in `after()` hook
-- [ ] Test data pre-generated at module level (not inside `test()`) when data creation isn't what's being measured
-- [ ] Multiple data sizes tested to show scaling behavior
+- [ ] Test data generated inside `before()` hooks (not at module level or inside `test()`)

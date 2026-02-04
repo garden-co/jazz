@@ -843,38 +843,30 @@ export class FileStream extends CoValueBase implements CoValue {
 
     if (!data) return undefined;
 
-    let totalLen = 0;
-    for (const chunk of data.chunks) {
-      totalLen += chunk.length;
-    }
-
-    // We merge all the chunks together to make it more
-    // simple to apply fromCharCode with a safe amount of arguments
-    const merged = new Uint8Array(totalLen);
-    let offset = 0;
-    for (const chunk of data.chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
-
-    // The CHUNK_SIZE is the safest max amount of arguments
-    // we can pass at once in a JS function
-    // V8 has around 64k limit, so the half of that should be safe
+    // Using String.fromCharCode.apply with batches of bytes is significantly faster
+    // than building the string byte-by-byte (e.g., `result += String.fromCharCode(byte)`).
+    // Each string concatenation creates a new string object, making byte-by-byte O(n²).
+    // With apply, we convert many bytes at once, reducing string allocations.
+    //
+    // We limit batch size to 32KB because V8 has ~64k argument limit for function calls.
     const CHUNK_SIZE = 32768;
     const parts: string[] = [];
-    for (let i = 0; i < totalLen; i += CHUNK_SIZE) {
-      // We try to combine as many bytes as possible in a single part
-      // to reduce the amount of strings we generate
-      parts.push(
-        String.fromCharCode.apply(
-          null,
-          merged.subarray(
-            i,
-            Math.min(i + CHUNK_SIZE, totalLen),
-          ) as unknown as number[],
-        ),
-      );
+
+    // Process each chunk directly without merging into a single buffer
+    for (const chunk of data.chunks) {
+      for (let i = 0; i < chunk.length; i += CHUNK_SIZE) {
+        parts.push(
+          String.fromCharCode.apply(
+            null,
+            chunk.subarray(
+              i,
+              Math.min(i + CHUNK_SIZE, chunk.length),
+            ) as unknown as number[],
+          ),
+        );
+      }
     }
+
     const base64 = btoa(parts.join(""));
 
     if (options?.dataURL) {

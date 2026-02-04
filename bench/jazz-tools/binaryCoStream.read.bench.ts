@@ -2,11 +2,12 @@ import cronometro from "cronometro";
 import * as localTools from "jazz-tools";
 import * as latestPublishedTools from "jazz-tools-latest";
 import { WasmCrypto as LocalWasmCrypto } from "cojson/crypto/WasmCrypto";
+import { cojsonInternals } from "cojson";
 import { WasmCrypto as LatestPublishedWasmCrypto } from "cojson-latest/crypto/WasmCrypto";
 
 // --- Test data (pre-generated, not measured) ---
 
-const CHUNK_SIZE = 4096;
+const CHUNK_SIZE = cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
 
 function makeChunks(totalBytes: number, chunkSize: number): Uint8Array[] {
   const chunks: Uint8Array[] = [];
@@ -22,10 +23,6 @@ function makeChunks(totalBytes: number, chunkSize: number): Uint8Array[] {
   }
   return chunks;
 }
-
-const chunks100k = makeChunks(100 * 1024, CHUNK_SIZE);
-const chunks1m = makeChunks(1024 * 1024, CHUNK_SIZE);
-const chunks5m = makeChunks(5 * 1024 * 1024, CHUNK_SIZE);
 
 // --- Context setup helper ---
 
@@ -80,7 +77,7 @@ function populateStream(ctx: BenchContext, chunks: Uint8Array[]) {
 }
 
 const benchOptions = {
-  iterations: 20,
+  iterations: 500,
   warmup: true,
   print: {
     colors: true,
@@ -91,116 +88,6 @@ const benchOptions = {
     console.error(error);
   },
 };
-
-// =============================================================
-// Write 100KB
-// =============================================================
-
-let ctx: BenchContext;
-
-await cronometro(
-  {
-    "Write 100KB - @latest": {
-      async before() {
-        ctx = await createContext(
-          // @ts-expect-error version mismatch
-          latestPublishedTools,
-          LatestPublishedWasmCrypto,
-        );
-      },
-      test() {
-        populateStream(ctx, chunks100k);
-      },
-      async after() {
-        (ctx.node as any).gracefulShutdown();
-      },
-    },
-    "Write 100KB - @workspace": {
-      async before() {
-        ctx = await createContext(localTools, LocalWasmCrypto);
-      },
-      test() {
-        populateStream(ctx, chunks100k);
-      },
-      async after() {
-        (ctx.node as any).gracefulShutdown();
-      },
-    },
-  },
-  benchOptions,
-);
-
-// =============================================================
-// Write 1MB
-// =============================================================
-
-await cronometro(
-  {
-    "Write 1MB - @latest": {
-      async before() {
-        ctx = await createContext(
-          // @ts-expect-error version mismatch
-          latestPublishedTools,
-          LatestPublishedWasmCrypto,
-        );
-      },
-      test() {
-        populateStream(ctx, chunks1m);
-      },
-      async after() {
-        (ctx.node as any).gracefulShutdown();
-      },
-    },
-    "Write 1MB - @workspace": {
-      async before() {
-        ctx = await createContext(localTools, LocalWasmCrypto);
-      },
-      test() {
-        populateStream(ctx, chunks1m);
-      },
-      async after() {
-        (ctx.node as any).gracefulShutdown();
-      },
-    },
-  },
-  benchOptions,
-);
-
-// =============================================================
-// Write 5MB
-// =============================================================
-
-await cronometro(
-  {
-    "Write 5MB - @latest": {
-      async before() {
-        ctx = await createContext(
-          // @ts-expect-error version mismatch
-          latestPublishedTools,
-          LatestPublishedWasmCrypto,
-        );
-      },
-      test() {
-        populateStream(ctx, chunks5m);
-      },
-      async after() {
-        (ctx.node as any).gracefulShutdown();
-      },
-    },
-    "Write 5MB - @workspace": {
-      async before() {
-        ctx = await createContext(localTools, LocalWasmCrypto);
-      },
-      test() {
-        populateStream(ctx, chunks5m);
-      },
-      async after() {
-        (ctx.node as any).gracefulShutdown();
-      },
-    },
-  },
-  benchOptions,
-);
 
 // =============================================================
 // getChunks 1MB
@@ -218,7 +105,10 @@ await cronometro(
           latestPublishedTools,
           LatestPublishedWasmCrypto,
         );
-        readStream = populateStream(readCtx, chunks1m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.getChunks();
@@ -230,7 +120,10 @@ await cronometro(
     "getChunks 1MB - @workspace": {
       async before() {
         readCtx = await createContext(localTools, LocalWasmCrypto);
-        readStream = populateStream(readCtx, chunks1m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.getChunks();
@@ -256,7 +149,10 @@ await cronometro(
           latestPublishedTools,
           LatestPublishedWasmCrypto,
         );
-        readStream = populateStream(readCtx, chunks5m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(5 * 1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.getChunks();
@@ -268,7 +164,10 @@ await cronometro(
     "getChunks 5MB - @workspace": {
       async before() {
         readCtx = await createContext(localTools, LocalWasmCrypto);
-        readStream = populateStream(readCtx, chunks5m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(5 * 1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.getChunks();
@@ -294,7 +193,10 @@ await cronometro(
           latestPublishedTools,
           LatestPublishedWasmCrypto,
         );
-        readStream = populateStream(readCtx, chunks1m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.asBase64();
@@ -306,7 +208,10 @@ await cronometro(
     "asBase64 1MB - @workspace": {
       async before() {
         readCtx = await createContext(localTools, LocalWasmCrypto);
-        readStream = populateStream(readCtx, chunks1m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.asBase64();
@@ -332,7 +237,10 @@ await cronometro(
           latestPublishedTools,
           LatestPublishedWasmCrypto,
         );
-        readStream = populateStream(readCtx, chunks5m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(5 * 1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.asBase64();
@@ -344,7 +252,10 @@ await cronometro(
     "asBase64 5MB - @workspace": {
       async before() {
         readCtx = await createContext(localTools, LocalWasmCrypto);
-        readStream = populateStream(readCtx, chunks5m);
+        readStream = populateStream(
+          readCtx,
+          makeChunks(5 * 1024 * 1024, CHUNK_SIZE),
+        );
       },
       test() {
         readStream.asBase64();
