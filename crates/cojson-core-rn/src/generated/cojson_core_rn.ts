@@ -69,6 +69,22 @@ const uniffiIsDebug =
 // Public interface members begin here.
 
 /**
+ * Decodes a base64url string to bytes (handles both padded and unpadded)
+ */
+export function base64urlToBytes(base64: string): ArrayBuffer {
+  return FfiConverterArrayBuffer.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_base64url_to_bytes(
+          FfiConverterString.lower(base64),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
  * Hash data once using BLAKE3.
  * - `data`: Raw bytes to hash
  * Returns 32 bytes of hash output.
@@ -104,6 +120,22 @@ export function blake3HashOnceWithContext(
         return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_blake3_hash_once_with_context(
           FfiConverterArrayBuffer.lower(data),
           FfiConverterArrayBuffer.lower(context),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
+ * Encodes bytes to a base64url string (with padding to match JS implementation)
+ */
+export function bytesToBase64url(bytes: ArrayBuffer): string {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_bytes_to_base64url(
+          FfiConverterArrayBuffer.lower(bytes),
           callStatus
         );
       },
@@ -2127,6 +2159,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_base64url_to_bytes() !==
+    59885
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_base64url_to_bytes'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_blake3_hash_once() !==
     58834
   ) {
@@ -2140,6 +2180,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_blake3_hash_once_with_context'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_bytes_to_base64url() !==
+    47249
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_bytes_to_base64url'
     );
   }
   if (
