@@ -905,6 +905,8 @@ describe("CoList Branching", () => {
     // Client1 adds items to the branch
     aliceBranch.append("eggs", undefined, "trusting");
 
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
     // Client2 loads the branch from a different session
     const branchOnClient2 = await loadCoValueOrFail(
       client2.node,
@@ -918,11 +920,11 @@ describe("CoList Branching", () => {
       "trusting",
     );
 
-    // Merge the branch back to source
     branchOnClient2.core.mergeBranch();
 
-    // Wait for sync
-    await groceryList.core.waitForSync();
+    // Wait for all coValues to sync on both nodes
+    await client2.node.syncManager.waitForAllCoValuesSync();
+    await client1.node.syncManager.waitForAllCoValuesSync();
 
     // Source list should contain the final state
     expect(groceryList.toJSON()).toEqual(["milk", "eggs", "cheese"]);
@@ -961,6 +963,8 @@ describe("CoList Branching", () => {
     // Client2 adds different items to second branch
     bobBranch.append("eggs", undefined, "trusting");
 
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
     // Client2 loads first branch and modifies it
     const aliceBranchOnClient2 = await loadCoValueOrFail(
       client2.node,
@@ -976,8 +980,9 @@ describe("CoList Branching", () => {
 
     bobBranch.core.mergeBranch();
 
-    // Wait for sync
-    await groceryList.core.waitForSync();
+    // Wait for all coValues to sync on both nodes
+    await client2.node.syncManager.waitForAllCoValuesSync();
+    await client1.node.syncManager.waitForAllCoValuesSync();
 
     // Source list should contain all changes
     expect(groceryList.toJSON()).toMatchInlineSnapshot(`
