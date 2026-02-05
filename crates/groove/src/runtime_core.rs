@@ -1738,6 +1738,134 @@ mod delayed_io_tests {
         assert_eq!(total, 1, "Same row should not appear twice");
     }
 
+    /// D4: Insert when index is "ready" but target leaf page is not loaded
+    /// Status: RED - insert returns Ok(false) and write is lost until page loads
+    /// Fixed by: Phase 4 (pending_writes should capture writes even when PageNotLoaded)
+    ///
+    /// Scenario: Index has meta + root loaded (is_ready() == true), but the root
+    /// is an internal node pointing to leaf pages that aren't loaded yet.
+    /// An insert targeting an unloaded leaf should still be captured.
+    #[test]
+    fn d4_insert_when_leaf_page_not_loaded() {
+        use crate::query_manager::index::btree_index::BTreeIndex;
+        use crate::query_manager::index::btree_page::{BTreePage, IndexMeta, PageId};
+
+        // Create an index with an internal root pointing to leaf pages
+        let mut index = BTreeIndex::new("users", "score");
+
+        // Set up meta: root is page 1, an internal node
+        let mut meta = IndexMeta::new();
+        meta.root_page_id = PageId(1);
+        meta.next_page_id = 4;
+        meta.entry_count = 20;
+        index.process_meta_load(Some(meta.serialize()));
+
+        // Drain the auto-generated request for page 1
+        let _ = index.take_storage_requests();
+
+        // Load root page as an INTERNAL node pointing to leaves 2 and 3
+        // Keys < 50 go to page 2, keys >= 50 go to page 3
+        let root_internal = BTreePage::Internal {
+            keys: vec![50i32.to_be_bytes().to_vec()],
+            children: vec![PageId(2), PageId(3)],
+        };
+        index.process_page_load(PageId(1), Some(root_internal.serialize()));
+
+        // Now index.is_ready() should be true (meta + root loaded)
+        assert!(
+            index.is_ready(),
+            "Index should be ready with meta + root loaded"
+        );
+
+        // But leaf pages 2 and 3 are NOT loaded
+        // Try to insert a row with score=25 (would go to page 2)
+        let row_id = crate::object::ObjectId::new();
+        let key = 25i32.to_be_bytes();
+        let result = index.insert(&key, row_id);
+
+        // Current behavior: insert returns Ok(false) because page 2 isn't loaded
+        // The write is NOT captured anywhere - it's just "deferred"
+
+        // THE INVARIANT: Even when is_ready() but specific page not loaded,
+        // the write should be captured in pending_inserts so it appears in scan results
+
+        // Check if the row appears in scan_all results
+        let scan_results = index.scan_all();
+
+        // Today: scan_results is empty (the insert was lost)
+        // After fix: scan_results should contain row_id
+
+        assert!(
+            scan_results.contains(&row_id),
+            "Insert to unloaded leaf page should be captured in pending_inserts. \
+             Got {} results, expected row_id {:?} to be present. \
+             insert() returned {:?}",
+            scan_results.len(),
+            row_id,
+            result
+        );
+    }
+
+    /// D5: Update that moves row to unloaded page (delete + insert same row_id)
+    /// Status: RED - pending_deletes removes row even if re-inserted
+    /// Fixed by: Phase 4 (pending_inserts "wins" over pending_deletes for same row_id)
+    ///
+    /// Scenario: Row exists with score=25 (page 2). Update changes score to 75
+    /// (would go to page 3). Neither page is loaded.
+    /// At index level: remove(old_key, row_id) + insert(new_key, row_id)
+    /// The row should still appear in scan_all() results.
+    #[test]
+    fn d5_update_moves_row_to_unloaded_page() {
+        use crate::query_manager::index::btree_index::BTreeIndex;
+        use crate::query_manager::index::btree_page::{BTreePage, IndexMeta, PageId};
+
+        let mut index = BTreeIndex::new("users", "score");
+
+        // Set up meta: root is page 1, an internal node
+        let mut meta = IndexMeta::new();
+        meta.root_page_id = PageId(1);
+        meta.next_page_id = 4;
+        meta.entry_count = 20;
+        index.process_meta_load(Some(meta.serialize()));
+
+        // Drain auto-generated request for page 1
+        let _ = index.take_storage_requests();
+
+        // Load root as internal node: keys < 50 → page 2, keys >= 50 → page 3
+        let root_internal = BTreePage::Internal {
+            keys: vec![50i32.to_be_bytes().to_vec()],
+            children: vec![PageId(2), PageId(3)],
+        };
+        index.process_page_load(PageId(1), Some(root_internal.serialize()));
+
+        assert!(
+            index.is_ready(),
+            "Index should be ready with meta + root loaded"
+        );
+
+        // Simulate an UPDATE: row moves from score=25 to score=75
+        let row_id = crate::object::ObjectId::new();
+        let old_key = 25i32.to_be_bytes();
+        let new_key = 75i32.to_be_bytes();
+
+        // Delete old key (page 2 not loaded)
+        let _ = index.remove(&old_key, row_id);
+        // Insert new key (page 3 not loaded)
+        let _ = index.insert(&new_key, row_id);
+
+        // THE INVARIANT: Row should still appear in scan_all()
+        // The delete should NOT remove the row since it was re-inserted
+        let scan_results = index.scan_all();
+
+        assert!(
+            scan_results.contains(&row_id),
+            "Update (delete + insert same row_id) should keep row in results. \
+             pending_inserts should 'win' over pending_deletes for same ObjectId. \
+             Got {} results.",
+            scan_results.len()
+        );
+    }
+
     // ============================================================
     // Category E: Page Discovery and Load Requirements
     // ============================================================
