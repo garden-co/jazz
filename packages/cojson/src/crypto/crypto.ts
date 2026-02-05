@@ -217,6 +217,12 @@ export abstract class CryptoProvider<Blake3State = any> {
       textEncoder.encode(readKeySecret),
       { context: textEncoder.encode("groupSealer") },
     );
+    // Blake3 output must be exactly 32 bytes to match X25519 secret key length
+    if (sealerBytes.length !== 32) {
+      throw new Error(
+        `Blake3 output must be 32 bytes for X25519 key, got ${sealerBytes.length}`,
+      );
+    }
     const secret: SealerSecret = `sealerSecret_z${base58.encode(sealerBytes)}`;
     return {
       secret,
