@@ -2037,12 +2037,13 @@ impl QueryManager {
 
             let delta = subscription.graph.settle(indices, om, row_loader);
 
-            // Check if this subscription has pending local loads
-            let has_pending_loads = subscription.graph.has_pending_ids();
+            // Check if this subscription has pending loads (row data OR index pages)
+            let has_pending_loads = subscription.graph.has_pending_ids() || delta.pending;
 
             // Emit on first settle ONLY if no pending loads, or when delta is non-empty
+            // Never emit while pending - wait for index/row loading to complete
             let needs_initial = !subscription.settled_once && !has_pending_loads;
-            if needs_initial || !delta.is_empty() {
+            if !delta.pending && (needs_initial || !delta.is_empty()) {
                 subscription.settled_once = true;
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,

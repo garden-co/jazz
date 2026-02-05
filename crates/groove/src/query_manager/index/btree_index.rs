@@ -406,8 +406,27 @@ impl BTreeIndex {
     }
 
     /// Check if the index root exists (is ready for operations).
+    ///
+    /// Note: This returns true only when the root page is actually loaded,
+    /// not when it's in the `Loading` state.
     pub fn root_exists(&self) -> bool {
-        self.meta_loaded && self.pages.contains_key(&self.meta.root_page_id)
+        self.meta_loaded
+            && matches!(
+                self.pages.get(&self.meta.root_page_id),
+                Some(PageState::Loaded(_))
+            )
+    }
+
+    /// Check if the index is ready to serve queries.
+    ///
+    /// Returns true only when both metadata AND root page are loaded
+    /// (not just requested for loading).
+    pub fn is_ready(&self) -> bool {
+        self.meta_loaded
+            && matches!(
+                self.pages.get(&self.meta.root_page_id),
+                Some(PageState::Loaded(_))
+            )
     }
 
     /// Reset index to unloaded state for cold start scenarios.

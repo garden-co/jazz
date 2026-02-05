@@ -422,7 +422,7 @@ mod cold_start_tests {
     fn b2_exactly_one_callback_after_cold_start() {
         // Invariant: Cold start produces exactly ONE callback with complete data
         // Status: FAILS TODAY - multiple spurious callbacks
-        // Fixed by: Phase 1
+        // Fixed by: Phase 2 (needs dirty marking when index loads)
 
         let schema = test_users_schema();
         let mut core = create_cold_start_runtime(schema.clone(), |warm| {
@@ -953,7 +953,7 @@ mod e2e_tests {
 | A1 (is_ready methods) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | A2 (scan returns pending) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | B1 (query waits) | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| B2 (no pending callbacks) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| B2 (no pending callbacks) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | C1 (dirty on meta load) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | C2 (only relevant dirty) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | D1 (insert while pending) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
@@ -971,7 +971,7 @@ mod e2e_tests {
 
 **Goal**: IndexScanNode returns `pending=true` when index isn't ready.
 
-**Tests passing after this phase**: A1, A2, B2 (+ A3, F3 which already pass)
+**Tests passing after this phase**: A1, A2 (+ A3, F3 which already pass)
 
 ### Changes
 

@@ -31,6 +31,9 @@ pub struct IndexScanNode {
 
     /// Last delta epoch processed (None = never scanned, uses slow path).
     last_delta_epoch: Option<u64>,
+
+    /// Whether the last scan returned pending (for detecting pending-to-ready transitions).
+    was_pending: bool,
 }
 
 impl IndexScanNode {
@@ -62,6 +65,7 @@ impl IndexScanNode {
             last_scanned_ids: AHashSet::new(),
             dirty: true,
             last_delta_epoch: None,
+            was_pending: false,
         }
     }
 
@@ -96,9 +100,30 @@ impl SourceNode for IndexScanNode {
         );
 
         let Some(index) = ctx.indices.get(&key) else {
+            // Index not yet created - treat as pending
+            self.was_pending = true;
             self.dirty = false;
-            return TupleDelta::new();
+            return TupleDelta {
+                pending: true,
+                ..Default::default()
+            };
         };
+
+        // Check if index is ready for queries
+        if !index.is_ready() {
+            self.was_pending = true;
+            self.dirty = false;
+            return TupleDelta {
+                pending: true,
+                ..Default::default()
+            };
+        }
+
+        // Transitioning from pending to ready - force full rescan
+        if self.was_pending {
+            self.was_pending = false;
+            self.last_delta_epoch = None; // Forces slow path (full scan)
+        }
 
         // Check if we can use the fast path (incremental deltas)
         // Requirements:
