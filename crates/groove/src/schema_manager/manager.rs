@@ -625,8 +625,8 @@ impl SchemaManager {
             }
         }
 
-        // Retry any buffered row updates
-        self.query_manager.retry_pending_row_updates();
+        // Pending row updates will be retried in the next process() call,
+        // which has access to IoHandler needed for index updates.
     }
 
     // =========================================================================
@@ -707,9 +707,6 @@ impl SchemaManager {
             }
         }
 
-        // Retry any pending row updates that might now be processable
-        self.query_manager.retry_pending_row_updates();
-
         // Subscribe using the temporary context
         self.query_manager.subscribe_with_explicit_context(
             query,
@@ -789,7 +786,7 @@ impl SchemaManager {
         self.activate_pending_and_sync_to_query_manager();
 
         // Retry any pending row updates that might now be processable
-        self.query_manager.retry_pending_row_updates();
+        self.query_manager.retry_pending_row_updates(io);
     }
 }
 

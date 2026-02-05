@@ -13,17 +13,10 @@ pub mod sort;
 pub mod subgraph;
 pub mod union;
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 
-use super::index::BTreeIndex;
 use super::types::{RowDescriptor, Tuple, TupleDelta};
-
-/// Index key type: (table, column, branch).
-/// Each branch maintains its own set of indices.
-pub type IndexKey = (String, String, String);
-
-/// Type alias for the indices map.
-pub type IndicesMap = AHashMap<IndexKey, BTreeIndex>;
+use crate::io_handler::IoHandler;
 
 /// Unique identifier for a node in the query graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,7 +24,7 @@ pub struct NodeId(pub u64);
 
 /// Context for source nodes that need external data.
 pub struct SourceContext<'a> {
-    pub indices: &'a IndicesMap,
+    pub io: &'a dyn IoHandler,
 }
 
 // ============================================================================

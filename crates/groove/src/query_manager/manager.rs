@@ -10,11 +10,9 @@ use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, QueryId, SyncManager,
 };
 
-use super::encoding::{decode_row, encode_row};
+use super::encoding::{decode_column, decode_row, encode_row};
 use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::graph_nodes::{IndexKey, IndicesMap};
-use super::index::{BTreeIndex, IndexError};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts, resolve_session_value};
 use super::policy_graph::PolicyGraph;
 use super::query::{Query, QueryBuilder};
@@ -86,12 +84,6 @@ impl std::fmt::Display for QueryError {
     }
 }
 
-impl From<IndexError> for QueryError {
-    fn from(e: IndexError) -> Self {
-        QueryError::IndexError(format!("{:?}", e))
-    }
-}
-
 impl std::error::Error for QueryError {}
 
 /// Handle to a pending query.
@@ -134,8 +126,8 @@ impl InsertHandle {
     /// Check if the row is indexed (appears in the _id index).
     ///
     /// After insert + process(), the row should be indexed.
-    pub fn is_indexed(&self, qm: &QueryManager, table: &str) -> bool {
-        qm.row_is_indexed(table, self.row_id)
+    pub fn is_indexed(&self, qm: &QueryManager, io: &dyn IoHandler, table: &str) -> bool {
+        qm.row_is_indexed(io, table, self.row_id)
     }
 }
 
@@ -232,10 +224,6 @@ pub struct QueryManager {
     sync_manager: SyncManager,
     schema: Arc<Schema>,
 
-    /// Indices: (table, column, branch) -> BTreeIndex
-    /// Each branch maintains its own set of indices.
-    indices: IndicesMap,
-
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
     pending_catalogue_updates: Vec<CatalogueUpdate>,
@@ -289,7 +277,6 @@ impl QueryManager {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
-            indices: IndicesMap::default(),
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -318,16 +305,6 @@ impl QueryManager {
             branch.as_str().to_string(),
             self.schema_context.current_hash,
         );
-
-        // Create indices for current schema
-        for (table_name, table_schema) in &schema {
-            Self::ensure_table_indices_for_branch(
-                &mut self.indices,
-                table_name.as_str(),
-                branch.as_str(),
-                table_schema,
-            );
-        }
     }
 
     /// Add a live schema (one we can read from but don't write to).
@@ -359,16 +336,6 @@ impl QueryManager {
         self.branch_schema_map
             .insert(branch.as_str().to_string(), hash);
 
-        // Create indices for this schema's branch
-        for (table_name, table_schema) in &schema {
-            Self::ensure_table_indices_for_branch(
-                &mut self.indices,
-                table_name.as_str(),
-                branch.as_str(),
-                table_schema,
-            );
-        }
-
         // Mark subscriptions for recompile to pick up new branch
         self.mark_subscriptions_for_recompile();
     }
@@ -382,9 +349,9 @@ impl QueryManager {
         // Try to activate pending schemas
         let activated = self.schema_context.try_activate_pending();
         if !activated.is_empty() {
-            // New schemas activated - update indices and mark for recompile
+            // New schemas activated - register branches and mark for recompile
             for hash in activated {
-                if let Some(schema) = self.schema_context.live_schemas.get(&hash).cloned() {
+                if let Some(_schema) = self.schema_context.live_schemas.get(&hash).cloned() {
                     let branch = ComposedBranchName::new(
                         &self.schema_context.env,
                         hash,
@@ -394,15 +361,6 @@ impl QueryManager {
 
                     self.branch_schema_map
                         .insert(branch.as_str().to_string(), hash);
-
-                    for (table_name, table_schema) in &schema {
-                        Self::ensure_table_indices_for_branch(
-                            &mut self.indices,
-                            table_name.as_str(),
-                            branch.as_str(),
-                            table_schema,
-                        );
-                    }
                 }
             }
             self.mark_subscriptions_for_recompile();
@@ -491,69 +449,15 @@ impl QueryManager {
             .collect()
     }
 
-    /// Public wrapper to ensure indices exist for a table on a specific branch.
-    ///
-    /// Used by SchemaManager for server-mode query execution when setting up
-    /// indices for a client's schema.
+    /// No-op: IoHandler manages its own index storage.
+    /// Kept as public API for SchemaManager compatibility.
     pub fn ensure_indices_for_branch(
         &mut self,
-        table: &str,
-        branch: &str,
-        table_schema: &TableSchema,
+        _table: &str,
+        _branch: &str,
+        _table_schema: &TableSchema,
     ) {
-        Self::ensure_table_indices_for_branch(&mut self.indices, table, branch, table_schema);
-    }
-
-    /// Ensure indices exist for a table on a specific branch.
-    fn ensure_table_indices_for_branch(
-        indices: &mut IndicesMap,
-        table: &str,
-        branch: &str,
-        table_schema: &TableSchema,
-    ) {
-        let key =
-            |col: &str| -> IndexKey { (table.to_string(), col.to_string(), branch.to_string()) };
-
-        // Primary "_id" index (for live rows)
-        if !indices.contains_key(&key("_id")) {
-            let mut id_index = BTreeIndex::new(table, "_id");
-            id_index.process_meta_load(None);
-            indices.insert(key("_id"), id_index);
-        }
-
-        // Soft-deleted rows index
-        if !indices.contains_key(&key("_id_deleted")) {
-            let mut deleted_index = BTreeIndex::new(table, "_id_deleted");
-            deleted_index.process_meta_load(None);
-            indices.insert(key("_id_deleted"), deleted_index);
-        }
-
-        // Index for each column
-        for col in &table_schema.descriptor.columns {
-            let col_str = col.name.as_str();
-            if !indices.contains_key(&key(col_str)) {
-                let mut col_index = BTreeIndex::new(table, col_str);
-                col_index.process_meta_load(None);
-                indices.insert(key(col_str), col_index);
-            }
-        }
-    }
-
-    /// Get a reference to an index by (table, column, branch).
-    fn get_index(&self, table: &str, column: &str, branch: &str) -> Option<&BTreeIndex> {
-        let key: IndexKey = (table.to_string(), column.to_string(), branch.to_string());
-        self.indices.get(&key)
-    }
-
-    /// Get a mutable reference to an index by (table, column, branch).
-    fn get_index_mut(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-    ) -> Option<&mut BTreeIndex> {
-        let key: IndexKey = (table.to_string(), column.to_string(), branch.to_string());
-        self.indices.get_mut(&key)
+        // No-op: IoHandler manages index storage directly
     }
 
     /// Get the underlying SyncManager.
@@ -585,21 +489,6 @@ impl QueryManager {
         &self,
     ) -> &HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
         &self.subscriptions
-    }
-
-    /// Test accessor for index by key (internal testing only).
-    #[cfg(test)]
-    pub fn test_get_index_mut(
-        &mut self,
-        key: &(String, String, String),
-    ) -> Option<&mut super::index::BTreeIndex> {
-        self.indices.get_mut(key)
-    }
-
-    /// Get all index keys (for testing).
-    #[cfg(test)]
-    pub fn test_all_index_keys(&self) -> Vec<(String, String, String)> {
-        self.indices.keys().cloned().collect()
     }
 
     /// Get subscription results as decoded rows with ObjectIds (for testing).
@@ -640,25 +529,37 @@ impl QueryManager {
     }
 
     /// Check if a row is indexed on a specific branch (appears in the _id index).
-    pub fn row_is_indexed_on_branch(&self, table: &str, branch: &str, row_id: ObjectId) -> bool {
-        self.get_index(table, "_id", branch)
-            .is_some_and(|index| index.contains_row(row_id))
+    pub fn row_is_indexed_on_branch(
+        &self,
+        io: &dyn IoHandler,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> bool {
+        let ids = io.index_lookup(table, "_id", branch, &Value::Uuid(row_id));
+        ids.contains(&row_id)
     }
 
     /// Check if a row is indexed on the default branch (appears in the _id index).
-    pub fn row_is_indexed(&self, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_indexed_on_branch(table, &self.current_branch(), row_id)
+    pub fn row_is_indexed(&self, io: &dyn IoHandler, table: &str, row_id: ObjectId) -> bool {
+        self.row_is_indexed_on_branch(io, table, &self.current_branch(), row_id)
     }
 
     /// Check if a row is soft-deleted on a specific branch.
-    pub fn row_is_deleted_on_branch(&self, table: &str, branch: &str, row_id: ObjectId) -> bool {
-        self.get_index(table, "_id_deleted", branch)
-            .is_some_and(|index| index.contains_row(row_id))
+    pub fn row_is_deleted_on_branch(
+        &self,
+        io: &dyn IoHandler,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> bool {
+        let ids = io.index_lookup(table, "_id_deleted", branch, &Value::Uuid(row_id));
+        ids.contains(&row_id)
     }
 
     /// Check if a row is soft-deleted (appears in _id_deleted but not _id).
-    pub fn row_is_deleted(&self, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_deleted_on_branch(table, &self.current_branch(), row_id)
+    pub fn row_is_deleted(&self, io: &dyn IoHandler, table: &str, row_id: ObjectId) -> bool {
+        self.row_is_deleted_on_branch(io, table, &self.current_branch(), row_id)
     }
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
@@ -798,7 +699,7 @@ impl QueryManager {
             .forward_update_to_servers(object_id, branch.into());
 
         // Update indices immediately and persist
-        self.update_indices_for_insert(table, object_id, &data, &descriptor)?;
+        self.update_indices_for_insert(io, table, object_id, &data, &descriptor)?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
@@ -856,9 +757,6 @@ impl QueryManager {
             });
         }
 
-        // Ensure indices exist for this branch
-        Self::ensure_table_indices_for_branch(&mut self.indices, table, branch, table_schema);
-
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
@@ -882,7 +780,14 @@ impl QueryManager {
             .forward_update_to_servers(object_id, branch.into());
 
         // Update indices on specified branch
-        self.update_indices_for_insert_on_branch(table, branch, object_id, &data, &descriptor)?;
+        Self::update_indices_for_insert_on_branch(
+            io,
+            table,
+            branch,
+            object_id,
+            &data,
+            &descriptor,
+        )?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
@@ -1127,7 +1032,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices and persist modified nodes
-        self.update_indices_for_update(&table_name.0, id, &old_data, &new_data, &descriptor)?;
+        self.update_indices_for_update(io, &table_name.0, id, &old_data, &new_data, &descriptor)?;
 
         // Mark subscriptions dirty and notify about content update
         self.mark_subscriptions_dirty(&table_name.0);
@@ -1184,7 +1089,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(&table, id) {
+        if self.row_is_deleted(io, &table, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -1231,7 +1136,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(&table, id, &old_data, &descriptor)?;
+        self.update_indices_for_soft_delete(io, &table, id, &old_data, &descriptor)?;
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1269,7 +1174,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(&table, id) {
+        if self.row_is_deleted(io, &table, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -1328,7 +1233,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(&table, id, &old_data, &descriptor)?;
+        self.update_indices_for_soft_delete(io, &table, id, &old_data, &descriptor)?;
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1358,7 +1263,7 @@ impl QueryManager {
         let table_name = TableName::new(table);
 
         // Check if already soft-deleted on this branch
-        if self.row_is_deleted_on_branch(table, branch, id) {
+        if self.row_is_deleted_on_branch(io, table, branch, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -1372,9 +1277,6 @@ impl QueryManager {
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.descriptor.clone();
-
-        // Ensure indices exist for this branch
-        Self::ensure_table_indices_for_branch(&mut self.indices, table, branch, table_schema);
 
         // Get parent commit on this branch
         let tips = self
@@ -1407,7 +1309,14 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices on this branch
-        self.update_indices_for_soft_delete_on_branch(table, branch, id, &old_data, &descriptor)?;
+        Self::update_indices_for_soft_delete_on_branch(
+            io,
+            table,
+            branch,
+            id,
+            &old_data,
+            &descriptor,
+        )?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
@@ -1445,7 +1354,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(&table, id) {
+        if !self.row_is_deleted(io, &table, id) {
             return Err(QueryError::RowNotDeleted(id));
         }
 
@@ -1493,7 +1402,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from _id_deleted, add to _id and column indices
-        self.update_indices_for_undelete(&table, id, &new_data, &descriptor)?;
+        self.update_indices_for_undelete(io, &table, id, &new_data, &descriptor)?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(&table);
@@ -1574,7 +1483,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from ALL indices including _id_deleted
-        self.update_indices_for_hard_delete(&table, id, old_data.as_deref(), &descriptor)?;
+        self.update_indices_for_hard_delete(io, &table, id, old_data.as_deref(), &descriptor)?;
 
         // Truncate branch: set tails = [delete_commit_id], removing all history
         // (In ObjectManager, this would be done via set_tails or similar)
@@ -1621,7 +1530,7 @@ impl QueryManager {
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(&table, id) {
+        if !self.row_is_deleted(io, &table, id) {
             return Err(QueryError::RowNotDeleted(id));
         }
 
@@ -1856,10 +1765,10 @@ impl QueryManager {
     /// Call this after activating new schemas (via try_activate_pending_schemas)
     /// and updating the schema context (via sync_context). Rows that arrived
     /// before their schema was known will be reprocessed.
-    pub fn retry_pending_row_updates(&mut self) {
+    pub fn retry_pending_row_updates(&mut self, io: &mut dyn IoHandler) {
         let pending = std::mem::take(&mut self.pending_row_updates);
         for update in pending {
-            self.handle_object_update(update);
+            self.handle_object_update(io, update);
         }
     }
 
@@ -1952,12 +1861,12 @@ impl QueryManager {
         // so new subscriptions can find data that arrived in the same batch.
         let updates = self.sync_manager.object_manager.take_all_object_updates();
         for update in updates {
-            self.handle_object_update(update);
+            self.handle_object_update(io, update);
         }
 
         // 3. Process pending query subscriptions from downstream clients
         // (after indices are updated, so initial settle finds existing data)
-        self.process_pending_query_subscriptions();
+        self.process_pending_query_subscriptions(io);
 
         // 3b. Process pending query unsubscriptions from downstream clients
         self.process_pending_query_unsubscriptions();
@@ -1981,7 +1890,7 @@ impl QueryManager {
         // 8. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
-        let indices = &self.indices;
+        let io_ref: &dyn IoHandler = io;
         let schema_context = &self.schema_context;
         let branch_schema_map = &self.branch_schema_map;
 
@@ -2058,7 +1967,7 @@ impl QueryManager {
                 subscription.graph.set_pending_branch(first_branch);
             }
 
-            let delta = subscription.graph.settle(indices, om, row_loader);
+            let delta = subscription.graph.settle(io_ref, om, row_loader);
 
             // Check if this subscription has pending loads (row data OR index pages)
             let has_pending_loads = subscription.graph.has_pending_ids() || delta.pending;
@@ -2081,15 +1990,7 @@ impl QueryManager {
         // async loads - objects are available when we query for them.
 
         // 9. Settle server-side subscriptions and update scopes
-        self.settle_server_subscriptions();
-
-        // 10. Clear index deltas after all subscriptions have settled
-        // This increments the epoch so the next process() cycle uses fresh deltas
-        for index in self.indices.values_mut() {
-            if index.has_deltas() {
-                index.clear_deltas();
-            }
-        }
+        self.settle_server_subscriptions(io_ref);
     }
 
     /// Pick up pending permission checks from SyncManager and evaluate them.
@@ -2107,7 +2008,7 @@ impl QueryManager {
     /// 1. Build a QueryGraph with the client's session
     /// 2. Settle the graph to get contributing ObjectIds
     /// 3. Set the scope in SyncManager (which triggers initial sync)
-    fn process_pending_query_subscriptions(&mut self) {
+    fn process_pending_query_subscriptions<H: IoHandler>(&mut self, io: &mut H) {
         let pending = self.sync_manager.take_pending_query_subscriptions();
 
         for sub in pending {
@@ -2149,7 +2050,7 @@ impl QueryManager {
 
             // Initial settle to populate the graph
             let om = &self.sync_manager.object_manager;
-            let indices = &self.indices;
+            let io_ref: &dyn IoHandler = io;
 
             // Resolve branches: use explicit branches or fall back to schema context
             let branches: Vec<String> = if sub.query.branches.is_empty() {
@@ -2195,7 +2096,7 @@ impl QueryManager {
                     .map(|(_, content, commit_id)| (content, commit_id))
             };
 
-            let _delta = graph.settle(indices, om, row_loader);
+            let _delta = graph.settle(io_ref, om, row_loader);
 
             // Get contributing ObjectIds
             let scope = graph.contributing_object_ids();
@@ -2255,7 +2156,7 @@ impl QueryManager {
     /// Called after local data changes to detect when new objects match
     /// a client's query subscription.
     #[allow(clippy::type_complexity)]
-    fn settle_server_subscriptions(&mut self) {
+    fn settle_server_subscriptions(&mut self, io: &dyn IoHandler) {
         // Collect updates to avoid borrow issues
         let mut scope_updates: Vec<(
             ClientId,
@@ -2265,7 +2166,6 @@ impl QueryManager {
         )> = Vec::new();
 
         let om = &self.sync_manager.object_manager;
-        let indices = &self.indices;
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let branches = &sub.branches;
@@ -2304,7 +2204,7 @@ impl QueryManager {
             };
 
             // Settle the graph
-            let _delta = sub.graph.settle(indices, om, row_loader);
+            let _delta = sub.graph.settle(io, om, row_loader);
 
             // Check if scope changed
             let new_scope = sub.graph.contributing_object_ids();
@@ -2686,7 +2586,7 @@ impl QueryManager {
 
         // Create row loader for settling
         let om = &self.sync_manager.object_manager;
-        let indices = &self.indices;
+        let io_ref: &dyn IoHandler = io;
         let current_branch = self.current_branch();
 
         // Settle each active policy check
@@ -2706,7 +2606,7 @@ impl QueryManager {
             let all_complete = state
                 .graphs
                 .iter_mut()
-                .all(|g| g.settle(indices, om, &mut row_loader));
+                .all(|g| g.settle(io_ref, om, &mut row_loader));
 
             if all_complete {
                 // All graphs settled - check results
@@ -2870,7 +2770,7 @@ impl QueryManager {
     }
 
     /// Handle an object update from the global subscription.
-    fn handle_object_update(&mut self, update: AllObjectUpdate) {
+    fn handle_object_update(&mut self, io: &mut dyn IoHandler, update: AllObjectUpdate) {
         // Check if this is a catalogue object (schema or lens)
         if let Some(type_str) = update.metadata.get("type")
             && (type_str == "catalogue_schema" || type_str == "catalogue_lens")
@@ -2948,9 +2848,6 @@ impl QueryManager {
 
         let descriptor = table_schema.descriptor.clone();
 
-        // Ensure indices exist for this branch
-        Self::ensure_table_indices_for_branch(&mut self.indices, &table, branch, &table_schema);
-
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
         if self.is_hard_deleted(update.object_id) {
             // Hard delete is authoritative - ignore incoming updates
@@ -2961,7 +2858,8 @@ impl QueryManager {
         if self.is_incoming_hard_delete(update.object_id) {
             // Apply hard delete unconditionally
             let old_data = update.old_content.as_deref();
-            let _ = self.update_indices_for_hard_delete_on_branch(
+            let _ = Self::update_indices_for_hard_delete_on_branch(
+                io,
                 &table,
                 branch,
                 update.object_id,
@@ -2977,7 +2875,8 @@ impl QueryManager {
         if self.is_soft_delete_commit(update.object_id) {
             // Apply soft delete - remove from _id and column indices, add to _id_deleted
             if let Some(old_data) = &update.old_content {
-                let _ = self.update_indices_for_soft_delete_on_branch(
+                let _ = Self::update_indices_for_soft_delete_on_branch(
+                    io,
                     &table,
                     branch,
                     update.object_id,
@@ -2986,12 +2885,20 @@ impl QueryManager {
                 );
             } else {
                 // No old content - just remove from _id and add to _id_deleted
-                if let Some(index) = self.get_index_mut(&table, "_id", branch) {
-                    let _ = index.remove(update.object_id.uuid().as_bytes(), update.object_id);
-                }
-                if let Some(index) = self.get_index_mut(&table, "_id_deleted", branch) {
-                    let _ = index.insert(update.object_id.uuid().as_bytes(), update.object_id);
-                }
+                let _ = io.index_remove(
+                    &table,
+                    "_id",
+                    branch,
+                    &Value::Uuid(update.object_id),
+                    update.object_id,
+                );
+                let _ = io.index_insert(
+                    &table,
+                    "_id_deleted",
+                    branch,
+                    &Value::Uuid(update.object_id),
+                    update.object_id,
+                );
             }
             self.mark_subscriptions_dirty(&table);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
@@ -2999,7 +2906,7 @@ impl QueryManager {
         }
 
         // Check if this is an undelete (non-empty content for previously soft-deleted row)
-        let was_soft_deleted = self.row_is_deleted_on_branch(&table, branch, update.object_id);
+        let was_soft_deleted = self.row_is_deleted_on_branch(io, &table, branch, update.object_id);
 
         // Extract current (new) data from the object on this branch
         let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
@@ -3009,7 +2916,8 @@ impl QueryManager {
 
         if was_soft_deleted {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
-            let _ = self.update_indices_for_undelete_on_branch(
+            let _ = Self::update_indices_for_undelete_on_branch(
+                io,
                 &table,
                 branch,
                 update.object_id,
@@ -3023,7 +2931,8 @@ impl QueryManager {
         // Normal update handling
         if update.is_new_object || update.previous_commit_ids.is_empty() {
             // First commit on branch (new object or synced first commit) - insert into all indices
-            let _ = self.update_indices_for_insert_on_branch(
+            let _ = Self::update_indices_for_insert_on_branch(
+                io,
                 &table,
                 branch,
                 update.object_id,
@@ -3033,7 +2942,8 @@ impl QueryManager {
         } else if let Some(old_data) = update.old_content {
             // Synced update - compute index delta using old_content
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
-            let _ = self.update_indices_for_update_on_branch(
+            let _ = Self::update_indices_for_update_on_branch(
+                io,
                 &table,
                 branch,
                 update.object_id,
@@ -3074,7 +2984,7 @@ impl QueryManager {
 
     /// Update indices when a row is inserted on a specific branch.
     fn update_indices_for_insert_on_branch(
-        &mut self,
+        io: &mut dyn IoHandler,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3082,17 +2992,16 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Update "_id" index
-        if let Some(index) = self.get_index_mut(table, "_id", branch) {
-            index.insert(object_id.uuid().as_bytes(), object_id)?;
-        }
+        io.index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
+            .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
 
         // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
-                && let Ok(Some(value_bytes)) =
-                    super::encoding::column_bytes(descriptor, data, col_idx)
+            if let Ok(value) = decode_column(descriptor, data, col_idx)
+                && value != Value::Null
             {
-                index.insert(value_bytes, object_id)?;
+                io.index_insert(table, col.name.as_str(), branch, &value, object_id)
+                    .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
             }
         }
 
@@ -3101,13 +3010,15 @@ impl QueryManager {
 
     /// Update indices when a row is inserted (on the default branch).
     fn update_indices_for_insert(
-        &mut self,
+        &self,
+        io: &mut dyn IoHandler,
         table: &str,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        self.update_indices_for_insert_on_branch(
+        Self::update_indices_for_insert_on_branch(
+            io,
             table,
             &self.current_branch(),
             object_id,
@@ -3118,7 +3029,7 @@ impl QueryManager {
 
     /// Update indices when a row is updated on a specific branch.
     fn update_indices_for_update_on_branch(
-        &mut self,
+        io: &mut dyn IoHandler,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3130,19 +3041,17 @@ impl QueryManager {
 
         // Update column indices (remove old value, add new value)
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch) {
-                // Remove old value
-                if let Ok(Some(old_bytes)) =
-                    super::encoding::column_bytes(descriptor, old_data, col_idx)
-                {
-                    index.remove(old_bytes, object_id)?;
-                }
-                // Add new value
-                if let Ok(Some(new_bytes)) =
-                    super::encoding::column_bytes(descriptor, new_data, col_idx)
-                {
-                    index.insert(new_bytes, object_id)?;
-                }
+            // Remove old value
+            if let Ok(old_value) = decode_column(descriptor, old_data, col_idx)
+                && old_value != Value::Null
+            {
+                let _ = io.index_remove(table, col.name.as_str(), branch, &old_value, object_id);
+            }
+            // Add new value
+            if let Ok(new_value) = decode_column(descriptor, new_data, col_idx)
+                && new_value != Value::Null
+            {
+                let _ = io.index_insert(table, col.name.as_str(), branch, &new_value, object_id);
             }
         }
 
@@ -3151,14 +3060,16 @@ impl QueryManager {
 
     /// Update indices when a row is updated (on the default branch).
     fn update_indices_for_update(
-        &mut self,
+        &self,
+        io: &mut dyn IoHandler,
         table: &str,
         object_id: ObjectId,
         old_data: &[u8],
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        self.update_indices_for_update_on_branch(
+        Self::update_indices_for_update_on_branch(
+            io,
             table,
             &self.current_branch(),
             object_id,
@@ -3170,7 +3081,7 @@ impl QueryManager {
 
     /// Update indices for soft delete on a specific branch.
     fn update_indices_for_soft_delete_on_branch(
-        &mut self,
+        io: &mut dyn IoHandler,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3178,37 +3089,41 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id" index
-        if let Some(index) = self.get_index_mut(table, "_id", branch) {
-            index.remove(object_id.uuid().as_bytes(), object_id)?;
-        }
+        let _ = io.index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id);
 
         // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
-                && let Ok(Some(value_bytes)) =
-                    super::encoding::column_bytes(descriptor, old_data, col_idx)
+            if let Ok(value) = decode_column(descriptor, old_data, col_idx)
+                && value != Value::Null
             {
-                index.remove(value_bytes, object_id)?;
+                let _ = io.index_remove(table, col.name.as_str(), branch, &value, object_id);
             }
         }
 
         // Add to "_id_deleted" index
-        if let Some(index) = self.get_index_mut(table, "_id_deleted", branch) {
-            index.insert(object_id.uuid().as_bytes(), object_id)?;
-        }
+        io.index_insert(
+            table,
+            "_id_deleted",
+            branch,
+            &Value::Uuid(object_id),
+            object_id,
+        )
+        .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
 
         Ok(())
     }
 
     /// Update indices for soft delete (on the default branch).
     fn update_indices_for_soft_delete(
-        &mut self,
+        &self,
+        io: &mut dyn IoHandler,
         table: &str,
         object_id: ObjectId,
         old_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        self.update_indices_for_soft_delete_on_branch(
+        Self::update_indices_for_soft_delete_on_branch(
+            io,
             table,
             &self.current_branch(),
             object_id,
@@ -3219,7 +3134,7 @@ impl QueryManager {
 
     /// Update indices for hard delete on a specific branch.
     fn update_indices_for_hard_delete_on_branch(
-        &mut self,
+        io: &mut dyn IoHandler,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3227,42 +3142,42 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id" index (may not be present if already soft-deleted)
-        if let Some(index) = self.get_index_mut(table, "_id", branch) {
-            // Ignore errors - row may not be in _id if already soft-deleted
-            let _ = index.remove(object_id.uuid().as_bytes(), object_id);
-        }
+        let _ = io.index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id);
 
         // Remove from all column indices (if we have old data)
         if let Some(data) = old_data {
             for (col_idx, col) in descriptor.columns.iter().enumerate() {
-                if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
-                    && let Ok(Some(value_bytes)) =
-                        super::encoding::column_bytes(descriptor, data, col_idx)
+                if let Ok(value) = decode_column(descriptor, data, col_idx)
+                    && value != Value::Null
                 {
-                    // Ignore errors - row may not be in column index if already soft-deleted
-                    let _ = index.remove(value_bytes, object_id);
+                    let _ = io.index_remove(table, col.name.as_str(), branch, &value, object_id);
                 }
             }
         }
 
         // Remove from "_id_deleted" index (handles soft→hard upgrade)
-        if let Some(index) = self.get_index_mut(table, "_id_deleted", branch) {
-            // Ignore errors - row may not be in _id_deleted if it was never soft-deleted
-            let _ = index.remove(object_id.uuid().as_bytes(), object_id);
-        }
+        let _ = io.index_remove(
+            table,
+            "_id_deleted",
+            branch,
+            &Value::Uuid(object_id),
+            object_id,
+        );
 
         Ok(())
     }
 
     /// Update indices for hard delete (on the default branch).
     fn update_indices_for_hard_delete(
-        &mut self,
+        &self,
+        io: &mut dyn IoHandler,
         table: &str,
         object_id: ObjectId,
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        self.update_indices_for_hard_delete_on_branch(
+        Self::update_indices_for_hard_delete_on_branch(
+            io,
             table,
             &self.current_branch(),
             object_id,
@@ -3273,7 +3188,7 @@ impl QueryManager {
 
     /// Update indices for undelete on a specific branch.
     fn update_indices_for_undelete_on_branch(
-        &mut self,
+        io: &mut dyn IoHandler,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3281,22 +3196,24 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id_deleted" index
-        if let Some(index) = self.get_index_mut(table, "_id_deleted", branch) {
-            index.remove(object_id.uuid().as_bytes(), object_id)?;
-        }
+        let _ = io.index_remove(
+            table,
+            "_id_deleted",
+            branch,
+            &Value::Uuid(object_id),
+            object_id,
+        );
 
         // Add to "_id" index
-        if let Some(index) = self.get_index_mut(table, "_id", branch) {
-            index.insert(object_id.uuid().as_bytes(), object_id)?;
-        }
+        io.index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
+            .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
 
         // Add to all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Some(index) = self.get_index_mut(table, col.name.as_str(), branch)
-                && let Ok(Some(value_bytes)) =
-                    super::encoding::column_bytes(descriptor, new_data, col_idx)
+            if let Ok(value) = decode_column(descriptor, new_data, col_idx)
+                && value != Value::Null
             {
-                index.insert(value_bytes, object_id)?;
+                let _ = io.index_insert(table, col.name.as_str(), branch, &value, object_id);
             }
         }
 
@@ -3305,13 +3222,15 @@ impl QueryManager {
 
     /// Update indices for undelete (on the default branch).
     fn update_indices_for_undelete(
-        &mut self,
+        &self,
+        io: &mut dyn IoHandler,
         table: &str,
         object_id: ObjectId,
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        self.update_indices_for_undelete_on_branch(
+        Self::update_indices_for_undelete_on_branch(
+            io,
             table,
             &self.current_branch(),
             object_id,
@@ -3384,16 +3303,6 @@ impl QueryManager {
     // No-op storage driver (for tests)
     // ========================================================================
 
-    /// Reset all indices to unloaded state for cold start scenarios.
-    ///
-    /// Call this on a new QueryManager created with an existing SyncManager
-    /// to allow indices to load their data from storage rather than starting empty.
-    pub fn reset_indices_for_cold_start(&mut self) {
-        for index in self.indices.values_mut() {
-            index.reset_for_cold_start();
-        }
-    }
-
     // ========================================================================
     // Memory profiling
     // ========================================================================
@@ -3401,20 +3310,15 @@ impl QueryManager {
     /// Calculate memory usage breakdown for profiling.
     ///
     /// Returns a tuple: (indices, subscriptions, policy_checks, total)
+    /// Note: indices are managed by IoHandler, so index memory is reported as 0.
     pub fn memory_size(&self) -> (usize, usize, usize, usize) {
-        // Indices state (mostly just the pending_index_updates queue)
-        let mut indices = 0usize;
-        for ((table, col, branch), index) in &self.indices {
-            indices += table.len() + col.len() + branch.len() + 64; // Key size + HashMap entry
-            indices += index.memory_size();
-        }
+        let indices = 0usize; // Indices managed by IoHandler
 
         // Subscriptions (QueryGraph can be large)
         let mut subscriptions = 0usize;
         for (id, sub) in &self.subscriptions {
             subscriptions += std::mem::size_of_val(id);
             subscriptions += std::mem::size_of::<QuerySubscription>();
-            // QueryGraph size estimation - it has maps and sets
             subscriptions += sub.graph.estimate_memory_size();
             subscriptions += 48; // HashMap entry overhead
         }

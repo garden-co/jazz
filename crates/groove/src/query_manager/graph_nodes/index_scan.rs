@@ -8,12 +8,10 @@ use crate::query_manager::types::{
 
 use super::{SourceContext, SourceNode};
 
-/// Source node that scans an index.
+/// Source node that scans an index via IoHandler.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
 #[derive(Debug)]
 pub struct IndexScanNode {
-    /// Reference to the index state (borrowed from QueryManager).
-    /// For now, we store the table/column/branch info and access index externally.
     pub table: TableName,
     pub column: ColumnName,
     pub branch: String,
@@ -28,23 +26,10 @@ pub struct IndexScanNode {
     last_scanned_ids: AHashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
-
-    /// Last delta epoch processed (None = never scanned, uses slow path).
-    last_delta_epoch: Option<u64>,
-
-    /// Whether the last scan returned pending (for detecting pending-to-ready transitions).
-    was_pending: bool,
 }
 
 impl IndexScanNode {
     /// Create a new index scan node.
-    ///
-    /// # Arguments
-    /// * `table` - Table name
-    /// * `column` - Column to scan on
-    /// * `branch` - Branch to scan on
-    /// * `condition` - Scan condition
-    /// * `row_descriptor` - Row descriptor for the table
     pub fn new_with_branch(
         table: impl Into<TableName>,
         column: impl Into<ColumnName>,
@@ -53,7 +38,6 @@ impl IndexScanNode {
         row_descriptor: RowDescriptor,
     ) -> Self {
         let table = table.into();
-        // Output is a single-element tuple, unmaterialized (ID-only)
         let output_descriptor = TupleDescriptor::single(table.as_str(), row_descriptor);
         Self {
             table,
@@ -64,18 +48,10 @@ impl IndexScanNode {
             current_tuples: AHashSet::new(),
             last_scanned_ids: AHashSet::new(),
             dirty: true,
-            last_delta_epoch: None,
-            was_pending: false,
         }
     }
 
     /// Create a new index scan node on the default "main" branch.
-    ///
-    /// # Arguments
-    /// * `table` - Table name
-    /// * `column` - Column to scan on
-    /// * `condition` - Scan condition
-    /// * `row_descriptor` - Row descriptor for the table
     pub fn new(
         table: impl Into<TableName>,
         column: impl Into<ColumnName>,
@@ -93,107 +69,57 @@ impl IndexScanNode {
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
-        let key = (
-            self.table.as_str().to_string(),
-            self.column.as_str().to_string(),
-            self.branch.clone(),
-        );
-
-        let Some(index) = ctx.indices.get(&key) else {
-            // Index not yet created - treat as pending
-            self.was_pending = true;
-            self.dirty = false;
-            return TupleDelta {
-                pending: true,
-                ..Default::default()
-            };
+        let new_ids: AHashSet<ObjectId> = match &self.condition {
+            ScanCondition::All => ctx
+                .io
+                .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
+                .into_iter()
+                .collect(),
+            ScanCondition::Eq(value) => ctx
+                .io
+                .index_lookup(
+                    self.table.as_str(),
+                    self.column.as_str(),
+                    &self.branch,
+                    value,
+                )
+                .into_iter()
+                .collect(),
+            ScanCondition::Range { min, max } => {
+                let start = min.as_ref();
+                let end = max.as_ref();
+                ctx.io
+                    .index_range(
+                        self.table.as_str(),
+                        self.column.as_str(),
+                        &self.branch,
+                        start,
+                        end,
+                    )
+                    .into_iter()
+                    .collect()
+            }
         };
 
-        // Check if index is ready for queries
-        if !index.is_ready() {
-            self.was_pending = true;
-            self.dirty = false;
-            return TupleDelta {
-                pending: true,
-                ..Default::default()
-            };
-        }
+        // Diff against last scan
+        let added: Vec<ObjectId> = new_ids
+            .difference(&self.last_scanned_ids)
+            .copied()
+            .collect();
+        let removed: Vec<ObjectId> = self
+            .last_scanned_ids
+            .difference(&new_ids)
+            .copied()
+            .collect();
 
-        // Transitioning from pending to ready - force full rescan
-        if self.was_pending {
-            self.was_pending = false;
-            self.last_delta_epoch = None; // Forces slow path (full scan)
-        }
-
-        // Check if we can use the fast path (incremental deltas)
-        // Requirements:
-        // 1. We've done at least one scan (last_delta_epoch is Some)
-        // 2. The epoch matches (no deltas were cleared since our last scan)
-        let can_use_deltas =
-            self.last_delta_epoch == Some(index.delta_epoch()) && self.last_delta_epoch.is_some();
-
-        let (added, removed) = if can_use_deltas {
-            // FAST PATH: Use deltas directly from the index
-            let (delta_added, delta_removed) = index.get_deltas(&self.condition);
-
-            // Filter to only IDs not already tracked (avoid double-counting)
-            let added_ids: Vec<ObjectId> = delta_added
-                .into_iter()
-                .filter(|id| !self.last_scanned_ids.contains(id))
-                .collect();
-            let removed_ids: Vec<ObjectId> = delta_removed
-                .into_iter()
-                .filter(|id| self.last_scanned_ids.contains(id))
-                .collect();
-
-            // Update state incrementally
-            for &id in &added_ids {
-                self.last_scanned_ids.insert(id);
-                self.current_tuples.insert(Tuple::from_id(id));
-            }
-            for &id in &removed_ids {
-                self.last_scanned_ids.remove(&id);
-                self.current_tuples.remove(&Tuple::from_id(id));
-            }
-
-            (added_ids, removed_ids)
-        } else {
-            // SLOW PATH: Full scan (first scan or epoch mismatch)
-            let new_ids: AHashSet<ObjectId> = match &self.condition {
-                ScanCondition::All => index.scan_all().into_iter().collect(),
-                ScanCondition::Eq(k) => index.lookup_exact(k).into_iter().collect(),
-                ScanCondition::Range { min, max } => {
-                    index.range_scan(min, max).into_iter().collect()
-                }
-            };
-
-            let added: Vec<ObjectId> = new_ids
-                .difference(&self.last_scanned_ids)
-                .copied()
-                .collect();
-            let removed: Vec<ObjectId> = self
-                .last_scanned_ids
-                .difference(&new_ids)
-                .copied()
-                .collect();
-
-            // Update state
-            self.last_scanned_ids = new_ids;
-            self.current_tuples = self
-                .last_scanned_ids
-                .iter()
-                .map(|&id| Tuple::from_id(id))
-                .collect();
-
-            // Record the epoch so we can use fast path next time
-            self.last_delta_epoch = Some(index.delta_epoch());
-
-            (added, removed)
-        };
-
+        self.last_scanned_ids = new_ids;
+        self.current_tuples = self
+            .last_scanned_ids
+            .iter()
+            .map(|&id| Tuple::from_id(id))
+            .collect();
         self.dirty = false;
 
-        // Return TupleDelta with length-1 tuples
         TupleDelta {
             added: added.into_iter().map(Tuple::from_id).collect(),
             removed: removed.into_iter().map(Tuple::from_id).collect(),
@@ -218,18 +144,12 @@ impl SourceNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::graph_nodes::IndicesMap;
-    use crate::query_manager::index::BTreeIndex;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType};
+    use crate::io_handler::{IoHandler, MemoryIoHandler};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
     use std::ops::Bound;
 
-    fn make_ctx(indices: &IndicesMap) -> SourceContext<'_> {
-        SourceContext { indices }
-    }
-
-    /// Helper to create a 3-tuple index key for the "main" branch.
-    fn index_key(table: &str, column: &str) -> (String, String, String) {
-        (table.to_string(), column.to_string(), "main".to_string())
+    fn make_ctx(io: &dyn crate::io_handler::IoHandler) -> SourceContext<'_> {
+        SourceContext { io }
     }
 
     fn test_descriptor() -> RowDescriptor {
@@ -246,21 +166,20 @@ mod tests {
 
     #[test]
     fn scan_all_returns_all_rows() {
-        let mut index = BTreeIndex::new("users", "_id");
-        index.process_meta_load(None); // Initialize empty index
+        let mut io = MemoryIoHandler::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(row1.uuid().as_bytes(), row1).unwrap();
-        index.insert(row2.uuid().as_bytes(), row2).unwrap();
-        index.insert(row3.uuid().as_bytes(), row3).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "_id"), index);
+        io.index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
+            .unwrap();
+        io.index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
+            .unwrap();
+        io.index_insert("users", "_id", "main", &Value::Uuid(row3), row3)
+            .unwrap();
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&indices);
+        let ctx = make_ctx(&io);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 3);
@@ -272,24 +191,34 @@ mod tests {
 
     #[test]
     fn scan_eq_returns_matching_rows() {
-        let mut index = BTreeIndex::new("users", "email");
-        index.process_meta_load(None);
+        let mut io = MemoryIoHandler::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(b"alice@example.com", row1).unwrap();
-        index.insert(b"bob@example.com", row2).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "email"), index);
+        io.index_insert(
+            "users",
+            "email",
+            "main",
+            &Value::Text("alice@example.com".into()),
+            row1,
+        )
+        .unwrap();
+        io.index_insert(
+            "users",
+            "email",
+            "main",
+            &Value::Text("bob@example.com".into()),
+            row2,
+        )
+        .unwrap();
 
         let mut node = IndexScanNode::new(
             "users",
             "email",
-            ScanCondition::Eq(b"alice@example.com".to_vec()),
+            ScanCondition::Eq(Value::Text("alice@example.com".into())),
             test_descriptor(),
         );
-        let ctx = make_ctx(&indices);
+        let ctx = make_ctx(&io);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
@@ -298,29 +227,28 @@ mod tests {
 
     #[test]
     fn scan_range_returns_rows_in_range() {
-        let mut index = BTreeIndex::new("users", "score");
-        index.process_meta_load(None);
+        let mut io = MemoryIoHandler::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        index.insert(&10i32.to_le_bytes(), row1).unwrap();
-        index.insert(&20i32.to_le_bytes(), row2).unwrap();
-        index.insert(&30i32.to_le_bytes(), row3).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "score"), index);
+        io.index_insert("users", "score", "main", &Value::Integer(10), row1)
+            .unwrap();
+        io.index_insert("users", "score", "main", &Value::Integer(20), row2)
+            .unwrap();
+        io.index_insert("users", "score", "main", &Value::Integer(30), row3)
+            .unwrap();
 
         let mut node = IndexScanNode::new(
             "users",
             "score",
             ScanCondition::Range {
-                min: Bound::Included(15i32.to_le_bytes().to_vec()),
-                max: Bound::Included(25i32.to_le_bytes().to_vec()),
+                min: Bound::Included(Value::Integer(15)),
+                max: Bound::Included(Value::Integer(25)),
             },
             test_descriptor(),
         );
-        let ctx = make_ctx(&indices);
+        let ctx = make_ctx(&io);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
@@ -329,53 +257,34 @@ mod tests {
 
     #[test]
     fn rescan_detects_changes() {
-        let mut index = BTreeIndex::new("users", "_id");
-        index.process_meta_load(None);
+        let mut io = MemoryIoHandler::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        index.insert(row1.uuid().as_bytes(), row1).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "_id"), index);
+        io.index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
+            .unwrap();
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&indices);
+        let ctx = make_ctx(&io);
         let delta1 = node.scan(&ctx);
         assert_eq!(delta1.added.len(), 1);
         assert!(contains_id(&delta1.added, row1));
 
-        // Simulate end of process cycle: clear deltas
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .clear_deltas();
-
         // Add another row
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .insert(row2.uuid().as_bytes(), row2)
+        io.index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
             .unwrap();
-        let ctx = make_ctx(&indices);
+
+        let ctx = make_ctx(&io);
         let delta2 = node.scan(&ctx);
         assert_eq!(delta2.added.len(), 1);
         assert!(contains_id(&delta2.added, row2));
         assert!(delta2.removed.is_empty());
 
-        // Simulate end of process cycle: clear deltas
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .clear_deltas();
-
         // Remove first row
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .remove(row1.uuid().as_bytes(), row1)
+        io.index_remove("users", "_id", "main", &Value::Uuid(row1), row1)
             .unwrap();
-        let ctx = make_ctx(&indices);
+
+        let ctx = make_ctx(&io);
         let delta3 = node.scan(&ctx);
         assert!(delta3.added.is_empty());
         assert_eq!(delta3.removed.len(), 1);
@@ -388,136 +297,7 @@ mod tests {
         let node = IndexScanNode::new("users", "_id", ScanCondition::All, desc);
         let output = node.output_tuple_descriptor();
 
-        // Should be single element, unmaterialized
         assert_eq!(output.element_count(), 1);
         assert!(!output.materialization().is_materialized(0));
-    }
-
-    // ========================================================================
-    // Delta/incremental scan tests
-    // ========================================================================
-
-    #[test]
-    fn full_scan_on_first_call() {
-        let mut index = BTreeIndex::new("users", "_id");
-        index.process_meta_load(None);
-        let row1 = ObjectId::new();
-        index.insert(row1.uuid().as_bytes(), row1).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "_id"), index);
-
-        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-
-        // First scan should use slow path (last_delta_epoch is None)
-        assert!(node.last_delta_epoch.is_none());
-
-        let ctx = make_ctx(&indices);
-        let delta = node.scan(&ctx);
-
-        // After first scan, epoch should be recorded
-        assert!(node.last_delta_epoch.is_some());
-        assert_eq!(delta.added.len(), 1);
-        assert!(contains_id(&delta.added, row1));
-    }
-
-    #[test]
-    fn incremental_scan_uses_deltas() {
-        // Test the fast path: multiple inserts within ONE process cycle (before clear_deltas)
-        let mut index = BTreeIndex::new("users", "_id");
-        index.process_meta_load(None);
-        let row1 = ObjectId::new();
-        let row2 = ObjectId::new();
-        let row3 = ObjectId::new();
-
-        // Insert first row
-        index.insert(row1.uuid().as_bytes(), row1).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "_id"), index);
-
-        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&indices);
-
-        // First scan (slow path - no prior epoch recorded)
-        let delta1 = node.scan(&ctx);
-        assert_eq!(delta1.added.len(), 1);
-        assert!(contains_id(&delta1.added, row1));
-
-        // Insert more rows WITHOUT clearing deltas (same process cycle)
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .insert(row2.uuid().as_bytes(), row2)
-            .unwrap();
-
-        // Second scan uses fast path: epochs match, deltas available
-        let ctx = make_ctx(&indices);
-        let delta2 = node.scan(&ctx);
-
-        // Fast path sees row1 (still in deltas) AND row2
-        // But row1 is already in last_scanned_ids, so only row2 is "added"
-        assert_eq!(delta2.added.len(), 1);
-        assert!(contains_id(&delta2.added, row2));
-
-        // Insert third row (still same epoch, no clear)
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .insert(row3.uuid().as_bytes(), row3)
-            .unwrap();
-
-        // Third scan also uses fast path
-        let ctx = make_ctx(&indices);
-        let delta3 = node.scan(&ctx);
-
-        // Only row3 is new
-        assert_eq!(delta3.added.len(), 1);
-        assert!(contains_id(&delta3.added, row3));
-    }
-
-    #[test]
-    fn full_scan_on_epoch_mismatch() {
-        let mut index = BTreeIndex::new("users", "_id");
-        index.process_meta_load(None);
-        let row1 = ObjectId::new();
-        let row2 = ObjectId::new();
-        index.insert(row1.uuid().as_bytes(), row1).unwrap();
-
-        let mut indices = IndicesMap::default();
-        indices.insert(index_key("users", "_id"), index);
-
-        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&indices);
-
-        // First scan
-        let delta1 = node.scan(&ctx);
-        assert_eq!(delta1.added.len(), 1);
-        let initial_epoch = node.last_delta_epoch;
-        assert_eq!(initial_epoch, Some(0));
-
-        // Clear deltas (simulating end of process cycle) - increments epoch
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .clear_deltas();
-
-        // Insert new row at new epoch
-        indices
-            .get_mut(&index_key("users", "_id"))
-            .unwrap()
-            .insert(row2.uuid().as_bytes(), row2)
-            .unwrap();
-
-        // Scan with mismatched epoch - should fallback to slow path
-        let ctx = make_ctx(&indices);
-        let delta2 = node.scan(&ctx);
-
-        // Node's epoch should be updated to new epoch
-        assert_eq!(node.last_delta_epoch, Some(1));
-
-        // Should detect the new row via full scan
-        assert_eq!(delta2.added.len(), 1);
-        assert!(contains_id(&delta2.added, row2));
     }
 }

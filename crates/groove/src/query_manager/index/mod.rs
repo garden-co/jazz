@@ -1,21 +1,17 @@
-pub mod btree_index;
-pub mod btree_page;
-
 use std::ops::Bound;
 
-pub use btree_index::{BTreeIndex, IndexError};
-pub use btree_page::{BTreePage, IndexMeta, LeafEntry, PageId};
+use crate::query_manager::types::Value;
 
 /// Condition for index scan.
 #[derive(Debug, Clone)]
 pub enum ScanCondition {
     /// No condition - scan all entries (uses "_id" index).
     All,
-    /// Exact match on key.
-    Eq(Vec<u8>),
+    /// Exact match on value.
+    Eq(Value),
     /// Range scan with bounds (inclusive, exclusive, or unbounded).
     Range {
-        min: Bound<Vec<u8>>,
-        max: Bound<Vec<u8>>,
+        min: Bound<Value>,
+        max: Bound<Value>,
     },
 }
