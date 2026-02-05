@@ -710,6 +710,76 @@ describe("non-member extending child to parent via groupSealer", () => {
     expect(mapAfterOnNode1.get("test")).toEqual("Written after rotation");
   });
 
+  test("old content visible after 3 key rotations via historical groupSealer", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Node1 creates parent group and adds node2 as admin
+    const parentGroup = node1.node.createGroup();
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    parentGroup.addMember(account2OnNode1, "admin");
+
+    await parentGroup.core.waitForSync();
+
+    // Node2 (member of parent) creates child and extends parent
+    const parentOnNode2 = await loadCoValueOrFail(node2.node, parentGroup.id);
+    const childGroup = node2.node.createGroup();
+    childGroup.extend(parentOnNode2);
+
+    // Create content with the initial key
+    const map0 = childGroup.createMap();
+    map0.set("test", "Before any rotation");
+
+    await map0.core.waitForSync();
+    await childGroup.core.waitForSync();
+
+    // Rotation 1
+    childGroup.rotateReadKey();
+
+    const map1 = childGroup.createMap();
+    map1.set("test", "After rotation 1");
+
+    await map1.core.waitForSync();
+    await childGroup.core.waitForSync();
+
+    // Rotation 2
+    childGroup.rotateReadKey();
+
+    const map2 = childGroup.createMap();
+    map2.set("test", "After rotation 2");
+
+    await map2.core.waitForSync();
+    await childGroup.core.waitForSync();
+
+    // Rotation 3
+    childGroup.rotateReadKey();
+
+    const map3 = childGroup.createMap();
+    map3.set("test", "After rotation 3");
+
+    await map3.core.waitForSync();
+    await childGroup.core.waitForSync();
+
+    // Node1 (parent admin) should be able to read content from all key generations
+    const map0OnNode1 = await loadCoValueOrFail(node1.node, map0.id);
+    expect(map0OnNode1.get("test")).toEqual("Before any rotation");
+
+    const map1OnNode1 = await loadCoValueOrFail(node1.node, map1.id);
+    expect(map1OnNode1.get("test")).toEqual("After rotation 1");
+
+    const map2OnNode1 = await loadCoValueOrFail(node1.node, map2.id);
+    expect(map2OnNode1.get("test")).toEqual("After rotation 2");
+
+    const map3OnNode1 = await loadCoValueOrFail(node1.node, map3.id);
+    expect(map3OnNode1.get("test")).toEqual("After rotation 3");
+  });
+
   // Edge case tests
   test("non-member can create multiple CoValues readable by parent", async () => {
     const { node1, node2, node3 } = await createThreeConnectedNodes(

@@ -31,7 +31,6 @@ import {
   Role,
   isAccountRole,
   isKeyForKeyField,
-  isKeySealedForGroupField,
 } from "../permissions.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
@@ -246,15 +245,10 @@ export class RawGroup<
   // This avoids iterating through all keys in getUncachedReadKey and findValidParentKeys
   private declare keyRevelations: Map<KeyID, Set<KeyID>>;
 
-  // Cache for sealedFor revelations: maps encrypted keyID to set of sealer IDs
-  // This avoids iterating through all keys in tryDecryptWithGroupSealer
-  private declare sealedForGroupRevelations: Map<KeyID, Set<SealerID>>;
-
   protected resetInternalState() {
     super.resetInternalState();
     this.parentGroupsChanges = new Map();
     this.keyRevelations = new Map();
-    this.sealedForGroupRevelations = new Map();
     this._lastReadableKeyId = undefined;
   }
 
@@ -278,10 +272,6 @@ export class RawGroup<
     if (!this.keyRevelations) {
       this.keyRevelations = new Map();
     }
-    if (!this.sealedForGroupRevelations) {
-      this.sealedForGroupRevelations = new Map();
-    }
-
     // Build caches incrementally
     for (const changeValue of transaction.changes) {
       const change = changeValue as {
@@ -298,8 +288,6 @@ export class RawGroup<
           );
         } else if (isKeyForKeyField(change.key)) {
           this.updateKeyRevelationsCache(change.key);
-        } else if (isKeySealedForGroupField(change.key)) {
-          this.updateSealedForGroupCache(change.key);
         }
       }
     }
@@ -318,22 +306,6 @@ export class RawGroup<
         this.keyRevelations.set(encryptedKeyID, revelations);
       }
       revelations.add(encryptingKeyID);
-    }
-  }
-
-  private updateSealedForGroupCache(key: string): void {
-    // Key format: key_encryptedID_sealedFor_sealerID
-    const parts = key.split("_sealedFor_");
-    if (parts.length === 2) {
-      const encryptedKeyID = parts[0] as KeyID;
-      const sealerID = parts[1] as SealerID;
-
-      let sealers = this.sealedForGroupRevelations.get(encryptedKeyID);
-      if (!sealers) {
-        sealers = new Set();
-        this.sealedForGroupRevelations.set(encryptedKeyID, sealers);
-      }
-      sealers.add(sealerID);
     }
   }
 
@@ -943,96 +915,60 @@ export class RawGroup<
 
   /**
    * Try to decrypt a key that was revealed via a parent group's sealer.
-   * Checks both current and historical group sealers (derived from historical read keys).
+   * Walks the parent group's groupSealer history backwards (newest first)
+   * and tries to unseal the key revelation for each historical sealer value.
    */
   private tryDecryptWithGroupSealer(
     keyID: KeyID,
     parentGroup: RawGroup,
   ): KeySecret | undefined {
-    // Try current group sealer
-    const currentSealer = parentGroup.get("groupSealer");
-    if (currentSealer) {
-      const sealedKey = this.lastEditAt(`${keyID}_sealedFor_${currentSealer}`);
-      if (sealedKey?.value) {
-        const groupSealerSecret = parentGroup.getGroupSealerSecret();
-        if (groupSealerSecret) {
-          const secret = this.crypto.unsealForGroup(
-            sealedKey.value as SealedForGroup<KeySecret>,
-            groupSealerSecret,
-            {
-              in: this.id,
-              tx: sealedKey.tx,
-            },
-          );
-          if (secret) {
-            return secret;
-          }
+    const sealerEntries = parentGroup.ops["groupSealer"];
+    if (!sealerEntries) return undefined;
+
+    const readKeyEntries = parentGroup.ops["readKey"];
+    if (!readKeyEntries) return undefined;
+
+    // Iterate backwards (newest sealer first) to try the most recent one first
+    for (let i = sealerEntries.length - 1; i >= 0; i--) {
+      const sealerEntry = sealerEntries[i]!;
+      if (sealerEntry.change.op !== "set") continue;
+      const sealerID = sealerEntry.change.value as SealerID | undefined;
+      if (!sealerID) continue;
+
+      const sealedKeyEdit = this.lastEditAt(`${keyID}_sealedFor_${sealerID}`);
+      if (!sealedKeyEdit?.value) continue;
+
+      // Find the readKey that was active when this groupSealer was set
+      // readKey entries are sorted by madeAt, so we find the last one <= sealerEntry.madeAt
+      const sealerTime = sealerEntry.madeAt;
+      let readKeyID: KeyID | undefined;
+      for (let j = readKeyEntries.length - 1; j >= 0; j--) {
+        const readKeyEntry = readKeyEntries[j]!;
+        if (readKeyEntry.change.op !== "set") continue;
+        if (readKeyEntry.madeAt <= sealerTime) {
+          readKeyID = readKeyEntry.change.value as KeyID;
+          break;
         }
       }
-    }
+      if (!readKeyID) continue;
 
-    // Try historical group sealers (derived from historical read keys)
-    // Use sealedForGroupRevelations cache instead of iterating through all keys
-    const sealersForKey = this.sealedForGroupRevelations.get(keyID);
-    if (sealersForKey) {
-      for (const sealerID of sealersForKey) {
-        // Skip the current sealer (already tried above)
-        if (sealerID === currentSealer) continue;
+      const readKeySecret = parentGroup.getReadKey(readKeyID);
+      if (!readKeySecret) continue;
 
-        const sealedKeyEdit = this.lastEditAt(`${keyID}_sealedFor_${sealerID}`);
-        if (!sealedKeyEdit?.value) continue;
+      const { secret: sealerSecret } =
+        this.crypto.groupSealerFromReadKey(readKeySecret);
 
-        // Try to find a historical read key that derives to this sealer
-        const historicalSecret = this.tryDeriveHistoricalSealerSecret(
-          parentGroup,
-          sealerID,
-        );
-        if (historicalSecret) {
-          const secret = this.crypto.unsealForGroup(
-            sealedKeyEdit.value as SealedForGroup<KeySecret>,
-            historicalSecret,
-            {
-              in: this.id,
-              tx: sealedKeyEdit.tx,
-            },
-          );
-          if (secret) {
-            return secret;
-          }
-        }
-      }
-    }
+      const secret = this.crypto.unsealForGroup(
+        sealedKeyEdit.value as SealedForGroup<KeySecret>,
+        sealerSecret,
+        {
+          in: this.id,
+          tx: sealedKeyEdit.tx,
+        },
+      );
 
-    return undefined;
-  }
-
-  /**
-   * Try to find a historical read key in the parent group that derives to the given sealer ID.
-   */
-  private tryDeriveHistoricalSealerSecret(
-    parentGroup: RawGroup,
-    targetSealerID: SealerID,
-  ): SealerSecret | undefined {
-    // First try the current read key
-    const { secret: currentReadKeySecret } = parentGroup.getCurrentReadKey();
-    if (currentReadKeySecret) {
-      const { id: derivedSealerID, secret: derivedSealerSecret } =
-        this.crypto.groupSealerFromReadKey(currentReadKeySecret);
-      if (derivedSealerID === targetSealerID) {
-        return derivedSealerSecret;
-      }
-    }
-
-    // Get all historical read keys from the parent group
-    // Use keyRevelations cache to find all encrypted key IDs
-    for (const encryptedKeyID of parentGroup.keyRevelations.keys()) {
-      const keySecret = parentGroup.getReadKey(encryptedKeyID);
-      if (keySecret) {
-        const { id: derivedSealerID, secret: derivedSealerSecret } =
-          this.crypto.groupSealerFromReadKey(keySecret);
-        if (derivedSealerID === targetSealerID) {
-          return derivedSealerSecret;
-        }
+      if (secret) {
+        return secret;
       }
     }
 
