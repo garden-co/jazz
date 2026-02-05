@@ -98,6 +98,7 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
       await this.run("COMMIT", []);
     } catch (error) {
       await this.run("ROLLBACK", []);
+      throw error;
     }
   }
 
