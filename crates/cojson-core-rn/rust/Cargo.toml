@@ -13,6 +13,7 @@ blake3 = "1.8.2"
 base64 = "0.22.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+indexmap = { version = "2.0", features = ["serde"] }
 
 [build-dependencies]
 uniffi = { workspace = true, features = ["build"] }

@@ -24,5 +24,5 @@ pub mod crypto {
     pub use xsalsa20::*;
 }
 
-pub mod session_log;
-pub use session_log::*;
+pub mod session_map;
+pub use session_map::*;

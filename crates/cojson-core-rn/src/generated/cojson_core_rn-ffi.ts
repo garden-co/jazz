@@ -47,75 +47,126 @@ interface NativeModuleInterface {
     data: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_cojson_core_rn_fn_clone_sessionlog(
+  ubrn_uniffi_cojson_core_rn_fn_clone_sessionmap(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_cojson_core_rn_fn_free_sessionlog(
+  ubrn_uniffi_cojson_core_rn_fn_free_sessionmap(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_cojson_core_rn_fn_constructor_sessionlog_new(
+  ubrn_uniffi_cojson_core_rn_fn_constructor_sessionmap_new(
     coId: Uint8Array,
+    headerJson: Uint8Array,
+    maxTxSize: Uint8Array,
+    skipVerify: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_add_transactions(
+    ptr: bigint,
     sessionId: Uint8Array,
     signerId: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): bigint;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_existing_private_transaction(
-    ptr: bigint,
-    encryptedChanges: Uint8Array,
-    keyUsed: Uint8Array,
-    madeAt: number,
-    meta: Uint8Array,
+    transactionsJson: Uint8Array,
+    signature: Uint8Array,
+    skipVerify: number,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_existing_trusting_transaction(
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_decrypt_transaction(
     ptr: bigint,
-    changes: Uint8Array,
-    madeAt: number,
-    meta: Uint8Array,
+    sessionId: Uint8Array,
+    txIndex: number,
+    keySecret: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): void;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_new_private_transaction(
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_decrypt_transaction_meta(
     ptr: bigint,
-    changesJson: Uint8Array,
+    sessionId: Uint8Array,
+    txIndex: number,
+    keySecret: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_header(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_known_state(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_known_state_with_streaming(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_last_signature(
+    ptr: bigint,
+    sessionId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_last_signature_checkpoint(
+    ptr: bigint,
+    sessionId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_session_ids(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_session_transactions(
+    ptr: bigint,
+    sessionId: Uint8Array,
+    fromIndex: number,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_signature_after(
+    ptr: bigint,
+    sessionId: Uint8Array,
+    txIndex: number,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_transaction(
+    ptr: bigint,
+    sessionId: Uint8Array,
+    txIndex: number,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_get_transaction_count(
+    ptr: bigint,
+    sessionId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_deleted(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_make_new_private_transaction(
+    ptr: bigint,
+    sessionId: Uint8Array,
     signerSecret: Uint8Array,
-    encryptionKey: Uint8Array,
+    changesJson: Uint8Array,
     keyId: Uint8Array,
+    keySecret: Uint8Array,
+    metaJson: Uint8Array,
     madeAt: number,
-    meta: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_add_new_trusting_transaction(
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_make_new_trusting_transaction(
     ptr: bigint,
-    changesJson: Uint8Array,
+    sessionId: Uint8Array,
     signerSecret: Uint8Array,
+    changesJson: Uint8Array,
+    metaJson: Uint8Array,
     madeAt: number,
-    meta: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_clone_session_log(
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_mark_as_deleted(
     ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): bigint;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_commit_transactions(
-    ptr: bigint,
-    newSignatureStr: Uint8Array,
-    skipValidate: number,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_decrypt_next_transaction_changes_json(
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_set_streaming_known_state(
     ptr: bigint,
-    txIndex: number,
-    encryptionKey: Uint8Array,
+    streamingJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
-  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_decrypt_next_transaction_meta_json(
-    ptr: bigint,
-    txIndex: number,
-    encryptionKey: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
+  ): void;
   ubrn_uniffi_cojson_core_rn_fn_func_base64url_to_bytes(
     base64: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
@@ -222,6 +273,10 @@ interface NativeModuleInterface {
     nonceMaterial: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_short_hash(
+    value: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_fn_func_sign(
     message: Uint8Array,
     secret: Uint8Array,
@@ -272,6 +327,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_checksum_func_new_ed25519_signing_key(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_new_x25519_private_key(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_seal(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_short_hash(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_sign(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_unseal(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_verify(): number;
@@ -280,22 +336,32 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_checksum_method_blake3hasher_clone_hasher(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_blake3hasher_finalize(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_blake3hasher_update(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_private_transaction(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_existing_trusting_transaction(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_new_private_transaction(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_add_new_trusting_transaction(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_clone_session_log(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_commit_transactions(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_decrypt_next_transaction_changes_json(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_decrypt_next_transaction_meta_json(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_add_transactions(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_decrypt_transaction(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_decrypt_transaction_meta(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_header(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_known_state_with_streaming(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_last_signature(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_last_signature_checkpoint(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_ids(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_session_transactions(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_signature_after(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction_count(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_is_deleted(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_private_transaction(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_trusting_transaction(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_mark_as_deleted(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_set_streaming_known_state(): number;
   ubrn_uniffi_cojson_core_rn_checksum_constructor_blake3hasher_new(): number;
-  ubrn_uniffi_cojson_core_rn_checksum_constructor_sessionlog_new(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_constructor_sessionmap_new(): number;
   ubrn_ffi_cojson_core_rn_uniffi_contract_version(): number;
   ubrn_uniffi_internal_fn_method_blake3hasher_ffi__bless_pointer(
     pointer: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): UniffiRustArcPtr;
-  ubrn_uniffi_internal_fn_method_sessionlog_ffi__bless_pointer(
+  ubrn_uniffi_internal_fn_method_sessionmap_ffi__bless_pointer(
     pointer: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): UniffiRustArcPtr;

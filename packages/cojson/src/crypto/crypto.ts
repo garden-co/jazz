@@ -1,21 +1,16 @@
 import { base58 } from "@scure/base";
-import { ControlledAccountOrAgent, RawAccountID } from "../coValues/account.js";
+import { RawAccountID } from "../coValues/account.js";
 import {
   AgentID,
   RawCoID,
   TransactionID,
-  SessionID,
   ActiveSessionID,
   DeleteSessionID,
 } from "../ids.js";
 import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
-import { JsonObject, JsonValue } from "../jsonValue.js";
+import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import {
-  PrivateTransaction,
-  Transaction,
-  TrustingTransaction,
-} from "../coValueCore/verifiedState.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 
 function randomBytes(bytesLength = 32): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(bytesLength));
@@ -111,14 +106,7 @@ export abstract class CryptoProvider<Blake3State = any> {
     )}`;
   }
 
-  shortHash(value: JsonValue): ShortHash {
-    return `shortHash_z${base58.encode(
-      this.blake3HashOnce(textEncoder.encode(stableStringify(value))).slice(
-        0,
-        shortHashLength,
-      ),
-    )}`;
-  }
+  abstract shortHash(value: JsonValue): ShortHash;
 
   abstract encrypt<T extends JsonValue, N extends JsonValue>(
     value: T,
@@ -262,11 +250,12 @@ export abstract class CryptoProvider<Blake3State = any> {
     return `${accountID}_session_d${randomPart}$`;
   }
 
-  abstract createSessionLog(
+  abstract createSessionMap(
     coID: RawCoID,
-    sessionID: SessionID,
-    signerID?: SignerID,
-  ): SessionLogImpl;
+    headerJson: string,
+    maxTxSize?: number,
+    skipVerify?: boolean,
+  ): SessionMapImpl;
 }
 
 export type Hash = `hash_z${string}`;
@@ -283,34 +272,77 @@ export type KeyID = `key_z${string}`;
 
 export const secretSeedLength = 32;
 
-export interface SessionLogImpl {
-  clone(): SessionLogImpl;
-  tryAdd(
-    transactions: Transaction[],
-    newSignature: Signature,
+/**
+ * SessionMapImpl - Native implementation of SessionMap
+ * One instance per CoValue, owns all session data including header
+ */
+export interface SessionMapImpl {
+  // === Header ===
+  getHeader(): string;
+
+  // === Transaction Operations ===
+  addTransactions(
+    sessionId: string,
+    signerId: string | undefined,
+    transactionsJson: string,
+    signature: string,
     skipVerify: boolean,
   ): void;
-  addNewPrivateTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
-    keyID: KeyID,
-    keySecret: KeySecret,
+
+  makeNewPrivateTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    keyId: string,
+    keySecret: string,
+    metaJson: string | undefined,
     madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: PrivateTransaction };
-  addNewTrustingTransaction(
-    signerAgent: ControlledAccountOrAgent,
-    changes: JsonValue[],
+  ): string; // Returns JSON: { signature, transaction }
+
+  makeNewTrustingTransaction(
+    sessionId: string,
+    signerSecret: string,
+    changesJson: string,
+    metaJson: string | undefined,
     madeAt: number,
-    meta: JsonObject | undefined,
-  ): { signature: Signature; transaction: TrustingTransaction };
-  decryptNextTransactionChangesJson(
-    tx_index: number,
-    key_secret: KeySecret,
-  ): string;
-  free(): void;
-  decryptNextTransactionMetaJson(
-    tx_index: number,
-    key_secret: KeySecret,
+  ): string; // Returns JSON: { signature, transaction }
+
+  // === Session Queries ===
+  getSessionIds(): string[];
+  getTransactionCount(sessionId: string): number; // -1 if not found
+  getTransaction(sessionId: string, txIndex: number): Transaction | undefined;
+  getSessionTransactions(
+    sessionId: string,
+    fromIndex: number,
+  ): Transaction[] | undefined;
+  getLastSignature(sessionId: string): string | undefined;
+  getSignatureAfter(sessionId: string, txIndex: number): string | undefined;
+  getLastSignatureCheckpoint(sessionId: string): number | undefined; // -1 if no checkpoints, undefined if session not found
+
+  // === Known State ===
+  getKnownState(): {
+    id: string;
+    header: boolean;
+    sessions: Record<string, number>;
+  };
+  getKnownStateWithStreaming():
+    | { id: string; header: boolean; sessions: Record<string, number> }
+    | undefined;
+  setStreamingKnownState(streamingJson: string): void;
+
+  // === Deletion ===
+  markAsDeleted(): void;
+  isDeleted(): boolean;
+
+  // === Decryption ===
+  decryptTransaction(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
+  ): string | undefined;
+  decryptTransactionMeta(
+    sessionId: string,
+    txIndex: number,
+    keySecret: string,
   ): string | undefined;
 }

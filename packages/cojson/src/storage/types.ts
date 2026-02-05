@@ -172,6 +172,10 @@ export interface DBTransactionInterfaceAsync {
     idx: number;
     signature: Signature;
   }): Promise<unknown>;
+
+  deleteCoValueContent(
+    coValueRow: Pick<StoredCoValueRow, "rowID" | "id">,
+  ): Promise<unknown>;
 }
 
 export interface DBClientInterfaceAsync {

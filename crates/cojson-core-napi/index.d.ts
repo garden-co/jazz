@@ -7,31 +7,56 @@ export declare class Blake3Hasher {
   clone(): Blake3Hasher
 }
 
-export declare class SessionLog {
-  constructor(coId: string, sessionId: string, signerId?: string | undefined | null)
-  clone(): SessionLog
-  addNewPrivateTransaction(changesJson: string, signerSecret: string, encryptionKey: string, keyId: string, madeAt: number, meta?: string | undefined | null): string
-  addNewTrustingTransaction(changesJson: string, signerSecret: string, madeAt: number, meta?: string | undefined | null): string
+export declare class SessionMap {
   /**
-   * Add an existing private transaction to the staging area.
-   * The transaction is NOT committed until commitTransactions() succeeds.
-   * Note: made_at uses f64 because JavaScript's number type is f64.
+   * Create a new SessionMap for a CoValue.
+   * Validates the header and verifies that `co_id` matches the hash of the header.
+   * `max_tx_size` is the threshold for recording in-between signatures (default: 100KB)
+   * `skip_verify` if true, skips uniqueness and ID validation (for trusted storage shards)
    */
-  addExistingPrivateTransaction(encryptedChanges: string, keyUsed: string, madeAt: number, meta?: string | undefined | null): void
+  constructor(coId: string, headerJson: string, maxTxSize?: number | undefined | null, skipVerify?: boolean | undefined | null)
+  /** Get the header as JSON */
+  getHeader(): string
+  /** Add transactions to a session */
+  addTransactions(sessionId: string, signerId: string | undefined | null, transactionsJson: string, signature: string, skipVerify: boolean): void
   /**
-   * Add an existing trusting transaction to the staging area.
-   * The transaction is NOT committed until commitTransactions() succeeds.
-   * Note: made_at uses f64 because JavaScript's number type is f64.
+   * Create new private transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
    */
-  addExistingTrustingTransaction(changes: string, madeAt: number, meta?: string | undefined | null): void
+  makeNewPrivateTransaction(sessionId: string, signerSecret: string, changesJson: string, keyId: string, keySecret: string, metaJson: string | undefined | null, madeAt: number): string
   /**
-   * Commit pending transactions to the main state.
-   * If skip_validate is false, validates the signature first.
-   * If skip_validate is true, commits without validation.
+   * Create new trusting transaction (for local writes)
+   * Returns JSON: { signature: string, transaction: Transaction }
    */
-  commitTransactions(newSignatureStr: string, skipValidate: boolean): void
-  decryptNextTransactionChangesJson(txIndex: number, encryptionKey: string): string
-  decryptNextTransactionMetaJson(txIndex: number, encryptionKey: string): string | null
+  makeNewTrustingTransaction(sessionId: string, signerSecret: string, changesJson: string, metaJson: string | undefined | null, madeAt: number): string
+  /** Get all session IDs as native array */
+  getSessionIds(): Array<string>
+  /** Get transaction count for a session (returns -1 if session not found) */
+  getTransactionCount(sessionId: string): number
+  /** Get single transaction by index as JSON string (returns undefined if not found) */
+  getTransaction(sessionId: string, txIndex: number): string | null
+  /** Get transactions for a session from index as JSON strings (returns undefined if session not found) */
+  getSessionTransactions(sessionId: string, fromIndex: number): Array<string> | null
+  /** Get last signature for a session (returns undefined if session not found) */
+  getLastSignature(sessionId: string): string | null
+  /** Get signature after specific transaction index */
+  getSignatureAfter(sessionId: string, txIndex: number): string | null
+  /** Get the last signature checkpoint index (-1 if no checkpoints, undefined if session not found) */
+  getLastSignatureCheckpoint(sessionId: string): number | null
+  /** Get the known state as a native JavaScript object */
+  getKnownState(): KnownState
+  /** Get the known state with streaming as a native JavaScript object */
+  getKnownStateWithStreaming(): KnownState | null
+  /** Set streaming known state */
+  setStreamingKnownState(streamingJson: string): void
+  /** Mark this CoValue as deleted */
+  markAsDeleted(): void
+  /** Check if this CoValue is deleted */
+  isDeleted(): boolean
+  /** Decrypt transaction changes */
+  decryptTransaction(sessionId: string, txIndex: number, keySecret: string): string | null
+  /** Decrypt transaction meta */
+  decryptTransactionMeta(sessionId: string, txIndex: number, keySecret: string): string | null
 }
 
 /**
@@ -171,6 +196,13 @@ export declare function getSealerId(secret: Uint8Array): string
  */
 export declare function getSignerId(secret: Uint8Array): string
 
+/** KnownState as a native JavaScript object (no JSON serialization needed) */
+export interface KnownState {
+  id: string
+  header: boolean
+  sessions: Record<string, number>
+}
+
 /**
  * Generate a new Ed25519 signing key using secure random number generation.
  * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
@@ -194,6 +226,13 @@ export declare function newX25519PrivateKey(): Uint8Array
  * Returns sealed bytes or throws JsError if sealing fails.
  */
 export declare function seal(message: Uint8Array, senderSecret: string, recipientId: string, nonceMaterial: Uint8Array): Uint8Array
+
+/**
+ * Compute a short hash of a stable-stringified JSON value.
+ * The input should already be serialized using stableStringify on the JS side.
+ * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
+ */
+export declare function shortHash(value: string): string
 
 /**
  * NAPI-exposed function to sign a message using Ed25519.

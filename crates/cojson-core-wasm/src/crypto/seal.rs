@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use cojson_core::crypto::seal as seal_crypto;
+use wasm_bindgen::prelude::*;
 
 /// WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
 /// Provides authenticated encryption with perfect forward secrecy.
@@ -15,7 +15,12 @@ pub fn seal(
     recipient_id: &str,
     nonce_material: &[u8],
 ) -> Result<Box<[u8]>, JsError> {
-    Ok(seal_crypto::seal(message, sender_secret, recipient_id, nonce_material)?)
+    Ok(seal_crypto::seal(
+        message,
+        sender_secret,
+        recipient_id,
+        nonce_material,
+    )?)
 }
 
 /// WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
@@ -32,5 +37,10 @@ pub fn unseal(
     sender_id: &str,
     nonce_material: &[u8],
 ) -> Result<Box<[u8]>, JsError> {
-    Ok(seal_crypto::unseal(sealed_message, recipient_secret, sender_id, nonce_material)?)
+    Ok(seal_crypto::unseal(
+        sealed_message,
+        recipient_secret,
+        sender_id,
+        nonce_material,
+    )?)
 }
