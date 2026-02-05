@@ -1,5 +1,5 @@
 use base64::{
-    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine,
 };
 
@@ -9,6 +9,13 @@ use super::ed25519::CryptoErrorUniffi;
 #[uniffi::export]
 pub fn bytes_to_base64url(bytes: Vec<u8>) -> String {
     URL_SAFE.encode(&bytes)
+}
+
+/// Encodes bytes to a standard base64 string (with padding)
+/// Use this for data URLs and other contexts requiring standard base64.
+#[uniffi::export]
+pub fn bytes_to_base64(bytes: Vec<u8>) -> String {
+    STANDARD.encode(&bytes)
 }
 
 /// Decodes a base64url string to bytes (handles both padded and unpadded)

@@ -48,6 +48,7 @@ import {
   SessionLog,
   bytesToBase64url as nativeBytesToBase64url,
   base64urlToBytes as nativeBase64urlToBytes,
+  bytesToBase64 as nativeBytesToBase64,
 } from "cojson-core-rn";
 import { setNativeBase64Implementation } from "../base64url.js";
 
@@ -152,6 +153,7 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     setNativeBase64Implementation({
       bytesToBase64url: nativeBytesToBase64url,
       base64urlToBytes: nativeBase64urlToBytes,
+      bytesToBase64: nativeBytesToBase64,
     });
     return new RNCrypto();
   }

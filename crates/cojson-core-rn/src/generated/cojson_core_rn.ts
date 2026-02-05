@@ -131,6 +131,23 @@ export function blake3HashOnceWithContext(
   );
 }
 /**
+ * Encodes bytes to a standard base64 string (with padding)
+ * Use this for data URLs and other contexts requiring standard base64.
+ */
+export function bytesToBase64(bytes: ArrayBuffer): string {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_bytes_to_base64(
+          FfiConverterArrayBuffer.lower(bytes),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
  * Encodes bytes to a base64url string (with padding to match JS implementation)
  */
 export function bytesToBase64url(bytes: ArrayBuffer): string {
@@ -2239,6 +2256,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_blake3_hash_once_with_context'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_bytes_to_base64() !==
+    57289
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_bytes_to_base64'
     );
   }
   if (
