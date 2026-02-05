@@ -234,7 +234,7 @@ fn row_is_indexed_after_insert() {
         .unwrap();
 
     // Row should be indexed immediately after insert
-    assert!(handle.is_indexed(&qm, "users"));
+    assert!(handle.is_indexed(&qm, &io, "users"));
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn index_persistence_via_insert() {
         .unwrap();
 
     // Verify row is indexed
-    assert!(handle.is_indexed(&qm, "users"));
+    assert!(handle.is_indexed(&qm, &io, "users"));
 }
 
 // ========================================================================
@@ -1677,14 +1677,14 @@ fn soft_delete_removes_from_id_index() {
         .unwrap();
 
     // Verify row is in _id index
-    assert!(qm.row_is_indexed("users", handle.row_id));
+    assert!(qm.row_is_indexed(&io, "users", handle.row_id));
 
     // Delete the row
     let delete_handle = qm.delete(&mut io, handle.row_id).unwrap();
     assert_eq!(delete_handle.row_id, handle.row_id);
 
     // Verify row is no longer in _id index
-    assert!(!qm.row_is_indexed("users", handle.row_id));
+    assert!(!qm.row_is_indexed(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -1703,13 +1703,13 @@ fn soft_delete_adds_to_id_deleted_index() {
         .unwrap();
 
     // Verify row is NOT in _id_deleted index
-    assert!(!qm.row_is_deleted("users", handle.row_id));
+    assert!(!qm.row_is_deleted(&io, "users", handle.row_id));
 
     // Delete the row
     qm.delete(&mut io, handle.row_id).unwrap();
 
     // Verify row IS in _id_deleted index
-    assert!(qm.row_is_deleted("users", handle.row_id));
+    assert!(qm.row_is_deleted(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -1935,7 +1935,7 @@ fn undelete_adds_to_id_index() {
     qm.delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is not in _id index
-    assert!(!qm.row_is_indexed("users", handle.row_id));
+    assert!(!qm.row_is_indexed(&io, "users", handle.row_id));
 
     // Undelete with new values
     qm.undelete(
@@ -1946,7 +1946,7 @@ fn undelete_adds_to_id_index() {
     .unwrap();
 
     // Verify row is back in _id index
-    assert!(qm.row_is_indexed("users", handle.row_id));
+    assert!(qm.row_is_indexed(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -1966,7 +1966,7 @@ fn undelete_removes_from_id_deleted_index() {
 
     // Delete the row
     qm.delete(&mut io, handle.row_id).unwrap();
-    assert!(qm.row_is_deleted("users", handle.row_id));
+    assert!(qm.row_is_deleted(&io, "users", handle.row_id));
 
     // Undelete
     qm.undelete(
@@ -1977,7 +1977,7 @@ fn undelete_removes_from_id_deleted_index() {
     .unwrap();
 
     // Verify row is NOT in _id_deleted index
-    assert!(!qm.row_is_deleted("users", handle.row_id));
+    assert!(!qm.row_is_deleted(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -2066,7 +2066,7 @@ fn hard_delete_removes_from_id_index() {
     qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is not in _id index
-    assert!(!qm.row_is_indexed("users", handle.row_id));
+    assert!(!qm.row_is_indexed(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -2086,13 +2086,13 @@ fn hard_delete_removes_from_id_deleted_index() {
 
     // Soft delete first (puts it in _id_deleted)
     qm.delete(&mut io, handle.row_id).unwrap();
-    assert!(qm.row_is_deleted("users", handle.row_id));
+    assert!(qm.row_is_deleted(&io, "users", handle.row_id));
 
     // Then hard delete (removes from _id_deleted)
     qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is NOT in _id_deleted index
-    assert!(!qm.row_is_deleted("users", handle.row_id));
+    assert!(!qm.row_is_deleted(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -2114,9 +2114,9 @@ fn hard_deleted_row_not_in_any_index() {
     qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is not in _id index
-    assert!(!qm.row_is_indexed("users", handle.row_id));
+    assert!(!qm.row_is_indexed(&io, "users", handle.row_id));
     // Verify row is not in _id_deleted index
-    assert!(!qm.row_is_deleted("users", handle.row_id));
+    assert!(!qm.row_is_deleted(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -2136,11 +2136,11 @@ fn soft_then_hard_delete_removes_from_id_deleted() {
 
     // Soft delete - row should be in _id_deleted
     qm.delete(&mut io, handle.row_id).unwrap();
-    assert!(qm.row_is_deleted("users", handle.row_id));
+    assert!(qm.row_is_deleted(&io, "users", handle.row_id));
 
     // Hard delete - row should be removed from _id_deleted
     qm.hard_delete(&mut io, handle.row_id).unwrap();
-    assert!(!qm.row_is_deleted("users", handle.row_id));
+    assert!(!qm.row_is_deleted(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -2191,14 +2191,14 @@ fn truncate_soft_deleted_row() {
 
     // Soft delete
     qm.delete(&mut io, handle.row_id).unwrap();
-    assert!(qm.row_is_deleted("users", handle.row_id));
+    assert!(qm.row_is_deleted(&io, "users", handle.row_id));
 
     // Truncate (upgrade to hard delete)
     qm.truncate(&mut io, handle.row_id).unwrap();
 
     // Verify row is completely gone
-    assert!(!qm.row_is_indexed("users", handle.row_id));
-    assert!(!qm.row_is_deleted("users", handle.row_id));
+    assert!(!qm.row_is_indexed(&io, "users", handle.row_id));
+    assert!(!qm.row_is_deleted(&io, "users", handle.row_id));
 }
 
 #[test]
@@ -2269,7 +2269,7 @@ fn include_deleted_query_returns_soft_deleted_rows() {
     assert_eq!(alice_result.unwrap().1[1], Value::Integer(100));
 
     // Verify that Alice is in the _id_deleted index
-    assert!(qm.row_is_deleted("users", handle1.row_id));
+    assert!(qm.row_is_deleted(&io, "users", handle1.row_id));
 }
 
 #[test]
@@ -4278,13 +4278,13 @@ fn index_key_includes_branch() {
     // Verify the row is indexed on the schema's branch
     let branch = get_branch(&qm);
     assert!(
-        qm.row_is_indexed_on_branch("users", &branch, handle.row_id),
+        qm.row_is_indexed_on_branch(&io, "users", &branch, handle.row_id),
         "Should have row indexed on schema branch"
     );
 
     // Verify the row is NOT indexed on a different branch
     assert!(
-        !qm.row_is_indexed_on_branch("users", "some-other-branch", handle.row_id),
+        !qm.row_is_indexed_on_branch(&io, "users", "some-other-branch", handle.row_id),
         "Should NOT have row indexed on different branch"
     );
 }

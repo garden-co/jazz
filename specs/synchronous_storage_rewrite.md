@@ -208,8 +208,8 @@ pub trait IoHandler {
     /// Lookup exact value - returns all row IDs with this value.
     fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value) -> Vec<ObjectId>;
 
-    /// Range scan - returns row IDs where start <= value < end.
-    fn index_range(&self, table: &str, column: &str, branch: &str, start: Option<&Value>, end: Option<&Value>) -> Vec<ObjectId>;
+    /// Range scan - returns row IDs matching the given bounds.
+    fn index_range(&self, table: &str, column: &str, branch: &str, start: Bound<&Value>, end: Bound<&Value>) -> Vec<ObjectId>;
 
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
@@ -355,7 +355,7 @@ pub fn load(&mut self, object_id: ObjectId, branch: &BranchName) -> Result<&Obje
 
 ---
 
-## Phase 3: Delete Our B-tree Implementation
+## Phase 3: Delete Our B-tree Implementation ✅
 
 **Goal**: Remove our entire B-tree index implementation - it's replaced by `IoHandler` index methods.
 
@@ -836,7 +836,7 @@ impl IoHandler for BfTreeIoHandler {
         Ok(())
     }
 
-    fn index_scan(&self, table: &str, column: &str, start: Option<&Value>, end: Option<&Value>) -> Vec<ObjectId> {
+    fn index_range(&self, table: &str, column: &str, branch: &str, start: Bound<&Value>, end: Bound<&Value>) -> Vec<ObjectId> {
         let prefix = format!("idx:{}:{}:", table, column);
         let start_key = start
             .map(|v| format!("{}{}", prefix, hex::encode(encode_index_value(v))))

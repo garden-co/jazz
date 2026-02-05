@@ -7,13 +7,14 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
 
-use super::encoding::encode_value;
+use crate::io_handler::IoHandler;
+
 use super::graph::{GraphNode, QueryGraph};
+use super::graph_nodes::NodeId;
 use super::graph_nodes::exists_output::ExistsOutputNode;
 use super::graph_nodes::index_scan::IndexScanNode;
 use super::graph_nodes::materialize::MaterializeNode;
 use super::graph_nodes::policy_filter::PolicyFilterNode;
-use super::graph_nodes::{IndicesMap, NodeId};
 use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
@@ -54,13 +55,12 @@ impl PolicyGraph {
         let mut graph = QueryGraph::new(*table, descriptor.clone());
 
         // IndexScan node: scan _id index for exact match
-        let encoded_id = encode_value(&Value::Uuid(object_id));
         let id_column = ColumnName::new("_id");
         let scan_node = IndexScanNode::new_with_branch(
             *table,
             id_column,
             branch,
-            ScanCondition::Eq(encoded_id),
+            ScanCondition::Eq(Value::Uuid(object_id)),
             descriptor.clone(),
         );
         let scan_id = graph.add_node_with_id(GraphNode::IndexScan(scan_node));
@@ -191,12 +191,12 @@ impl PolicyGraph {
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
-        indices: &IndicesMap,
+        io: &dyn IoHandler,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
         // Settle the graph
-        let _delta = self.graph.settle(indices, om, row_loader);
+        let _delta = self.graph.settle(io, om, row_loader);
 
         // Check if the ExistsOutput node is complete
         self.is_complete()
@@ -349,15 +349,15 @@ mod tests {
             PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
                 .unwrap();
 
-        // With no actual data in the indices/om, the scan will return no rows
+        // With no actual data in the io/om, the scan will return no rows
         let om = ObjectManager::new();
-        let indices: IndicesMap = IndicesMap::default();
+        let io = crate::io_handler::MemoryIoHandler::new();
 
         // Row loader returns None for all IDs (no data)
         let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };
 
         // Settle the graph
-        pg.settle(&indices, &om, &mut row_loader);
+        pg.settle(&io, &om, &mut row_loader);
 
         // No rows found (object doesn't exist in empty OM), so result is false
         assert!(!pg.result());

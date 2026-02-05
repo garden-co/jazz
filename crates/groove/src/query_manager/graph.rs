@@ -10,7 +10,8 @@ use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
-use super::encoding::encode_value;
+use crate::io_handler::IoHandler;
+
 use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::array_subquery::ArraySubqueryNode;
 use super::graph_nodes::exists_output::ExistsOutputNode;
@@ -25,7 +26,7 @@ use super::graph_nodes::project::ProjectNode;
 use super::graph_nodes::sort::SortNode;
 use super::graph_nodes::subgraph::SubgraphTemplate;
 use super::graph_nodes::union::UnionNode;
-use super::graph_nodes::{IndicesMap, NodeId, RowNode, SourceContext, SourceNode, TransformNode};
+use super::graph_nodes::{NodeId, RowNode, SourceContext, SourceNode, TransformNode};
 use super::index::ScanCondition;
 use super::query::{Condition, Query};
 use super::session::Session;
@@ -1247,7 +1248,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(
         &mut self,
-        indices: &IndicesMap,
+        io: &dyn IoHandler,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> RowDelta
@@ -1259,11 +1260,8 @@ impl QueryGraph {
 
         let order = self.topo_sort_dirty();
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
-        // Track source nodes that returned pending (index not ready)
-        // so we can re-mark them dirty after clearing the bitmap
-        let mut pending_source_nodes: Vec<NodeId> = Vec::new();
 
-        let ctx = SourceContext { indices };
+        let ctx = SourceContext { io };
         let _ = om; // om is still passed to other nodes that need it
 
         for node_id in order {
@@ -1271,9 +1269,6 @@ impl QueryGraph {
                 Some(GraphNode::IndexScan(_)) => {
                     if let Some(GraphNode::IndexScan(scan_node)) = self.get_node_mut(node_id) {
                         let delta = SourceNode::scan(scan_node, &ctx);
-                        if delta.pending {
-                            pending_source_nodes.push(node_id);
-                        }
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1395,9 +1390,8 @@ impl QueryGraph {
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
-                            policy_node.process_with_context(input_delta, indices, om, &mut |id| {
-                                row_loader(id)
-                            })
+                            policy_node
+                                .process_with_context(input_delta, io, om, &mut |id| row_loader(id))
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
@@ -1440,7 +1434,7 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(indices, om, &mut |id| row_loader(id))
+                            subquery_node.reevaluate_all(io, om, &mut |id| row_loader(id))
                         } else {
                             TupleDelta::new()
                         };
@@ -1448,7 +1442,7 @@ impl QueryGraph {
                         // Process outer input changes
                         let outer_delta = subquery_node.process_with_context(
                             input_delta,
-                            indices,
+                            io,
                             om,
                             &mut row_loader,
                         );
@@ -1487,13 +1481,6 @@ impl QueryGraph {
         }
 
         self.dirty_bitmap.fill(false);
-
-        // Re-mark pending source nodes as dirty so they will be re-evaluated on next settle.
-        // This ensures IndexScanNodes waiting for index loading stay dirty until ready.
-        for node_id in pending_source_nodes {
-            self.mark_dirty(node_id);
-            self.mark_downstream_dirty(node_id);
-        }
 
         // Convert TupleDelta to RowDelta for output
         // For single-table queries: use simple conversion
@@ -1618,26 +1605,26 @@ fn build_remaining_predicate(
 /// Convert a condition to a scan condition.
 fn condition_to_scan(cond: &Condition) -> ScanCondition {
     match cond {
-        Condition::Eq { value, .. } => ScanCondition::Eq(encode_value(value)),
+        Condition::Eq { value, .. } => ScanCondition::Eq(value.clone()),
         Condition::Lt { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Excluded(encode_value(value)),
+            max: Bound::Excluded(value.clone()),
         },
         Condition::Le { value, .. } => ScanCondition::Range {
             min: Bound::Unbounded,
-            max: Bound::Included(encode_value(value)),
+            max: Bound::Included(value.clone()),
         },
         Condition::Gt { value, .. } => ScanCondition::Range {
-            min: Bound::Excluded(encode_value(value)),
+            min: Bound::Excluded(value.clone()),
             max: Bound::Unbounded,
         },
         Condition::Ge { value, .. } => ScanCondition::Range {
-            min: Bound::Included(encode_value(value)),
+            min: Bound::Included(value.clone()),
             max: Bound::Unbounded,
         },
         Condition::Between { min, max, .. } => ScanCondition::Range {
-            min: Bound::Included(encode_value(min)),
-            max: Bound::Included(encode_value(max)),
+            min: Bound::Included(min.clone()),
+            max: Bound::Included(max.clone()),
         },
         _ => ScanCondition::All,
     }

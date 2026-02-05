@@ -5,7 +5,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::commit::CommitId;
-    use crate::io_handler::MemoryIoHandler;
+    use crate::io_handler::{IoHandler, MemoryIoHandler};
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::types::{
@@ -580,15 +580,14 @@ mod tests {
 
         // Manually update indices for the old branch
         // (In real usage, this would happen via handle_object_update)
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v1_branch.clone());
-            let index = qm
-                .test_get_index_mut(&index_key)
-                .expect("v1 branch _id index should exist");
-            index
-                .insert(old_row_id.uuid().as_bytes(), old_row_id)
-                .unwrap();
-        }
+        io.index_insert(
+            "users",
+            "_id",
+            &v1_branch,
+            &Value::Uuid(old_row_id),
+            old_row_id,
+        )
+        .unwrap();
 
         // --- Insert a row on the NEW schema branch (v2 format: id, name, email) ---
         let v2_table = v2.get(&TableName::new("users")).unwrap();
@@ -617,15 +616,14 @@ mod tests {
             .unwrap();
 
         // Update indices for new branch
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v2_branch.clone());
-            let index = qm
-                .test_get_index_mut(&index_key)
-                .expect("v2 branch _id index should exist");
-            index
-                .insert(new_row_id.uuid().as_bytes(), new_row_id)
-                .unwrap();
-        }
+        io.index_insert(
+            "users",
+            "_id",
+            &v2_branch,
+            &Value::Uuid(new_row_id),
+            new_row_id,
+        )
+        .unwrap();
 
         // --- Query across both branches ---
         let query = QueryBuilder::new("users")
@@ -773,12 +771,8 @@ mod tests {
             .unwrap();
 
         // Update v1 branch index
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v1_branch.clone());
-            if let Some(index) = qm.test_get_index_mut(&index_key) {
-                index.insert(row1_id.uuid().as_bytes(), row1_id).unwrap();
-            }
-        }
+        io.index_insert("users", "_id", &v1_branch, &Value::Uuid(row1_id), row1_id)
+            .unwrap();
 
         // --- Insert row on v2 branch (middle schema) ---
         let v2_table = v2.get(&TableName::new("users")).unwrap();
@@ -809,12 +803,8 @@ mod tests {
             .unwrap();
 
         // Update v2 branch index
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v2_branch.clone());
-            if let Some(index) = qm.test_get_index_mut(&index_key) {
-                index.insert(row2_id.uuid().as_bytes(), row2_id).unwrap();
-            }
-        }
+        io.index_insert("users", "_id", &v2_branch, &Value::Uuid(row2_id), row2_id)
+            .unwrap();
 
         // --- Insert row on v3 branch (current schema) ---
         let v3_table = v3.get(&TableName::new("users")).unwrap();
@@ -844,12 +834,8 @@ mod tests {
             .unwrap();
 
         // Update v3 branch index
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v3_branch.clone());
-            if let Some(index) = qm.test_get_index_mut(&index_key) {
-                index.insert(row3_id.uuid().as_bytes(), row3_id).unwrap();
-            }
-        }
+        io.index_insert("users", "_id", &v3_branch, &Value::Uuid(row3_id), row3_id)
+            .unwrap();
 
         // --- Query across all three branches ---
         let query = QueryBuilder::new("users")
@@ -1015,12 +1001,8 @@ mod tests {
             .unwrap();
 
         // Update v1 branch index
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v1_branch.clone());
-            if let Some(index) = qm.test_get_index_mut(&index_key) {
-                index.insert(row_id.uuid().as_bytes(), row_id).unwrap();
-            }
-        }
+        io.index_insert("users", "_id", &v1_branch, &Value::Uuid(row_id), row_id)
+            .unwrap();
 
         // Query
         let query = QueryBuilder::new("users").branches(&[&v1_branch]).build();
@@ -1117,12 +1099,8 @@ mod tests {
             .unwrap();
 
         // Update _id index for v1 branch
-        {
-            let index_key = ("users".to_string(), "_id".to_string(), v1_branch.clone());
-            if let Some(index) = qm.test_get_index_mut(&index_key) {
-                index.insert(row_id.uuid().as_bytes(), row_id).unwrap();
-            }
-        }
+        io.index_insert("users", "_id", &v1_branch, &Value::Uuid(row_id), row_id)
+            .unwrap();
 
         // --- Query using NEW column name (email_address) ---
         let query = QueryBuilder::new("users")
@@ -1840,6 +1818,7 @@ mod tests {
         // The row should be in the server's index for that branch
         assert!(
             server.query_manager().row_is_indexed_on_branch(
+                &io_server,
                 "documents",
                 client_branch.as_str(),
                 doc_id
@@ -2044,15 +2023,24 @@ mod tests {
         // Update server indices
         {
             let branch = server.branch_name().to_string();
-            let index_key = ("documents".to_string(), "_id".to_string(), branch);
-            if let Some(index) = server.query_manager_mut().test_get_index_mut(&index_key) {
-                index
-                    .insert(alice_doc_id.uuid().as_bytes(), alice_doc_id)
-                    .unwrap();
-                index
-                    .insert(bob_doc_id.uuid().as_bytes(), bob_doc_id)
-                    .unwrap();
-            }
+            io_server
+                .index_insert(
+                    "documents",
+                    "_id",
+                    &branch,
+                    &Value::Uuid(alice_doc_id),
+                    alice_doc_id,
+                )
+                .unwrap();
+            io_server
+                .index_insert(
+                    "documents",
+                    "_id",
+                    &branch,
+                    &Value::Uuid(bob_doc_id),
+                    bob_doc_id,
+                )
+                .unwrap();
         }
 
         // Clear any sync messages from document creation
@@ -2330,10 +2318,9 @@ mod tests {
         // Update index
         {
             let branch = server.branch_name().to_string();
-            let index_key = ("notes".to_string(), "_id".to_string(), branch);
-            if let Some(index) = server.query_manager_mut().test_get_index_mut(&index_key) {
-                index.insert(note_id.uuid().as_bytes(), note_id).unwrap();
-            }
+            io_server
+                .index_insert("notes", "_id", &branch, &Value::Uuid(note_id), note_id)
+                .unwrap();
         }
 
         server.query_manager_mut().sync_manager_mut().take_outbox();

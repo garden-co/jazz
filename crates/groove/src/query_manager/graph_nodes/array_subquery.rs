@@ -16,8 +16,10 @@ use crate::query_manager::types::{
     TupleElement, Value,
 };
 
+use crate::io_handler::IoHandler;
+
+use super::RowNode;
 use super::subgraph::SubgraphTemplate;
-use super::{IndicesMap, RowNode};
 
 /// Node that evaluates a correlated subquery for each outer row,
 /// producing an array column with the results.
@@ -134,11 +136,11 @@ impl ArraySubqueryNode {
         self.inner_dirty
     }
 
-    /// Process outer deltas with access to indices and object manager for subgraph settling.
+    /// Process outer deltas with access to IoHandler and object manager for subgraph settling.
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        indices: &IndicesMap,
+        io: &dyn IoHandler,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -166,7 +168,7 @@ impl ArraySubqueryNode {
                 if let Some(correlation_value) = self.extract_correlation_value(&tuple) {
                     // Evaluate subgraph for this correlation value
                     let array_result =
-                        self.evaluate_subgraph(&correlation_value, indices, om, &mut row_loader);
+                        self.evaluate_subgraph(&correlation_value, io, om, &mut row_loader);
 
                     // Store instance state
                     self.instances
@@ -192,7 +194,7 @@ impl ArraySubqueryNode {
 
                 let array_result = if needs_reevaluate {
                     if let Some(ref new_corr) = new_correlation {
-                        self.evaluate_subgraph(new_corr, indices, om, &mut row_loader)
+                        self.evaluate_subgraph(new_corr, io, om, &mut row_loader)
                     } else {
                         Value::Array(vec![])
                     }
@@ -246,7 +248,7 @@ impl ArraySubqueryNode {
     fn evaluate_subgraph(
         &self,
         correlation_value: &Value,
-        indices: &IndicesMap,
+        io: &dyn IoHandler,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> Value {
@@ -261,7 +263,7 @@ impl ArraySubqueryNode {
         };
 
         // Settle the subgraph
-        let row_delta = instance.graph.settle(indices, om, row_loader);
+        let row_delta = instance.graph.settle(io, om, row_loader);
 
         // Convert result rows to array of Row values
         let array_elements: Vec<Value> = row_delta
@@ -306,7 +308,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(
         &mut self,
-        indices: &IndicesMap,
+        io: &dyn IoHandler,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta
@@ -327,7 +329,7 @@ impl ArraySubqueryNode {
 
         for (outer_id, correlation_value, old_array) in instances_snapshot {
             // Re-evaluate subgraph
-            let new_array = self.evaluate_subgraph(&correlation_value, indices, om, row_loader);
+            let new_array = self.evaluate_subgraph(&correlation_value, io, om, row_loader);
 
             // Check if array changed
             if old_array != new_array {
@@ -369,7 +371,7 @@ impl RowNode for ArraySubqueryNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // This is a simplified process that doesn't have access to indices/om.
+        // This is a simplified process that doesn't have access to io/om.
         // Real processing should use process_with_context.
         // For now, just pass through with empty arrays.
         let mut result = TupleDelta::new();

@@ -10,6 +10,7 @@
 //! not shared mutable state.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Bound;
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
@@ -141,15 +142,14 @@ pub trait IoHandler {
     fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value)
     -> Vec<ObjectId>;
 
-    /// Range scan - returns row IDs where start <= value < end.
-    /// None bounds mean unbounded on that side.
+    /// Range scan - returns row IDs matching the range bounds.
     fn index_range(
         &self,
         table: &str,
         column: &str,
         branch: &str,
-        start: Option<&Value>,
-        end: Option<&Value>,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
     ) -> Vec<ObjectId>;
 
     /// Full scan - returns all row IDs in this index.
@@ -485,23 +485,23 @@ impl IoHandler for MemoryIoHandler {
         table: &str,
         column: &str,
         branch: &str,
-        start: Option<&Value>,
-        end: Option<&Value>,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
     ) -> Vec<ObjectId> {
         let key = (table.to_string(), column.to_string(), branch.to_string());
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
 
-        use std::ops::Bound;
-
         let start_bound = match start {
-            Some(v) => Bound::Included(encode_value(v)),
-            None => Bound::Unbounded,
+            Bound::Included(v) => Bound::Included(encode_value(v)),
+            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
+            Bound::Unbounded => Bound::Unbounded,
         };
         let end_bound = match end {
-            Some(v) => Bound::Excluded(encode_value(v)),
-            None => Bound::Unbounded,
+            Bound::Included(v) => Bound::Included(encode_value(v)),
+            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
+            Bound::Unbounded => Bound::Unbounded,
         };
 
         index
@@ -689,21 +689,33 @@ mod tests {
             "users",
             "age",
             "main",
-            Some(&Value::Integer(25)),
-            Some(&Value::Integer(35)),
+            Bound::Included(&Value::Integer(25)),
+            Bound::Excluded(&Value::Integer(35)),
         );
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row25));
         assert!(results.contains(&row30));
 
-        // Unbounded start
-        let results = io.index_range("users", "age", "main", None, Some(&Value::Integer(26)));
+        // Unbounded start, exclusive end
+        let results = io.index_range(
+            "users",
+            "age",
+            "main",
+            Bound::Unbounded,
+            Bound::Excluded(&Value::Integer(26)),
+        );
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row20));
         assert!(results.contains(&row25));
 
-        // Unbounded end
-        let results = io.index_range("users", "age", "main", Some(&Value::Integer(30)), None);
+        // Inclusive start, unbounded end
+        let results = io.index_range(
+            "users",
+            "age",
+            "main",
+            Bound::Included(&Value::Integer(30)),
+            Bound::Unbounded,
+        );
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row30));
         assert!(results.contains(&row35));
