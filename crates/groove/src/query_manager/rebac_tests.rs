@@ -139,6 +139,7 @@ fn rebac_insert_allowed_by_simple_policy() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -207,6 +208,7 @@ fn rebac_insert_denied_by_simple_policy() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -291,6 +293,7 @@ fn rebac_no_session_allows_all_writes() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -367,6 +370,7 @@ fn rebac_table_without_policy_allows_all_writes() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -429,6 +433,7 @@ fn rebac_non_row_object_allowed() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -508,6 +513,7 @@ fn rebac_two_clients_different_sessions() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     // Bob's document
@@ -519,6 +525,7 @@ fn rebac_two_clients_different_sessions() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     // Both clients send their documents
@@ -650,6 +657,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -787,6 +795,7 @@ fn rebac_update_denied_by_using_policy() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -1067,6 +1076,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -1141,6 +1151,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         author: ObjectId::new(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     qm.sync_manager_mut().push_inbox(InboxEntry {

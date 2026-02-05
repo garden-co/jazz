@@ -16,7 +16,7 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 use crate::storage::{ContentHash, StorageError};
-use crate::sync_manager::OutboxEntry;
+use crate::sync_manager::{OutboxEntry, PersistenceTier};
 
 // ============================================================================
 // LoadedBranch - Branch data returned from storage
@@ -104,6 +104,17 @@ pub trait IoHandler {
 
     /// Delete a blob by content hash.
     fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError>;
+
+    // ================================================================
+    // Persistence ack storage
+    // ================================================================
+
+    /// Record that a commit was persisted at the given tier.
+    fn store_ack_tier(
+        &mut self,
+        commit_id: CommitId,
+        tier: PersistenceTier,
+    ) -> Result<(), StorageError>;
 
     // ================================================================
     // Index operations (sync - THE KEY INNOVATION)
@@ -200,6 +211,9 @@ pub struct MemoryIoHandler {
 
     /// Sync message outbox (taken by caller)
     outbox: Vec<OutboxEntry>,
+
+    /// Persistence ack tiers per commit.
+    ack_tiers: HashMap<CommitId, HashSet<PersistenceTier>>,
 }
 
 /// Internal object storage structure.
@@ -342,8 +356,14 @@ impl IoHandler for MemoryIoHandler {
         let Some(branch_data) = obj.branches.get(branch) else {
             return Ok(None);
         };
+        let mut commits = branch_data.commits.clone();
+        for commit in &mut commits {
+            if let Some(tiers) = self.ack_tiers.get(&commit.id()) {
+                commit.ack_state.confirmed_tiers = tiers.clone();
+            }
+        }
         Ok(Some(LoadedBranch {
-            commits: branch_data.commits.clone(),
+            commits,
             tails: branch_data.tails.clone(),
         }))
     }
@@ -419,6 +439,19 @@ impl IoHandler for MemoryIoHandler {
 
     fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
         self.blobs.remove(&hash);
+        Ok(())
+    }
+
+    // ================================================================
+    // Persistence ack storage
+    // ================================================================
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: CommitId,
+        tier: PersistenceTier,
+    ) -> Result<(), StorageError> {
+        self.ack_tiers.entry(commit_id).or_default().insert(tier);
         Ok(())
     }
 
@@ -552,6 +585,7 @@ mod tests {
             author: ObjectId::new(),
             metadata: None,
             stored_state: Default::default(),
+            ack_state: Default::default(),
         }
     }
 

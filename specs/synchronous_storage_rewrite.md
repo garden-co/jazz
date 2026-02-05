@@ -109,7 +109,11 @@ Phase 2 (Object mgmt) ──► Phase 3 (Delete B-tree) ──► Phase 4 (Query
          ┌──────────────────────────────────────────────────────┤
          │                                                      │
          ▼                                                      ▼
-Phase 7 (bf-tree impl)                                Phase 6 (Durability)
+Phase 7 (bf-tree impl)                             Phase 6a (Write acks, Rust)
+         │                                                      │
+         │                                               Phase 6b (Query settlement tiers, Rust)
+         │                                                      │
+         │                                               Phase 6c (Durability API, TS)
          │                                                      │
          └──────────────────────┬───────────────────────────────┘
                                 │
@@ -494,7 +498,7 @@ pub struct TupleDelta {
 
 ---
 
-## Phase 5: Test Adaptation
+## Phase 5: Test Adaptation ✅
 
 **Goal**: All existing groove tests pass with the new sync storage.
 
@@ -529,11 +533,113 @@ Tests that happen to use async infrastructure but test other behavior:
 
 ---
 
-## Phase 6: Durability Confirmation Protocol
+## Phase 6a: Write Persistence Acks (Rust)
 
-**Goal**: Extend sync protocol with persistence acknowledgment and query settlement.
+**Goal**: Add persistence acknowledgment messages to the sync protocol. Implement emission, routing, relay, and consumption of write acks. Verify with three-tier E2E tests using three groove instances (A ↔ B ↔ C).
 
-### New SyncPayload Variants
+**After Phase 6a**: `PersistenceAck` flows correctly through a multi-tier topology. Commits carry ack state. 544+ tests pass.
+
+### Key Design Decisions
+
+#### Separation of concerns: ack state vs routing
+
+Two distinct concerns, stored in different places:
+
+1. **CommitAckState on Commit** — intrinsic property of the commit ("which tiers have confirmed persistence"). Lives on the `Commit` struct with `#[serde(skip)]` (not serialized over the wire, not hashed). **Persisted via IoHandler** — `store_ack_tier()` writes incrementally, `load_branch()` populates ack_state on each returned commit.
+
+2. **Interest map on SyncManager** — transient routing table ("which clients need to hear about acks for this commit"). `HashMap<CommitId, HashSet<ClientId>>`. Connection-scoped, cleaned up on disconnect.
+
+```rust
+// On Commit (intrinsic):
+pub struct Commit {
+    // ... existing fields ...
+    #[serde(skip, default)]
+    pub ack_state: CommitAckState,
+}
+
+// On SyncManager (transient routing):
+pub struct SyncManager {
+    // ... existing fields ...
+    my_tier: Option<PersistenceTier>,
+    commit_interest: HashMap<CommitId, HashSet<ClientId>>,
+}
+```
+
+#### Why no CommitSource on Commit
+
+The same commit can arrive from multiple clients, or multiple times from the same client (network retries). Storing a single source on the commit doesn't work. The interest map handles the N:1 relationship naturally — multiple clients can be interested in the same commit's acks.
+
+#### Interest map lifecycle
+
+- **Add**: When `process_from_client` receives `ObjectUpdated`, add `client_id` to interest set for each commit ID.
+- **Remove**: When a client disconnects, remove it from all interest sets. Clean up empty entries.
+- **Idempotent**: Re-receiving a commit from the same client just re-adds to the HashSet (no-op). Node re-acks and re-relays any existing upstream acks.
+
+#### Each groove instance knows its own tier
+
+`SyncManager` gets a `my_tier: Option<PersistenceTier>` config field. When set, acks emitted by this instance carry this tier. When `None`, the instance doesn't emit acks (e.g., a memory-only client that doesn't persist).
+
+#### Ack flow
+
+Direct ack is always immediate — the receiver knows who sent the commit (from method params). Relay uses the interest map:
+
+```
+A (client) ──write──▸ B (server/client) ──forward──▸ C (server)
+                                                       │
+A ◂──relay(C's ack)── B ◂──────direct ack(tier=Core)──┘
+     via interest map    │
+A ◂──direct ack(tier=Worker)──┘
+```
+
+1. A sends commit to B. B records `interest[commit] = {A}`.
+2. B persists → B acks A directly (tier=Worker). B forwards commit to C.
+3. C persists → C acks B directly (tier=Core).
+4. B receives C's ack. Looks up `interest[commit]` → {A}. Relays ack to A.
+5. A now has acks from both Worker and Core tiers.
+
+### Scope
+
+**ADD**:
+- `PersistenceTier` enum (with `Ord`: Worker < EdgeServer < CoreServer)
+- `CommitAckState` struct (on Commit, `#[serde(skip)]`)
+- `SyncPayload::PersistenceAck` variant
+- `SyncManager.my_tier` config
+- `SyncManager.commit_interest` routing table
+- Interest map population in `process_from_client()`
+- Direct ack emission in `apply_object_updated()` (after successful persist)
+- Ack relay in PersistenceAck handler (via interest map)
+- Ack state update on commits via IoHandler
+- `IoHandler::store_ack_tier()` + MemoryIoHandler impl
+- `load_branch()` populates ack_state from storage
+- Client disconnect cleanup
+- Three-tier E2E tests (write ack only)
+
+**DON'T ADD** (later phases):
+- `QuerySettled` (Phase 6b)
+- `settled_tier` on subscriptions (Phase 6b)
+- TypeScript API (Phase 6c)
+- Worker bridge (Phase 6c)
+
+### New Types
+
+```rust
+/// Identifies which tier is confirming persistence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub enum PersistenceTier {
+    /// Local worker (OPFS persistence).
+    Worker,
+    /// Edge server (regional persistence).
+    EdgeServer,
+    /// Global core server (global persistence).
+    CoreServer,
+}
+
+/// Ack state: which tiers have confirmed persistence of this commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitAckState {
+    pub confirmed_tiers: HashSet<PersistenceTier>,
+}
+```
 
 ```rust
 pub enum SyncPayload {
@@ -543,32 +649,201 @@ pub enum SyncPayload {
     PersistenceAck {
         object_id: ObjectId,
         branch_name: BranchName,
-        /// Commit IDs confirmed persisted.
         confirmed_commits: HashSet<CommitId>,
-        /// Which tier is confirming (for multi-tier scenarios).
         tier: PersistenceTier,
     },
-
-    /// Confirms all current data for a query has been sent.
-    /// Sent after QueryRegistration when initial sync is complete.
-    QuerySettled {
-        query_id: QueryId,
-        /// Which tier has settled (for multi-tier scenarios).
-        tier: PersistenceTier,
-    },
-}
-
-/// Identifies which tier is confirming persistence/settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PersistenceTier {
-    /// Local worker (OPFS persistence).
-    Worker,
-    /// Edge server (regional persistence).
-    EdgeServer,
-    /// Global core server (global persistence).
-    CoreServer,
 }
 ```
+
+### Implementation Steps
+
+**Step 1: Types + IoHandler persistence**
+
+Add `PersistenceTier`, `CommitAckState` to commit.rs. Add `ack_state: CommitAckState` field to `Commit` (`#[serde(skip, default)]`). Add `SyncPayload::PersistenceAck` variant. Add `store_ack_tier()` to IoHandler trait. Implement in MemoryIoHandler with `ack_tiers: HashMap<CommitId, HashSet<PersistenceTier>>`. Update `load_branch()` to populate ack_state from storage. Add `my_tier` and `commit_interest` fields to SyncManager.
+
+**Step 2: Populate interest map**
+
+In `process_from_client()`, when receiving `ObjectUpdated`, add `client_id` to interest set for each commit ID before calling `apply_object_updated()`.
+
+**Step 3: Emit direct PersistenceAck**
+
+Modify `apply_object_updated()` to accept a `source` parameter. After successfully persisting commits, if `self.my_tier` is set, emit `PersistenceAck` back to the source with the persisted commit IDs.
+
+**Step 4: Handle incoming PersistenceAck + relay**
+
+Add handling in `process_from_server()` and `process_from_client()`: persist ack state via `io.store_ack_tier()`, update in-memory commit ack_state, relay to interested clients via the interest map. Add `get_commit_mut()` to ObjectManager for in-memory ack state updates.
+
+**Step 5: Client disconnect cleanup**
+
+In `remove_client()` (or equivalent), remove the disconnected client from all interest sets. Clean up empty entries.
+
+**Step 6: Three-tier E2E tests**
+
+Create `pump_messages_3tier()` helper. Tests:
+1. `persistence_ack_direct` — A writes to B, B acks A with B's tier
+2. `persistence_ack_relay` — A writes through B to C, C acks B, B relays to A with C's tier
+3. `persistence_ack_both_tiers` — A receives acks from both B and C tiers
+4. `persistence_ack_idempotent` — duplicate commit delivery doesn't panic
+5. `persistence_ack_cleanup_on_disconnect` — interest map cleaned on disconnect
+6. `persistence_ack_survives_reload` — store_ack_tier → load_branch round-trip
+
+### Files to Modify
+
+| File | Change |
+|------|--------|
+| `commit.rs` | Add `CommitAckState`, `ack_state` field on `Commit` |
+| `io_handler.rs` | Add `store_ack_tier()` to IoHandler trait, implement in MemoryIoHandler (+ `ack_tiers` field), update `load_branch()` to populate ack_state |
+| `sync_manager.rs` | Add `PersistenceTier`, `SyncPayload::PersistenceAck`, `my_tier` field, `commit_interest` map, interest population, ack emission/relay, disconnect cleanup |
+| `object_manager.rs` | Add `get_commit_mut()` method |
+| `sync_manager_tests.rs` | Three-tier E2E tests, `pump_messages_3tier()` helper |
+
+### Verification
+
+```bash
+cargo check -p groove
+cargo test -p groove
+cargo clippy -p groove -- -D warnings
+```
+
+---
+
+## Phase 6b: Query Settlement Tiers (Rust)
+
+**Goal**: Add tier-aware query settlement to the sync protocol. A subscriber can request that initial delivery be held until a specific persistence tier confirms settlement (e.g., "don't show results until EdgeServer has settled"). Implement `QuerySettled` message emission, relay, and tier-gated delivery in QueryManager. Verify with E2E tests.
+
+**Depends on**: Phase 6a (PersistenceTier enum, SyncManager routing patterns).
+
+**After Phase 6b**: Subscribers can specify `settled_tier` on subscriptions. `QuerySettled` flows through the sync topology. First delivery is held until the required tier settles, then delivers the full accumulated state.
+
+### Key Design Decisions
+
+#### settled_tier controls initial delivery timing
+
+The `settled_tier` option on a subscription controls when the *first* update is delivered:
+- `None` (default): delivery is immediate on first local settle (current behavior preserved)
+- `Some(PersistenceTier)`: delivery is held until `QuerySettled` arrives from that tier (or higher)
+
+After the first delivery, all subsequent incremental updates are delivered immediately regardless of tier.
+
+#### Data accumulates while waiting
+
+While holding back delivery, the query graph continues settling and processing incoming data normally. When the required tier finally settles, the initial delivery contains ALL accumulated data — not just what arrived after the tier settled.
+
+This is achieved by using `QueryGraph::current_result()` (already exists) to get the full current state at the moment of first delivery.
+
+#### QuerySettled is a separate SyncPayload variant
+
+```rust
+SyncPayload::QuerySettled {
+    query_id: QueryId,
+    tier: PersistenceTier,
+}
+```
+
+Emitted by a server when a client's forwarded query subscription settles for the first time. Relayed through intermediaries back to the originating client.
+
+#### Query origin tracking for relay
+
+SyncManager needs to know which client originated each forwarded query so it can relay `QuerySettled` back. New field: `query_origin: HashMap<QueryId, ClientId>`.
+
+### Scope
+
+**ADD**:
+- `SyncPayload::QuerySettled` variant
+- `settled_tier: Option<PersistenceTier>` on `QuerySubscription`
+- `achieved_tiers: HashSet<PersistenceTier>` on `QuerySubscription`
+- Delivery hold logic in `QueryManager::process()` — gate first delivery on tier satisfaction
+- `notify_query_settled(sub_id, tier)` method on QueryManager
+- `query_origin: HashMap<QueryId, ClientId>` on SyncManager
+- QuerySettled emission on first server-side subscription settlement
+- QuerySettled relay through intermediaries
+- `settled_tier` parameter on RuntimeCore subscribe API
+- E2E tests for QuerySettled flow
+
+**DON'T ADD** (Phase 6c):
+- TypeScript API
+- Worker bridge integration
+
+### Implementation Steps
+
+**Step 1: Add QuerySettled SyncPayload variant**
+
+```rust
+SyncPayload::QuerySettled {
+    query_id: QueryId,
+    tier: PersistenceTier,
+},
+```
+
+**Step 2: Add settled_tier to QuerySubscription**
+
+In `query_manager/manager.rs`, add to `QuerySubscription`:
+- `settled_tier: Option<PersistenceTier>` — required tier for initial delivery
+- `achieved_tiers: HashSet<PersistenceTier>` — tiers that have confirmed settlement
+
+Add `notify_query_settled(sub_id, tier)` method that adds tier to achieved_tiers and marks subscription dirty.
+
+**Step 3: Modify delivery logic in QueryManager::process()**
+
+```rust
+let delta = subscription.graph.settle(io_ref, om, row_loader);
+
+let tier_satisfied = match &subscription.settled_tier {
+    None => true,
+    Some(required) => subscription.achieved_tiers.iter().any(|t| t >= required),
+};
+
+if !tier_satisfied {
+    // Waiting for required tier — don't deliver anything yet
+} else if !subscription.settled_once {
+    // First delivery — full current state from graph
+    let current_rows = subscription.graph.current_result();
+    let full_delta = RowDelta { added: current_rows, removed: vec![], updated: vec![] };
+    subscription.settled_once = true;
+    self.update_outbox.push(QueryUpdate { delta: full_delta, ... });
+} else if !delta.is_empty() {
+    // Incremental delivery (tier already satisfied)
+    self.update_outbox.push(QueryUpdate { delta, ... });
+}
+```
+
+**Step 4: Query origin tracking + relay in SyncManager**
+
+Add `query_origin: HashMap<QueryId, ClientId>` to SyncManager. When SyncManager forwards a client's query upstream, record the mapping. When receiving QuerySettled from server, relay to originating client. When B's own ServerQuerySubscription settles for the first time, emit QuerySettled to the client.
+
+**Step 5: Extend subscribe API**
+
+Add `settled_tier: Option<PersistenceTier>` parameter to `RuntimeCore::subscribe()`, thread through to QuerySubscription.
+
+**Step 6: E2E tests**
+
+1. `query_settled_direct` — A subscribes on B with `settled_tier=Worker`, B settles, B sends QuerySettled. Assert: A gets initial update only after QuerySettled.
+2. `query_settled_relay` — A subscribes with `settled_tier=EdgeServer` through B to C. B settles (Worker) → no update. C settles (EdgeServer) → QuerySettled relayed → A gets update.
+3. `query_settled_no_tier_immediate` — `settled_tier=None` preserves immediate delivery (current behavior).
+4. `query_settled_data_accumulates` — Data arrives while waiting for tier. Assert: initial update contains ALL accumulated data.
+
+### Files to Modify
+
+| File | Change |
+|------|--------|
+| `sync_manager.rs` | Add `SyncPayload::QuerySettled`, `query_origin` map, QuerySettled emission/relay |
+| `query_manager/manager.rs` | Add `settled_tier`/`achieved_tiers` to subscription, delivery hold logic, `notify_query_settled()` |
+| `runtime_core.rs` | Add `settled_tier` parameter to subscribe API |
+| `sync_manager_tests.rs` | QuerySettled E2E tests |
+
+### Verification
+
+```bash
+cargo check -p groove
+cargo test -p groove
+cargo clippy -p groove -- -D warnings
+```
+
+---
+
+## Phase 6c: Durability API (TypeScript)
+
+**Goal**: Expose durability confirmation to jazz-ts users via a Promise-based API. Depends on Phase 6a (write acks), Phase 6b (query settlement), and Phase 8 (worker architecture).
 
 ### Durability API: Fire-and-Forget with Optional Persistence Promises
 
@@ -652,11 +927,7 @@ Main Thread          Worker              Edge Server         Core Server
      │    (tier:Core)   │                     │                   │
 ```
 
-The `persisted()` Promise resolves when the requested tier's `PersistAck` arrives.
-
 ### Query Settlement Levels
-
-Similarly for queries:
 
 ```rust
 pub enum SettlementLevel {
@@ -1090,8 +1361,9 @@ This is acceptable because:
 - [ ] New sync `IoHandler` trait (with index methods)
 - [ ] `MemoryIoHandler` implementation (for tests + main thread)
 - [ ] Key encoding functions (`encode_index_value`, etc.)
-- [ ] `PersistenceAck` and `QuerySettled` sync payload variants
-- [ ] `PersistenceTier` enum
+- [ ] `PersistenceAck` sync payload variant + `CommitAckState` (Phase 6a)
+- [ ] `QuerySettled` sync payload variant + `settled_tier` on subscriptions (Phase 6b)
+- [ ] `PersistenceTier` enum (Phase 6a)
 - [ ] `BfTreeIoHandler` implementation (Phase 7, for persistence)
 
 **groove-wasm crate:**
