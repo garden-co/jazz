@@ -32,6 +32,7 @@ impl<'de> Deserialize<'de> for ObjectId {
 }
 
 /// How deeply a branch has been loaded from storage.
+/// Note: With sync storage, this is mainly used to track whether branch data exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BranchLoadedState {
     #[default]
@@ -39,17 +40,6 @@ pub enum BranchLoadedState {
     TipIdsOnly,
     TipsOnly,
     AllCommits,
-}
-
-/// State of an object in the manager.
-#[derive(Debug, Clone)]
-pub enum ObjectState {
-    /// Created locally, persistence pending. Operations work immediately.
-    Creating(Object),
-    /// Being loaded from storage. Operations must wait/poll.
-    Loading,
-    /// Fully persisted/loaded. Operations work immediately.
-    Available(Object),
 }
 
 impl ObjectId {
