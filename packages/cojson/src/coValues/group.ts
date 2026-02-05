@@ -133,6 +133,41 @@ function healMissingKeyForEveryone(group: RawGroup) {
   }
 }
 
+/**
+ * Backfill the groupSealer field for groups created before the feature was introduced.
+ * Since the groupSealer is derived deterministically from the readKey, parallel migrations
+ * from different accounts will always produce the same value.
+ *
+ * Only admins/managers can set the groupSealer field.
+ */
+function healMissingGroupSealer(group: RawGroup) {
+  if (group.get("groupSealer")) {
+    return;
+  }
+
+  // Check direct membership only (not inherited roles via parent groups)
+  // to avoid accessing parentGroupsChanges which may not be initialized during early construction
+  const currentAccountOrAgent = group.core.node.getCurrentAccountOrAgentID();
+  const directRole = group.get(currentAccountOrAgent);
+  if (directRole !== "admin" && directRole !== "manager") {
+    return;
+  }
+
+  const readKeyId = group.get("readKey");
+  if (!readKeyId) {
+    return;
+  }
+
+  const readKeySecret = group.getReadKey(readKeyId);
+  if (!readKeySecret) {
+    return;
+  }
+
+  const groupSealer =
+    group.core.node.crypto.groupSealerFromReadKey(readKeySecret);
+  group.set("groupSealer", groupSealer.id, "trusting");
+}
+
 function needsKeyRotation(group: RawGroup) {
   const myRole = group.myRole();
 
@@ -333,6 +368,7 @@ export class RawGroup<
     const runMigrations = () => {
       // rotateReadKeyIfNeeded(this);
       healMissingKeyForEveryone(this);
+      healMissingGroupSealer(this);
     };
 
     // We need the group and their parents to be completely downloaded to correctly handle the migrations

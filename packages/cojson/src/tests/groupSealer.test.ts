@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
+import { expectGroup } from "../typeUtils/expectGroup.js";
+import { LocalNode } from "../localNode.js";
+import { RawGroup } from "../coValues/group.js";
 import {
   SyncMessagesLog,
   createNConnectedNodes,
@@ -11,6 +14,47 @@ import {
 } from "./testUtils.js";
 
 const crypto = await WasmCrypto.create();
+
+/**
+ * Creates a group without the groupSealer field, simulating a legacy group
+ * created before the groupSealer feature was introduced.
+ */
+function createLegacyGroup(node: LocalNode): RawGroup {
+  const account = node.getCurrentAgent();
+
+  const groupCoValue = node.createCoValue({
+    type: "comap",
+    ruleset: { type: "group", initialAdmin: account.id },
+    meta: null,
+    ...node.crypto.createdNowUnique(),
+  });
+
+  const group = expectGroup(groupCoValue.getCurrentContent());
+
+  group.set(account.id, "admin", "trusting");
+
+  const readKey = node.crypto.newRandomKeySecret();
+
+  group.set(
+    `${readKey.id}_for_${account.id}`,
+    node.crypto.seal({
+      message: readKey.secret,
+      from: account.currentSealerSecret(),
+      to: account.currentSealerID(),
+      nOnceMaterial: {
+        in: groupCoValue.id,
+        tx: groupCoValue.nextTransactionID(),
+      },
+    }),
+    "trusting",
+  );
+
+  group.set("readKey", readKey.id, "trusting");
+
+  // Intentionally NOT setting groupSealer to simulate a pre-feature group
+
+  return group;
+}
 
 // ============================================================================
 // Unit tests for sealForGroup / unsealForGroup crypto operations (Task 26)
@@ -1022,5 +1066,206 @@ describe("permission validation for groupSealer", () => {
     const newSealer = group.get("groupSealer");
     expect(newSealer).toBeDefined();
     expect(newSealer).not.toEqual(originalSealer);
+  });
+});
+
+describe("groupSealer migration for legacy groups", () => {
+  test("legacy group without groupSealer gets migrated when loaded by admin on another node", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    // Create a legacy group (without groupSealer) on node1, add node2 as admin
+    const legacyGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    legacyGroup.addMember(account2OnNode1, "admin");
+
+    expect(legacyGroup.get("groupSealer")).toBeUndefined();
+
+    await legacyGroup.core.waitForSync();
+
+    // Node2 (admin) loads the group - migration should add the groupSealer
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, legacyGroup.id);
+
+    expect(groupOnNode2.get("groupSealer")).toBeDefined();
+    expect(groupOnNode2.get("groupSealer")).toMatch(/^sealer_z/);
+
+    // Verify it's derived from the current read key
+    const readKey = groupOnNode2.getCurrentReadKey();
+    expect(readKey.secret).toBeDefined();
+    const expectedSealer = crypto.groupSealerFromReadKey(readKey.secret!);
+    expect(groupOnNode2.get("groupSealer")).toEqual(expectedSealer.id);
+  });
+
+  test("migration is idempotent - loading on two admin nodes produces same groupSealer", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Create a legacy group on node1, add node2 and node3 as admins
+    const legacyGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    const account3OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node3.accountID,
+    );
+    legacyGroup.addMember(account2OnNode1, "admin");
+    legacyGroup.addMember(account3OnNode1, "admin");
+
+    expect(legacyGroup.get("groupSealer")).toBeUndefined();
+
+    await legacyGroup.core.waitForSync();
+
+    // Node2 loads and migrates
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, legacyGroup.id);
+    const sealerFromNode2 = groupOnNode2.get("groupSealer");
+    expect(sealerFromNode2).toBeDefined();
+
+    await groupOnNode2.core.waitForSync();
+
+    // Node3 loads - migration should be idempotent (groupSealer already set via sync or re-derived)
+    const groupOnNode3 = await loadCoValueOrFail(node3.node, legacyGroup.id);
+    const sealerFromNode3 = groupOnNode3.get("groupSealer");
+    expect(sealerFromNode3).toBeDefined();
+
+    // Both should produce the same groupSealer (deterministic from readKey)
+    expect(sealerFromNode3).toEqual(sealerFromNode2);
+  });
+
+  test("parallel migrations from different accounts produce same groupSealer", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Create a legacy group on node1, add node2 and node3 as admins
+    const legacyGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    const account3OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node3.accountID,
+    );
+    legacyGroup.addMember(account2OnNode1, "admin");
+    legacyGroup.addMember(account3OnNode1, "admin");
+
+    expect(legacyGroup.get("groupSealer")).toBeUndefined();
+
+    await legacyGroup.core.waitForSync();
+
+    // Both node2 and node3 load the group concurrently, triggering parallel migrations
+    const [groupOnNode2, groupOnNode3] = await Promise.all([
+      loadCoValueOrFail(node2.node, legacyGroup.id),
+      loadCoValueOrFail(node3.node, legacyGroup.id),
+    ]);
+
+    // Both should have a groupSealer set
+    const sealerOnNode2 = groupOnNode2.get("groupSealer");
+    const sealerOnNode3 = groupOnNode3.get("groupSealer");
+
+    expect(sealerOnNode2).toBeDefined();
+    expect(sealerOnNode3).toBeDefined();
+
+    // Both should derive the same groupSealer since it's deterministic from readKey
+    expect(sealerOnNode2).toEqual(sealerOnNode3);
+
+    // Wait for sync and verify convergence
+    await groupOnNode2.core.waitForSync();
+    await groupOnNode3.core.waitForSync();
+
+    // After sync, both should still agree
+    expect(groupOnNode2.get("groupSealer")).toEqual(
+      groupOnNode3.get("groupSealer"),
+    );
+  });
+
+  test("non-admin member does not trigger migration", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Create a legacy group on node1, add node2 as reader only
+    const legacyGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    legacyGroup.addMember(account2OnNode1, "reader");
+
+    expect(legacyGroup.get("groupSealer")).toBeUndefined();
+
+    await legacyGroup.core.waitForSync();
+
+    const transactions = legacyGroup.core.getValidSortedTransactions();
+
+    // Node2 (reader) loads the group - should NOT trigger migration
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, legacyGroup.id);
+
+    // The groupSealer should still be undefined because node2 is only a reader
+    // and cannot set the groupSealer field
+    expect(groupOnNode2.get("groupSealer")).toBeUndefined();
+    expect(groupOnNode2.core.getValidSortedTransactions()).toHaveLength(
+      transactions.length,
+    );
+  });
+
+  test("migrated legacy group works with non-member extension via groupSealer", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Create a legacy group on node1 (no groupSealer), add node2 as admin
+    const legacyGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    legacyGroup.addMember(account2OnNode1, "admin");
+
+    expect(legacyGroup.get("groupSealer")).toBeUndefined();
+
+    await legacyGroup.core.waitForSync();
+
+    // Node2 (admin) loads the group, triggering migration
+    const parentGroup = await loadCoValueOrFail(node2.node, legacyGroup.id);
+
+    // Verify migration happened
+    expect(parentGroup.get("groupSealer")).toBeDefined();
+
+    await parentGroup.core.waitForSync();
+
+    // Node3 (NOT a member of parent) creates a child group and extends parent
+    const parentOnNode3 = await loadCoValueOrFail(node3.node, legacyGroup.id);
+    const childGroup = node3.node.createGroup();
+    childGroup.extend(parentOnNode3);
+
+    const map = childGroup.createMap();
+    map.set("test", "Written by non-member after migration");
+
+    await map.core.waitForSync();
+    await childGroup.core.waitForSync();
+
+    // Node1 (original creator/admin) should be able to read content via migrated groupSealer
+    // First, sync to pick up the migrated groupSealer
+    const parentOnNode1 = await loadCoValueOrFail(node1.node, legacyGroup.id);
+    await parentOnNode1.core.waitForSync();
+
+    const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+    expect(mapOnNode1.get("test")).toEqual(
+      "Written by non-member after migration",
+    );
   });
 });
