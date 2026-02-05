@@ -157,9 +157,17 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
 
 export class SQLiteClientAsync implements DBClientInterfaceAsync {
   private readonly db: SQLiteDatabaseDriverAsync;
+  /** Serialize transactions to avoid SQLITE_BUSY errors */
+  private txQueue = Promise.resolve() as Promise<unknown>;
 
   constructor(db: SQLiteDatabaseDriverAsync) {
     this.db = db;
+  }
+
+  private enqueueTx<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.txQueue.then(fn);
+    this.txQueue = next;
+    return next;
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
@@ -275,8 +283,8 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
     const rows = await this.db.query<DeletedCoValueQueueRow>(
       `SELECT coValueID as id
-       FROM deletedCoValues
-       WHERE status = ?`,
+         FROM deletedCoValues
+         WHERE status = ?`,
       [DeletedCoValueDeletionStatus.Pending],
     );
     return rows.map((r) => r.id);
@@ -285,8 +293,10 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
   async transaction(
     operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
   ): Promise<unknown> {
-    return this.db.transaction((tx) =>
-      operationsCallback(new SQLiteTransactionAsync(tx)),
+    return this.enqueueTx(() =>
+      this.db.transaction((tx) =>
+        operationsCallback(new SQLiteTransactionAsync(tx)),
+      ),
     );
   }
 
