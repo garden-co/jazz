@@ -21,6 +21,14 @@ pub struct PolicyError {
 // ID Types
 // ============================================================================
 
+/// Persistence tier — declaration order defines Ord (Worker < EdgeServer < CoreServer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub enum PersistenceTier {
+    Worker,
+    EdgeServer,
+    CoreServer,
+}
+
 /// Unique identifier for a server connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerId(pub Uuid);
@@ -197,6 +205,14 @@ pub enum SyncPayload {
     /// Unsubscribe from a query (client to server).
     QueryUnsubscription { query_id: QueryId },
 
+    /// Persistence acknowledgment — confirms a set of commits were persisted at a tier.
+    PersistenceAck {
+        object_id: ObjectId,
+        branch_name: BranchName,
+        confirmed_commits: HashSet<CommitId>,
+        tier: PersistenceTier,
+    },
+
     /// Error response.
     Error(SyncError),
 }
@@ -211,6 +227,7 @@ impl SyncPayload {
             SyncPayload::BlobResponse { .. } => "BlobResponse",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
+            SyncPayload::PersistenceAck { .. } => "PersistenceAck",
             SyncPayload::Error(_) => "Error",
         }
     }
@@ -315,6 +332,11 @@ pub struct SyncManager {
     pending_query_unsubscriptions: Vec<PendingQueryUnsubscription>,
 
     next_pending_id: u64,
+
+    /// This node's persistence tier (None = don't emit acks).
+    my_tier: Option<PersistenceTier>,
+    /// Tracks which clients are interested in acks for each commit.
+    commit_interest: HashMap<CommitId, HashSet<ClientId>>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -336,6 +358,8 @@ impl std::fmt::Debug for SyncManager {
                 &self.pending_query_unsubscriptions,
             )
             .field("next_pending_id", &self.next_pending_id)
+            .field("my_tier", &self.my_tier)
+            .field("commit_interest", &self.commit_interest)
             .finish()
     }
 }
@@ -359,6 +383,8 @@ impl SyncManager {
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
             next_pending_id: 0,
+            my_tier: None,
+            commit_interest: HashMap::new(),
         }
     }
 
@@ -375,7 +401,15 @@ impl SyncManager {
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
             next_pending_id: 0,
+            my_tier: None,
+            commit_interest: HashMap::new(),
         }
+    }
+
+    /// Set this node's persistence tier (enables ack emission).
+    pub fn with_tier(mut self, tier: PersistenceTier) -> Self {
+        self.my_tier = Some(tier);
+        self
     }
 
     // ========================================================================
@@ -410,6 +444,11 @@ impl SyncManager {
     /// Remove a client connection.
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
+        // Clean up interest map
+        self.commit_interest.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
     }
 
     /// Get server state.
@@ -498,6 +537,11 @@ impl SyncManager {
     /// Take all pending updates for upper layer evaluation.
     pub fn take_pending_updates(&mut self) -> Vec<PendingUpdate> {
         std::mem::take(&mut self.pending_updates)
+    }
+
+    /// Get the IDs of all pending updates (without taking them).
+    pub fn pending_update_ids(&self) -> Vec<PendingUpdateId> {
+        self.pending_updates.iter().map(|p| p.id).collect()
     }
 
     /// Approve a pending update, applying it.
@@ -1101,7 +1145,23 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
-                self.apply_object_updated(io, object_id, metadata, branch_name, commits);
+                let persisted =
+                    self.apply_object_updated(io, object_id, metadata, branch_name, commits);
+
+                // Emit ack back to server if we have a tier
+                if let Some(tier) = self.my_tier
+                    && !persisted.is_empty()
+                {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Server(server_id),
+                        payload: SyncPayload::PersistenceAck {
+                            object_id,
+                            branch_name,
+                            confirmed_commits: persisted,
+                            tier,
+                        },
+                    });
+                }
 
                 // Forward to clients whose scope includes this object/branch
                 self.forward_update_to_clients(object_id, branch_name);
@@ -1118,6 +1178,41 @@ impl SyncManager {
 
                 // Forward to clients
                 self.forward_truncation_to_clients(object_id, branch_name, tails);
+            }
+            SyncPayload::PersistenceAck {
+                object_id,
+                branch_name,
+                confirmed_commits,
+                tier,
+            } => {
+                // Persist ack state and update in-memory
+                for &commit_id in &confirmed_commits {
+                    let _ = io.store_ack_tier(commit_id, tier);
+                    if let Some(commit) =
+                        self.object_manager
+                            .get_commit_mut(object_id, &branch_name, commit_id)
+                    {
+                        commit.ack_state.confirmed_tiers.insert(tier);
+                    }
+                }
+                // Relay to interested clients
+                let mut interested = HashSet::new();
+                for &commit_id in &confirmed_commits {
+                    if let Some(clients) = self.commit_interest.get(&commit_id) {
+                        interested.extend(clients);
+                    }
+                }
+                for cid in interested {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(cid),
+                        payload: SyncPayload::PersistenceAck {
+                            object_id,
+                            branch_name,
+                            confirmed_commits: confirmed_commits.clone(),
+                            tier,
+                        },
+                    });
+                }
             }
             SyncPayload::BlobResponse { blob_id, data } => {
                 let _ = self.object_manager.put_blob(
@@ -1155,21 +1250,13 @@ impl SyncManager {
                 object_id,
                 branch_name,
                 commits,
-                metadata,
+                metadata: _,
             } => {
-                // Check if this is a system object that bypasses scope check:
-                // - Catalogue objects (schema or lens)
-                // - Row objects (have "table" metadata)
-                let is_system_or_row_object = metadata.as_ref().is_some_and(|m| {
-                    m.metadata
-                        .get("type")
-                        .is_some_and(|t| t == "catalogue_schema" || t == "catalogue_lens")
-                        || m.metadata.contains_key("table")
-                });
-
-                // Check if object is in any query scope (system/row objects bypass scope check)
-                if !is_system_or_row_object && !client.is_in_scope(*object_id, branch_name) {
-                    // Out of scope - queue for approval
+                // Check if object is in any query scope
+                if !client.is_in_scope(*object_id, branch_name) {
+                    // Out of scope - queue for upper-layer approval.
+                    // This applies to ALL objects including row/catalogue objects:
+                    // even new inserts that the scope hasn't seen yet must be approved.
                     let id = PendingUpdateId(self.next_pending_id);
                     self.next_pending_id += 1;
                     self.pending_updates.push(PendingUpdate {
@@ -1346,6 +1433,47 @@ impl SyncManager {
                         query_id: *query_id,
                     });
             }
+            SyncPayload::PersistenceAck {
+                object_id,
+                branch_name,
+                confirmed_commits,
+                tier,
+            } => {
+                let object_id = *object_id;
+                let branch_name = *branch_name;
+                let tier = *tier;
+                let confirmed_commits = confirmed_commits.clone();
+                // A client relaying an ack (e.g. from a further-upstream tier)
+                // Persist ack state and update in-memory
+                for &commit_id in &confirmed_commits {
+                    let _ = io.store_ack_tier(commit_id, tier);
+                    if let Some(commit) =
+                        self.object_manager
+                            .get_commit_mut(object_id, &branch_name, commit_id)
+                    {
+                        commit.ack_state.confirmed_tiers.insert(tier);
+                    }
+                }
+                // Relay to interested clients (excluding the sender)
+                let mut interested = HashSet::new();
+                for &commit_id in &confirmed_commits {
+                    if let Some(clients) = self.commit_interest.get(&commit_id) {
+                        interested.extend(clients);
+                    }
+                }
+                interested.remove(&client_id);
+                for cid in interested {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(cid),
+                        payload: SyncPayload::PersistenceAck {
+                            object_id,
+                            branch_name,
+                            confirmed_commits: confirmed_commits.clone(),
+                            tier,
+                        },
+                    });
+                }
+            }
             // Clients shouldn't send these
             SyncPayload::BlobResponse { .. } | SyncPayload::Error(_) => {}
         }
@@ -1366,7 +1494,31 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
-                self.apply_object_updated(io, object_id, metadata, branch_name, commits);
+                // Track client interest for ack relay
+                for commit in &commits {
+                    self.commit_interest
+                        .entry(commit.id())
+                        .or_default()
+                        .insert(client_id);
+                }
+
+                let persisted =
+                    self.apply_object_updated(io, object_id, metadata, branch_name, commits);
+
+                // Emit ack back to client if we have a tier
+                if let Some(tier) = self.my_tier
+                    && !persisted.is_empty()
+                {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(client_id),
+                        payload: SyncPayload::PersistenceAck {
+                            object_id,
+                            branch_name,
+                            confirmed_commits: persisted,
+                            tier,
+                        },
+                    });
+                }
 
                 // Forward to servers
                 self.forward_update_to_servers(object_id, branch_name);
@@ -1394,6 +1546,7 @@ impl SyncManager {
     }
 
     /// Apply an ObjectUpdated payload to the local ObjectManager.
+    /// Returns the set of newly persisted commit IDs (excludes duplicates).
     fn apply_object_updated<H: IoHandler>(
         &mut self,
         io: &mut H,
@@ -1401,25 +1554,37 @@ impl SyncManager {
         metadata: Option<ObjectMetadata>,
         branch_name: BranchName,
         commits: Vec<Commit>,
-    ) {
+    ) -> HashSet<CommitId> {
         // If we don't have this object yet and metadata is provided, create it
         if self.object_manager.get(object_id).is_none() {
             if let Some(meta) = metadata {
-                // Create object with metadata (we need to set the specific ID)
                 self.object_manager
                     .receive_object(io, object_id, meta.metadata);
             } else {
-                // Can't create without metadata
-                return;
+                return HashSet::new();
             }
         }
 
-        // Apply each commit
+        let mut persisted = HashSet::new();
         for commit in commits {
-            let _ = self
+            let commit_id = commit.id();
+            // Check if commit already exists before applying
+            let already_exists = self
                 .object_manager
-                .receive_commit(io, object_id, branch_name, commit);
+                .get(object_id)
+                .and_then(|obj| obj.branches.get(&branch_name))
+                .is_some_and(|branch| branch.commits.contains_key(&commit_id));
+
+            if self
+                .object_manager
+                .receive_commit(io, object_id, branch_name, commit)
+                .is_ok()
+                && !already_exists
+            {
+                persisted.insert(commit_id);
+            }
         }
+        persisted
     }
 
     /// Forward an update to all servers.
@@ -2062,6 +2227,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2122,6 +2288,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2190,6 +2357,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2257,6 +2425,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2331,6 +2500,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2376,6 +2546,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2399,6 +2570,63 @@ mod tests {
     }
 
     #[test]
+    fn row_object_out_of_scope_goes_to_pending() {
+        // A row object (metadata has "table") that isn't in any query scope
+        // should still be queued for approval, not silently applied.
+        let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        // Client has no queries - everything is out of scope
+
+        let obj_id = ObjectId::new();
+        let author = ObjectId::new();
+        let commit = Commit {
+            parents: smallvec![],
+            content: b"row data".to_vec(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        let mut row_metadata = HashMap::new();
+        row_metadata.insert("table".to_string(), "users".to_string());
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: Some(ObjectMetadata {
+                    id: obj_id,
+                    metadata: row_metadata,
+                }),
+                branch_name: "main".into(),
+                commits: vec![commit],
+            },
+        });
+
+        sm.process_inbox(&mut io);
+
+        // Should be queued for approval, NOT silently applied
+        let pending = sm.take_pending_updates();
+        assert_eq!(
+            pending.len(),
+            1,
+            "Row object not in scope should go to pending"
+        );
+        assert_eq!(pending[0].client_id, client_id);
+
+        // Should NOT be applied yet
+        assert!(
+            sm.object_manager.get(obj_id).is_none(),
+            "Object should not be created until approved"
+        );
+    }
+
+    #[test]
     fn approved_pending_update_is_applied() {
         let mut sm = SyncManager::new();
         let mut io = MemoryIoHandler::new();
@@ -2415,6 +2643,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2462,6 +2691,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2534,6 +2764,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -2749,6 +2980,7 @@ mod tests {
             author,
             metadata: None,
             stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
         };
 
         sm.push_inbox(InboxEntry {
@@ -3210,5 +3442,459 @@ mod tests {
             }
             _ => panic!("Expected QuerySubscription"),
         }
+    }
+
+    // ========================================================================
+    // Phase 6a: Persistence Ack E2E Tests
+    // ========================================================================
+
+    /// Approve all pending updates on a SyncManager (test helper).
+    fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryIoHandler) {
+        let ids = sm.pending_update_ids();
+        for id in ids {
+            sm.approve_update(io, id);
+        }
+    }
+
+    /// Route messages between three tiers: A ↔ B ↔ C.
+    ///
+    /// A is a client of B, B is a client of C.
+    /// Pumps until no messages remain or 10 rounds (whichever comes first).
+    /// Auto-approves pending updates on B and C (simulates permissive server).
+    fn pump_messages_3tier(
+        a: &mut SyncManager,
+        b: &mut SyncManager,
+        c: &mut SyncManager,
+        a_io: &mut MemoryIoHandler,
+        b_io: &mut MemoryIoHandler,
+        c_io: &mut MemoryIoHandler,
+        a_client_of_b: ClientId,
+        b_server_for_a: ServerId,
+        b_client_of_c: ClientId,
+        c_server_for_b: ServerId,
+    ) {
+        for _ in 0..10 {
+            let mut any_messages = false;
+
+            // A outbox → B inbox (A sends to server b_server_for_a → B receives from client a_client_of_b)
+            for entry in a.take_outbox() {
+                if entry.destination == Destination::Server(b_server_for_a) {
+                    any_messages = true;
+                    b.push_inbox(InboxEntry {
+                        source: Source::Client(a_client_of_b),
+                        payload: entry.payload,
+                    });
+                }
+            }
+
+            // B outbox → route to A or C
+            for entry in b.take_outbox() {
+                match &entry.destination {
+                    Destination::Client(cid) if *cid == a_client_of_b => {
+                        any_messages = true;
+                        a.push_inbox(InboxEntry {
+                            source: Source::Server(b_server_for_a),
+                            payload: entry.payload,
+                        });
+                    }
+                    Destination::Server(sid) if *sid == c_server_for_b => {
+                        any_messages = true;
+                        c.push_inbox(InboxEntry {
+                            source: Source::Client(b_client_of_c),
+                            payload: entry.payload,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            // C outbox → B inbox
+            for entry in c.take_outbox() {
+                if entry.destination == Destination::Client(b_client_of_c) {
+                    any_messages = true;
+                    b.push_inbox(InboxEntry {
+                        source: Source::Server(c_server_for_b),
+                        payload: entry.payload,
+                    });
+                }
+            }
+
+            if !any_messages && a.inbox.is_empty() && b.inbox.is_empty() && c.inbox.is_empty() {
+                break;
+            }
+
+            a.process_inbox(a_io);
+            b.process_inbox(b_io);
+            c.process_inbox(c_io);
+
+            // Auto-approve pending updates on B and C (server tiers)
+            approve_all_pending(b, b_io);
+            approve_all_pending(c, c_io);
+        }
+    }
+
+    /// Setup helper: creates A ↔ B ↔ C topology.
+    /// Returns (a, b, c, a_io, b_io, c_io, ids...).
+    struct ThreeTierSetup {
+        a: SyncManager,
+        b: SyncManager,
+        c: SyncManager,
+        a_io: MemoryIoHandler,
+        b_io: MemoryIoHandler,
+        c_io: MemoryIoHandler,
+        a_client_of_b: ClientId,
+        b_server_for_a: ServerId,
+        b_client_of_c: ClientId,
+        c_server_for_b: ServerId,
+    }
+
+    fn setup_3tier() -> ThreeTierSetup {
+        let a_client_of_b = ClientId::new();
+        let b_server_for_a = ServerId::new();
+        let b_client_of_c = ClientId::new();
+        let c_server_for_b = ServerId::new();
+
+        let a = SyncManager::new();
+        let mut b = SyncManager::new().with_tier(PersistenceTier::Worker);
+        let mut c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+
+        // A connects to B as server
+        // B adds A as client (with full sync for simplicity)
+        b.add_client_with_full_sync(a_client_of_b);
+
+        // B connects to C as server
+        // C adds B as client (with full sync)
+        c.add_client_with_full_sync(b_client_of_c);
+        b.add_server(c_server_for_b);
+
+        ThreeTierSetup {
+            a,
+            b,
+            c,
+            a_io: MemoryIoHandler::new(),
+            b_io: MemoryIoHandler::new(),
+            c_io: MemoryIoHandler::new(),
+            a_client_of_b,
+            b_server_for_a,
+            b_client_of_c,
+            c_server_for_b,
+        }
+    }
+
+    fn make_test_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
+        Commit {
+            parents: parents.into(),
+            content: content.to_vec(),
+            timestamp: 1000,
+            author: ObjectId::from_uuid(uuid::Uuid::nil()),
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        }
+    }
+
+    #[test]
+    fn persistence_ack_direct() {
+        let mut s = setup_3tier();
+
+        // Create object on A and add commit
+        let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+        let commit = make_test_commit(b"hello", vec![]);
+        let commit_id = commit.id();
+        let _ =
+            s.a.object_manager
+                .receive_commit(&mut s.a_io, obj_id, "main", commit);
+        s.a.add_server(s.b_server_for_a);
+        s.a.forward_update_to_servers(obj_id, "main".into());
+
+        pump_messages_3tier(
+            &mut s.a,
+            &mut s.b,
+            &mut s.c,
+            &mut s.a_io,
+            &mut s.b_io,
+            &mut s.c_io,
+            s.a_client_of_b,
+            s.b_server_for_a,
+            s.b_client_of_c,
+            s.c_server_for_b,
+        );
+
+        // A should have received a PersistenceAck from B (tier=Worker)
+        // Check A's processed state — the ack was processed by A's process_inbox
+        // Since A has no tier, it doesn't re-emit, but it should have received the ack
+        // Let's check: the ack was delivered to A's inbox and processed.
+        // Since A processes PersistenceAck from server, it stores it in io and updates in-memory.
+        let a_commit =
+            s.a.object_manager
+                .get_commit_mut(obj_id, &"main".into(), commit_id);
+        assert!(a_commit.is_some(), "Commit should exist on A");
+        assert!(
+            a_commit
+                .unwrap()
+                .ack_state
+                .confirmed_tiers
+                .contains(&PersistenceTier::Worker),
+            "A should have received Worker ack from B"
+        );
+    }
+
+    #[test]
+    fn persistence_ack_relay() {
+        let mut s = setup_3tier();
+
+        // Create object on A
+        let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+        let commit = make_test_commit(b"hello-relay", vec![]);
+        let commit_id = commit.id();
+        let _ =
+            s.a.object_manager
+                .receive_commit(&mut s.a_io, obj_id, "main", commit);
+        s.a.add_server(s.b_server_for_a);
+        s.a.forward_update_to_servers(obj_id, "main".into());
+
+        pump_messages_3tier(
+            &mut s.a,
+            &mut s.b,
+            &mut s.c,
+            &mut s.a_io,
+            &mut s.b_io,
+            &mut s.c_io,
+            s.a_client_of_b,
+            s.b_server_for_a,
+            s.b_client_of_c,
+            s.c_server_for_b,
+        );
+
+        // A should have received EdgeServer ack (relayed through B from C)
+        let a_commit =
+            s.a.object_manager
+                .get_commit_mut(obj_id, &"main".into(), commit_id)
+                .expect("Commit should exist on A");
+        assert!(
+            a_commit
+                .ack_state
+                .confirmed_tiers
+                .contains(&PersistenceTier::EdgeServer),
+            "A should have received EdgeServer ack relayed through B"
+        );
+    }
+
+    #[test]
+    fn persistence_ack_both_tiers() {
+        let mut s = setup_3tier();
+
+        let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+        let commit = make_test_commit(b"hello-both", vec![]);
+        let commit_id = commit.id();
+        let _ =
+            s.a.object_manager
+                .receive_commit(&mut s.a_io, obj_id, "main", commit);
+        s.a.add_server(s.b_server_for_a);
+        s.a.forward_update_to_servers(obj_id, "main".into());
+
+        pump_messages_3tier(
+            &mut s.a,
+            &mut s.b,
+            &mut s.c,
+            &mut s.a_io,
+            &mut s.b_io,
+            &mut s.c_io,
+            s.a_client_of_b,
+            s.b_server_for_a,
+            s.b_client_of_c,
+            s.c_server_for_b,
+        );
+
+        let a_commit =
+            s.a.object_manager
+                .get_commit_mut(obj_id, &"main".into(), commit_id)
+                .expect("Commit should exist on A");
+        assert!(
+            a_commit
+                .ack_state
+                .confirmed_tiers
+                .contains(&PersistenceTier::Worker),
+            "Should have Worker ack from B"
+        );
+        assert!(
+            a_commit
+                .ack_state
+                .confirmed_tiers
+                .contains(&PersistenceTier::EdgeServer),
+            "Should have EdgeServer ack from C"
+        );
+    }
+
+    #[test]
+    fn persistence_ack_idempotent() {
+        let mut s = setup_3tier();
+
+        let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+        let commit = make_test_commit(b"idempotent", vec![]);
+        let commit_id = commit.id();
+        let _ =
+            s.a.object_manager
+                .receive_commit(&mut s.a_io, obj_id, "main", commit.clone());
+        s.a.add_server(s.b_server_for_a);
+        s.a.forward_update_to_servers(obj_id, "main".into());
+
+        // Pump once
+        pump_messages_3tier(
+            &mut s.a,
+            &mut s.b,
+            &mut s.c,
+            &mut s.a_io,
+            &mut s.b_io,
+            &mut s.c_io,
+            s.a_client_of_b,
+            s.b_server_for_a,
+            s.b_client_of_c,
+            s.c_server_for_b,
+        );
+
+        // Send the same commit again — should not panic
+        s.a.forward_update_to_servers(obj_id, "main".into());
+
+        pump_messages_3tier(
+            &mut s.a,
+            &mut s.b,
+            &mut s.c,
+            &mut s.a_io,
+            &mut s.b_io,
+            &mut s.c_io,
+            s.a_client_of_b,
+            s.b_server_for_a,
+            s.b_client_of_c,
+            s.c_server_for_b,
+        );
+
+        // Still has acks
+        let a_commit =
+            s.a.object_manager
+                .get_commit_mut(obj_id, &"main".into(), commit_id)
+                .expect("Commit should exist on A");
+        assert!(
+            a_commit
+                .ack_state
+                .confirmed_tiers
+                .contains(&PersistenceTier::Worker)
+        );
+    }
+
+    #[test]
+    fn persistence_ack_cleanup_on_disconnect() {
+        let mut s = setup_3tier();
+
+        // A creates and sends a commit to B
+        let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+        let commit = make_test_commit(b"disconnect-test", vec![]);
+        let _ =
+            s.a.object_manager
+                .receive_commit(&mut s.a_io, obj_id, "main", commit);
+        s.a.add_server(s.b_server_for_a);
+        s.a.forward_update_to_servers(obj_id, "main".into());
+
+        // Pump A→B only (one round)
+        for entry in s.a.take_outbox() {
+            if entry.destination == Destination::Server(s.b_server_for_a) {
+                s.b.push_inbox(InboxEntry {
+                    source: Source::Client(s.a_client_of_b),
+                    payload: entry.payload,
+                });
+            }
+        }
+        s.b.process_inbox(&mut s.b_io);
+        approve_all_pending(&mut s.b, &mut s.b_io);
+        // B should now have interest for A's commits
+
+        // Disconnect A from B
+        s.b.remove_client(s.a_client_of_b);
+
+        // C acks arrive at B — should not crash when trying to relay to disconnected A
+        // Forward B→C and let C ack back
+        for entry in s.b.take_outbox() {
+            match &entry.destination {
+                Destination::Server(sid) if *sid == s.c_server_for_b => {
+                    s.c.push_inbox(InboxEntry {
+                        source: Source::Client(s.b_client_of_c),
+                        payload: entry.payload,
+                    });
+                }
+                _ => {}
+            }
+        }
+        s.c.process_inbox(&mut s.c_io);
+        approve_all_pending(&mut s.c, &mut s.c_io);
+
+        // C sends ack back to B
+        for entry in s.c.take_outbox() {
+            if entry.destination == Destination::Client(s.b_client_of_c) {
+                s.b.push_inbox(InboxEntry {
+                    source: Source::Server(s.c_server_for_b),
+                    payload: entry.payload,
+                });
+            }
+        }
+        // Should not panic — A's interest was cleaned up
+        s.b.process_inbox(&mut s.b_io);
+
+        // B should not have any outbox entries for the disconnected client
+        let outbox = s.b.take_outbox();
+        for entry in &outbox {
+            if let Destination::Client(cid) = &entry.destination {
+                assert_ne!(
+                    *cid, s.a_client_of_b,
+                    "Should not relay to disconnected client"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn persistence_ack_survives_reload() {
+        let mut io = MemoryIoHandler::new();
+
+        let obj_id = ObjectId::new();
+        io.create_object(obj_id, HashMap::new()).unwrap();
+
+        let commit = make_test_commit(b"persist-test", vec![]);
+        let commit_id = commit.id();
+        io.append_commit(obj_id, &"main".into(), commit).unwrap();
+
+        // Store ack tier
+        io.store_ack_tier(commit_id, PersistenceTier::EdgeServer)
+            .unwrap();
+
+        // Load branch and verify ack_state is populated
+        let loaded = io
+            .load_branch(obj_id, &"main".into())
+            .unwrap()
+            .expect("Branch should exist");
+
+        assert_eq!(loaded.commits.len(), 1);
+        assert!(
+            loaded.commits[0]
+                .ack_state
+                .confirmed_tiers
+                .contains(&PersistenceTier::EdgeServer),
+            "Loaded commit should have EdgeServer ack"
+        );
+    }
+
+    #[test]
+    fn ack_state_does_not_affect_commit_id_sync() {
+        // Verify that commits with different ack_state have the same ID
+        // (complementary to the unit test in commit.rs)
+        let mut ack_state = crate::commit::CommitAckState::default();
+        ack_state
+            .confirmed_tiers
+            .insert(PersistenceTier::CoreServer);
+
+        let commit1 = make_test_commit(b"same-content", vec![]);
+        let mut commit2 = make_test_commit(b"same-content", vec![]);
+        commit2.ack_state = ack_state;
+
+        assert_eq!(commit1.id(), commit2.id());
     }
 }

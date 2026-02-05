@@ -1,14 +1,23 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::object::ObjectId;
+use crate::sync_manager::PersistenceTier;
 
 /// BLAKE3 hash identifying a commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommitId(pub [u8; 32]);
+
+/// Persistence acknowledgment state (runtime only, not serialized).
+///
+/// Tracks which persistence tiers have confirmed storing this commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitAckState {
+    pub confirmed_tiers: HashSet<PersistenceTier>,
+}
 
 /// Storage state of a commit (runtime only, not serialized).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,6 +42,9 @@ pub struct Commit {
     /// Storage state (runtime only, not serialized).
     #[serde(skip, default)]
     pub stored_state: StoredState,
+    /// Persistence acknowledgment state (runtime only, not serialized).
+    #[serde(skip, default)]
+    pub ack_state: CommitAckState,
 }
 
 impl Commit {
@@ -89,6 +101,7 @@ mod tests {
             author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
         };
 
         let id1 = commit.id();
@@ -105,6 +118,7 @@ mod tests {
             author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
         };
 
         let commit2 = Commit {
@@ -114,6 +128,7 @@ mod tests {
             author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
         };
 
         assert_ne!(commit1.id(), commit2.id());
@@ -128,6 +143,7 @@ mod tests {
             author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::Pending,
+            ack_state: CommitAckState::default(),
         };
 
         let commit2 = Commit {
@@ -137,6 +153,38 @@ mod tests {
             author: ObjectId::from_uuid(Uuid::nil()),
             metadata: None,
             stored_state: StoredState::Stored,
+            ack_state: CommitAckState::default(),
+        };
+
+        assert_eq!(commit1.id(), commit2.id());
+    }
+
+    #[test]
+    fn ack_state_does_not_affect_commit_id() {
+        let commit1 = Commit {
+            parents: smallvec![],
+            content: b"hello".to_vec(),
+            timestamp: 1234567890,
+            author: ObjectId::from_uuid(Uuid::nil()),
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
+        };
+
+        let mut ack_state = CommitAckState::default();
+        ack_state.confirmed_tiers.insert(PersistenceTier::Worker);
+        ack_state
+            .confirmed_tiers
+            .insert(PersistenceTier::EdgeServer);
+
+        let commit2 = Commit {
+            parents: smallvec![],
+            content: b"hello".to_vec(),
+            timestamp: 1234567890,
+            author: ObjectId::from_uuid(Uuid::nil()),
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state,
         };
 
         assert_eq!(commit1.id(), commit2.id());

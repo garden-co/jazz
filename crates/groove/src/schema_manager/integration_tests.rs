@@ -1641,6 +1641,14 @@ mod tests {
 
     use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncPayload};
 
+    /// Approve all pending updates on a SyncManager (test helper).
+    fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryIoHandler) {
+        let ids = sm.pending_update_ids();
+        for id in ids {
+            sm.approve_update(io, id);
+        }
+    }
+
     /// E2E test: Two clients with same schema, server with empty schema.
     ///
     /// NOTE: This test is incomplete. The current architecture requires servers
@@ -1757,7 +1765,15 @@ mod tests {
                 payload: schema_msg.payload.clone(),
             });
 
-        // Server processes the inbox - this triggers catalogue processing
+        // Server processes the inbox
+        server.process(&mut io_server);
+
+        // Approve pending updates (catalogue objects are out-of-scope for clients without queries)
+        approve_all_pending(
+            server.query_manager_mut().sync_manager_mut(),
+            &mut io_server,
+        );
+        // Re-process after approval to trigger catalogue processing
         server.process(&mut io_server);
 
         // === Server should now have the schema in known_schemas ===
@@ -1808,7 +1824,14 @@ mod tests {
                 payload: row_msg.payload.clone(),
             });
 
-        // Server processes - lazy activation should kick in
+        // Server processes
+        server.process(&mut io_server);
+
+        // Approve pending row update and re-process for lazy activation
+        approve_all_pending(
+            server.query_manager_mut().sync_manager_mut(),
+            &mut io_server,
+        );
         server.process(&mut io_server);
 
         // === Verify the row was indexed on server ===
@@ -2266,6 +2289,13 @@ mod tests {
             }
         }
 
+        server.process(&mut io_server);
+
+        // Approve pending updates (catalogue objects are out-of-scope for clients without queries)
+        approve_all_pending(
+            server.query_manager_mut().sync_manager_mut(),
+            &mut io_server,
+        );
         server.process(&mut io_server);
 
         // Process catalogue updates

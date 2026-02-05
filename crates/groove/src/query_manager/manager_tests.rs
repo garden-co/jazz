@@ -482,6 +482,7 @@ fn synced_update_updates_column_indices() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     let commit1_id = qm
         .sync_manager_mut()
@@ -531,6 +532,7 @@ fn synced_update_updates_column_indices() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -640,6 +642,7 @@ fn synced_insert_appears_in_subscription_delta() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -730,6 +733,7 @@ fn synced_update_is_visible_in_query() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -820,6 +824,7 @@ fn synced_row_visible_in_filtered_subscription() {
         author: author_1,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -871,6 +876,7 @@ fn synced_row_visible_in_filtered_subscription() {
         author: author_2,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -1020,6 +1026,7 @@ fn synced_update_emits_subscription_delta() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     let branch = get_branch(&qm);
     qm.sync_manager_mut()
@@ -1418,6 +1425,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     // Object metadata marking it as a "users" table row
@@ -1515,6 +1523,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
         author: row_id,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     // Push the update through SyncManager inbox
@@ -1612,6 +1621,7 @@ fn two_peer_sync_insert_reaches_subscription() {
         author: row_id,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     // Send to Peer B via SyncManager inbox
@@ -1829,6 +1839,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         timestamp: 1000, // Lower timestamp
         metadata: None,
         stored_state: StoredState::Pending,
+        ack_state: Default::default(),
     };
 
     // Commit B: higher timestamp, content "TipB" - this should win
@@ -1844,6 +1855,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
         timestamp: 2000, // Higher timestamp - LWW winner
         metadata: None,
         stored_state: StoredState::Pending,
+        ack_state: Default::default(),
     };
 
     // Add both commits to create concurrent tips
@@ -4409,6 +4421,7 @@ fn handle_object_update_respects_branch() {
         author,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -4441,6 +4454,7 @@ fn handle_object_update_respects_branch() {
         author: row_id2,
         metadata: None,
         stored_state: StoredState::Stored,
+        ack_state: Default::default(),
     };
     qm.sync_manager_mut()
         .object_manager
@@ -5121,6 +5135,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         author,
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
     };
 
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {

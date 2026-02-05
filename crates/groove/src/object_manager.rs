@@ -214,6 +214,21 @@ impl ObjectManager {
         self.objects.get_mut(&id)
     }
 
+    /// Get a mutable reference to a specific commit.
+    pub fn get_commit_mut(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        commit_id: CommitId,
+    ) -> Option<&mut Commit> {
+        self.objects
+            .get_mut(&object_id)?
+            .branches
+            .get_mut(branch_name)?
+            .commits
+            .get_mut(&commit_id)
+    }
+
     /// Add a commit to an object's branch.
     ///
     /// - Creates the branch automatically if parents is empty
@@ -289,6 +304,7 @@ impl ObjectManager {
             author,
             metadata,
             stored_state: StoredState::Pending,
+            ack_state: Default::default(),
         };
 
         let commit_id = commit.id();
@@ -384,6 +400,7 @@ impl ObjectManager {
             author,
             metadata: None,
             stored_state: StoredState::Pending,
+            ack_state: Default::default(),
         };
 
         let commit_id = commit.id();
