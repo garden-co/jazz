@@ -72,6 +72,25 @@ const uniffiIsDebug =
 // Public interface members begin here.
 
 /**
+ * Decodes a base64url string to bytes (handles both padded and unpadded)
+ */
+export function base64urlToBytes(base64: string): ArrayBuffer /*throws*/ {
+  return FfiConverterArrayBuffer.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeCryptoErrorUniffi.lift.bind(
+        FfiConverterTypeCryptoErrorUniffi
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_base64url_to_bytes(
+          FfiConverterString.lower(base64),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
  * Hash data once using BLAKE3.
  * - `data`: Raw bytes to hash
  * Returns 32 bytes of hash output.
@@ -107,6 +126,39 @@ export function blake3HashOnceWithContext(
         return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_blake3_hash_once_with_context(
           FfiConverterArrayBuffer.lower(data),
           FfiConverterArrayBuffer.lower(context),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
+ * Encodes bytes to a standard base64 string (with padding)
+ * Use this for data URLs and other contexts requiring standard base64.
+ */
+export function bytesToBase64(bytes: ArrayBuffer): string {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_bytes_to_base64(
+          FfiConverterArrayBuffer.lower(bytes),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
+ * Encodes bytes to a base64url string (with padding to match JS implementation)
+ */
+export function bytesToBase64url(bytes: ArrayBuffer): string {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_bytes_to_base64url(
+          FfiConverterArrayBuffer.lower(bytes),
           callStatus
         );
       },
@@ -898,6 +950,7 @@ export enum CryptoErrorUniffi_Tags {
   CipherError = 'CipherError',
   InvalidPrefix = 'InvalidPrefix',
   Base58Error = 'Base58Error',
+  Base64DecodeError = 'Base64DecodeError',
 }
 export const CryptoErrorUniffi = (() => {
   type InvalidKeyLength__interface = {
@@ -1235,6 +1288,44 @@ export const CryptoErrorUniffi = (() => {
     }
   }
 
+  type Base64DecodeError__interface = {
+    tag: CryptoErrorUniffi_Tags.Base64DecodeError;
+    inner: Readonly<[string]>;
+  };
+
+  class Base64DecodeError_
+    extends UniffiError
+    implements Base64DecodeError__interface
+  {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'CryptoErrorUniffi';
+    readonly tag = CryptoErrorUniffi_Tags.Base64DecodeError;
+    readonly inner: Readonly<[string]>;
+    constructor(v0: string) {
+      super('CryptoErrorUniffi', 'Base64DecodeError');
+      this.inner = Object.freeze([v0]);
+    }
+
+    static new(v0: string): Base64DecodeError_ {
+      return new Base64DecodeError_(v0);
+    }
+
+    static instanceOf(obj: any): obj is Base64DecodeError_ {
+      return obj.tag === CryptoErrorUniffi_Tags.Base64DecodeError;
+    }
+
+    static hasInner(obj: any): obj is Base64DecodeError_ {
+      return Base64DecodeError_.instanceOf(obj);
+    }
+
+    static getInner(obj: Base64DecodeError_): Readonly<[string]> {
+      return obj.inner;
+    }
+  }
+
   function instanceOf(obj: any): obj is CryptoErrorUniffi {
     return obj[uniffiTypeNameSymbol] === 'CryptoErrorUniffi';
   }
@@ -1251,6 +1342,7 @@ export const CryptoErrorUniffi = (() => {
     CipherError: CipherError_,
     InvalidPrefix: InvalidPrefix_,
     Base58Error: Base58Error_,
+    Base64DecodeError: Base64DecodeError_,
   });
 })();
 
@@ -1295,6 +1387,10 @@ const FfiConverterTypeCryptoErrorUniffi = (() => {
           );
         case 10:
           return new CryptoErrorUniffi.Base58Error(
+            FfiConverterString.read(from)
+          );
+        case 11:
+          return new CryptoErrorUniffi.Base64DecodeError(
             FfiConverterString.read(from)
           );
         default:
@@ -1355,6 +1451,12 @@ const FfiConverterTypeCryptoErrorUniffi = (() => {
           FfiConverterString.write(inner[0], into);
           return;
         }
+        case CryptoErrorUniffi_Tags.Base64DecodeError: {
+          ordinalConverter.write(11, into);
+          const inner = value.inner;
+          FfiConverterString.write(inner[0], into);
+          return;
+        }
         default:
           // Throwing from here means that CryptoErrorUniffi_Tags hasn't matched an ordinal.
           throw new UniffiInternalError.UnexpectedEnumCase();
@@ -1406,6 +1508,12 @@ const FfiConverterTypeCryptoErrorUniffi = (() => {
         case CryptoErrorUniffi_Tags.Base58Error: {
           const inner = value.inner;
           let size = ordinalConverter.allocationSize(10);
+          size += FfiConverterString.allocationSize(inner[0]);
+          return size;
+        }
+        case CryptoErrorUniffi_Tags.Base64DecodeError: {
+          const inner = value.inner;
+          let size = ordinalConverter.allocationSize(11);
           size += FfiConverterString.allocationSize(inner[0]);
           return size;
         }
@@ -2445,6 +2553,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_base64url_to_bytes() !==
+    7419
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_base64url_to_bytes'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_blake3_hash_once() !==
     58834
   ) {
@@ -2458,6 +2574,22 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_blake3_hash_once_with_context'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_bytes_to_base64() !==
+    57289
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_bytes_to_base64'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_bytes_to_base64url() !==
+    47249
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_bytes_to_base64url'
     );
   }
   if (

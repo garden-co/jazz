@@ -37,9 +37,12 @@ import {
   seal,
   unseal,
   Blake3Hasher,
+  bytesToBase64url as nativeBytesToBase64url,
+  base64urlToBytes as nativeBase64urlToBytes,
+  bytesToBase64 as nativeBytesToBase64,
   SessionMap as RNSessionMap,
 } from "cojson-core-rn";
-import { WasmCrypto } from "./WasmCrypto.js";
+import { setNativeBase64Implementation } from "../base64url.js";
 
 type Blake3State = Blake3Hasher;
 
@@ -146,6 +149,12 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
   }
 
   static async create(): Promise<RNCrypto> {
+    // Register native base64 implementation for React Native
+    setNativeBase64Implementation({
+      bytesToBase64url: nativeBytesToBase64url,
+      base64urlToBytes: nativeBase64urlToBytes,
+      bytesToBase64: nativeBytesToBase64,
+    });
     return new RNCrypto();
   }
 

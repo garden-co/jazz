@@ -40,7 +40,8 @@ import {
 import { RawCoList } from "./coList.js";
 import { RawCoMap } from "./coMap.js";
 import { RawCoPlainText } from "./coPlainText.js";
-import { RawBinaryCoStream, RawCoStream } from "./coStream.js";
+import { RawBinaryCoStream } from "./binaryCoStream.js";
+import { RawCoStream } from "./coStream.js";
 
 export const EVERYONE = "everyone" as const;
 export type Everyone = "everyone";

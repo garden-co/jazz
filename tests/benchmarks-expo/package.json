@@ -1,0 +1,27 @@
+{
+  "name": "benchmarks-expo",
+  "main": "index.ts",
+  "packageManager": "pnpm@10.16.1",
+  "scripts": {
+    "build": "expo prebuild",
+    "build:clean": "expo prebuild --clean",
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
+  },
+  "dependencies": {
+    "@azure/core-asynciterator-polyfill": "^1.0.2",
+    "cojson": "workspace:*",
+    "cojson-core-rn": "workspace:*",
+    "expo": "catalog:expo",
+    "react": "catalog:expo",
+    "react-native": "0.81.5",
+    "react-native-nitro-modules": "0.26.4"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "19.1.17",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}

@@ -23,6 +23,8 @@ pub enum CryptoErrorUniffi {
     InvalidPrefix(String, String),
     #[error("Invalid base58: {0}")]
     Base58Error(String),
+    #[error("Invalid base64: {0}")]
+    Base64DecodeError(String),
 }
 
 impl From<CryptoError> for CryptoErrorUniffi {

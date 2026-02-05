@@ -13,7 +13,11 @@
   },
   "scripts": {
     "bench:cojson": "vitest bench",
-    "bench:jazz-tools": "pnpm exec tsx ./jazz-tools/comap.create.jazz-tools.bench.ts"
+    "bench:jazz-tools": "pnpm exec tsx ./jazz-tools/comap.create.jazz-tools.bench.ts",
+    "bench:filestream:write": "node --experimental-strip-types --no-warnings ./jazz-tools/binaryCoStream.write.bench.ts",
+    "bench:filestream:getChunks": "node --experimental-strip-types --no-warnings ./jazz-tools/filestream.getChunks.bench.ts",
+    "bench:filestream:asBase64": "node --experimental-strip-types --no-warnings ./jazz-tools/filestream.asBase64.bench.ts",
+    "bench:filestream": "pnpm bench:filestream:write && pnpm bench:filestream:getChunks && pnpm bench:filestream:asBase64"
   },
   "devDependencies": {
     "tsx": "^4.19.3",
