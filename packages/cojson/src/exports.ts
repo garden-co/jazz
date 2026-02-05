@@ -1,4 +1,8 @@
-import { base64URLtoBytes, bytesToBase64url } from "./base64url.js";
+import {
+  base64URLtoBytes,
+  bytesToBase64url,
+  bytesToBase64,
+} from "./base64url.js";
 import { type RawCoValue } from "./coValue.js";
 import {
   CoValueCore,
@@ -111,6 +115,7 @@ export const cojsonInternals = {
   expectGroup,
   base64URLtoBytes,
   bytesToBase64url,
+  bytesToBase64,
   parseJSON,
   stableStringify,
   getDependedOnCoValues,

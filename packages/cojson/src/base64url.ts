@@ -30,6 +30,21 @@ export function bytesToBase64url(bytes: Uint8Array): string {
   return bytesToBase64urlFallback(bytes);
 }
 
+/**
+ * Encode bytes to standard base64 (not URL-safe).
+ * Use this for data URLs and other contexts requiring standard base64.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  if (hasNativeBase64) {
+    return (
+      bytes as unknown as {
+        toBase64: () => string;
+      }
+    ).toBase64();
+  }
+  return bytesToBase64Fallback(bytes);
+}
+
 // --- Fallback implementations ---
 
 function base64URLtoBytesFallback(base64: string): Uint8Array {
@@ -77,16 +92,48 @@ function bytesToBase64urlFallback(bytes: Uint8Array): string {
   return base64;
 }
 
-const alphabet =
+function bytesToBase64Fallback(bytes: Uint8Array): string {
+  const m = bytes.length;
+  const k = m % 3;
+  const n = Math.floor(m / 3) * 4 + (k && k + 1);
+  const N = Math.ceil(m / 3) * 4;
+  const encoded = new Uint8Array(N);
+
+  for (let i = 0, j = 0; j < m; i += 4, j += 3) {
+    const y = (bytes[j]! << 16) + (bytes[j + 1]! << 8) + (bytes[j + 2]! | 0);
+    encoded[i] = encodeLookupStd[y >> 18]!;
+    encoded[i + 1] = encodeLookupStd[(y >> 12) & 0x3f]!;
+    encoded[i + 2] = encodeLookupStd[(y >> 6) & 0x3f]!;
+    encoded[i + 3] = encodeLookupStd[y & 0x3f]!;
+  }
+
+  let base64 = decoder.decode(new Uint8Array(encoded.buffer, 0, n));
+  if (k === 1) base64 += "==";
+  if (k === 2) base64 += "=";
+
+  return base64;
+}
+
+// base64url alphabet (RFC 4648 §5)
+const alphabetUrl =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+// Standard base64 alphabet (RFC 4648 §4)
+const alphabetStd =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
 const lookup = new Uint8Array(128);
-for (const [i, a] of Array.from(alphabet).entries()) {
+for (const [i, a] of Array.from(alphabetUrl).entries()) {
   lookup[a.charCodeAt(0)] = i;
 }
 lookup["=".charCodeAt(0)] = 0;
 
 const encodeLookup = new Uint8Array(64);
-for (const [i, a] of Array.from(alphabet).entries()) {
+for (const [i, a] of Array.from(alphabetUrl).entries()) {
   encodeLookup[i] = a.charCodeAt(0);
+}
+
+const encodeLookupStd = new Uint8Array(64);
+for (const [i, a] of Array.from(alphabetStd).entries()) {
+  encodeLookupStd[i] = a.charCodeAt(0);
 }

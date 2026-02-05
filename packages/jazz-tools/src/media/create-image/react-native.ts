@@ -50,14 +50,14 @@ async function getResizer(): Promise<
   try {
     const rnImageResizer = await import("@bam.tech/react-native-image-resizer");
 
-    if (rnImageResizer.default !== undefined) {
+    if (rnImageResizer.default) {
       return rnImageResizer.default;
     }
   } catch (e) {}
 
   try {
     const expoImageManipulator = await import("expo-image-manipulator");
-    if (expoImageManipulator.ImageManipulator !== undefined) {
+    if (expoImageManipulator.ImageManipulator) {
       return expoImageManipulator;
     }
   } catch (e) {}

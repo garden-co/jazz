@@ -1,11 +1,9 @@
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
-import { CoID, RawCoValue } from "../coValue.js";
-import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
-import { RawCoID, SessionID, TransactionID } from "../ids.js";
-import { JsonObject, JsonValue } from "../jsonValue.js";
-import { logger } from "../logger.js";
-import { CoStreamItem } from "./coStream.js";
-import { RawGroup } from "./group.js";
+import type { CoID, RawCoValue } from "../coValue.js";
+import type { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import type { RawCoID } from "../ids.js";
+import type { JsonObject } from "../jsonValue.js";
+import type { RawGroup } from "./group.js";
 
 export type BinaryStreamInfo = {
   mimeType: string;

@@ -1,5 +1,9 @@
 import { expect, test } from "vitest";
-import { base64URLtoBytes, bytesToBase64url } from "./base64url.js";
+import {
+  base64URLtoBytes,
+  bytesToBase64url,
+  bytesToBase64,
+} from "./base64url.js";
 
 const txt = new TextEncoder();
 
@@ -86,4 +90,32 @@ test("URL-safe characters: - and _ instead of + and /", () => {
   expect(encoded2).toContain("_");
   expect(encoded2).toContain("-");
   expect(base64URLtoBytes(encoded2)).toEqual(bytes2);
+});
+
+test("bytesToBase64 produces standard base64 with + and /", () => {
+  // 0xFB, 0xEF, 0xBE → standard base64 should contain "-" characters that become "+"
+  const bytes1 = new Uint8Array([0xfb, 0xef, 0xbe]);
+  const encoded1 = bytesToBase64(bytes1);
+  expect(encoded1).not.toContain("-");
+  expect(encoded1).not.toContain("_");
+  expect(encoded1).toContain("+");
+
+  // 0xFF, 0xFF, 0xFE → standard base64 "///+"
+  const bytes2 = new Uint8Array([0xff, 0xff, 0xfe]);
+  const encoded2 = bytesToBase64(bytes2);
+  expect(encoded2).not.toContain("-");
+  expect(encoded2).not.toContain("_");
+  expect(encoded2).toContain("/");
+  expect(encoded2).toContain("+");
+  expect(encoded2).toEqual("///+");
+});
+
+test("bytesToBase64 RFC test vectors", () => {
+  expect(bytesToBase64(new Uint8Array([]))).toEqual("");
+  expect(bytesToBase64(txt.encode("f"))).toEqual("Zg==");
+  expect(bytesToBase64(txt.encode("fo"))).toEqual("Zm8=");
+  expect(bytesToBase64(txt.encode("foo"))).toEqual("Zm9v");
+  expect(bytesToBase64(txt.encode("foob"))).toEqual("Zm9vYg==");
+  expect(bytesToBase64(txt.encode("fooba"))).toEqual("Zm9vYmE=");
+  expect(bytesToBase64(txt.encode("foobar"))).toEqual("Zm9vYmFy");
 });

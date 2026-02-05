@@ -970,7 +970,7 @@ export class FileStream extends CoValueBase implements CoValue {
       offset += chunk.length;
     }
 
-    const base64 = cojsonInternals.bytesToBase64url(merged);
+    const base64 = cojsonInternals.bytesToBase64(merged);
 
     if (options?.dataURL) {
       return `data:${data.mimeType};base64,${base64}`;
