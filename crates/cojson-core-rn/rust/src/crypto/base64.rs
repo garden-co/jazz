@@ -3,6 +3,8 @@ use base64::{
     Engine,
 };
 
+use super::ed25519::CryptoErrorUniffi;
+
 /// Encodes bytes to a base64url string (with padding to match JS implementation)
 #[uniffi::export]
 pub fn bytes_to_base64url(bytes: Vec<u8>) -> String {
@@ -11,10 +13,10 @@ pub fn bytes_to_base64url(bytes: Vec<u8>) -> String {
 
 /// Decodes a base64url string to bytes (handles both padded and unpadded)
 #[uniffi::export]
-pub fn base64url_to_bytes(base64: String) -> Vec<u8> {
+pub fn base64url_to_bytes(base64: String) -> Result<Vec<u8>, CryptoErrorUniffi> {
     // Try with padding first, then without padding as fallback
     URL_SAFE
         .decode(&base64)
         .or_else(|_| URL_SAFE_NO_PAD.decode(&base64))
-        .unwrap_or_default()
+        .map_err(|e| CryptoErrorUniffi::Base64DecodeError(e.to_string()))
 }
