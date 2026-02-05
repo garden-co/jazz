@@ -52,9 +52,9 @@ describe("invitations sync", () => {
     ).toMatchInlineSnapshot(`
       [
         "invite-consumer -> server | LOAD Map sessions: empty",
-        "server -> invite-consumer | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> invite-consumer | CONTENT Group header: true new: After: 0 New: 6",
         "server -> invite-consumer | CONTENT Map header: true new: After: 0 New: 1",
-        "invite-consumer -> server | KNOWN Group sessions: header/5",
+        "invite-consumer -> server | KNOWN Group sessions: header/6",
         "invite-consumer -> server | KNOWN Map sessions: header/1",
         "invite-consumer -> server | CONTENT Group header: false new: After: 0 New: 2",
       ]
@@ -99,11 +99,11 @@ describe("invitations sync", () => {
     ).toMatchInlineSnapshot(`
       [
         "invite-consumer -> server | LOAD Map sessions: empty",
-        "server -> invite-consumer | CONTENT ParentGroup header: true new: After: 0 New: 3",
-        "server -> invite-consumer | CONTENT Group header: true new: After: 0 New: 7",
+        "server -> invite-consumer | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "server -> invite-consumer | CONTENT Group header: true new: After: 0 New: 8",
         "server -> invite-consumer | CONTENT Map header: true new: After: 0 New: 1",
-        "invite-consumer -> server | KNOWN ParentGroup sessions: header/3",
-        "invite-consumer -> server | KNOWN Group sessions: header/7",
+        "invite-consumer -> server | KNOWN ParentGroup sessions: header/4",
+        "invite-consumer -> server | KNOWN Group sessions: header/8",
         "invite-consumer -> server | KNOWN Map sessions: header/1",
         "invite-consumer -> server | CONTENT Group header: false new: After: 0 New: 2",
       ]
@@ -148,16 +148,16 @@ describe("invitations sync", () => {
     ).toMatchInlineSnapshot(`
       [
         "invite-consumer -> server | LOAD ParentGroup sessions: empty",
-        "server -> invite-consumer | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "invite-consumer -> server | KNOWN ParentGroup sessions: header/5",
+        "server -> invite-consumer | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "invite-consumer -> server | KNOWN ParentGroup sessions: header/6",
         "invite-consumer -> server | CONTENT ParentGroup header: false new: After: 0 New: 2",
         "invite-consumer -> server | LOAD Map sessions: empty",
-        "server -> invite-consumer | KNOWN ParentGroup sessions: header/7",
+        "server -> invite-consumer | KNOWN ParentGroup sessions: header/8",
         "server -> invite-provider | CONTENT ParentGroup header: false new: After: 0 New: 2",
-        "server -> invite-consumer | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> invite-consumer | CONTENT Group header: true new: After: 0 New: 6",
         "server -> invite-consumer | CONTENT Map header: true new: After: 0 New: 1",
-        "invite-provider -> server | KNOWN ParentGroup sessions: header/7",
-        "invite-consumer -> server | KNOWN Group sessions: header/5",
+        "invite-provider -> server | KNOWN ParentGroup sessions: header/8",
+        "invite-consumer -> server | KNOWN Group sessions: header/6",
         "invite-consumer -> server | KNOWN Map sessions: header/1",
       ]
     `);

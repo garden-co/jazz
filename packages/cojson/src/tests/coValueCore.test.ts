@@ -403,7 +403,8 @@ test("(smoke test) records transactions from local node", async () => {
   });
 
   assert(typeof value !== "number" && !!value?.count);
-  expect(value.count).toBe(3);
+  // Creating a group now creates 4 transactions: admin member, key revelation, readKey, and groupSealer
+  expect(value.count).toBe(4);
 });
 
 test("creating a coValue with a group should't trigger automatically a content creation (performance)", () => {

@@ -57,9 +57,9 @@ describe("CojsonMessageChannel", () => {
     ).toMatchInlineSnapshot(`
       [
         "server -> client | LOAD Map sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 6",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> client | KNOWN Group sessions: header/5",
+        "server -> client | KNOWN Group sessions: header/6",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);

@@ -608,6 +608,36 @@ export function seal(
   );
 }
 /**
+ * Uniffi-exposed function for sealing a message for a group (anonymous box pattern).
+ * Uses an ephemeral key pair, so no sender authentication is provided.
+ * - `message`: Raw bytes to seal
+ * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix (the group's sealer)
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns ephemeral_public_key (32 bytes) || ciphertext, or throws an error if sealing fails.
+ */
+export function sealForGroup(
+  message: ArrayBuffer,
+  recipientId: string,
+  nonceMaterial: ArrayBuffer
+): ArrayBuffer /*throws*/ {
+  return FfiConverterArrayBuffer.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeCryptoErrorUniffi.lift.bind(
+        FfiConverterTypeCryptoErrorUniffi
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_seal_for_group(
+          FfiConverterArrayBuffer.lower(message),
+          FfiConverterString.lower(recipientId),
+          FfiConverterArrayBuffer.lower(nonceMaterial),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
  * Compute a short hash of a stable-stringified JSON value.
  * The input should already be serialized using stableStringify on the JS side.
  * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
@@ -673,6 +703,36 @@ export function unseal(
           FfiConverterArrayBuffer.lower(sealedMessage),
           FfiConverterString.lower(recipientSecret),
           FfiConverterString.lower(senderId),
+          FfiConverterArrayBuffer.lower(nonceMaterial),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
+/**
+ * Uniffi-exposed function for unsealing a message sealed for a group (anonymous box pattern).
+ * Extracts the ephemeral public key and decrypts the message.
+ * - `sealed_message`: ephemeral_public_key (32 bytes) || ciphertext
+ * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+ * Returns unsealed bytes or throws an error if unsealing fails.
+ */
+export function unsealForGroup(
+  sealedMessage: ArrayBuffer,
+  recipientSecret: string,
+  nonceMaterial: ArrayBuffer
+): ArrayBuffer /*throws*/ {
+  return FfiConverterArrayBuffer.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeCryptoErrorUniffi.lift.bind(
+        FfiConverterTypeCryptoErrorUniffi
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_unseal_for_group(
+          FfiConverterArrayBuffer.lower(sealedMessage),
+          FfiConverterString.lower(recipientSecret),
           FfiConverterArrayBuffer.lower(nonceMaterial),
           callStatus
         );
@@ -2734,6 +2794,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_seal_for_group() !==
+    16377
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_seal_for_group'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_short_hash() !==
     26806
   ) {
@@ -2753,6 +2821,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_unseal'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_unseal_for_group() !==
+    19938
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_unseal_for_group'
     );
   }
   if (

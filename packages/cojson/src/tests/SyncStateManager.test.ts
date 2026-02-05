@@ -307,8 +307,8 @@ describe("SyncStateManager", () => {
       [
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | LOAD Group sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | KNOWN Group sessions: header/3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);

@@ -23,6 +23,8 @@ export type Signature = `signature_z${string}`;
 export type SealerSecret = `sealerSecret_z${string}`;
 export type SealerID = `sealer_z${string}`;
 export type Sealed<T> = `sealed_U${string}` & { __type: T };
+// Anonymous box - encrypted to a group's sealer without sender authentication
+export type SealedForGroup<T> = `sealedForGroup_U${string}` & { __type: T };
 
 export type AgentSecret = `${SealerSecret}/${SignerSecret}`;
 
@@ -202,6 +204,39 @@ export abstract class CryptoProvider<Blake3State = any> {
     sealed: Sealed<T>,
     sealer: SealerSecret,
     from: SealerID,
+    nOnceMaterial: { in: RawCoID; tx: TransactionID },
+  ): T | undefined;
+
+  // Derive group sealer deterministically from read key
+  // This ensures concurrent migrations by different admins produce the same result
+  groupSealerFromReadKey(readKeySecret: KeySecret): {
+    id: SealerID;
+    secret: SealerSecret;
+  } {
+    const sealerBytes = this.blake3HashOnceWithContext(
+      textEncoder.encode(readKeySecret),
+      { context: textEncoder.encode("groupSealer") },
+    );
+    const secret: SealerSecret = `sealerSecret_z${base58.encode(sealerBytes)}`;
+    return {
+      secret,
+      id: this.getSealerID(secret),
+    };
+  }
+
+  // Anonymous box - encrypt data to a group's sealer without sender authentication
+  // Uses ephemeral key pair, embeds ephemeral public key in output
+  abstract sealForGroup<T extends JsonValue>(args: {
+    message: T;
+    to: SealerID;
+    nOnceMaterial: { in: RawCoID; tx: TransactionID };
+  }): SealedForGroup<T>;
+
+  // Decrypt data sealed to a group
+  // Extracts ephemeral public key from sealed data, derives shared secret
+  abstract unsealForGroup<T extends JsonValue>(
+    sealed: SealedForGroup<T>,
+    groupSealerSecret: SealerSecret,
     nOnceMaterial: { in: RawCoID; tx: TransactionID },
   ): T | undefined;
 

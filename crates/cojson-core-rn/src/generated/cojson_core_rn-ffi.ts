@@ -273,6 +273,12 @@ interface NativeModuleInterface {
     nonceMaterial: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_seal_for_group(
+    message: Uint8Array,
+    recipientId: Uint8Array,
+    nonceMaterial: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_fn_func_short_hash(
     value: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
@@ -286,6 +292,12 @@ interface NativeModuleInterface {
     sealedMessage: Uint8Array,
     recipientSecret: Uint8Array,
     senderId: Uint8Array,
+    nonceMaterial: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_unseal_for_group(
+    sealedMessage: Uint8Array,
+    recipientSecret: Uint8Array,
     nonceMaterial: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
@@ -327,9 +339,11 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_checksum_func_new_ed25519_signing_key(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_new_x25519_private_key(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_seal(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_seal_for_group(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_short_hash(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_sign(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_unseal(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_unseal_for_group(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_verify(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_x25519_diffie_hellman(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_x25519_public_key(): number;

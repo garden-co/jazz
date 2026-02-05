@@ -47,9 +47,9 @@ describe("syncing deleted coValues", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -169,14 +169,14 @@ describe("syncing deleted coValues", () => {
     ).toMatchInlineSnapshot(`
       [
         "bob -> server | LOAD Map sessions: empty",
-        "alice -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "alice -> server | CONTENT Group header: true new: After: 0 New: 4",
         "alice -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> bob | KNOWN Map sessions: empty",
-        "server -> alice | KNOWN Group sessions: header/3",
+        "server -> alice | KNOWN Group sessions: header/4",
         "server -> alice | KNOWN Map sessions: header/1",
-        "server -> bob | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> bob | CONTENT Group header: true new: After: 0 New: 4",
         "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
-        "bob -> server | KNOWN Group sessions: header/3",
+        "bob -> server | KNOWN Group sessions: header/4",
         "bob -> server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -223,10 +223,10 @@ describe("syncing deleted coValues", () => {
         "client -> server | CONTENT Map header: false new: After: 0 New: 1",
         "server -> client | KNOWN Map sessions: header/2",
         "server -> bob | CONTENT Map header: false new: After: 0 New: 1",
-        "bob -> server | LOAD Group sessions: header/5",
+        "bob -> server | LOAD Group sessions: header/6",
         "bob -> server | LOAD Map sessions: header/2",
         "bob -> server | CONTENT Map header: false new: After: 0 New: 1",
-        "server -> bob | KNOWN Group sessions: header/5",
+        "server -> bob | KNOWN Group sessions: header/6",
         "server -> bob | CONTENT Map header: false new: After: 0 New: 1",
         "server -> bob | KNOWN Map sessions: header/3",
         "bob -> server | KNOWN Map sessions: header/2",

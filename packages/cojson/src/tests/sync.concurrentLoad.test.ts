@@ -102,10 +102,10 @@ describe("concurrent load", () => {
       [
         "client -> server | LOAD Map1 sessions: empty",
         "client -> server | LOAD Map2 sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map1 header: true new: After: 0 New: 1",
         "server -> client | CONTENT Map2 header: true new: After: 0 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map1 sessions: header/1",
         "client -> server | LOAD Map3 sessions: empty",
         "client -> server | KNOWN Map2 sessions: header/1",
@@ -149,9 +149,9 @@ describe("concurrent load", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map1 sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map1 header: true new: After: 0 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map1 sessions: header/1",
         "client -> server | LOAD Map2 sessions: empty",
         "server -> client | CONTENT Map2 header: true new: After: 0 New: 1",
@@ -467,8 +467,8 @@ describe("concurrent load", () => {
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | LOAD Group sessions: empty",
         "server -> client | KNOWN Group sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server | KNOWN Group sessions: header/5",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 6",
+        "client -> server | KNOWN Group sessions: header/6",
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -516,9 +516,9 @@ describe("concurrent load", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD LargeMap sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT LargeMap header: true new: After: 0 New: 73 expectContentUntil: header/200",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN LargeMap sessions: header/73",
       ]
     `);
@@ -579,8 +579,8 @@ describe("concurrent load", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
-        "server -> client | KNOWN Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
+        "server -> client | KNOWN Group sessions: header/4",
         "client -> server | LOAD C sessions: empty",
         "server -> client | CONTENT C header: true new: After: 0 New: 1",
         "client -> server | KNOWN C sessions: header/1",
@@ -634,9 +634,9 @@ describe("concurrent load", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD A sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT A header: true new: After: 0 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN A sessions: header/1",
         "client -> server | LOAD C sessions: empty",
         "server -> client | CONTENT C header: true new: After: 0 New: 1",

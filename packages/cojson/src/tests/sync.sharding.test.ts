@@ -284,13 +284,13 @@ describe("sharding", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server1 | LOAD Group sessions: header/3",
+        "client -> server1 | LOAD Group sessions: header/4",
         "client -> server3 | LOAD Map sessions: header/1",
-        "client -> server1 | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server1 | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server3 | CONTENT Map header: true new: After: 0 New: 1",
         "server1 -> client | KNOWN Group sessions: empty",
         "server3 -> client | KNOWN Map sessions: empty",
-        "server1 -> client | KNOWN Group sessions: header/3",
+        "server1 -> client | KNOWN Group sessions: header/4",
         "server3 -> client | KNOWN Map sessions: header/1",
       ]
     `);

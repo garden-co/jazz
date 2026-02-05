@@ -42,13 +42,13 @@ describe("peer reconciliation", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/1",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | KNOWN Group sessions: empty",
         "server -> client | KNOWN Map sessions: empty",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -91,10 +91,10 @@ describe("peer reconciliation", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/2",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
         "server -> client | KNOWN Map sessions: header/2",
       ]
@@ -146,12 +146,12 @@ describe("peer reconciliation", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/2",
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/2",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
         "server -> client | KNOWN Map sessions: header/2",
       ]
@@ -193,12 +193,12 @@ describe("peer reconciliation", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/1",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN Group sessions: empty",
         "server -> client | KNOWN Map sessions: empty",
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/2",
         "server -> client | KNOWN Group sessions: empty",
         "server -> client | KNOWN Map sessions: empty",
@@ -206,8 +206,8 @@ describe("peer reconciliation", () => {
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
         "server -> client | LOAD Group sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN Group sessions: header/3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/2",
       ]
     `);
@@ -255,9 +255,9 @@ describe("peer reconciliation", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Account sessions: header/4",
-        "client -> server | LOAD ProfileGroup sessions: header/5",
+        "client -> server | LOAD ProfileGroup sessions: header/6",
         "client -> server | LOAD Profile sessions: header/1",
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/1",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN Account sessions: empty",
@@ -266,31 +266,31 @@ describe("peer reconciliation", () => {
         "server -> client | KNOWN Group sessions: empty",
         "server -> client | KNOWN Map sessions: empty",
         "client -> server | LOAD Account sessions: header/4",
-        "client -> server | LOAD ProfileGroup sessions: header/5",
+        "client -> server | LOAD ProfileGroup sessions: header/6",
         "client -> server | LOAD Profile sessions: header/1",
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/2",
         "server -> client | KNOWN Account sessions: empty",
         "server -> client | KNOWN ProfileGroup sessions: empty",
         "server -> client | KNOWN Profile sessions: empty",
         "server -> client | KNOWN Group sessions: empty",
         "server -> client | KNOWN Map sessions: empty",
-        "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "client -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | LOAD Account sessions: empty",
         "server -> client | LOAD ProfileGroup sessions: empty",
         "client -> server | CONTENT Account header: true new: After: 0 New: 4",
-        "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "server -> client | KNOWN Account sessions: header/4",
-        "server -> client | KNOWN ProfileGroup sessions: header/5",
+        "server -> client | KNOWN ProfileGroup sessions: header/6",
         "server -> client | KNOWN Profile sessions: header/1",
         "server -> client | KNOWN CORRECTION Map sessions: empty",
-        "server -> client | KNOWN ProfileGroup sessions: header/5",
+        "server -> client | KNOWN ProfileGroup sessions: header/6",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
         "server -> client | LOAD Group sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN Group sessions: header/3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/2",
       ]
     `);
@@ -391,9 +391,9 @@ describe("peer reconciliation with garbageCollected CoValues", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -451,9 +451,9 @@ describe("peer reconciliation with garbageCollected CoValues", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Group sessions: header/4",
         "client -> server | LOAD Map sessions: header/1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -523,13 +523,13 @@ describe("peer reconciliation with garbageCollected CoValues", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | LOAD ClientGroup sessions: header/3",
+        "client -> server | LOAD ClientGroup sessions: header/4",
         "client -> server | LOAD ClientMap sessions: header/1",
-        "client -> server | CONTENT ClientGroup header: true new: After: 0 New: 3",
+        "client -> server | CONTENT ClientGroup header: true new: After: 0 New: 4",
         "client -> server | CONTENT ClientMap header: true new: After: 0 New: 1",
         "server -> client | KNOWN ClientGroup sessions: empty",
         "server -> client | KNOWN ClientMap sessions: empty",
-        "server -> client | KNOWN ClientGroup sessions: header/3",
+        "server -> client | KNOWN ClientGroup sessions: header/4",
         "server -> client | KNOWN ClientMap sessions: header/1",
       ]
     `);

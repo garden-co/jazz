@@ -16,6 +16,8 @@ Jazz is a distributed database framework for building local-first apps. It syncs
 ```bash
 pnpm install              # Install dependencies
 pnpm build:packages       # Build TypeScript packages
+pnpm build:core           # Build native packages
+pnpm build:all-packages   # Build everything
 pnpm test                 # Run tests (Vitest, watch mode)
 pnpm test --watch=false   # Run tests without watch
 pnpm test fileName        # Run tests on files matching fileName
