@@ -113,6 +113,11 @@ impl<D: crate::driver::Driver> TestIoHandler<D> {
     pub fn driver_mut(&mut self) -> &mut D {
         &mut self.driver
     }
+
+    /// Take driver out (for cold-start transfer between runtimes)
+    pub fn into_driver(self) -> D {
+        self.driver
+    }
 }
 
 impl<D: crate::driver::Driver> IoHandler for TestIoHandler<D> {
@@ -132,6 +137,94 @@ impl<D: crate::driver::Driver> IoHandler for TestIoHandler<D> {
 
     fn take_pending_responses(&mut self) -> Vec<StorageResponse> {
         std::mem::take(&mut self.pending_responses)
+    }
+}
+
+/// IoHandler that delays storage responses for testing async scenarios.
+/// Unlike TestIoHandler which processes synchronously, this queues requests
+/// and requires explicit `flush()` to process them.
+#[cfg(test)]
+pub use delayed_io_handler::DelayedIoHandler;
+
+#[cfg(test)]
+mod delayed_io_handler {
+    use super::{IoHandler, OutboxEntry, StorageRequest, StorageResponse};
+    use crate::driver::{Driver, TestDriver};
+
+    pub struct DelayedIoHandler {
+        driver: TestDriver,
+        pending_requests: Vec<StorageRequest>,
+        ready_responses: Vec<StorageResponse>,
+    }
+
+    impl DelayedIoHandler {
+        pub fn new() -> Self {
+            Self {
+                driver: TestDriver::new(),
+                pending_requests: Vec::new(),
+                ready_responses: Vec::new(),
+            }
+        }
+
+        /// Create with existing driver (for cold-start scenarios)
+        pub fn with_driver(driver: TestDriver) -> Self {
+            Self {
+                driver,
+                pending_requests: Vec::new(),
+                ready_responses: Vec::new(),
+            }
+        }
+
+        /// Process all pending requests and queue responses
+        pub fn process_pending(&mut self) {
+            let requests: Vec<_> = self.pending_requests.drain(..).collect();
+            let responses = self.driver.process(requests);
+            self.ready_responses.extend(responses);
+        }
+
+        /// Take ready responses for parking in RuntimeCore
+        pub fn take_responses(&mut self) -> Vec<StorageResponse> {
+            std::mem::take(&mut self.ready_responses)
+        }
+
+        /// Check if there are pending requests
+        pub fn has_pending_requests(&self) -> bool {
+            !self.pending_requests.is_empty()
+        }
+
+        /// Convenience: process pending and return responses
+        pub fn flush(&mut self) -> Vec<StorageResponse> {
+            self.process_pending();
+            self.take_responses()
+        }
+
+        /// Get driver reference (for verification)
+        pub fn driver(&self) -> &TestDriver {
+            &self.driver
+        }
+
+        /// Take driver out (for cold-start transfer)
+        pub fn into_driver(self) -> TestDriver {
+            self.driver
+        }
+    }
+
+    impl IoHandler for DelayedIoHandler {
+        fn send_storage_request(&mut self, request: StorageRequest) {
+            self.pending_requests.push(request);
+        }
+
+        fn send_sync_message(&mut self, _message: OutboxEntry) {
+            // No-op for local tests
+        }
+
+        fn schedule_batched_tick(&self) {
+            // No-op - tests control ticking explicitly
+        }
+
+        fn take_pending_responses(&mut self) -> Vec<StorageResponse> {
+            Vec::new() // Responses come via explicit flush()
+        }
     }
 }
 
