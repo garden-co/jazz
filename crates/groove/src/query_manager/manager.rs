@@ -2043,6 +2043,7 @@ impl QueryManager {
             // Emit on first settle ONLY if no pending loads, or when delta is non-empty
             // Never emit while pending - wait for index/row loading to complete
             let needs_initial = !subscription.settled_once && !has_pending_loads;
+
             if !delta.pending && (needs_initial || !delta.is_empty()) {
                 subscription.settled_once = true;
                 self.update_outbox.push(QueryUpdate {
@@ -3409,6 +3410,24 @@ impl QueryManager {
         graph.involves_table(table)
     }
 
+    /// Mark subscriptions dirty when an index transitions to ready.
+    /// Called when LoadIndexMeta or LoadIndexPage causes is_ready() to become true.
+    fn mark_subscriptions_dirty_for_index(&mut self, table: &str, column: &str) {
+        // Mark local subscriptions dirty
+        for subscription in self.subscriptions.values_mut() {
+            if subscription.graph.uses_index(table, column) {
+                subscription.graph.mark_dirty_for_column(table, column);
+            }
+        }
+
+        // Mark server subscriptions dirty (for downstream clients)
+        for server_sub in self.server_subscriptions.values_mut() {
+            if server_sub.graph.uses_index(table, column) {
+                server_sub.graph.mark_dirty_for_column(table, column);
+            }
+        }
+    }
+
     // ========================================================================
     // No-op storage driver (for tests)
     // ========================================================================
@@ -3552,8 +3571,17 @@ impl QueryManager {
                     result,
                 } => {
                     let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    if let Some(index) = self.indices.get_mut(&key) {
+                    let needs_dirty_mark = if let Some(index) = self.indices.get_mut(&key) {
+                        let was_ready = index.is_ready();
                         index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
+                        !was_ready && index.is_ready()
+                    } else {
+                        false
+                    };
+
+                    // If index just became ready, mark affected subscriptions dirty
+                    if needs_dirty_mark {
+                        self.mark_subscriptions_dirty_for_index(table, column);
                     }
                 }
                 StorageResponse::LoadIndexPage {
@@ -3563,11 +3591,20 @@ impl QueryManager {
                     result,
                 } => {
                     let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    if let Some(index) = self.indices.get_mut(&key) {
+                    let needs_dirty_mark = if let Some(index) = self.indices.get_mut(&key) {
+                        let was_ready = index.is_ready();
                         index.process_page_load(
                             PageId(*page_id),
                             result.as_ref().ok().and_then(|o| o.clone()),
                         );
+                        !was_ready && index.is_ready()
+                    } else {
+                        false
+                    };
+
+                    // If index just became ready, mark affected subscriptions dirty
+                    if needs_dirty_mark {
+                        self.mark_subscriptions_dirty_for_index(table, column);
                     }
                 }
                 StorageResponse::StoreIndexMeta { .. }
