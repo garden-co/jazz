@@ -3,9 +3,11 @@ import { x25519 } from "@noble/curves/ed25519";
 import { blake3 } from "@noble/hashes/blake3";
 import { base58, base64url } from "@scure/base";
 import { expect, test, vi } from "vitest";
+import { shortHashLength } from "../crypto/crypto.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
+import { JsonValue } from "../jsonValue.js";
 
 const crypto = await WasmCrypto.create();
 
@@ -166,4 +168,109 @@ test(`Unsealing malformed JSON logs error [${name}]`, () => {
   expect(consoleSpy.mock.lastCall?.[0]).toContain(
     "Failed to decrypt/parse sealed message",
   );
+});
+
+// ============================================================================
+// shortHash implementation consistency tests
+// ============================================================================
+
+/**
+ * Compute shortHash using the base TypeScript implementation (reference).
+ * This mirrors the CryptoProvider.shortHash method exactly.
+ */
+function referenceShortHash(value: JsonValue): string {
+  const textEncoder = new TextEncoder();
+  return `shortHash_z${base58.encode(
+    blake3(textEncoder.encode(stableStringify(value))).slice(
+      0,
+      shortHashLength,
+    ),
+  )}`;
+}
+
+test(`shortHash WASM implementation matches TypeScript reference [${name}]`, () => {
+  // Test with simple object
+  const simpleObj = { hello: "world" };
+  expect(crypto.shortHash(simpleObj)).toBe(referenceShortHash(simpleObj));
+
+  // Test with object where key order differs (should produce same hash due to stableStringify)
+  const objA = { b: "world", a: "hello" };
+  const objB = { a: "hello", b: "world" };
+  expect(crypto.shortHash(objA)).toBe(referenceShortHash(objA));
+  expect(crypto.shortHash(objB)).toBe(referenceShortHash(objB));
+  expect(crypto.shortHash(objA)).toBe(crypto.shortHash(objB));
+
+  // Test with nested objects
+  const nestedObj = { outer: { inner: { deep: "value" } }, top: 123 };
+  expect(crypto.shortHash(nestedObj)).toBe(referenceShortHash(nestedObj));
+
+  // Test with arrays
+  const arrayValue = [1, 2, 3, "four", { five: 5 }];
+  expect(crypto.shortHash(arrayValue)).toBe(referenceShortHash(arrayValue));
+
+  // Test with primitives
+  expect(crypto.shortHash("string")).toBe(referenceShortHash("string"));
+  expect(crypto.shortHash(42)).toBe(referenceShortHash(42));
+  expect(crypto.shortHash(true)).toBe(referenceShortHash(true));
+  expect(crypto.shortHash(null)).toBe(referenceShortHash(null));
+
+  // Test with empty structures
+  expect(crypto.shortHash({})).toBe(referenceShortHash({}));
+  expect(crypto.shortHash([])).toBe(referenceShortHash([]));
+});
+
+test(`shortHash produces correct format [${name}]`, () => {
+  const value = { test: "data" };
+  const hash = crypto.shortHash(value);
+
+  // Should start with "shortHash_z" prefix
+  expect(hash).toMatch(/^shortHash_z/);
+
+  // The base58 encoded part should be reasonable length (19 bytes base58 encoded)
+  const base58Part = hash.substring("shortHash_z".length);
+  expect(base58Part.length).toBeGreaterThan(0);
+
+  // Should only contain valid base58 characters
+  expect(base58Part).toMatch(
+    /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/,
+  );
+});
+
+test(`shortHash with complex nested structure matches reference [${name}]`, () => {
+  const complexValue = {
+    users: [
+      { id: 1, name: "Alice", active: true },
+      { id: 2, name: "Bob", active: false },
+    ],
+    metadata: {
+      created: 1234567890,
+      tags: ["important", "test"],
+      config: {
+        nested: {
+          deeply: {
+            value: "found",
+          },
+        },
+      },
+    },
+    nullField: null,
+    emptyArray: [],
+    emptyObject: {},
+  };
+
+  expect(crypto.shortHash(complexValue)).toBe(referenceShortHash(complexValue));
+});
+
+test(`shortHash with special characters matches reference [${name}]`, () => {
+  // Test with unicode
+  const unicodeValue = { emoji: "🎉", chinese: "你好", arabic: "مرحبا" };
+  expect(crypto.shortHash(unicodeValue)).toBe(referenceShortHash(unicodeValue));
+
+  // Test with escape sequences
+  const escapeValue = {
+    quote: 'has "quotes"',
+    newline: "has\nnewline",
+    tab: "has\ttab",
+  };
+  expect(crypto.shortHash(escapeValue)).toBe(referenceShortHash(escapeValue));
 });

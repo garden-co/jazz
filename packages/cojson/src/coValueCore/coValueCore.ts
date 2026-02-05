@@ -42,7 +42,6 @@ import {
   Uniqueness,
   VerifiedState,
 } from "./verifiedState.js";
-import { SessionMap } from "./SessionMap.js";
 import {
   MergeCommit,
   BranchPointerCommit,
@@ -64,45 +63,6 @@ import {
   KnownStateSessions,
 } from "../knownState.js";
 import { safeParseJSON } from "../jsonStringify.js";
-
-export type ValidationValue =
-  | { isOk: true }
-  | {
-      isOk: false;
-      message: string;
-    };
-
-function validateUniqueness(uniqueness: Uniqueness): ValidationValue {
-  if (typeof uniqueness === "number" && !Number.isInteger(uniqueness)) {
-    return {
-      isOk: false,
-      message: "Uniqueness cannot be a non-integer number, got " + uniqueness,
-    };
-  }
-
-  if (Array.isArray(uniqueness)) {
-    return {
-      isOk: false,
-      message: "Uniqueness cannot be an array, got " + uniqueness,
-    };
-  }
-
-  if (typeof uniqueness === "object" && uniqueness !== null) {
-    for (let [key, value] of Object.entries(uniqueness)) {
-      if (typeof value !== "string") {
-        return {
-          isOk: false,
-          message:
-            "Uniqueness object values must be a string, got " +
-            value +
-            " for key " +
-            key,
-        };
-      }
-    }
-  }
-  return { isOk: true };
-}
 
 export function idforHeader(
   header: CoValueHeader,
@@ -619,36 +579,34 @@ export class CoValueCore {
     streamingKnownState?: KnownStateSessions,
     skipVerify?: boolean,
   ) {
-    if (!skipVerify) {
-      const validation = validateUniqueness(header.uniqueness);
-      if (!validation.isOk) {
-        logger.error("Invalid uniqueness", {
-          header,
-          errorMessage: validation.message,
-        });
-        return false;
-      }
-
-      const expectedId = idforHeader(header, this.node.crypto);
-
-      if (this.id !== expectedId) {
-        return false;
-      }
-    }
-
-    this.addDependencyFromHeader(header);
-
-    if (this._verified?.sessions.size) {
+    if (this._verified?.sessionCount) {
       throw new Error(
         "CoValueCore: provideHeader called on coValue with verified sessions present!",
       );
     }
-    this._verified = new VerifiedState(
-      this.id,
-      this.node.crypto,
-      header,
-      new SessionMap(this.id, this.node.crypto, streamingKnownState),
-    );
+
+    // Create VerifiedState - Rust validates uniqueness and id match unless skipVerify is true
+    try {
+      this._verified = new VerifiedState(
+        this.id,
+        this.node.crypto,
+        header,
+        streamingKnownState,
+        skipVerify,
+      );
+    } catch (e) {
+      // Rust validation failed (invalid uniqueness or id mismatch)
+      logger.error("Header validation failed", {
+        id: this.id,
+        header,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return false;
+    }
+
+    // Only add dependencies after successful validation
+    this.addDependencyFromHeader(header);
+
     // Clean up if transitioning from garbageCollected/onlyKnownState
     if (this.isAvailable()) {
       this.cleanupLastKnownState();
@@ -763,7 +721,7 @@ export class CoValueCore {
 
     return {
       sessionID,
-      txIndex: this.verified.sessions.get(sessionID)?.transactions.length || 0,
+      txIndex: this.verified.getTransactionsCount(sessionID) || 0,
     };
   }
 
@@ -794,8 +752,7 @@ export class CoValueCore {
     let deleteTransaction: Transaction | undefined = undefined;
 
     if (isDeleteSessionID(sessionID)) {
-      const txCount =
-        this.verified.sessions.get(sessionID)?.transactions.length ?? 0;
+      const txCount = this.verified.getTransactionsCount(sessionID) ?? 0;
       if (txCount > 0 || newTransactions.length > 1) {
         return {
           value: true,
@@ -1426,7 +1383,7 @@ export class CoValueCore {
 
     const isBranched = this.isBranched();
 
-    for (const [sessionID, sessionLog] of this.verified.sessions.entries()) {
+    for (const [sessionID, sessionLog] of this.verified.sessionEntries()) {
       const count = this.verifiedTransactionsKnownSessions[sessionID] ?? 0;
 
       for (
@@ -1992,7 +1949,7 @@ export class CoValueCore {
   }
 
   getTx(txID: TransactionID): Transaction | undefined {
-    return this.verified?.sessions.get(txID.sessionID)?.transactions[
+    return this.verified?.getSession(txID.sessionID)?.transactions[
       txID.txIndex
     ];
   }
