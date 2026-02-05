@@ -1,4 +1,4 @@
-import type { JsonValue, RawCoValue } from "cojson";
+import type { CoValueUniqueness, JsonValue, RawCoValue } from "cojson";
 import { CojsonInternalTypes } from "cojson";
 import {
   Account,
@@ -162,6 +162,34 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
 }
 
 /**
+ * Derive a child uniqueness from a parent uniqueness and a field name.
+ *
+ * For string uniqueness: `parentUnique + "/" + fieldName`
+ * For object uniqueness: `{ ...parentUnique, _field: existingField + "/" + fieldName }`
+ *
+ * @param parentUniqueness - The parent's uniqueness value
+ * @param fieldName - The name of the field containing the child
+ * @returns The derived uniqueness for the child
+ */
+export function deriveChildUniqueness(
+  parentUniqueness: CoValueUniqueness["uniqueness"],
+  fieldName: string,
+): CoValueUniqueness["uniqueness"] {
+  if (typeof parentUniqueness === "string") {
+    return `${parentUniqueness}@@${fieldName}`;
+  }
+  if (typeof parentUniqueness === "object" && parentUniqueness !== null) {
+    const existingField = parentUniqueness._field ?? "";
+    return {
+      ...parentUniqueness,
+      _field: existingField ? `${existingField}/${fieldName}` : fieldName,
+    };
+  }
+  // For boolean/null/undefined, return as-is (no derivation needed)
+  return parentUniqueness;
+}
+
+/**
  * Creates a new CoValue of the given ref type, using the provided init values.
  *
  * @param schema - The schema of the CoValue to create.
@@ -170,6 +198,8 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
  * to determine the owner of the new CoValue
  * @param newOwnerStrategy - The strategy to use to determine the owner of the new CoValue
  * @param onCreate - The callback to call when the new CoValue is created
+ * @param parentUniqueness - The parent's uniqueness value (if the parent is unique)
+ * @param fieldName - The name of the field containing this ref (for deriving child uniqueness)
  * @returns The created CoValue.
  */
 export function instantiateRefEncodedWithInit<V extends CoValue>(
@@ -178,6 +208,11 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   containerOwner: Group,
   newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
   onCreate?: RefOnCreateCallback,
+  unique?: {
+    uniqueness: CoValueUniqueness["uniqueness"];
+    fieldName: string;
+    firstComesWins: boolean;
+  },
 ): V {
   if (!isCoValueClass<V>(schema.ref)) {
     throw Error(
@@ -186,8 +221,35 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   }
   const owner = newOwnerStrategy(() => Group.create(), containerOwner, init);
   onCreate?.(owner, init);
+
+  // Derive child uniqueness if parent is unique and child uses the same owner
+  let childUniqueness: CoValueUniqueness["uniqueness"] | undefined;
+  if (unique !== undefined) {
+    const isSameOwner = owner === containerOwner;
+    if (isSameOwner) {
+      childUniqueness = deriveChildUniqueness(
+        unique.uniqueness,
+        unique.fieldName,
+      );
+    } else if (
+      typeof unique.uniqueness === "string" ||
+      (typeof unique.uniqueness === "object" && unique.uniqueness !== null)
+    ) {
+      // Log warning when parent has meaningful uniqueness but child uses a different owner
+      console.warn(
+        `Inline CoValue at field "${unique.fieldName}" has a different owner than its unique parent. ` +
+          `The child will not inherit uniqueness. Consider using "sameAsContainer" permission ` +
+          `for CoValues within unique parents.`,
+      );
+    }
+  }
+
   // @ts-expect-error - create is a static method in all CoValue classes
-  return schema.ref.create(init, owner);
+  return schema.ref.create(init, {
+    owner,
+    unique: childUniqueness,
+    firstComesWins: unique?.firstComesWins,
+  });
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

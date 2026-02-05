@@ -27,7 +27,7 @@ test("should add and delete account in dropdown", async ({ page }) => {
     page.getByText("Select an account to connect to the inspector."),
   ).toBeVisible();
   await expect(
-    page.getByText(`Inspector test account <${accountID}>`),
+    page.getByText(`👤Inspector test account <${accountID}>`),
   ).not.toBeVisible();
 });
 
@@ -192,7 +192,7 @@ test("should show Group members", async ({ page }) => {
 
   const row2 = table.getByRole("row").nth(2);
   await expect(row2.getByRole("cell").nth(0)).toHaveText(
-    `Inspector test account <${account.$jazz.id}>`,
+    `👤Inspector test account <${account.$jazz.id}>`,
   );
   await expect(row2.getByRole("cell").nth(1)).toHaveText("admin");
 

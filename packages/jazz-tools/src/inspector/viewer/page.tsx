@@ -7,6 +7,7 @@ import {
   RawCoPlainText,
   RawCoStream,
   RawCoValue,
+  RawGroup,
 } from "cojson";
 import { styled } from "goober";
 import React from "react";
@@ -236,6 +237,13 @@ export function Page(props: PageProps) {
                 <span style={{ color: "#57534e", fontWeight: 500 }}>
                   {" "}
                   {(snapshot as { name: string }).name}
+                </span>
+              ) : extendedType === "group" &&
+                value &&
+                (value as RawGroup).name ? (
+                <span style={{ color: "#57534e", fontWeight: 500 }}>
+                  {" "}
+                  {(value as RawGroup).name}
                 </span>
               ) : null}
             </span>

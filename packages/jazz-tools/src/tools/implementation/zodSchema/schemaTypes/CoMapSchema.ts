@@ -199,7 +199,7 @@ export class CoMapSchema<
     );
   }
 
-  /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */
+  /** @deprecated Use `loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: string,
@@ -208,6 +208,54 @@ export class CoMapSchema<
     return this.coValueClass.findUnique(unique, ownerID, as);
   }
 
+  /**
+   * Get an existing unique CoMap or create a new one if it doesn't exist.
+   *
+   * Unlike `upsertUnique`, this method does NOT update existing values with the provided value.
+   * The provided value is only used when creating a new CoMap.
+   *
+   * @example
+   * ```ts
+   * const settings = await UserSettings.getOrCreateUnique({
+   *   value: { theme: "dark", language: "en" },
+   *   unique: "user-settings",
+   *   owner: me,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoMap.
+   * @returns Either an existing CoMap (unchanged), or a new initialised CoMap if none exists.
+   * @category Subscription & Loading
+   */
+  getOrCreateUnique<
+    const R extends RefsToResolve<
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(options: {
+    value: Simplify<CoMapSchemaInit<Shape>>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Owner;
+    resolve?: RefsToResolveStrict<
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
+      R
+    >;
+  }): Promise<
+    Settled<
+      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+    >
+  > {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(
+      // @ts-expect-error
+      withSchemaResolveQuery(options, this.resolveQuery),
+    );
+  }
+
+  /**
+   * @deprecated Use `getOrCreateUnique` instead. Note: getOrCreateUnique does not update existing values.
+   * If you need to update, use getOrCreateUnique followed by direct property assignment.
+   */
   upsertUnique<
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap

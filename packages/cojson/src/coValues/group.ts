@@ -21,7 +21,7 @@ import {
   isAgentID,
   isParentGroupReference,
 } from "../ids.js";
-import { JsonObject } from "../jsonValue.js";
+import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
 import {
   AccountRole,
@@ -336,6 +336,13 @@ export class RawGroup<
     } else {
       runMigrations();
     }
+  }
+
+  /**
+   * Optional display name set at group creation. Immutable; stored in plaintext in header meta.
+   */
+  get name(): string | undefined {
+    return (this.headerMeta as { name?: string } | null)?.name;
   }
 
   /**
@@ -1269,6 +1276,7 @@ export class RawGroup<
     meta?: M["headerMeta"],
     initPrivacy: "trusting" | "private" = "private",
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
+    initMeta?: JsonObject,
   ): M {
     const map = this.core.node
       .createCoValue({
@@ -1286,10 +1294,10 @@ export class RawGroup<
       .getCurrentContent() as M;
 
     if (init) {
-      map.assign(init, initPrivacy);
+      map.assign(init, initPrivacy, initMeta);
     } else if (!uniqueness.createdAt) {
       // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
-      map.core.makeTransaction([], "trusting");
+      map.core.makeTransaction([], "trusting", initMeta);
     }
 
     return map;
@@ -1306,6 +1314,7 @@ export class RawGroup<
     meta?: L["headerMeta"],
     initPrivacy: "trusting" | "private" = "private",
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
+    initMeta?: JsonObject,
   ): L {
     const list = this.core.node
       .createCoValue({
@@ -1323,10 +1332,10 @@ export class RawGroup<
       .getCurrentContent() as L;
 
     if (init?.length) {
-      list.appendItems(init, undefined, initPrivacy);
+      list.appendItems(init, undefined, initPrivacy, initMeta);
     } else if (!uniqueness.createdAt) {
       // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
-      list.core.makeTransaction([], "trusting");
+      list.core.makeTransaction([], "trusting", initMeta);
     }
 
     return list;
@@ -1364,8 +1373,11 @@ export class RawGroup<
 
   /** @category 3. Value creation */
   createStream<C extends RawCoStream>(
+    init?: JsonValue[],
+    initPrivacy: "trusting" | "private" = "private",
     meta?: C["headerMeta"],
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
+    initMeta?: JsonObject,
   ): C {
     const stream = this.core.node
       .createCoValue({
@@ -1382,9 +1394,11 @@ export class RawGroup<
       })
       .getCurrentContent() as C;
 
-    if (!uniqueness.createdAt) {
+    if (init?.length) {
+      stream.core.makeTransaction(init, initPrivacy, initMeta);
+    } else if (!uniqueness.createdAt) {
       // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
-      stream.core.makeTransaction([], "trusting");
+      stream.core.makeTransaction([], "trusting", initMeta);
     }
 
     return stream;

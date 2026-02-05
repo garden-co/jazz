@@ -824,13 +824,19 @@ export class LocalNode {
 
   createGroup(
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
+    options?: { name?: string },
   ): RawGroup {
     const account = this.getCurrentAgent();
+
+    const meta =
+      options?.name != null && options.name !== ""
+        ? { name: options.name }
+        : null;
 
     const groupCoValue = this.createCoValue({
       type: "comap",
       ruleset: { type: "group", initialAdmin: account.id },
-      meta: null,
+      meta,
       ...(uniqueness.createdAt !== undefined
         ? { createdAt: uniqueness.createdAt }
         : {}),

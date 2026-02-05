@@ -2,6 +2,7 @@ import {
   cojsonInternals,
   type CoValueUniqueness,
   type CojsonInternalTypes,
+  type RawCoID,
   type RawCoValue,
 } from "cojson";
 import { AvailableCoValueCore } from "cojson";
@@ -30,7 +31,10 @@ import {
   coValueClassFromCoValueClassOrSchema,
   inspect,
 } from "../internal.js";
-import type { BranchDefinition } from "../subscribe/types.js";
+import type {
+  BranchDefinition,
+  CoValueErrorState,
+} from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
 import { JazzError } from "../subscribe/JazzError.js";
 
@@ -124,6 +128,16 @@ export function getUnloadedCoValueWithoutId<T extends CoValue>(
   const newValue = createUnloadedCoValue("", loadingState);
   unloadedCoValueStates.set(loadingState, newValue);
   return newValue;
+}
+
+export function createSettledCoValue<T extends CoValue>(
+  id: ID<T>,
+  loadingState: CoValueErrorState,
+): Settled<T> {
+  return {
+    $jazz: { id, loadingState },
+    $isLoaded: false,
+  };
 }
 
 export function createUnloadedCoValue<T extends CoValue>(
@@ -457,6 +471,7 @@ export function parseCoValueCreateOptions(
         owner?: Account | Group;
         unique?: CoValueUniqueness["uniqueness"];
         onCreate?: OnCreateCallback;
+        firstComesWins?: boolean;
       }
     | Account
     | Group
@@ -464,6 +479,7 @@ export function parseCoValueCreateOptions(
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;
+  firstComesWins: boolean;
 } {
   const onCreate =
     options && "onCreate" in options ? options.onCreate : undefined;
@@ -471,19 +487,21 @@ export function parseCoValueCreateOptions(
   if (!options) {
     const owner = Group.create();
     onCreate?.(owner);
-    return { owner, uniqueness: undefined };
+    return { owner, uniqueness: undefined, firstComesWins: false };
   }
 
   if (TypeSym in options) {
     if (options[TypeSym] === "Account") {
       const owner = accountOrGroupToGroup(options);
       onCreate?.(owner);
-      return { owner, uniqueness: undefined };
+      return { owner, uniqueness: undefined, firstComesWins: false };
     } else if (options[TypeSym] === "Group") {
       onCreate?.(options);
-      return { owner: options, uniqueness: undefined };
+      return { owner: options, uniqueness: undefined, firstComesWins: false };
     }
   }
+
+  const firstComesWins = options.firstComesWins ?? false;
 
   const uniqueness = options.unique
     ? { uniqueness: options.unique }
@@ -498,6 +516,7 @@ export function parseCoValueCreateOptions(
   const opts = {
     owner,
     uniqueness,
+    firstComesWins,
   };
   return opts;
 }
@@ -513,17 +532,21 @@ export function parseGroupCreateOptions(
   options:
     | {
         owner?: Account;
+        name?: string;
       }
     | Account
     | undefined,
-) {
+): { owner: Account; name?: string } {
   if (!options) {
     return { owner: activeAccountContext.get() };
   }
 
-  return TypeSym in options && isAccountInstance(options)
-    ? { owner: options }
-    : { owner: options.owner ?? activeAccountContext.get() };
+  if (TypeSym in options && isAccountInstance(options)) {
+    return { owner: options };
+  }
+
+  const owner = options.owner ?? activeAccountContext.get();
+  return options.name !== undefined ? { owner, name: options.name } : { owner };
 }
 
 export function getIdFromHeader(
@@ -537,6 +560,19 @@ export function getIdFromHeader(
 
   return cojsonInternals.idforHeader(header, node.crypto);
 }
+
+/**
+ * Mapping from CoValue TypeSym to the CoValueHeaderType.
+ */
+const coValueTypeSymToHeaderType: Record<string, CoValueHeaderType | null> = {
+  CoMap: "comap",
+  Group: null,
+  Account: null,
+  CoList: "colist",
+  CoStream: "costream",
+  CoPlainText: "coplaintext",
+  BinaryCoStream: null,
+};
 
 export async function unstable_loadUnique<
   S extends CoValueClassOrSchema,
@@ -552,24 +588,63 @@ export async function unstable_loadUnique<
   },
 ): Promise<MaybeLoaded<Loaded<S, R>>> {
   const cls = coValueClassFromCoValueClassOrSchema(schema);
-
-  if (
-    !("_getUniqueHeader" in cls) ||
-    typeof cls._getUniqueHeader !== "function"
-  ) {
-    throw new Error("CoValue class does not support unique headers");
-  }
-
-  const header = cls._getUniqueHeader(options.unique, options.owner.$jazz.id);
+  const headerType = getUniqueHeaderType(schema);
 
   // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
   return internalLoadUnique(cls, {
-    header,
+    type: headerType,
+    unique: options.unique,
     onCreateWhenMissing: options.onCreateWhenMissing,
     onUpdateWhenFound: options.onUpdateWhenFound,
     owner: options.owner,
     resolve: options.resolve,
   }) as unknown as MaybeLoaded<Loaded<S, R>>;
+}
+
+export type CoValueHeaderType = "comap" | "colist" | "costream" | "coplaintext";
+
+/**
+ * Get the CoValueHeaderType from a CoValue class.
+ * Throws for unsupported types (Group, Account, BinaryCoStream).
+ */
+export function getUniqueHeaderType(
+  schema: CoValueClassOrSchema,
+): CoValueHeaderType {
+  const cls = coValueClassFromCoValueClassOrSchema(schema);
+  const typeSym = cls.prototype[TypeSym] as string | undefined;
+  if (!typeSym) {
+    throw new Error(`Cannot determine CoValue type from class: ${cls.name}`);
+  }
+
+  const headerType = coValueTypeSymToHeaderType[typeSym];
+  if (!headerType) {
+    throw new Error(
+      `Unsupported CoValue type for unique headers: ${typeSym}. ` +
+        `Only CoMap, CoList, CoFeed (CoStream), and CoPlainText are supported.`,
+    );
+  }
+
+  return headerType;
+}
+
+/**
+ * Generate a unique header for a CoValue class.
+ * Throws for unsupported types (Group, Account, BinaryCoStream).
+ */
+export function getUniqueHeader(
+  type: CoValueHeaderType,
+  unique: CoValueUniqueness["uniqueness"],
+  ownerID: ID<Account> | ID<Group>,
+): CoValueHeader {
+  return {
+    type,
+    ruleset: {
+      type: "ownedByGroup" as const,
+      group: ownerID as RawCoID,
+    },
+    meta: null,
+    uniqueness: unique,
+  };
 }
 
 export async function internalLoadUnique<
@@ -578,7 +653,8 @@ export async function internalLoadUnique<
 >(
   cls: CoValueClass<V>,
   options: {
-    header: CoValueHeader;
+    unique: CoValueUniqueness["uniqueness"];
+    type: CoValueHeaderType;
     onCreateWhenMissing?: () => void;
     onUpdateWhenFound?: (value: Resolved<V, R>) => void;
     owner: Account | Group;
@@ -590,7 +666,12 @@ export async function internalLoadUnique<
   const node =
     loadAs[TypeSym] === "Anonymous" ? loadAs.node : loadAs.$jazz.localNode;
 
-  const id = cojsonInternals.idforHeader(options.header, node.crypto);
+  const header = getUniqueHeader(
+    options.type,
+    options.unique,
+    options.owner.$jazz.id,
+  );
+  const id = cojsonInternals.idforHeader(header, node.crypto);
 
   // We first try to load the unique value without using resolve and without
   // retrying failures
@@ -607,6 +688,13 @@ export async function internalLoadUnique<
   // to ward against race conditions that would happen when
   // running the same upsert unique concurrently
   if (options.onCreateWhenMissing && !isAvailable) {
+    if (!loadAs.canWrite(options.owner)) {
+      return createSettledCoValue<Resolved<V, R>>(
+        id,
+        CoValueLoadingState.UNAUTHORIZED,
+      );
+    }
+
     options.onCreateWhenMissing();
 
     return loadCoValueWithoutMe(cls, id, {
@@ -628,7 +716,7 @@ export async function internalLoadUnique<
       resolve: options.resolve,
     });
 
-    if (loaded.$isLoaded) {
+    if (loaded.$isLoaded && loadAs.canWrite(options.owner)) {
       // we don't return the update result because
       // we want to run another load to backfill any possible partially loaded
       // values that have been set in the update
