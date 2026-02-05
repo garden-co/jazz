@@ -58,6 +58,14 @@ export interface StorageAPI {
   ): void;
   store(data: NewContentMessage, handleCorrection: CorrectionCallback): void;
 
+  /**
+   * Store multiple messages atomically in a single transaction.
+   * All messages are committed together, or none are committed if an error occurs.
+   *
+   * Used by atomic transactions to ensure all mutations are persisted together.
+   */
+  storeAtomicBatch(messages: NewContentMessage[]): Promise<void>;
+
   streamingQueue?: StorageStreamingQueue;
 
   getKnownState(id: string): CoValueKnownState;

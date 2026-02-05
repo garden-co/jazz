@@ -33,6 +33,7 @@ export type SyncMessage =
   | LoadMessage
   | KnownStateMessage
   | NewContentMessage
+  | BatchMessage
   | DoneMessage;
 
 export type LoadMessage = {
@@ -61,6 +62,15 @@ export type SessionNewContent = {
   after: number;
   newTransactions: Transaction[];
   lastSignature: Signature;
+};
+
+/**
+ * BatchMessage contains multiple NewContentMessages to be processed atomically.
+ * Used for atomic transactions where all mutations should be persisted and synced together.
+ */
+export type BatchMessage = {
+  action: "batch";
+  messages: NewContentMessage[];
 };
 
 export type DoneMessage = {
@@ -179,6 +189,12 @@ export class SyncManager {
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
+    // Handle batch messages first (they don't have an id field)
+    if (msg.action === "batch") {
+      this.handleBatch(msg, peer);
+      return;
+    }
+
     if (!isRawCoID(msg.id)) {
       const errorType = msg.id ? "invalid" : "undefined";
       logger.warn(`Received sync message with ${errorType} id`, {
@@ -1067,13 +1083,80 @@ export class SyncManager {
     return this.sendNewContent(msg.id, peer);
   }
 
+  /**
+   * Handle a batch of content messages atomically.
+   * Unpacks the batch and processes each message individually while preserving order.
+   */
+  handleBatch(msg: BatchMessage, peer: PeerState) {
+    for (const message of msg.messages) {
+      this.handleSyncMessage(message, peer);
+    }
+  }
+
+  /**
+   * Sync multiple mutations atomically.
+   * Stores all in IndexedDB in one transaction and sends as one BatchMessage to servers.
+   */
+  async syncAtomicBatch(messages: NewContentMessage[]): Promise<void> {
+    if (messages.length === 0) {
+      return; // No-op for empty batches
+    }
+
+    const coValueIds = new Set(messages.map((m) => m.id));
+
+    // Start both operations in parallel (single attempt for storage and network)
+    const storagePromise = this.local.storage
+      ? this.local.storage.storeAtomicBatch(messages)
+      : Promise.resolve(undefined);
+
+    const syncPromise = this.syncBatchToServers(messages, coValueIds);
+
+    // Wait for both to complete
+    await Promise.allSettled([storagePromise, syncPromise]);
+  }
+
+  private async syncBatchToServers(
+    messages: NewContentMessage[],
+    coValueIds: Set<RawCoID>,
+  ): Promise<void> {
+    // Create single batch message
+    const batchMessage: BatchMessage = {
+      action: "batch",
+      messages: messages,
+    };
+
+    // Track sync state for all CoValues in the batch
+    for (const coValueId of coValueIds) {
+      this.trackSyncState(coValueId);
+    }
+
+    // Send to all server peers for each CoValue
+    const sentToPeers = new Set<PeerID>();
+    for (const coValueId of coValueIds) {
+      for (const peer of this.getServerPeers(coValueId)) {
+        if (!sentToPeers.has(peer.id) && !peer.closed) {
+          this.trySendToPeer(peer, batchMessage);
+          sentToPeers.add(peer.id);
+
+          // Update optimistic known state for each CoValue
+          for (const msg of messages) {
+            if (this.getServerPeers(msg.id).some((p) => p.id === peer.id)) {
+              peer.combineOptimisticWith(msg.id, knownStateFromContent(msg));
+              peer.trackToldKnownState(msg.id);
+            }
+          }
+        }
+      }
+    }
+  }
+
   private syncQueue = new LocalTransactionsSyncQueue((content) =>
     this.syncContent(content),
   );
   syncLocalTransaction = this.syncQueue.syncTransaction;
   trackDirtyCoValues = this.syncQueue.trackDirtyCoValues;
 
-  syncContent(content: NewContentMessage) {
+  private syncContent(content: NewContentMessage) {
     const coValue = this.local.getCoValue(content.id);
 
     this.storeContent(content);

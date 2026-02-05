@@ -3,7 +3,7 @@ import { expectMap } from "../coValue.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
-import type { LoadMessage } from "../sync.js";
+import type { BatchMessage, LoadMessage } from "../sync.js";
 import {
   TEST_NODE_CONFIG,
   blockMessageTypeOnOutgoingPeer,
@@ -15,6 +15,7 @@ import {
   randomAgentAndSessionID,
   setupTestAccount,
   setupTestNode,
+  SyncMessagesLog,
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";
@@ -183,6 +184,44 @@ test("should not verify transactions when SyncManager has verification disabled"
 
   const loadedMap = await loadCoValueOrFail(jazzCloud.node, map.id);
   expect(loadedMap.get("hello")).toEqual("world");
+});
+
+test("transaction mutations are sent together in a single batch message", async () => {
+  setupTestNode({ isSyncServer: true });
+  const { node, connectToSyncServer } = setupTestNode();
+  connectToSyncServer();
+
+  const group = node.createGroup();
+  const map = group.createMap();
+  map.set("initial", "value", "trusting");
+  await map.core.waitForSync();
+
+  SyncMessagesLog.clear();
+
+  await node.withTransaction(() => {
+    map.set("key1", "value1", "trusting");
+    map.set("key2", "value2", "trusting");
+  });
+
+  await map.core.waitForSync();
+
+  const clientToServerBatchMessages = SyncMessagesLog.messages.filter(
+    (message) =>
+      message.from === "client" &&
+      message.to === "server" &&
+      message.msg.action === "batch",
+  );
+
+  const expectedBatchMessageCount = 1;
+  expect(clientToServerBatchMessages).toHaveLength(expectedBatchMessageCount);
+
+  const batchMessage = clientToServerBatchMessages[0]!.msg as BatchMessage;
+  const expectedMutationCount = 2;
+  expect(batchMessage.messages).toHaveLength(expectedMutationCount);
+  expect(batchMessage.messages.map((message) => message.id)).toEqual([
+    map.id,
+    map.id,
+  ]);
 });
 
 describe("sync - extra tests", () => {

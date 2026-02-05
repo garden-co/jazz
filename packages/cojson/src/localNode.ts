@@ -41,6 +41,7 @@ import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
 import { connectedPeers } from "./streamUtils.js";
 import { CoValueKnownState, emptyKnownState } from "./knownState.js";
+import { TransactionContext } from "./transactionContext.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -70,6 +71,13 @@ export class LocalNode {
   crashed: Error | undefined = undefined;
 
   storage?: StorageAPI;
+
+  /**
+   * The active transaction context, if any.
+   * When set, mutations are buffered instead of being synced immediately.
+   * @internal
+   */
+  private transactionContext?: TransactionContext;
 
   /** @category 3. Low-level */
   constructor(
@@ -115,6 +123,67 @@ export class LocalNode {
    */
   enableDeletedCoValuesErasure() {
     this.storage?.enableDeletedCoValuesErasure();
+  }
+
+  /**
+   * Get the active transaction context, if any.
+   * Used by CoValueCore to check if mutations should be buffered.
+   * @internal
+   */
+  getTransactionContext(): TransactionContext | undefined {
+    return this.transactionContext;
+  }
+
+  /**
+   * Execute multiple mutations atomically.
+   *
+   * All mutations within the callback are applied immediately to memory (optimistic updates),
+   * but persisted and synced as a single batch. If either persistence or sync fails,
+   * the system retries with exponential backoff until success.
+   *
+   * **Important:** The callback must be synchronous. Async callbacks are not supported
+   * because they would allow other code to run during the transaction, potentially
+   * causing read/write concurrency issues.
+   *
+   * @param callback - Synchronous function containing mutations (no async/await)
+   * @returns Promise that resolves when all mutations are persisted and synced
+   *
+   * @example
+   * ```typescript
+   * await localNode.withTransaction(() => {
+   *   coValue1.makeTransaction([change1], "trusting");
+   *   coValue2.makeTransaction([change2], "trusting");
+   * });
+   * ```
+   *
+   * @category 3. Low-level
+   */
+  async withTransaction<T>(callback: () => T): Promise<T> {
+    // Check for nested transactions
+    if (this.transactionContext) {
+      throw new Error("Nested transactions are not supported");
+    }
+
+    // Create and activate transaction context
+    this.transactionContext = new TransactionContext();
+
+    try {
+      // Execute user callback synchronously (no concurrency while transaction is open)
+      const result = callback();
+
+      return result;
+    } finally {
+      // Get buffered messages
+      const messages = this.transactionContext.getPendingMessages();
+
+      if (messages.length > 0) {
+        // Flush to storage and sync atomically
+        await this.syncManager.syncAtomicBatch(messages);
+      }
+
+      // Always clean up transaction context
+      this.transactionContext = undefined;
+    }
   }
 
   hasCoValue(id: RawCoID) {

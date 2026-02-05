@@ -1248,7 +1248,29 @@ export class CoValueCore {
     // force immediate notification because local updates may come from the UI
     // where we need synchronous updates
     this.notifyUpdate();
-    this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
+
+    // Check if we're inside a transaction context
+    const transactionContext = this.node.getTransactionContext();
+
+    if (transactionContext?.isActive()) {
+      // TODO: keeping the knownStateBefore can dedupe multiple changes into a single transaction
+      // as done in syncLocalTransaction
+
+      // Buffer the message instead of syncing immediately
+      const content = this.newContentSince(knownStateBefore);
+      if (content) {
+        for (const msg of content) {
+          transactionContext.bufferMessage(msg);
+        }
+      }
+      // Don't sync now - will be done when transaction completes
+    } else {
+      // Normal flow: sync immediately
+      this.node.syncManager.syncLocalTransaction(
+        this.verified,
+        knownStateBefore,
+      );
+    }
 
     if (madeAt === undefined) {
       // We don't revalidate the dependants transactions because we assume that transactions that you are
