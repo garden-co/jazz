@@ -9,7 +9,7 @@ import { onTestFinished } from "vitest";
 /** Cleanup functions registered by createAsyncStorage; run by the runner hook (registered first so it runs last). */
 const storageCleanupFns: Array<() => void | Promise<void>> = [];
 
-export function registerStorageCleanup(fn: () => void | Promise<void>): void {
+function registerStorageCleanup(fn: () => void | Promise<void>): void {
   storageCleanupFns.push(fn);
 }
 
@@ -54,6 +54,7 @@ class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
       await this.run("COMMIT", []);
     } catch (error) {
       await this.run("ROLLBACK", []);
+      throw error;
     }
   }
 

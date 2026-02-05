@@ -165,7 +165,7 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
   }
 
   private enqueueTx<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.txQueue.then(fn);
+    const next = this.txQueue.then(fn, fn);
     this.txQueue = next;
     return next;
   }
