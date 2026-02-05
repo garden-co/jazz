@@ -13,6 +13,7 @@ For React/WASM use cases, a key invariant must hold:
 > When updating a text field bound to an object that affects the same query populating the text field, the subscription callback must fire **synchronously** after the mutation.
 
 This works when indices are fully loaded. It breaks when:
+
 1. Index metadata hasn't loaded yet (`meta_loaded=false`)
 2. Specific B-tree pages aren't loaded yet
 
@@ -32,12 +33,12 @@ Based on investigation, these decisions guide the implementation:
 
 The query graph has two distinct async loading mechanisms:
 
-| Layer | What's Loading | Current Status | Who Handles |
-|-------|---------------|----------------|-------------|
+| Layer           | What's Loading                                | Current Status                                                          | Who Handles                 |
+| --------------- | --------------------------------------------- | ----------------------------------------------------------------------- | --------------------------- |
 | **Index Pages** | B-tree structure (meta, internal, leaf pages) | **Broken** - scans don't trigger loading, `scan_all()` doesn't traverse | IndexScanNode (to be fixed) |
-| **Row Data** | Object content bytes | **Working** - MaterializeNode tracks `pending_ids`, retries on settle | MaterializeNode |
+| **Row Data**    | Object content bytes                          | **Working** - MaterializeNode tracks `pending_ids`, retries on settle   | MaterializeNode             |
 
-Index page loading is *upstream* of row materialization - you can't even know what ObjectIds to materialize without the index pages.
+Index page loading is _upstream_ of row materialization - you can't even know what ObjectIds to materialize without the index pages.
 
 ---
 
@@ -50,6 +51,7 @@ Index page loading is *upstream* of row materialization - you can't even know wh
 ### Test Infrastructure
 
 Tests operate on `RuntimeCore<DelayedIoHandler>` where `DelayedIoHandler` is a new test handler that:
+
 - Queues storage requests instead of processing immediately
 - Allows controlled delivery of responses (simulating async storage)
 - Uses the existing `TestDriver` for actual storage operations
@@ -128,6 +130,7 @@ impl IoHandler for DelayedIoHandler {
 ### Test Categories
 
 Tests are organized by invariant. Each test documents:
+
 - The invariant being tested
 - Why it fails today (current behavior)
 - Which phase will fix it
@@ -685,6 +688,108 @@ mod pending_writes_tests {
         let total = *total_rows.lock().unwrap();
         assert_eq!(total, 1, "Same row should not appear twice");
     }
+
+    // ========================================================================
+    // D4: Insert when is_ready() but specific leaf page not loaded
+    // ========================================================================
+
+    #[test]
+    fn d4_insert_when_leaf_page_not_loaded() {
+        // Invariant: Insert should be captured even when is_ready() but target
+        //            leaf page is not loaded yet
+        // Status: FAILS TODAY - insert returns Ok(false), write is lost
+        // Fixed by: Phase 4 (pending_writes captures writes on PageNotLoaded too)
+        //
+        // Scenario: Index has meta + root loaded (is_ready() == true), but root
+        // is an internal node pointing to leaf pages that aren't loaded yet.
+        // An insert targeting an unloaded leaf should still be captured.
+
+        let mut index = BTreeIndex::new("users", "score");
+
+        // Set up meta: root is page 1, an internal node
+        let mut meta = IndexMeta::new();
+        meta.root_page_id = PageId(1);
+        meta.next_page_id = 4;
+        meta.entry_count = 20;
+        index.process_meta_load(Some(meta.serialize()));
+
+        // Load root page as an INTERNAL node pointing to leaves 2 and 3
+        // Keys < 50 go to page 2, keys >= 50 go to page 3
+        let root_internal = BTreePage::Internal {
+            keys: vec![50i32.to_be_bytes().to_vec()],
+            children: vec![PageId(2), PageId(3)],
+        };
+        index.process_page_load(PageId(1), Some(root_internal.serialize()));
+
+        // Now index.is_ready() is true (meta + root loaded)
+        assert!(index.is_ready());
+
+        // But leaf pages 2 and 3 are NOT loaded
+        // Try to insert a row with score=25 (would go to page 2)
+        let row_id = ObjectId::new();
+        let key = 25i32.to_be_bytes();
+        let result = index.insert(&key, row_id);
+
+        // Current: insert returns Ok(false), write NOT captured
+        // THE INVARIANT: write should be in pending_inserts, visible in scan_all
+
+        let scan_results = index.scan_all();
+        assert!(scan_results.contains(&row_id),
+            "Insert to unloaded leaf should be captured in pending_inserts");
+    }
+
+    // ========================================================================
+    // D5: Update that moves row to unloaded page (delete + insert same row_id)
+    // ========================================================================
+
+    #[test]
+    fn d5_update_moves_row_to_unloaded_page() {
+        // Invariant: Update (delete old key + insert new key) for same row_id
+        //            should keep the row in results, not delete it
+        // Status: FAILS TODAY - pending_deletes removes row even if re-inserted
+        // Fixed by: Phase 4 (pending_inserts "wins" over pending_deletes for same row_id)
+        //
+        // Scenario: Row exists with score=25 (page 2). Update changes score to 75
+        // (would go to page 3). Neither page 2 nor 3 is loaded.
+        // At index level: remove(25, row_id) + insert(75, row_id)
+        // The row should still appear in scan_all() results.
+
+        let mut index = BTreeIndex::new("users", "score");
+
+        // Set up meta: root is page 1, an internal node
+        let mut meta = IndexMeta::new();
+        meta.root_page_id = PageId(1);
+        meta.next_page_id = 4;
+        meta.entry_count = 20;
+        index.process_meta_load(Some(meta.serialize()));
+
+        // Load root as internal node: keys < 50 → page 2, keys >= 50 → page 3
+        let root_internal = BTreePage::Internal {
+            keys: vec![50i32.to_be_bytes().to_vec()],
+            children: vec![PageId(2), PageId(3)],
+        };
+        index.process_page_load(PageId(1), Some(root_internal.serialize()));
+
+        assert!(index.is_ready());
+
+        // Simulate an UPDATE: row moves from score=25 to score=75
+        let row_id = ObjectId::new();
+        let old_key = 25i32.to_be_bytes();
+        let new_key = 75i32.to_be_bytes();
+
+        // Delete old key (page 2 not loaded)
+        let _ = index.remove(&old_key, row_id);
+        // Insert new key (page 3 not loaded)
+        let _ = index.insert(&new_key, row_id);
+
+        // THE INVARIANT: Row should still appear in scan_all()
+        // The delete of old_key should NOT remove the row since it was re-inserted
+        let scan_results = index.scan_all();
+
+        assert!(scan_results.contains(&row_id),
+            "Update (delete + insert same row_id) should keep row in results. \
+             pending_inserts should 'win' over pending_deletes for same ObjectId");
+    }
 }
 ```
 
@@ -943,27 +1048,30 @@ mod e2e_tests {
 ### Test Passingness by Phase
 
 **Already passing** (verify invariants that work today):
+
 - A3: OutputNode holds back pending results ✅
 - F3: Sync edit fires callback immediately (when index ready) ✅
 
 **Red tests** (fail today, turn green as phases complete):
 
-| Test | Phase 0 | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 |
-|------|:-------:|:-------:|:-------:|:-------:|:-------:|:-------:|
-| A1 (is_ready methods) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| A2 (scan returns pending) | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| B1 (query waits) | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| B2 (no pending callbacks) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| C1 (dirty on meta load) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| C2 (only relevant dirty) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| D1 (insert while pending) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| D2 (batch pending writes) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| D3 (dedupe pending) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-| E1 (scan reports missing) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| E2 (settlement returns loads) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| E3 (sibling pages) | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| F1 (cold start e2e) | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
-| F2 (insert during cold) | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Test                                   | Phase 0 | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 |
+| -------------------------------------- | :-----: | :-----: | :-----: | :-----: | :-----: | :-----: |
+| A1 (is_ready methods)                  |   ❌    |   ✅    |   ✅    |   ✅    |   ✅    |   ✅    |
+| A2 (scan returns pending)              |   ❌    |   ✅    |   ✅    |   ✅    |   ✅    |   ✅    |
+| B1 (query waits)                       |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |   ✅    |
+| B2 (no pending callbacks)              |   ❌    |   ❌    |   ✅    |   ✅    |   ✅    |   ✅    |
+| C1 (dirty on meta load)                |   ❌    |   ❌    |   ✅    |   ✅    |   ✅    |   ✅    |
+| C2 (only relevant dirty)               |   ❌    |   ❌    |   ✅    |   ✅    |   ✅    |   ✅    |
+| D1 (insert while pending)              |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |
+| D2 (batch pending writes)              |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |
+| D3 (dedupe pending)                    |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |
+| D4 (insert to unloaded leaf)           |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |
+| D5 (update moves row to unloaded page) |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |
+| E1 (scan reports missing)              |   ❌    |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |
+| E2 (settlement returns loads)          |   ❌    |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |
+| E3 (sibling pages)                     |   ❌    |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |
+| F1 (cold start e2e)                    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |   ✅    |
+| F2 (insert during cold)                |   ❌    |   ❌    |   ❌    |   ❌    |   ✅    |   ✅    |
 
 ---
 
@@ -975,12 +1083,12 @@ mod e2e_tests {
 
 ### Changes
 
-| File | Change |
-|------|--------|
-| `btree_index.rs` | Add `is_ready()` method: returns true only if meta AND root page loaded |
-| `btree_index.rs` | Add `ScanState` enum: `Ready(Vec<ObjectId>)` or `Pending` |
-| `index_scan.rs` | Add `was_pending: bool` field to track state transitions |
-| `index_scan.rs` | Return `pending=true` in TupleDelta when `!index.is_ready()` or scan returns `Pending` |
+| File             | Change                                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `btree_index.rs` | Add `is_ready()` method: returns true only if meta AND root page loaded                |
+| `btree_index.rs` | Add `ScanState` enum: `Ready(Vec<ObjectId>)` or `Pending`                              |
+| `index_scan.rs`  | Add `was_pending: bool` field to track state transitions                               |
+| `index_scan.rs`  | Return `pending=true` in TupleDelta when `!index.is_ready()` or scan returns `Pending` |
 
 ### Implementation
 
@@ -1058,12 +1166,12 @@ fn index_scan_forces_rescan_after_pending_to_ready_transition() {
 
 ### Changes
 
-| File | Change |
-|------|--------|
+| File         | Change                                                                                      |
+| ------------ | ------------------------------------------------------------------------------------------- |
 | `manager.rs` | In `StorageResponse::LoadIndexMeta` handler, mark subscriptions dirty if index became ready |
-| `manager.rs` | In `StorageResponse::LoadIndexPage` handler, same pattern |
-| `manager.rs` | Add `mark_subscriptions_dirty_for_index(table, column)` method |
-| `graph.rs` | Add `uses_index(table, column) -> bool` method |
+| `manager.rs` | In `StorageResponse::LoadIndexPage` handler, same pattern                                   |
+| `manager.rs` | Add `mark_subscriptions_dirty_for_index(table, column)` method                              |
+| `graph.rs`   | Add `uses_index(table, column) -> bool` method                                              |
 
 ### Implementation
 
@@ -1127,11 +1235,11 @@ fn only_relevant_subscriptions_marked_dirty() {
 
 ### Changes
 
-| File | Change |
-|------|--------|
+| File              | Change                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------- |
 | `runtime_core.rs` | In one-shot query handling, only resolve when `!update.delta.pending` (internal flag) |
-| `runtime_core.rs` | Only invoke subscription callback when `!update.delta.pending` |
-| `output.rs` | Verify OutputNode holds back results when `pending=true` (already implemented) |
+| `runtime_core.rs` | Only invoke subscription callback when `!update.delta.pending`                        |
+| `output.rs`       | Verify OutputNode holds back results when `pending=true` (already implemented)        |
 
 ### Implementation
 
@@ -1196,12 +1304,12 @@ fn subscription_callback_not_invoked_while_loading() {
 
 ### Changes
 
-| File | Change |
-|------|--------|
+| File             | Change                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------- |
 | `btree_index.rs` | `scan_all()`, `lookup_exact()`, `range_scan()` merge results from `pending_writes` |
-| `btree_index.rs` | Ensure duplicates are handled (same ID in B-tree and pending_writes) |
-| `index_scan.rs` | Track `pending_writes` entries seen while pending, include in first Ready delta |
-| `output.rs` | Accumulate deltas while `pending=true` (already exists for MaterializeNode) |
+| `btree_index.rs` | Ensure duplicates are handled (same ID in B-tree and pending_writes)               |
+| `index_scan.rs`  | Track `pending_writes` entries seen while pending, include in first Ready delta    |
+| `output.rs`      | Accumulate deltas while `pending=true` (already exists for MaterializeNode)        |
 
 ### Implementation
 
@@ -1305,11 +1413,13 @@ fn scan_merges_pending_writes_with_btree_deduped() {
 ### Background
 
 Pages are discovered during traversal - you can't know upfront what's needed:
+
 - `lookup_exact(key)`: Root → internal → target leaf (path discovered by traversing)
 - `range_scan(min, max)`: Path to start + sibling chain (discovered via `next_leaf`)
 - `scan_all()`: ALL leaf pages (requires traversing ALL internal pages)
 
 **Current bugs**:
+
 - `scan_all()` doesn't traverse - just iterates loaded pages!
 - `range_scan()` silently stops on missing sibling pages
 - No method reports what pages are needed
@@ -1346,13 +1456,13 @@ The `index_loads_needed` and `object_loads_needed` get put into outboxes for the
 
 ### Changes
 
-| File | Change |
-|------|--------|
-| `btree_index.rs` | Scan methods return `(results, missing_pages)` tuple |
+| File             | Change                                                                   |
+| ---------------- | ------------------------------------------------------------------------ |
+| `btree_index.rs` | Scan methods return `(results, missing_pages)` tuple                     |
 | `btree_index.rs` | Fix `scan_all()` to actually traverse the tree and collect missing pages |
-| `btree_index.rs` | Fix `range_scan()` to report missing sibling pages |
-| `graph.rs` | `settle()` returns `SettlementResult` instead of just `RowDelta` |
-| `manager.rs` | Process `SettlementResult`, queue load requests to outbox |
+| `btree_index.rs` | Fix `range_scan()` to report missing sibling pages                       |
+| `graph.rs`       | `settle()` returns `SettlementResult` instead of just `RowDelta`         |
+| `manager.rs`     | Process `SettlementResult`, queue load requests to outbox                |
 
 ### Implementation
 
@@ -1463,6 +1573,7 @@ match settlement_result {
 ```
 
 **Benefits of this approach**:
+
 - Keeps scan methods immutable (`&self`)
 - Clear separation: "what do I need?" vs "go load it"
 - Fits existing outbox pattern
@@ -1524,11 +1635,11 @@ fn range_scan_reports_missing_sibling_pages() {
 
 ### Changes
 
-| API | Location | Action |
-|-----|----------|--------|
-| `load_indices()` | `WasmRuntime`, `TokioRuntime` | **Remove** |
-| `reset_indices_for_cold_start()` | `QueryManager`, `BTreeIndex` | **Remove** |
-| `load_indices_from_driver()` | Test helpers | **Remove** |
+| API                              | Location                      | Action     |
+| -------------------------------- | ----------------------------- | ---------- |
+| `load_indices()`                 | `WasmRuntime`, `TokioRuntime` | **Remove** |
+| `reset_indices_for_cold_start()` | `QueryManager`, `BTreeIndex`  | **Remove** |
+| `load_indices_from_driver()`     | Test helpers                  | **Remove** |
 
 ### What to Update
 
@@ -1548,11 +1659,11 @@ fn range_scan_reports_missing_sibling_pages() {
 This test doesn't exist today and would fail without the fixes:
 
 ```typescript
-it('loads data from IndexedDB after reopen', async () => {
+it("loads data from IndexedDB after reopen", async () => {
   // Phase 1: Create and populate
   const db1 = await createDb({ driver: indexedDbDriver() });
-  db1.insert(app.todos, { title: 'Test todo' });
-  db1.insert(app.todos, { title: 'Another todo' });
+  db1.insert(app.todos, { title: "Test todo" });
+  db1.insert(app.todos, { title: "Another todo" });
   await db1.shutdown();
 
   // Phase 2: Reopen and query immediately
@@ -1560,14 +1671,14 @@ it('loads data from IndexedDB after reopen', async () => {
   const todos = await db2.all(app.todos);
 
   expect(todos.length).toBe(2);
-  expect(todos.map(t => t.title)).toContain('Test todo');
+  expect(todos.map((t) => t.title)).toContain("Test todo");
 });
 ```
 
 ### Synchronous Edit Cycle Test
 
 ```typescript
-it('shows inserted row immediately in subscription', async () => {
+it("shows inserted row immediately in subscription", async () => {
   const db = await createDb({ driver: indexedDbDriver() });
   let callbackCount = 0;
   let lastAll: Todo[] = [];
@@ -1578,25 +1689,25 @@ it('shows inserted row immediately in subscription', async () => {
   });
 
   // Wait for initial callback (empty or loaded)
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 100));
   const initialCount = callbackCount;
 
   // Insert should trigger immediate callback with new row
-  const id = db.insert(app.todos, { title: 'New todo' });
+  const id = db.insert(app.todos, { title: "New todo" });
 
   // Callback should have fired synchronously (count increased)
   expect(callbackCount).toBeGreaterThan(initialCount);
-  expect(lastAll.some(t => t.id === id)).toBe(true);
+  expect(lastAll.some((t) => t.id === id)).toBe(true);
 });
 ```
 
 ### Mixed Scenario: Reopen + Edit
 
 ```typescript
-it('new write during load appears in first callback', async () => {
+it("new write during load appears in first callback", async () => {
   // Phase 1: Create initial data
   const db1 = await createDb({ driver: indexedDbDriver() });
-  db1.insert(app.todos, { title: 'Old todo' });
+  db1.insert(app.todos, { title: "Old todo" });
   await db1.shutdown();
 
   // Phase 2: Reopen, subscribe, then insert immediately
@@ -1610,17 +1721,17 @@ it('new write during load appears in first callback', async () => {
   });
 
   // Insert new todo immediately (while index still loading)
-  db2.insert(app.todos, { title: 'New todo' });
+  db2.insert(app.todos, { title: "New todo" });
 
   // Wait for indices to load
-  await new Promise(r => setTimeout(r, 500));
+  await new Promise((r) => setTimeout(r, 500));
 
   // Should have received exactly ONE callback with BOTH todos
   // (not: callback with empty, then callback with old, then callback with new)
   expect(callbackCount).toBe(1);
   expect(lastAll.length).toBe(2);
-  expect(lastAll.map(t => t.title)).toContain('Old todo');
-  expect(lastAll.map(t => t.title)).toContain('New todo');
+  expect(lastAll.map((t) => t.title)).toContain("Old todo");
+  expect(lastAll.map((t) => t.title)).toContain("New todo");
 });
 ```
 
@@ -1630,11 +1741,11 @@ it('new write during load appears in first callback', async () => {
 
 Existing cold-start tests pass because they avoid the async scenario:
 
-| Test Suite | Storage | Why It Passes |
-|------------|---------|---------------|
-| TypeScript E2E | SQLite (sync) | SQLite is blocking - no async gap |
-| Rust cold-start | TestDriver (sync) | Explicit `load_indices_from_driver()` + sync driver |
-| IndexedDB driver tests | fake-indexeddb | Driver-level only, no query tests |
+| Test Suite             | Storage           | Why It Passes                                       |
+| ---------------------- | ----------------- | --------------------------------------------------- |
+| TypeScript E2E         | SQLite (sync)     | SQLite is blocking - no async gap                   |
+| Rust cold-start        | TestDriver (sync) | Explicit `load_indices_from_driver()` + sync driver |
+| IndexedDB driver tests | fake-indexeddb    | Driver-level only, no query tests                   |
 
 **No tests exist for**: WASM + IndexedDB + DB reopen + query before indices load.
 

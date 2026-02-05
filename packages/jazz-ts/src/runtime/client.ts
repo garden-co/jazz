@@ -184,6 +184,11 @@ export class JazzClient {
       context.userBranch ?? "main",
     );
 
+    // NOTE: loadIndices() is NOT called here because:
+    // 1. For fresh databases, there's nothing to load
+    // 2. For reopened databases, we need async support to wait for storage responses
+    // TODO: Add async waitForIndices() method for persistence support
+
     const client = new JazzClient(runtime, context);
 
     // Set up sync if server URL provided
@@ -231,6 +236,11 @@ export class JazzClient {
       context.env ?? "dev",
       context.userBranch ?? "main",
     );
+
+    // NOTE: loadIndices() is NOT called here because:
+    // 1. For fresh databases, there's nothing to load
+    // 2. For reopened databases, we need async support to wait for storage responses
+    // TODO: Add async waitForIndices() method for persistence support
 
     const client = new JazzClient(runtime, context);
 

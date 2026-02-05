@@ -493,4 +493,26 @@ impl WasmRuntime {
         let wasm_schema = WasmSchema::from(schema);
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
     }
+
+    // =========================================================================
+    // Initialization
+    // =========================================================================
+
+    /// Load indices from storage (cold start).
+    ///
+    /// Call this after construction to initialize indices from persisted storage.
+    /// This triggers index loading through the normal storage request flow.
+    /// Since WASM storage is async (via JS callback), responses will arrive
+    /// via `on_storage_response()`.
+    #[wasm_bindgen(js_name = loadIndices)]
+    pub fn load_indices(&self) {
+        let mut core = self.core.borrow_mut();
+        // Reset indices to trigger loading (same pattern as TokioRuntime)
+        core.schema_manager_mut()
+            .query_manager_mut()
+            .reset_indices_for_cold_start();
+        // Trigger immediate tick to emit storage requests
+        // Responses will come back via on_storage_response()
+        core.immediate_tick();
+    }
 }
