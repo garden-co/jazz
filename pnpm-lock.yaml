@@ -337,40 +337,6 @@ importers:
         specifier: ^0.13.1
         version: 0.13.1
 
-  examples/benchmarks-expo:
-    dependencies:
-      '@azure/core-asynciterator-polyfill':
-        specifier: ^1.0.2
-        version: 1.0.2
-      cojson:
-        specifier: workspace:*
-        version: link:../../packages/cojson
-      cojson-core-rn:
-        specifier: workspace:*
-        version: link:../../crates/cojson-core-rn
-      expo:
-        specifier: catalog:expo
-        version: 54.0.23(@babel/core@7.28.5)(graphql@16.12.0)(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.83.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
-      react:
-        specifier: 19.1.0
-        version: 19.1.0
-      react-native:
-        specifier: 0.81.5
-        version: 0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.83.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0)
-      react-native-nitro-modules:
-        specifier: 0.26.4
-        version: 0.26.4(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.83.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
-    devDependencies:
-      '@babel/core':
-        specifier: ^7.25.2
-        version: 7.28.5
-      '@types/react':
-        specifier: 19.1.0
-        version: 19.1.0
-      typescript:
-        specifier: ~5.9.2
-        version: 5.9.2
-
   examples/betterauth:
     dependencies:
       '@icons-pack/react-simple-icons':
@@ -3077,6 +3043,40 @@ importers:
       zod:
         specifier: ^4.1.11
         version: 4.1.11
+
+  tests/benchmarks-expo:
+    dependencies:
+      '@azure/core-asynciterator-polyfill':
+        specifier: ^1.0.2
+        version: 1.0.2
+      cojson:
+        specifier: workspace:*
+        version: link:../../packages/cojson
+      cojson-core-rn:
+        specifier: workspace:*
+        version: link:../../crates/cojson-core-rn
+      expo:
+        specifier: catalog:expo
+        version: 54.0.23(@babel/core@7.28.5)(graphql@16.12.0)(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.83.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react:
+        specifier: 19.1.0
+        version: 19.1.0
+      react-native:
+        specifier: 0.81.5
+        version: 0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.83.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0)
+      react-native-nitro-modules:
+        specifier: 0.26.4
+        version: 0.26.4(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.83.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+    devDependencies:
+      '@babel/core':
+        specifier: ^7.25.2
+        version: 7.28.5
+      '@types/react':
+        specifier: 19.1.0
+        version: 19.1.0
+      typescript:
+        specifier: ~5.9.2
+        version: 5.9.2
 
   tests/browser-integration:
     dependencies:
@@ -13321,12 +13321,12 @@ packages:
 
   glob@7.2.3:
     resolution: {integrity: sha512-nFR0zLpU2YCaRxwoCJvL6UvCH2JFyFVIvwTLsIf21AuHlMskA1hhTdk+LlYJtOlYt9v6dvszD2BGRqBL+iQK9Q==}
-    deprecated: Glob versions prior to v9 are no longer supported
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   glob@8.1.0:
     resolution: {integrity: sha512-r8hpEjiQEYlF2QU0df3dS+nxxSIreXQS1qRhMJM0Q5NDdR386C7jb7Hwwod8Fgiuex+k0GFjgft18yvxm5XoCQ==}
     engines: {node: '>=12'}
-    deprecated: Glob versions prior to v9 are no longer supported
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   global-agent@3.0.0:
     resolution: {integrity: sha512-PT6XReJ+D07JvGoxQMkT6qji/jVNfX/h364XHZOWeRzy64sSFr+xJ5OX7LI3b4MPQzdL4H8Y8M0xzPpsVMwA8Q==}
@@ -17898,12 +17898,12 @@ packages:
   tar@6.2.1:
     resolution: {integrity: sha512-DZ4yORTwrbTj/7MZYq2w+/ZFdI6OZ/f9SFHR+71gIVUZhOQPHzVCLpvRnPgyaMpfWxxk/4ONva3GQSyNIKRv6A==}
     engines: {node: '>=10'}
-    deprecated: Old versions of tar are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exhorbitant rates) by contacting i@izs.me
+    deprecated: Old versions of tar are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   tar@7.4.3:
     resolution: {integrity: sha512-5S7Va8hKfV7W5U6g3aYxXmlPoZVAwUMy9AOKyF2fVuZa2UD3qZjg578OrLRt8PcNN1PleVaL/5/yYATNL0ICUw==}
     engines: {node: '>=18'}
-    deprecated: Old versions of tar are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exhorbitant rates) by contacting i@izs.me
+    deprecated: Old versions of tar are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   tar@7.5.2:
     resolution: {integrity: sha512-7NyxrTE4Anh8km8iEy7o0QYPs+0JKBTj5ZaqHg6B39erLg0qYXN3BijtShwbsNSvQ+LN75+KV+C4QR/f6Gwnpg==}
@@ -27839,7 +27839,9 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
 
   '@react-native/metro-config@0.81.5(@babel/core@7.28.5)':
     dependencies:
