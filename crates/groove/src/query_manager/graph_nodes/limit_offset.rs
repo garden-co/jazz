@@ -58,14 +58,8 @@ impl LimitOffsetNode {
     }
 
     /// Compute the delta between old and new tuple window.
-    fn compute_tuple_delta(
-        &self,
-        old_tuples: &[Tuple],
-        new_tuples: &[Tuple],
-        pending: bool,
-    ) -> TupleDelta {
+    fn compute_tuple_delta(&self, old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
         let mut delta = TupleDelta::new();
-        delta.pending = pending;
 
         // Find removed tuples (in old but not in new)
         for old in old_tuples {
@@ -112,7 +106,6 @@ impl RowNode for LimitOffsetNode {
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let old_tuples = self.windowed_tuples.clone();
-        let pending = input.pending;
 
         // Apply changes to all_tuples
         for tuple in input.removed {
@@ -136,7 +129,7 @@ impl RowNode for LimitOffsetNode {
         self.dirty = false;
 
         // Return the delta for the window
-        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples, pending)
+        self.compute_tuple_delta(&old_tuples, &self.windowed_tuples)
     }
 
     fn current_tuples(&self) -> &AHashSet<Tuple> {
@@ -203,7 +196,6 @@ mod tests {
             .collect();
 
         let delta = TupleDelta {
-            pending: false,
             added: tuples,
             removed: vec![],
             updated: vec![],
@@ -230,7 +222,6 @@ mod tests {
             .collect();
 
         let delta = TupleDelta {
-            pending: false,
             added: tuples,
             removed: vec![],
             updated: vec![],
@@ -258,7 +249,6 @@ mod tests {
             .collect();
 
         let delta = TupleDelta {
-            pending: false,
             added: tuples,
             removed: vec![],
             updated: vec![],
@@ -286,7 +276,6 @@ mod tests {
 
         // Initial: [0, 1, 2, 3] -> window [0, 1]
         node.process(TupleDelta {
-            pending: false,
             added: tuples.clone(),
             removed: vec![],
             updated: vec![],
@@ -297,7 +286,6 @@ mod tests {
 
         // Remove first tuple: [1, 2, 3] -> window [1, 2]
         let result = node.process(TupleDelta {
-            pending: false,
             added: vec![],
             removed: vec![tuples[0].clone()],
             updated: vec![],
@@ -322,7 +310,6 @@ mod tests {
         let tuple = make_tuple(id, 1, "Row1");
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple],
             removed: vec![],
             updated: vec![],

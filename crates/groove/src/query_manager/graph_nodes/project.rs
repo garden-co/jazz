@@ -164,7 +164,6 @@ impl RowNode for ProjectNode {
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
-        result.pending = input.pending;
 
         // Project removed tuples
         for tuple in input.removed {
@@ -255,7 +254,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1],
             removed: vec![],
             updated: vec![],
@@ -303,7 +301,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1],
             removed: vec![],
             updated: vec![],
@@ -344,7 +341,6 @@ mod tests {
 
         // Add old tuple
         node.process(TupleDelta {
-            pending: false,
             added: vec![old_tuple.clone()],
             removed: vec![],
             updated: vec![],
@@ -352,7 +348,6 @@ mod tests {
 
         // Update tuple
         let result = node.process(TupleDelta {
-            pending: false,
             added: vec![],
             removed: vec![],
             updated: vec![(old_tuple, new_tuple)],
@@ -365,33 +360,6 @@ mod tests {
         let row = new_projected.to_single_row().unwrap();
         let values = decode_row(&node.output_descriptor(), &row.data).unwrap();
         assert_eq!(values[1], Value::Integer(31)); // age updated
-    }
-
-    #[test]
-    fn project_preserves_pending_flag() {
-        let descriptor = test_descriptor();
-        let mut node = ProjectNode::new(descriptor, &["name"]);
-
-        let id1 = ObjectId::new();
-        let tuple1 = make_tuple(
-            id1,
-            &[
-                Value::Integer(1),
-                Value::Text("Alice".into()),
-                Value::Text("alice@example.com".into()),
-                Value::Integer(30),
-            ],
-        );
-
-        let delta = TupleDelta {
-            pending: true,
-            added: vec![tuple1],
-            removed: vec![],
-            updated: vec![],
-        };
-
-        let result = node.process(delta);
-        assert!(result.pending);
     }
 
     #[test]

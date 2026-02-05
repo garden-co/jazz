@@ -75,7 +75,6 @@ impl TransformNode for UnionNode {
             added,
             removed,
             updated: vec![],
-            pending: false,
         }
     }
 

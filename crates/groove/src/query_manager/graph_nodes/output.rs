@@ -36,12 +36,8 @@ pub struct OutputNode {
     ordered_tuples: Vec<Tuple>,
     /// Pending tuple deltas to deliver.
     pending_tuple_deltas: Vec<TupleDelta>,
-    /// True if we're holding back results due to pending rows.
-    held_pending: bool,
     /// True if subscriber has received initial snapshot.
     subscriber_initialized: bool,
-    /// Accumulated tuple changes while pending.
-    held_tuple_changes: TupleDelta,
     dirty: bool,
 }
 
@@ -59,9 +55,7 @@ impl OutputNode {
             current_tuples: AHashSet::new(),
             ordered_tuples: Vec::new(),
             pending_tuple_deltas: Vec::new(),
-            held_pending: false,
             subscriber_initialized: false,
-            held_tuple_changes: TupleDelta::new(),
             dirty: true,
         }
     }
@@ -69,11 +63,6 @@ impl OutputNode {
     /// Get the output tuple descriptor.
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_tuple_descriptor
-    }
-
-    /// Check if we're holding back results due to pending rows.
-    pub fn is_held_pending(&self) -> bool {
-        self.held_pending
     }
 
     /// Get the output mode.
@@ -152,7 +141,7 @@ impl RowNode for OutputNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // Apply changes to current_tuples and ordered_tuples (always update internal state)
+        // Apply changes to current_tuples and ordered_tuples
         for tuple in &input.removed {
             self.current_tuples.remove(tuple);
             self.ordered_tuples.retain(|t| t != tuple);
@@ -174,64 +163,7 @@ impl RowNode for OutputNode {
 
         self.dirty = false;
 
-        // Handle pending state for delivery
-        if input.pending {
-            // Still pending - hold back results, don't deliver to subscribers
-            self.held_pending = true;
-
-            // If subscriber is already initialized, accumulate changes
-            if self.subscriber_initialized {
-                self.held_tuple_changes.added.extend(input.added.clone());
-                self.held_tuple_changes
-                    .removed
-                    .extend(input.removed.clone());
-                self.held_tuple_changes
-                    .updated
-                    .extend(input.updated.clone());
-            }
-
-            // Return the input but don't add to pending_tuple_deltas
-            return input;
-        }
-
-        // Not pending - check if we were previously holding back
-        if self.held_pending {
-            self.held_pending = false;
-
-            if !self.subscriber_initialized {
-                // First time: emit full current_tuples as the initial snapshot
-                self.subscriber_initialized = true;
-
-                if !self.current_tuples.is_empty() {
-                    let snapshot = TupleDelta {
-                        added: self.current_tuples.iter().cloned().collect(),
-                        removed: vec![],
-                        updated: vec![],
-                        pending: false,
-                    };
-                    self.pending_tuple_deltas.push(snapshot.clone());
-                    return snapshot;
-                }
-                return input;
-            } else {
-                // Subsequent pending period: emit only accumulated changes
-                self.held_tuple_changes.added.extend(input.added.clone());
-                self.held_tuple_changes
-                    .removed
-                    .extend(input.removed.clone());
-                self.held_tuple_changes
-                    .updated
-                    .extend(input.updated.clone());
-
-                let result = std::mem::take(&mut self.held_tuple_changes);
-                if !result.is_empty() {
-                    self.pending_tuple_deltas.push(result.clone());
-                }
-                return result;
-            }
-        }
-
-        // Normal case - not pending, weren't holding back
+        // Deliver immediately
         self.subscriber_initialized = true;
         if !input.is_empty() {
             self.pending_tuple_deltas.push(input.clone());
@@ -278,10 +210,6 @@ mod tests {
         }])
     }
 
-    fn contains_id(tuples: &[Tuple], id: ObjectId) -> bool {
-        tuples.iter().any(|t| t.ids().contains(&id))
-    }
-
     fn make_output_node(mode: OutputMode) -> OutputNode {
         let descriptor = test_descriptor();
         let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
@@ -296,7 +224,6 @@ mod tests {
         let tuple1 = make_tuple(id1, 1, "Alice");
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1],
             removed: vec![],
             updated: vec![],
@@ -317,7 +244,6 @@ mod tests {
         let tuple1 = make_tuple(id1, 1, "Alice");
 
         node.process(TupleDelta {
-            pending: false,
             added: vec![tuple1],
             removed: vec![],
             updated: vec![],
@@ -345,7 +271,6 @@ mod tests {
         );
 
         let delta = RowDelta {
-            pending: false,
             added: vec![row1],
             removed: vec![],
             updated: vec![],
@@ -370,33 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn output_holds_back_when_pending() {
-        let mut node = make_output_node(OutputMode::Delta);
-
-        let id1 = ObjectId::new();
-        let tuple1 = make_tuple(id1, 1, "Alice");
-
-        // Process delta with pending=true
-        let delta = TupleDelta {
-            pending: true,
-            added: vec![tuple1],
-            removed: vec![],
-            updated: vec![],
-        };
-
-        node.process(delta);
-
-        // Internal state should be updated
-        assert_eq!(node.current_rows().len(), 1);
-        assert!(node.is_held_pending());
-
-        // But no deltas should be delivered
-        let deltas = node.take_tuple_deltas();
-        assert!(deltas.is_empty(), "Should hold back deltas when pending");
-    }
-
-    #[test]
-    fn output_emits_full_state_when_pending_clears() {
+    fn output_delivers_immediately() {
         let mut node = make_output_node(OutputMode::Delta);
 
         let id1 = ObjectId::new();
@@ -404,62 +303,8 @@ mod tests {
         let tuple1 = make_tuple(id1, 1, "Alice");
         let tuple2 = make_tuple(id2, 2, "Bob");
 
-        // First delta with pending=true
+        // First delta
         let delta1 = TupleDelta {
-            pending: true,
-            added: vec![tuple1],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta1);
-        assert!(node.is_held_pending());
-        assert!(node.take_tuple_deltas().is_empty());
-
-        // Second delta with pending=true (add another tuple)
-        let delta2 = TupleDelta {
-            pending: true,
-            added: vec![tuple2],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta2);
-        assert!(node.is_held_pending());
-        assert!(node.take_tuple_deltas().is_empty());
-
-        // Now pending clears
-        let delta3 = TupleDelta {
-            pending: false,
-            added: vec![],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta3);
-
-        // Should no longer be held pending
-        assert!(!node.is_held_pending());
-
-        // Should emit full current state as a single delta
-        let deltas = node.take_tuple_deltas();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(
-            deltas[0].added.len(),
-            2,
-            "Should contain all current tuples"
-        );
-    }
-
-    #[test]
-    fn output_normal_behavior_when_not_pending() {
-        let mut node = make_output_node(OutputMode::Delta);
-
-        let id1 = ObjectId::new();
-        let id2 = ObjectId::new();
-        let tuple1 = make_tuple(id1, 1, "Alice");
-        let tuple2 = make_tuple(id2, 2, "Bob");
-
-        // Normal delta (not pending)
-        let delta1 = TupleDelta {
-            pending: false,
             added: vec![tuple1],
             removed: vec![],
             updated: vec![],
@@ -471,9 +316,8 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
 
-        // Second normal delta
+        // Second delta
         let delta2 = TupleDelta {
-            pending: false,
             added: vec![tuple2],
             removed: vec![],
             updated: vec![],
@@ -484,116 +328,5 @@ mod tests {
         let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
-    }
-
-    #[test]
-    fn output_subsequent_pending_emits_only_new_changes() {
-        // This tests the scenario:
-        // 1. Initial pending → clears → full snapshot emitted
-        // 2. Normal updates → delivered incrementally
-        // 3. New pending → clears → only NEW changes emitted (not full snapshot)
-
-        let mut node = make_output_node(OutputMode::Delta);
-
-        let id1 = ObjectId::new();
-        let id2 = ObjectId::new();
-        let id3 = ObjectId::new();
-        let tuple1 = make_tuple(id1, 1, "Alice");
-        let tuple2 = make_tuple(id2, 2, "Bob");
-        let tuple3 = make_tuple(id3, 3, "Charlie");
-
-        // Step 1: Initial pending period
-        let delta1 = TupleDelta {
-            pending: true,
-            added: vec![tuple1],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta1);
-        assert!(
-            node.take_tuple_deltas().is_empty(),
-            "Should hold back during initial pending"
-        );
-
-        // Step 2: Initial pending clears
-        let delta2 = TupleDelta {
-            pending: false,
-            added: vec![tuple2],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta2);
-
-        // Should emit full snapshot (both tuples)
-        let deltas = node.take_tuple_deltas();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(
-            deltas[0].added.len(),
-            2,
-            "Initial clear should emit full snapshot"
-        );
-
-        // Step 3: Normal update (non-pending)
-        let delta3 = TupleDelta {
-            pending: false,
-            added: vec![tuple3],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta3);
-
-        // Should deliver incrementally
-        let deltas = node.take_tuple_deltas();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(
-            deltas[0].added.len(),
-            1,
-            "Normal update should be incremental"
-        );
-        assert!(contains_id(&deltas[0].added, id3));
-
-        // Step 4: New pending period starts
-        let id4 = ObjectId::new();
-        let tuple4 = make_tuple(id4, 4, "Dave");
-        let delta4 = TupleDelta {
-            pending: true,
-            added: vec![tuple4],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta4);
-        assert!(
-            node.take_tuple_deltas().is_empty(),
-            "Should hold back during second pending"
-        );
-
-        // Step 5: Second pending clears
-        let id5 = ObjectId::new();
-        let tuple5 = make_tuple(id5, 5, "Eve");
-        let delta5 = TupleDelta {
-            pending: false,
-            added: vec![tuple5],
-            removed: vec![],
-            updated: vec![],
-        };
-        node.process(delta5);
-
-        // Should emit ONLY the changes during the pending period (tuple4, tuple5)
-        // NOT the full snapshot (which would be all 5 tuples)
-        let deltas = node.take_tuple_deltas();
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(
-            deltas[0].added.len(),
-            2,
-            "Subsequent pending clear should emit only accumulated changes, not full snapshot"
-        );
-
-        // Verify we got tuple4 and tuple5, not the old tuples
-        assert!(contains_id(&deltas[0].added, id4), "Should contain tuple4");
-        assert!(contains_id(&deltas[0].added, id5), "Should contain tuple5");
-        assert!(
-            !contains_id(&deltas[0].added, id1),
-            "Should NOT contain tuple1 (from initial snapshot)"
-        );
     }
 }

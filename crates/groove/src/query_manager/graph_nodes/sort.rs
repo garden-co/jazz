@@ -144,7 +144,6 @@ impl RowNode for SortNode {
 
         // Build result with tuples in sorted order
         let mut result = TupleDelta::new();
-        result.pending = input.pending;
 
         // Added tuples in sorted order
         for tuple in &self.sorted_tuples {
@@ -262,7 +261,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
             updated: vec![],
@@ -314,7 +312,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
             updated: vec![],
@@ -397,7 +394,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2, tuple3, tuple4],
             removed: vec![],
             updated: vec![],
@@ -435,7 +431,6 @@ mod tests {
         );
 
         node.process(TupleDelta {
-            pending: false,
             added: vec![tuple1],
             removed: vec![],
             updated: vec![],
@@ -451,7 +446,6 @@ mod tests {
             ],
         );
         node.process(TupleDelta {
-            pending: false,
             added: vec![tuple2],
             removed: vec![],
             updated: vec![],

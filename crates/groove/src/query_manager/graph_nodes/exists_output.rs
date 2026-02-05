@@ -19,8 +19,6 @@ pub struct ExistsOutputNode {
     descriptor: RowDescriptor,
     /// Count of rows currently in the result set.
     count: usize,
-    /// True if we're still waiting for upstream data.
-    pending: bool,
     /// Current tuples (for RowNode trait compliance).
     current_tuples: AHashSet<Tuple>,
     /// Whether this node needs reprocessing.
@@ -33,7 +31,6 @@ impl ExistsOutputNode {
         Self {
             descriptor,
             count: 0,
-            pending: true, // Start pending until first process
             current_tuples: AHashSet::new(),
             dirty: true,
         }
@@ -42,16 +39,6 @@ impl ExistsOutputNode {
     /// Returns true if at least one row exists.
     pub fn exists(&self) -> bool {
         self.count > 0
-    }
-
-    /// Returns true if we're still waiting for upstream data.
-    pub fn is_pending(&self) -> bool {
-        self.pending
-    }
-
-    /// Returns true if the result is complete (not pending).
-    pub fn is_complete(&self) -> bool {
-        !self.pending
     }
 
     /// Get the current row count.
@@ -69,9 +56,6 @@ impl RowNode for ExistsOutputNode {
         // Update count based on added/removed tuples
         self.count += input.added.len();
         self.count = self.count.saturating_sub(input.removed.len());
-
-        // Track pending state from upstream
-        self.pending = input.pending;
 
         // Update current tuples set
         for tuple in &input.added {
@@ -131,7 +115,6 @@ mod tests {
     fn test_empty_starts_not_exists() {
         let node = ExistsOutputNode::new(test_descriptor());
         assert!(!node.exists());
-        assert!(node.is_pending()); // Starts pending
     }
 
     #[test]
@@ -143,13 +126,11 @@ mod tests {
             added: vec![make_tuple(id)],
             removed: vec![],
             updated: vec![],
-            pending: false,
         };
 
         node.process(delta);
 
         assert!(node.exists());
-        assert!(!node.is_pending());
         assert_eq!(node.count(), 1);
     }
 
@@ -165,7 +146,6 @@ mod tests {
             added: vec![tuple.clone()],
             removed: vec![],
             updated: vec![],
-            pending: false,
         });
         assert!(node.exists());
 
@@ -174,7 +154,6 @@ mod tests {
             added: vec![],
             removed: vec![tuple],
             updated: vec![],
-            pending: false,
         });
         assert!(!node.exists());
         assert_eq!(node.count(), 0);
@@ -191,7 +170,6 @@ mod tests {
             added: vec![make_tuple(id1), make_tuple(id2)],
             removed: vec![],
             updated: vec![],
-            pending: false,
         });
 
         assert!(node.exists());
@@ -202,35 +180,10 @@ mod tests {
             added: vec![],
             removed: vec![make_tuple(id1)],
             updated: vec![],
-            pending: false,
         });
 
         assert!(node.exists());
         assert_eq!(node.count(), 1);
-    }
-
-    #[test]
-    fn test_pending_propagates() {
-        let mut node = ExistsOutputNode::new(test_descriptor());
-
-        // Process with pending=true
-        node.process(TupleDelta {
-            added: vec![],
-            removed: vec![],
-            updated: vec![],
-            pending: true,
-        });
-        assert!(node.is_pending());
-
-        // Process with pending=false
-        node.process(TupleDelta {
-            added: vec![],
-            removed: vec![],
-            updated: vec![],
-            pending: false,
-        });
-        assert!(!node.is_pending());
-        assert!(node.is_complete());
     }
 
     #[test]
@@ -243,7 +196,6 @@ mod tests {
             added: vec![],
             removed: vec![make_tuple(id)],
             updated: vec![],
-            pending: false,
         });
 
         // Count should be 0, not negative

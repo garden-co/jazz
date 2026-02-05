@@ -319,7 +319,6 @@ impl JoinNode {
     /// Process left side delta.
     pub fn process_left(&mut self, delta: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
-        result.pending = delta.pending;
 
         // Handle removals first
         for tuple in delta.removed {
@@ -344,7 +343,6 @@ impl JoinNode {
     /// Process right side delta.
     pub fn process_right(&mut self, delta: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
-        result.pending = delta.pending;
 
         // Handle removals first
         for tuple in delta.removed {
@@ -456,7 +454,6 @@ mod tests {
 
         // Add user
         let result1 = node.process_left(TupleDelta {
-            pending: false,
             added: vec![user.clone()],
             removed: vec![],
             updated: vec![],
@@ -465,7 +462,6 @@ mod tests {
 
         // Add post with matching author_id
         let result2 = node.process_right(TupleDelta {
-            pending: false,
             added: vec![post.clone()],
             removed: vec![],
             updated: vec![],
@@ -496,14 +492,12 @@ mod tests {
         let post = make_post_tuple(post_oid, 100, "Hello World", 999); // Different author_id
 
         node.process_left(TupleDelta {
-            pending: false,
             added: vec![user],
             removed: vec![],
             updated: vec![],
         });
 
         let result = node.process_right(TupleDelta {
-            pending: false,
             added: vec![post],
             removed: vec![],
             updated: vec![],
@@ -534,7 +528,6 @@ mod tests {
 
         // Add user
         node.process_left(TupleDelta {
-            pending: false,
             added: vec![user],
             removed: vec![],
             updated: vec![],
@@ -542,7 +535,6 @@ mod tests {
 
         // Add two posts with same author_id
         let result = node.process_right(TupleDelta {
-            pending: false,
             added: vec![post1, post2],
             removed: vec![],
             updated: vec![],
@@ -572,13 +564,11 @@ mod tests {
 
         // Add both
         node.process_left(TupleDelta {
-            pending: false,
             added: vec![user.clone()],
             removed: vec![],
             updated: vec![],
         });
         node.process_right(TupleDelta {
-            pending: false,
             added: vec![post.clone()],
             removed: vec![],
             updated: vec![],
@@ -587,7 +577,6 @@ mod tests {
 
         // Remove post
         let result = node.process_right(TupleDelta {
-            pending: false,
             added: vec![],
             removed: vec![post],
             updated: vec![],
@@ -595,31 +584,6 @@ mod tests {
 
         assert_eq!(result.removed.len(), 1);
         assert!(node.current_tuples().is_empty());
-    }
-
-    #[test]
-    fn join_preserves_pending_flag() {
-        let mut node = JoinNode::from_row_descriptors(
-            "users",
-            users_descriptor(),
-            "posts",
-            posts_descriptor(),
-            "id",
-            "author_id",
-        )
-        .unwrap();
-
-        let user_oid = ObjectId::new();
-        let user = make_user_tuple(user_oid, 1, "Alice");
-
-        let result = node.process_left(TupleDelta {
-            pending: true,
-            added: vec![user],
-            removed: vec![],
-            updated: vec![],
-        });
-
-        assert!(result.pending);
     }
 
     #[test]
@@ -643,7 +607,6 @@ mod tests {
 
         // Add post first
         let result1 = node.process_right(TupleDelta {
-            pending: false,
             added: vec![post],
             removed: vec![],
             updated: vec![],
@@ -652,7 +615,6 @@ mod tests {
 
         // Add user
         let result2 = node.process_left(TupleDelta {
-            pending: false,
             added: vec![user],
             removed: vec![],
             updated: vec![],
