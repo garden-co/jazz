@@ -5,6 +5,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::commit::CommitId;
+    use crate::io_handler::MemoryIoHandler;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::types::{
@@ -366,10 +367,14 @@ mod tests {
     use crate::sync_manager::SyncManager;
 
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
-    fn execute_query(manager: &mut SchemaManager, query: Query) -> Vec<(ObjectId, Vec<Value>)> {
+    fn execute_query(
+        manager: &mut SchemaManager,
+        io: &mut MemoryIoHandler,
+        query: Query,
+    ) -> Vec<(ObjectId, Vec<Value>)> {
         let qm = manager.query_manager_mut();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process();
+        qm.process(io);
         let results = qm.get_subscription_results(sub_id);
         qm.unsubscribe_with_sync(sub_id);
         results
@@ -540,6 +545,7 @@ mod tests {
         qm.set_current_schema(v2.clone(), "dev", "main");
         qm.add_live_schema(v1.clone());
         qm.register_lens(lens);
+        let mut io = MemoryIoHandler::new();
 
         // Get branch names
         let v1_branch = format!("dev-{}-main", v1_hash.short());
@@ -554,12 +560,15 @@ mod tests {
         // Create object and add commit on v1 branch
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
-        qm.sync_manager_mut()
-            .object_manager
-            .create_with_id(old_row_id, Some(metadata.clone()));
+        qm.sync_manager_mut().object_manager.create_with_id(
+            &mut io,
+            old_row_id,
+            Some(metadata.clone()),
+        );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io,
                 old_row_id,
                 &v1_branch,
                 vec![],
@@ -593,10 +602,11 @@ mod tests {
 
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(new_row_id, Some(metadata));
+            .create_with_id(&mut io, new_row_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io,
                 new_row_id,
                 &v2_branch,
                 vec![],
@@ -623,8 +633,9 @@ mod tests {
             .build();
 
         // Subscribe and process to settle the graph
+        let mut io = MemoryIoHandler::new();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process();
+        qm.process(&mut io);
 
         // Get results
         let results = qm.get_subscription_results(sub_id);
@@ -740,14 +751,18 @@ mod tests {
         let row1_values = vec![Value::Uuid(row1_id), Value::Text("Alice".to_string())];
         let row1_data = encode_row(&v1_table.descriptor, &row1_values).unwrap();
 
+        let mut io = MemoryIoHandler::new();
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
-        qm.sync_manager_mut()
-            .object_manager
-            .create_with_id(row1_id, Some(metadata.clone()));
+        qm.sync_manager_mut().object_manager.create_with_id(
+            &mut io,
+            row1_id,
+            Some(metadata.clone()),
+        );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io,
                 row1_id,
                 &v1_branch,
                 vec![],
@@ -775,12 +790,15 @@ mod tests {
         ];
         let row2_data = encode_row(&v2_table.descriptor, &row2_values).unwrap();
 
-        qm.sync_manager_mut()
-            .object_manager
-            .create_with_id(row2_id, Some(metadata.clone()));
+        qm.sync_manager_mut().object_manager.create_with_id(
+            &mut io,
+            row2_id,
+            Some(metadata.clone()),
+        );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io,
                 row2_id,
                 &v2_branch,
                 vec![],
@@ -811,10 +829,11 @@ mod tests {
 
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(row3_id, Some(metadata));
+            .create_with_id(&mut io, row3_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io,
                 row3_id,
                 &v3_branch,
                 vec![],
@@ -837,8 +856,9 @@ mod tests {
             .branches(&[&v1_branch, &v2_branch, &v3_branch])
             .build();
 
+        let mut io = MemoryIoHandler::new();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process();
+        qm.process(&mut io);
 
         let results = qm.get_subscription_results(sub_id);
 
@@ -975,14 +995,23 @@ mod tests {
         ];
         let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
 
+        let mut io = MemoryIoHandler::new();
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(row_id, Some(metadata));
+            .create_with_id(&mut io, row_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
-            .add_commit(row_id, &v1_branch, vec![], row_data.clone(), row_id, None)
+            .add_commit(
+                &mut io,
+                row_id,
+                &v1_branch,
+                vec![],
+                row_data.clone(),
+                row_id,
+                None,
+            )
             .unwrap();
 
         // Update v1 branch index
@@ -995,9 +1024,8 @@ mod tests {
 
         // Query
         let query = QueryBuilder::new("users").branches(&[&v1_branch]).build();
-
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process();
+        qm.process(&mut io);
 
         let results = qm.get_subscription_results(sub_id);
 
@@ -1055,6 +1083,7 @@ mod tests {
         qm.set_current_schema(v2.clone(), "dev", "main");
         qm.add_live_schema(v1.clone());
         qm.register_lens(lens);
+        let mut io = MemoryIoHandler::new();
 
         // Get branch names
         let v1_branch = format!("dev-{}-main", v1_hash.short());
@@ -1073,10 +1102,18 @@ mod tests {
         metadata.insert("table".to_string(), "users".to_string());
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(row_id, Some(metadata));
+            .create_with_id(&mut io, row_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
-            .add_commit(row_id, &v1_branch, vec![], row_data.clone(), row_id, None)
+            .add_commit(
+                &mut io,
+                row_id,
+                &v1_branch,
+                vec![],
+                row_data.clone(),
+                row_id,
+                None,
+            )
             .unwrap();
 
         // Update _id index for v1 branch
@@ -1091,9 +1128,8 @@ mod tests {
         let query = QueryBuilder::new("users")
             .branches(&[&v1_branch, &v2_branch])
             .build();
-
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process();
+        qm.process(&mut io);
 
         let results = qm.get_subscription_results(sub_id);
 
@@ -1133,7 +1169,8 @@ mod tests {
                 .unwrap();
 
         // Persist schema
-        let object_id = manager.persist_schema();
+        let mut io = MemoryIoHandler::new();
+        let object_id = manager.persist_schema(&mut io);
 
         // Verify ObjectId is deterministic (based on schema hash)
         let schema_hash = SchemaHash::compute(&v2);
@@ -1174,7 +1211,8 @@ mod tests {
         let lens = manager.add_live_schema(v1).unwrap().clone();
 
         // Persist lens
-        let object_id = manager.persist_lens(&lens);
+        let mut io = MemoryIoHandler::new();
+        let object_id = manager.persist_lens(&mut io, &lens);
 
         // Verify ObjectId is deterministic
         assert_eq!(object_id, lens.object_id());
@@ -1361,8 +1399,9 @@ mod tests {
         // add_live_schema now automatically updates QueryManager
 
         // === Client A persists schema and lens to catalogue ===
-        let schema_object_id = client_a.persist_schema();
-        let lens_object_id = client_a.persist_lens(&lens);
+        let mut io_a = MemoryIoHandler::new();
+        let schema_object_id = client_a.persist_schema(&mut io_a);
+        let lens_object_id = client_a.persist_lens(&mut io_a, &lens);
 
         // Verify deterministic ObjectIds
         assert_eq!(schema_object_id, v2_hash.to_object_id());
@@ -1421,9 +1460,13 @@ mod tests {
         let email = Value::Text("alice@example.com".into());
 
         client_a
-            .insert("users", &[id_val.clone(), name.clone(), email.clone()])
+            .insert(
+                &mut io_a,
+                "users",
+                &[id_val.clone(), name.clone(), email.clone()],
+            )
             .unwrap();
-        client_a.process();
+        client_a.process(&mut io_a);
 
         // === Simulate data sync: A's row arrives at B ===
         // For a full E2E test, we would pump sync messages between A and B.
@@ -1671,7 +1714,9 @@ mod tests {
 
         // === Client A persists schema to catalogue BEFORE connecting to server ===
         // This way, when the server is added, the catalogue object will sync
-        let schema_obj_id = client_a.persist_schema();
+        let mut io_a = MemoryIoHandler::new();
+        let mut io_server = MemoryIoHandler::new();
+        let schema_obj_id = client_a.persist_schema(&mut io_a);
         assert_eq!(schema_obj_id, schema_hash.to_object_id());
 
         // === Network topology setup ===
@@ -1701,7 +1746,7 @@ mod tests {
             .add_server(server_id);
 
         // Process to generate outbox messages
-        client_a.process();
+        client_a.process(&mut io_a);
 
         // === Transfer catalogue object from Client A to Server ===
         let outbox_a = client_a
@@ -1735,7 +1780,7 @@ mod tests {
             });
 
         // Server processes the inbox - this triggers catalogue processing
-        server.process();
+        server.process(&mut io_server);
 
         // === Server should now have the schema in known_schemas ===
         assert!(
@@ -1751,9 +1796,11 @@ mod tests {
             Value::Text("alice".into()),
             Value::Text("Test Document".into()),
         ];
-        let handle = client_a.insert("documents", &doc_values).unwrap();
+        let handle = client_a
+            .insert(&mut io_a, "documents", &doc_values)
+            .unwrap();
         let doc_id = handle.row_id; // The actual row object ID
-        client_a.process();
+        client_a.process(&mut io_a);
 
         // Get client A's outbox - should have the row object
         let outbox_a = client_a
@@ -1784,7 +1831,7 @@ mod tests {
             });
 
         // Server processes - lazy activation should kick in
-        server.process();
+        server.process(&mut io_server);
 
         // === Verify the row was indexed on server ===
         // Build the branch name that client A uses
@@ -1908,6 +1955,10 @@ mod tests {
             .take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
 
+        let mut io_a = MemoryIoHandler::new();
+        let mut io_b = MemoryIoHandler::new();
+        let mut io_server = MemoryIoHandler::new();
+
         // === Create documents on server ===
         // Alice's document
         let alice_doc_id = ObjectId::new();
@@ -1935,12 +1986,13 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .create_with_id(alice_doc_id, Some(alice_metadata.clone()));
+            .create_with_id(&mut io_server, alice_doc_id, Some(alice_metadata.clone()));
         server
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io_server,
                 alice_doc_id,
                 &server_branch,
                 vec![],
@@ -1973,12 +2025,13 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .create_with_id(bob_doc_id, Some(bob_metadata.clone()));
+            .create_with_id(&mut io_server, bob_doc_id, Some(bob_metadata.clone()));
         server
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
             .add_commit(
+                &mut io_server,
                 bob_doc_id,
                 &server_branch,
                 vec![],
@@ -2015,7 +2068,7 @@ mod tests {
             .subscribe_with_sync(query_a.clone(), Some(Session::new("alice")))
             .unwrap();
 
-        client_a.process();
+        client_a.process(&mut io_a);
 
         // Get the QuerySubscription message from client A
         let outbox_a = client_a
@@ -2037,7 +2090,7 @@ mod tests {
             });
 
         // Server processes the subscription
-        server.process();
+        server.process(&mut io_server);
 
         // === Server should send Alice's doc to Client A ===
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
@@ -2083,7 +2136,7 @@ mod tests {
             .subscribe_with_sync(query_b.clone(), Some(Session::new("bob")))
             .unwrap();
 
-        client_b.process();
+        client_b.process(&mut io_b);
 
         // Forward subscription to server
         let outbox_b = client_b
@@ -2103,7 +2156,7 @@ mod tests {
                 payload: query_sub_b.payload.clone(),
             });
 
-        server.process();
+        server.process(&mut io_server);
 
         // === Server should send Bob's doc to Client B ===
         let server_outbox_b = server.query_manager_mut().sync_manager_mut().take_outbox();
@@ -2202,9 +2255,12 @@ mod tests {
         client.query_manager_mut().sync_manager_mut().take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
 
+        let mut io_client = MemoryIoHandler::new();
+        let mut io_server = MemoryIoHandler::new();
+
         // === Client persists schema to catalogue ===
-        let schema_obj_id = client.persist_schema();
-        client.process();
+        let schema_obj_id = client.persist_schema(&mut io_client);
+        client.process(&mut io_client);
 
         // Transfer to server
         let outbox = client.query_manager_mut().sync_manager_mut().take_outbox();
@@ -2222,7 +2278,7 @@ mod tests {
             }
         }
 
-        server.process();
+        server.process(&mut io_server);
 
         // Process catalogue updates
         let updates = server.query_manager_mut().take_pending_catalogue_updates();
@@ -2255,12 +2311,20 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .create_with_id(note_id, Some(note_metadata));
+            .create_with_id(&mut io_server, note_id, Some(note_metadata));
         server
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .add_commit(note_id, &server_branch, vec![], note_data, note_id, None)
+            .add_commit(
+                &mut io_server,
+                note_id,
+                &server_branch,
+                vec![],
+                note_data,
+                note_id,
+                None,
+            )
             .unwrap();
 
         // Update index
@@ -2284,7 +2348,7 @@ mod tests {
             .subscribe_with_sync(query, None)
             .unwrap();
 
-        client.process();
+        client.process(&mut io_client);
 
         // Forward subscription to server
         let client_outbox = client.query_manager_mut().sync_manager_mut().take_outbox();
@@ -2300,7 +2364,7 @@ mod tests {
             }
         }
 
-        server.process();
+        server.process(&mut io_server);
 
         // === Server should send the note to client ===
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
@@ -2360,6 +2424,7 @@ mod tests {
         let mut client =
             SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
                 .unwrap();
+        let mut io = MemoryIoHandler::new();
 
         // Get branch names
         let v1_branch = format!("dev-{}-main", v1_hash.short());
@@ -2397,21 +2462,29 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .create_with_id(row_id, Some(metadata));
+            .create_with_id(&mut io, row_id, Some(metadata));
         client
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .add_commit(row_id, &v2_branch, vec![], row_data.clone(), row_id, None)
+            .add_commit(
+                &mut io,
+                row_id,
+                &v2_branch,
+                vec![],
+                row_data.clone(),
+                row_id,
+                None,
+            )
             .unwrap();
 
         // Process - this should trigger handle_object_update for the v2 row
         // Since v2 schema is unknown, it should be buffered
-        client.process();
+        client.process(&mut io);
 
         // Query on v1 branch should not find the row (it's on v2 branch)
         let query = QueryBuilder::new("users").branch(&v1_branch).build();
-        let results = execute_query(&mut client, query);
+        let results = execute_query(&mut client, &mut io, query);
         assert_eq!(
             results.len(),
             0,
@@ -2451,7 +2524,7 @@ mod tests {
         // 1. Activate v2 schema (now has lens path)
         // 2. Call sync_context()
         // 3. Retry pending row updates
-        client.process();
+        client.process(&mut io);
 
         // v2 should now be live
         assert!(
@@ -2465,7 +2538,7 @@ mod tests {
             .branches(&[&v1_branch, &v2_branch])
             .build();
         let sub_id = client.query_manager_mut().subscribe(multi_query).unwrap();
-        client.process();
+        client.process(&mut io);
 
         let results = client.query_manager().get_subscription_results(sub_id);
 

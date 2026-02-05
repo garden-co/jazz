@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
+use crate::io_handler::IoHandler;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{BlobId, ObjectManager};
 use crate::query_manager::policy::Operation;
@@ -448,10 +449,10 @@ impl SyncManager {
     }
 
     /// Process all inbox entries.
-    pub fn process_inbox(&mut self) {
+    pub fn process_inbox<H: IoHandler>(&mut self, io: &mut H) {
         let entries = std::mem::take(&mut self.inbox);
         for entry in entries {
-            self.process_inbox_entry(entry);
+            self.process_inbox_entry(io, entry);
         }
     }
 
@@ -465,8 +466,9 @@ impl SyncManager {
     /// The content is stored as a commit on the "main" branch.
     ///
     /// Used for storing schemas and lenses in the catalogue.
-    pub fn create_object_with_content(
+    pub fn create_object_with_content<H: IoHandler>(
         &mut self,
+        io: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
@@ -474,11 +476,12 @@ impl SyncManager {
         // Create the object if it doesn't exist
         if self.object_manager.get(object_id).is_none() {
             self.object_manager
-                .create_with_id(object_id, Some(metadata));
+                .create_with_id(io, object_id, Some(metadata));
         }
 
         // Add content as a commit on the "main" branch
         let _ = self.object_manager.add_commit(
+            io,
             object_id,
             "main",
             Vec::new(), // No parents - root commit
@@ -498,11 +501,11 @@ impl SyncManager {
     }
 
     /// Approve a pending update, applying it.
-    pub fn approve_update(&mut self, pending_id: PendingUpdateId) {
+    pub fn approve_update<H: IoHandler>(&mut self, io: &mut H, pending_id: PendingUpdateId) {
         // Find and remove the pending update
         if let Some(pos) = self.pending_updates.iter().position(|p| p.id == pending_id) {
             let pending = self.pending_updates.remove(pos);
-            self.apply_payload_from_client(pending.client_id, pending.payload, true);
+            self.apply_payload_from_client(io, pending.client_id, pending.payload, true);
         }
     }
 
@@ -652,8 +655,12 @@ impl SyncManager {
     ///
     /// This takes the full PendingPermissionCheck since it was already taken
     /// from the queue by take_pending_permission_checks().
-    pub fn approve_permission_check(&mut self, check: PendingPermissionCheck) {
-        self.apply_payload_from_client(check.client_id, check.payload, true);
+    pub fn approve_permission_check<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        check: PendingPermissionCheck,
+    ) {
+        self.apply_payload_from_client(io, check.client_id, check.payload, true);
     }
 
     /// Reject a pending permission check, sending error back to client.
@@ -724,20 +731,14 @@ impl SyncManager {
         // Collect all object/branch/tips we need to sync
         let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
-        for (object_id, object_state) in &self.object_manager.objects {
-            if let Some(object) = match object_state {
-                crate::object::ObjectState::Creating(obj)
-                | crate::object::ObjectState::Available(obj) => Some(obj),
-                crate::object::ObjectState::Loading => None,
-            } {
-                for (branch_name, branch) in &object.branches {
-                    to_sync.push((
-                        *object_id,
-                        object.metadata.clone(),
-                        *branch_name,
-                        branch.tips.iter().copied().collect(),
-                    ));
-                }
+        for (object_id, object) in &self.object_manager.objects {
+            for (branch_name, branch) in &object.branches {
+                to_sync.push((
+                    *object_id,
+                    object.metadata.clone(),
+                    *branch_name,
+                    branch.tips.iter().copied().collect(),
+                ));
             }
         }
 
@@ -755,20 +756,14 @@ impl SyncManager {
         // Collect all object/branch/tips we need to sync
         let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
-        for (object_id, object_state) in &self.object_manager.objects {
-            if let Some(object) = match object_state {
-                crate::object::ObjectState::Creating(obj)
-                | crate::object::ObjectState::Available(obj) => Some(obj),
-                crate::object::ObjectState::Loading => None,
-            } {
-                for (branch_name, branch) in &object.branches {
-                    to_sync.push((
-                        *object_id,
-                        object.metadata.clone(),
-                        *branch_name,
-                        branch.tips.iter().copied().collect(),
-                    ));
-                }
+        for (object_id, object) in &self.object_manager.objects {
+            for (branch_name, branch) in &object.branches {
+                to_sync.push((
+                    *object_id,
+                    object.metadata.clone(),
+                    *branch_name,
+                    branch.tips.iter().copied().collect(),
+                ));
             }
         }
 
@@ -1085,15 +1080,20 @@ impl SyncManager {
     }
 
     /// Process a single inbox entry.
-    fn process_inbox_entry(&mut self, entry: InboxEntry) {
+    fn process_inbox_entry<H: IoHandler>(&mut self, io: &mut H, entry: InboxEntry) {
         match entry.source {
-            Source::Server(server_id) => self.process_from_server(server_id, entry.payload),
-            Source::Client(client_id) => self.process_from_client(client_id, entry.payload),
+            Source::Server(server_id) => self.process_from_server(io, server_id, entry.payload),
+            Source::Client(client_id) => self.process_from_client(io, client_id, entry.payload),
         }
     }
 
     /// Process a payload from a server.
-    fn process_from_server(&mut self, server_id: ServerId, payload: SyncPayload) {
+    fn process_from_server<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        server_id: ServerId,
+        payload: SyncPayload,
+    ) {
         match payload {
             SyncPayload::ObjectUpdated {
                 object_id,
@@ -1101,7 +1101,7 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
-                self.apply_object_updated(object_id, metadata, branch_name, commits);
+                self.apply_object_updated(io, object_id, metadata, branch_name, commits);
 
                 // Forward to clients whose scope includes this object/branch
                 self.forward_update_to_clients(object_id, branch_name);
@@ -1112,15 +1112,16 @@ impl SyncManager {
                 tails,
             } => {
                 // Apply truncation locally
-                let _ = self
-                    .object_manager
-                    .truncate_branch(object_id, branch_name, tails.clone());
+                let _ =
+                    self.object_manager
+                        .truncate_branch(io, object_id, branch_name, tails.clone());
 
                 // Forward to clients
                 self.forward_truncation_to_clients(object_id, branch_name, tails);
             }
             SyncPayload::BlobResponse { blob_id, data } => {
                 let _ = self.object_manager.put_blob(
+                    io,
                     blob_id.object_id,
                     blob_id.branch_name,
                     blob_id.commit_id,
@@ -1139,7 +1140,12 @@ impl SyncManager {
     }
 
     /// Process a payload from a client.
-    fn process_from_client(&mut self, client_id: ClientId, payload: SyncPayload) {
+    fn process_from_client<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        client_id: ClientId,
+        payload: SyncPayload,
+    ) {
         let Some(client) = self.clients.get(&client_id) else {
             return;
         };
@@ -1218,7 +1224,7 @@ impl SyncManager {
                     );
                 } else {
                     // No session - allow (permissive mode)
-                    self.apply_payload_from_client(client_id, payload, false);
+                    self.apply_payload_from_client(io, client_id, payload, false);
                 }
             }
             SyncPayload::ObjectTruncated {
@@ -1273,7 +1279,7 @@ impl SyncManager {
                     );
                 } else {
                     // No session - allow (permissive mode)
-                    self.apply_payload_from_client(client_id, payload, false);
+                    self.apply_payload_from_client(io, client_id, payload, false);
                 }
             }
             SyncPayload::BlobRequest { blob_id } => {
@@ -1346,8 +1352,9 @@ impl SyncManager {
     }
 
     /// Apply a payload from a client (either directly or after approval).
-    fn apply_payload_from_client(
+    fn apply_payload_from_client<H: IoHandler>(
         &mut self,
+        io: &mut H,
         client_id: ClientId,
         payload: SyncPayload,
         _was_pending: bool,
@@ -1359,7 +1366,7 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
-                self.apply_object_updated(object_id, metadata, branch_name, commits);
+                self.apply_object_updated(io, object_id, metadata, branch_name, commits);
 
                 // Forward to servers
                 self.forward_update_to_servers(object_id, branch_name);
@@ -1372,9 +1379,9 @@ impl SyncManager {
                 branch_name,
                 tails,
             } => {
-                let _ = self
-                    .object_manager
-                    .truncate_branch(object_id, branch_name, tails.clone());
+                let _ =
+                    self.object_manager
+                        .truncate_branch(io, object_id, branch_name, tails.clone());
 
                 // Forward to servers
                 self.forward_truncation_to_servers(object_id, branch_name, tails.clone());
@@ -1387,8 +1394,9 @@ impl SyncManager {
     }
 
     /// Apply an ObjectUpdated payload to the local ObjectManager.
-    fn apply_object_updated(
+    fn apply_object_updated<H: IoHandler>(
         &mut self,
+        io: &mut H,
         object_id: ObjectId,
         metadata: Option<ObjectMetadata>,
         branch_name: BranchName,
@@ -1398,7 +1406,8 @@ impl SyncManager {
         if self.object_manager.get(object_id).is_none() {
             if let Some(meta) = metadata {
                 // Create object with metadata (we need to set the specific ID)
-                self.object_manager.receive_object(object_id, meta.metadata);
+                self.object_manager
+                    .receive_object(io, object_id, meta.metadata);
             } else {
                 // Can't create without metadata
                 return;
@@ -1409,7 +1418,7 @@ impl SyncManager {
         for commit in commits {
             let _ = self
                 .object_manager
-                .receive_commit(object_id, branch_name, commit);
+                .receive_commit(io, object_id, branch_name, commit);
         }
     }
 
@@ -1575,6 +1584,7 @@ impl SyncManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io_handler::MemoryIoHandler;
     use smallvec::smallvec;
 
     // ========================================================================
@@ -1595,13 +1605,20 @@ mod tests {
     #[test]
     fn add_server_receives_existing_objects() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create an object with a commit
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
-        let _ =
-            sm.object_manager
-                .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        );
 
         // Add server
         let server_id = ServerId::new();
@@ -1630,6 +1647,7 @@ mod tests {
     #[test]
     fn local_commit_syncs_to_server() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
         let server_id = ServerId::new();
         sm.add_server(server_id);
 
@@ -1637,11 +1655,19 @@ mod tests {
         sm.take_outbox();
 
         // Create object and commit
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let commit_id = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"content".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Manually trigger sync (in real usage, this would be called after local changes)
@@ -1662,6 +1688,7 @@ mod tests {
     #[test]
     fn remove_server_stops_sync() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
         let server_id = ServerId::new();
         sm.add_server(server_id);
         sm.take_outbox();
@@ -1669,11 +1696,17 @@ mod tests {
         sm.remove_server(server_id);
 
         // Create new object
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
-        let _ =
-            sm.object_manager
-                .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        );
 
         sm.forward_update_to_servers(obj_id, "main".into());
 
@@ -1684,21 +1717,46 @@ mod tests {
     #[test]
     fn commits_sent_in_causal_order() {
         let mut sm = SyncManager::new();
-        let obj_id = sm.object_manager.create(None);
+        let mut io = MemoryIoHandler::new();
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
 
         // Create chain: c1 <- c2 <- c3
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
         let c2 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![c1],
+                b"c2".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
         let c3 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![c2], b"c3".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![c2],
+                b"c3".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add server - should receive all commits in order
@@ -1727,13 +1785,20 @@ mod tests {
     #[test]
     fn client_with_query_receives_matching_objects() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
-        let _ =
-            sm.object_manager
-                .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        );
 
         // Add client with query
         let client_id = ClientId::new();
@@ -1761,13 +1826,20 @@ mod tests {
     #[test]
     fn client_without_query_receives_nothing() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
-        let _ =
-            sm.object_manager
-                .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        );
 
         // Add client without query
         let client_id = ClientId::new();
@@ -1780,12 +1852,13 @@ mod tests {
     #[test]
     fn local_commit_in_scope_syncs_to_client() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Setup client with query
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
 
         let mut scope = HashSet::new();
@@ -1796,7 +1869,15 @@ mod tests {
         // Add commit
         let commit_id = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"content".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         sm.forward_update_to_clients(obj_id, "main".into());
@@ -1815,23 +1896,30 @@ mod tests {
     #[test]
     fn local_commit_out_of_scope_not_sent_to_client() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
 
         // Client has query for obj1/main
-        let obj1 = sm.object_manager.create(None);
+        let obj1 = sm.object_manager.create(&mut io, None);
         let mut scope = HashSet::new();
         scope.insert((obj1, "main".into()));
         sm.set_client_query_scope(client_id, QueryId(1), scope, None);
         sm.take_outbox();
 
         // Create commit on different object
-        let obj2 = sm.object_manager.create(None);
+        let obj2 = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
-        let _ =
-            sm.object_manager
-                .add_commit(obj2, "main", vec![], b"content".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj2,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        );
 
         sm.forward_update_to_clients(obj2, "main".into());
 
@@ -1842,17 +1930,30 @@ mod tests {
     #[test]
     fn query_update_adds_scope_triggers_initial_sync() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create two objects
-        let obj1 = sm.object_manager.create(None);
-        let obj2 = sm.object_manager.create(None);
+        let obj1 = sm.object_manager.create(&mut io, None);
+        let obj2 = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
-        let _ = sm
-            .object_manager
-            .add_commit(obj1, "main", vec![], b"c1".to_vec(), author, None);
-        let _ = sm
-            .object_manager
-            .add_commit(obj2, "main", vec![], b"c2".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj1,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        );
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj2,
+            "main",
+            vec![],
+            b"c2".to_vec(),
+            author,
+            None,
+        );
 
         // Client initially only has obj1
         let client_id = ClientId::new();
@@ -1883,8 +1984,9 @@ mod tests {
     #[test]
     fn query_removal_stops_future_updates() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
 
         let client_id = ClientId::new();
@@ -1903,9 +2005,15 @@ mod tests {
             .remove(&QueryId(1));
 
         // Add commit
-        let _ =
-            sm.object_manager
-                .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        );
 
         sm.forward_update_to_clients(obj_id, "main".into());
 
@@ -1921,12 +2029,21 @@ mod tests {
     fn no_callback_allows_all_writes() {
         // When no permission callback is set, all writes in scope are allowed
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let client_id = ClientId::new();
@@ -1957,7 +2074,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         // Verify commit was applied
         let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
@@ -1967,12 +2084,21 @@ mod tests {
     #[test]
     fn write_with_session_goes_to_pending_permission_checks() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let client_id = ClientId::new();
@@ -2008,7 +2134,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         // Should be in pending permission checks
         let pending = sm.take_pending_permission_checks();
@@ -2026,12 +2152,21 @@ mod tests {
     #[test]
     fn approve_permission_check_applies_write() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let client_id = ClientId::new();
@@ -2067,14 +2202,14 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         // Get pending check and approve it
         let mut pending = sm.take_pending_permission_checks();
         assert_eq!(pending.len(), 1);
         let check = pending.remove(0);
 
-        sm.approve_permission_check(check);
+        sm.approve_permission_check(&mut io, check);
 
         // Commit should now be applied
         let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
@@ -2084,12 +2219,21 @@ mod tests {
     #[test]
     fn reject_permission_check_sends_error() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let client_id = ClientId::new();
@@ -2125,7 +2269,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         // Get pending check and reject it
         let mut pending = sm.take_pending_permission_checks();
@@ -2153,12 +2297,21 @@ mod tests {
     #[test]
     fn no_session_allows_write_immediately() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"original".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let client_id = ClientId::new();
@@ -2190,7 +2343,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         // No pending permission checks (no session means permissive mode)
         let pending = sm.take_pending_permission_checks();
@@ -2208,6 +2361,7 @@ mod tests {
     #[test]
     fn out_of_scope_update_goes_to_pending() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2237,7 +2391,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         let pending = sm.take_pending_updates();
         assert_eq!(pending.len(), 1);
@@ -2247,6 +2401,7 @@ mod tests {
     #[test]
     fn approved_pending_update_is_applied() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2275,7 +2430,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         let pending = sm.take_pending_updates();
         let pending_id = pending[0].id;
@@ -2284,7 +2439,7 @@ mod tests {
         sm.pending_updates = pending;
 
         // Approve
-        sm.approve_update(pending_id);
+        sm.approve_update(&mut io, pending_id);
 
         // Verify object was created
         assert!(sm.object_manager.get(obj_id).is_some());
@@ -2293,6 +2448,7 @@ mod tests {
     #[test]
     fn rejected_pending_update_sends_error() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2321,7 +2477,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         let pending = sm.take_pending_updates();
         let pending_id = pending[0].id;
@@ -2352,6 +2508,7 @@ mod tests {
     #[test]
     fn server_update_forwarded_to_matching_clients() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Setup server
         let server_id = ServerId::new();
@@ -2392,7 +2549,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         // Client should receive forwarded update
         let outbox = sm.take_outbox();
@@ -2417,18 +2574,27 @@ mod tests {
     #[test]
     fn blob_request_with_permission_returns_data() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object with blob
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let commit_id = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"content".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let content_hash = sm
             .object_manager
-            .put_blob(obj_id, "main", commit_id, b"blob data".to_vec())
+            .put_blob(&mut io, obj_id, "main", commit_id, b"blob data".to_vec())
             .unwrap();
 
         // Client with read permission
@@ -2455,7 +2621,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         let outbox = sm.take_outbox();
         assert_eq!(outbox.len(), 1);
@@ -2475,18 +2641,27 @@ mod tests {
     #[test]
     fn blob_request_without_permission_returns_error() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object with blob
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let commit_id = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"content".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"content".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         let content_hash = sm
             .object_manager
-            .put_blob(obj_id, "main", commit_id, b"blob data".to_vec())
+            .put_blob(&mut io, obj_id, "main", commit_id, b"blob data".to_vec())
             .unwrap();
 
         // Client WITHOUT permission for this object
@@ -2508,7 +2683,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         let outbox = sm.take_outbox();
         assert_eq!(outbox.len(), 1);
@@ -2530,17 +2705,26 @@ mod tests {
     #[test]
     fn client_update_forwarded_to_server_and_other_clients() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Setup server
         let server_id = ServerId::new();
         sm.add_server(server_id);
 
         // Create object
-        let obj_id = sm.object_manager.create(None);
+        let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"initial".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"initial".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         sm.take_outbox();
@@ -2577,7 +2761,7 @@ mod tests {
             },
         });
 
-        sm.process_inbox();
+        sm.process_inbox(&mut io);
 
         let outbox = sm.take_outbox();
 
@@ -2593,17 +2777,29 @@ mod tests {
     #[test]
     fn metadata_sent_only_once_per_destination() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object BEFORE adding server
-        let obj_id = sm.object_manager.create(Some(
-            [("key".to_string(), "value".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("key".to_string(), "value".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Now add server - should receive existing object with metadata
@@ -2622,9 +2818,15 @@ mod tests {
         }
 
         // Add another commit (as child of c1)
-        let _ =
-            sm.object_manager
-                .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None);
+        let _ = sm.object_manager.add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![c1],
+            b"c2".to_vec(),
+            author,
+            None,
+        );
 
         sm.forward_update_to_servers(obj_id, "main".into());
 
@@ -2646,16 +2848,28 @@ mod tests {
     #[test]
     fn nosync_object_not_synced_to_server() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object with nosync: "true" metadata
-        let obj_id = sm.object_manager.create(Some(
-            [("nosync".to_string(), "true".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("nosync".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         sm.object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add server - should NOT receive the nosync object
@@ -2672,16 +2886,28 @@ mod tests {
     #[test]
     fn nosync_object_not_synced_to_client() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object with nosync: "true" metadata
-        let obj_id = sm.object_manager.create(Some(
-            [("nosync".to_string(), "true".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("nosync".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         sm.object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add client with scope including the object
@@ -2701,17 +2927,29 @@ mod tests {
     #[test]
     fn nosync_object_update_not_forwarded_to_server() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create nosync object
-        let obj_id = sm.object_manager.create(Some(
-            [("nosync".to_string(), "true".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("nosync".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add server
@@ -2721,7 +2959,15 @@ mod tests {
 
         // Add another commit
         sm.object_manager
-            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![c1],
+                b"c2".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Forward update to servers
@@ -2737,21 +2983,41 @@ mod tests {
     #[test]
     fn nosync_object_truncation_not_forwarded_to_server() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create nosync object with some history
-        let obj_id = sm.object_manager.create(Some(
-            [("nosync".to_string(), "true".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("nosync".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
         let c2 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![c1],
+                b"c2".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add server
@@ -2773,21 +3039,41 @@ mod tests {
     #[test]
     fn nosync_object_truncation_not_forwarded_to_client() {
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create nosync object with some history
-        let obj_id = sm.object_manager.create(Some(
-            [("nosync".to_string(), "true".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("nosync".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         let c1 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
         let c2 = sm
             .object_manager
-            .add_commit(obj_id, "main", vec![c1], b"c2".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![c1],
+                b"c2".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add client with scope including the object
@@ -2813,16 +3099,28 @@ mod tests {
     fn regular_object_still_syncs_to_server() {
         // Ensure regular objects without nosync still sync properly
         let mut sm = SyncManager::new();
+        let mut io = MemoryIoHandler::new();
 
         // Create object WITHOUT nosync metadata
-        let obj_id = sm.object_manager.create(Some(
-            [("key".to_string(), "value".to_string())]
-                .into_iter()
-                .collect(),
-        ));
+        let obj_id = sm.object_manager.create(
+            &mut io,
+            Some(
+                [("key".to_string(), "value".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
         let author = ObjectId::new();
         sm.object_manager
-            .add_commit(obj_id, "main", vec![], b"c1".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"c1".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
 
         // Add server - should receive the object

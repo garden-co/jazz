@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::io_handler::IoHandler;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertHandle, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
@@ -426,7 +427,7 @@ impl SchemaManager {
     /// will receive this via catalogue sync.
     ///
     /// Returns the ObjectId of the stored schema object.
-    pub fn persist_schema(&mut self) -> ObjectId {
+    pub fn persist_schema<H: IoHandler>(&mut self, io: &mut H) -> ObjectId {
         let schema_hash = self.context.current_hash;
         let object_id = schema_hash.to_object_id();
         let content = encode_schema(&self.context.current_schema);
@@ -434,7 +435,7 @@ impl SchemaManager {
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(object_id, metadata, content);
+            .create_object_with_content(io, object_id, metadata, content);
 
         object_id
     }
@@ -446,14 +447,14 @@ impl SchemaManager {
     /// will receive this via catalogue sync.
     ///
     /// Returns the ObjectId of the stored lens object.
-    pub fn persist_lens(&mut self, lens: &Lens) -> ObjectId {
+    pub fn persist_lens<H: IoHandler>(&mut self, io: &mut H, lens: &Lens) -> ObjectId {
         let object_id = lens.object_id();
         let content = encode_lens_transform(&lens.forward);
 
         let metadata = self.lens_metadata(lens);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(object_id, metadata, content);
+            .create_object_with_content(io, object_id, metadata, content);
 
         object_id
     }
@@ -719,18 +720,25 @@ impl SchemaManager {
     }
 
     /// Insert a row into the current schema's branch.
-    pub fn insert(&mut self, table: &str, values: &[Value]) -> Result<InsertHandle, QueryError> {
-        self.insert_with_session(table, values, None)
+    pub fn insert<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        table: &str,
+        values: &[Value],
+    ) -> Result<InsertHandle, QueryError> {
+        self.insert_with_session(io, table, values, None)
     }
 
     /// Insert with session-based policy checking.
-    pub fn insert_with_session(
+    pub fn insert_with_session<H: IoHandler>(
         &mut self,
+        io: &mut H,
         table: &str,
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<InsertHandle, QueryError> {
         self.query_manager.insert_on_branch_with_session(
+            io,
             table,
             self.context.branch_name().as_str(),
             values,
@@ -739,9 +747,18 @@ impl SchemaManager {
     }
 
     /// Delete a row (soft delete) from current schema's branch.
-    pub fn delete(&mut self, table: &str, object_id: ObjectId) -> Result<DeleteHandle, QueryError> {
-        self.query_manager
-            .delete_on_branch(table, self.context.branch_name().as_str(), object_id)
+    pub fn delete<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        table: &str,
+        object_id: ObjectId,
+    ) -> Result<DeleteHandle, QueryError> {
+        self.query_manager.delete_on_branch(
+            io,
+            table,
+            self.context.branch_name().as_str(),
+            object_id,
+        )
     }
 
     /// Process pending operations (drives SyncManager).
@@ -752,8 +769,8 @@ impl SchemaManager {
     ///
     /// When schemas activate, QueryManager is updated incrementally and
     /// buffered row updates are retried.
-    pub fn process(&mut self) {
-        self.query_manager.process();
+    pub fn process<H: IoHandler>(&mut self, io: &mut H) {
+        self.query_manager.process(io);
 
         // Process any catalogue updates queued by QueryManager
         let updates = self.query_manager.take_pending_catalogue_updates();
@@ -1062,9 +1079,11 @@ mod tests {
 
     #[test]
     fn schema_manager_insert_and_query() {
+        use crate::io_handler::MemoryIoHandler;
         use crate::object::ObjectId;
 
         let schema = make_schema_v2();
+        let mut io = MemoryIoHandler::new();
         let mut manager =
             SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
 
@@ -1075,15 +1094,15 @@ mod tests {
         let email = Value::Text("alice@example.com".into());
 
         let _handle = manager
-            .insert("users", &[id_val.clone(), name, email])
+            .insert(&mut io, "users", &[id_val.clone(), name, email])
             .unwrap();
-        manager.process();
+        manager.process(&mut io);
 
         // Query via subscribe/process/unsubscribe pattern
         let query = manager.query("users").build();
         let qm = manager.query_manager_mut();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process();
+        qm.process(&mut io);
         let results = qm.get_subscription_results(sub_id);
         qm.unsubscribe_with_sync(sub_id);
 

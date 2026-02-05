@@ -1,286 +1,795 @@
-//! IoHandler trait - Platform abstraction for I/O and scheduling.
+//! Synchronous IoHandler trait and implementations.
 //!
-//! RuntimeCore is generic over this trait, allowing both native (tokio)
-//! and WASM platforms to share the same core logic while handling
-//! I/O and scheduling differently.
+//! This is the foundation of the sync storage architecture. All storage
+//! and index operations are synchronous - they return immediately with results.
+//!
+//! # Design: Single-threaded
+//!
+//! No `Send + Sync` bounds. Each thread (main, worker) has its own IoHandler
+//! instance. Cross-thread communication uses the sync protocol over postMessage,
+//! not shared mutable state.
 
-use crate::storage::{StorageRequest, StorageResponse};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::commit::{Commit, CommitId};
+use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::Value;
+use crate::storage::{ContentHash, StorageError};
 use crate::sync_manager::OutboxEntry;
 
-/// Platform abstraction for I/O operations and tick scheduling.
+// ============================================================================
+// LoadedBranch - Branch data returned from storage
+// ============================================================================
+
+/// Branch data loaded from storage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoadedBranch {
+    pub commits: Vec<Commit>,
+    pub tails: HashSet<CommitId>,
+}
+
+// ============================================================================
+// IoHandler Trait
+// ============================================================================
+
+/// Synchronous I/O handler for storage, indices, and sync messages.
 ///
-/// Implementations provide:
-/// - Storage request dispatch (fire-and-forget, responses come back via parking)
-/// - Sync message dispatch to the network
-/// - Batched tick scheduling (debounced)
+/// All storage and index operations are **synchronous** - they return
+/// immediately with results. This eliminates the async response/callback
+/// pattern that permeated the old architecture.
 ///
-/// # Platform Implementations
+/// # Single-threaded
 ///
-/// - **TokioIoHandler** (groove-tokio): Uses tokio::spawn for scheduling,
-///   Arc<Mutex> for shared state, AtomicBool for debouncing.
-///
-/// - **WasmIoHandler** (groove-wasm): Uses wasm_bindgen_futures::spawn_local,
-///   Rc<RefCell> for shared state, JS callbacks for I/O.
+/// No `Send + Sync` bounds. Each thread has its own IoHandler instance.
+/// Cross-thread communication uses the sync protocol, not shared state.
 pub trait IoHandler {
-    /// Send a single storage request (fire-and-forget).
-    ///
-    /// The response will be delivered later via the runtime's
-    /// `park_storage_response()` method. The IoHandler implementation
-    /// is responsible for routing responses back to the core.
-    fn send_storage_request(&mut self, request: StorageRequest);
+    // ================================================================
+    // Object storage (sync - returns immediately with result)
+    // ================================================================
+
+    /// Create a new object with the given ID and metadata.
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError>;
+
+    /// Load object metadata. Returns None if object doesn't exist.
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError>;
+
+    /// Load a branch's commits and tails. Returns None if branch doesn't exist.
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError>;
+
+    /// Append a commit to a branch.
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit: Commit,
+    ) -> Result<(), StorageError>;
+
+    /// Delete a commit from a branch.
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit_id: CommitId,
+    ) -> Result<(), StorageError>;
+
+    /// Set or clear the branch truncation tails.
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        tails: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError>;
+
+    // ================================================================
+    // Blob storage (sync)
+    // ================================================================
+
+    /// Store a blob by content hash.
+    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError>;
+
+    /// Load a blob by content hash. Returns None if not found.
+    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Delete a blob by content hash.
+    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError>;
+
+    // ================================================================
+    // Index operations (sync - THE KEY INNOVATION)
+    // ================================================================
+    //
+    // These replace our entire BTreeIndex implementation.
+    // MemoryIoHandler uses BTreeMaps. BfTreeIoHandler (Phase 7) uses bf-tree.
+    //
+    // NOTE: Branch is included in all index methods to support multi-branch
+    // scenarios (e.g., user branch vs main branch).
+    //
+    // NOTE: Methods take `Value` not raw bytes - each implementation handles
+    // encoding internally. This keeps encoding concerns inside IoHandler.
+
+    /// Insert an index entry.
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError>;
+
+    /// Remove an index entry.
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError>;
+
+    /// Lookup exact value - returns all row IDs with this value.
+    fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value)
+    -> Vec<ObjectId>;
+
+    /// Range scan - returns row IDs where start <= value < end.
+    /// None bounds mean unbounded on that side.
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Option<&Value>,
+        end: Option<&Value>,
+    ) -> Vec<ObjectId>;
+
+    /// Full scan - returns all row IDs in this index.
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
+
+    // ================================================================
+    // Sync messages (already sync in current design)
+    // ================================================================
 
     /// Send a sync message to the network.
-    ///
-    /// The message should be delivered to connected peers/servers
-    /// according to the destination in the OutboxEntry.
     fn send_sync_message(&mut self, message: OutboxEntry);
 
-    /// Schedule the next batched tick.
-    ///
-    /// This should be debounced - if a tick is already scheduled,
-    /// this call should be a no-op. The scheduled tick should call
-    /// `RuntimeCore::batched_tick()` when it fires.
-    ///
-    /// Platform implementations:
-    /// - Tokio: `tokio::spawn` with `AtomicBool` debounce flag
-    /// - WASM: `wasm_bindgen_futures::spawn_local` with `Rc<RefCell<bool>>` flag
+    // ================================================================
+    // Scheduling (may still be needed for subscription batching)
+    // ================================================================
+
+    /// Schedule a batched tick. May be a no-op in some implementations.
     fn schedule_batched_tick(&self);
-
-    /// Take any pending storage responses.
-    ///
-    /// For synchronous drivers (Tokio/RocksDB), storage responses are
-    /// available immediately after `send_storage_request`. This method
-    /// drains those responses so they can be processed.
-    ///
-    /// For async drivers (WASM), responses come back via callback and
-    /// are parked directly on RuntimeCore, so this returns empty.
-    fn take_pending_responses(&mut self) -> Vec<StorageResponse> {
-        Vec::new()
-    }
 }
 
-/// Null IoHandler for testing - does nothing.
+// ============================================================================
+// MemoryIoHandler - In-memory implementation for testing and main thread
+// ============================================================================
+
+/// Index key: (table, column, branch).
+type IndexKey = (String, String, String);
+
+/// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
+type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
+
+/// In-memory IoHandler for testing and main-thread use.
 ///
-/// Useful for unit tests that only exercise synchronous logic
-/// and don't need actual I/O or scheduling.
+/// Stores objects, blobs, and indices in HashMaps/BTreeMaps. No persistence.
+/// This is sufficient for:
+/// - All groove unit tests
+/// - All groove integration tests
+/// - Main thread in browser (acts as cache of worker state)
 #[derive(Default)]
-pub struct NullIoHandler;
+pub struct MemoryIoHandler {
+    /// Object storage: object_id -> ObjectData
+    objects: HashMap<ObjectId, ObjectData>,
 
-impl IoHandler for NullIoHandler {
-    fn send_storage_request(&mut self, _request: StorageRequest) {
-        // Drop the request - used for testing without storage
+    /// Blob storage: content_hash -> data
+    blobs: HashMap<ContentHash, Vec<u8>>,
+
+    /// Index storage: key -> (encoded_value -> row_ids)
+    indices: HashMap<IndexKey, IndexEntries>,
+
+    /// Sync message outbox (taken by caller)
+    outbox: Vec<OutboxEntry>,
+}
+
+/// Internal object storage structure.
+#[derive(Debug, Clone, Default)]
+struct ObjectData {
+    metadata: HashMap<String, String>,
+    branches: HashMap<BranchName, BranchData>,
+}
+
+/// Internal branch storage structure.
+#[derive(Debug, Clone, Default)]
+struct BranchData {
+    commits: Vec<Commit>,
+    tails: HashSet<CommitId>,
+}
+
+impl MemoryIoHandler {
+    /// Create a new empty MemoryIoHandler.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn send_sync_message(&mut self, _message: OutboxEntry) {
-        // Drop the message - used for testing without sync
+    /// Take all pending outbox messages.
+    pub fn take_outbox(&mut self) -> Vec<OutboxEntry> {
+        std::mem::take(&mut self.outbox)
     }
 
-    fn schedule_batched_tick(&self) {
-        // No-op - testing mode doesn't schedule ticks
+    /// Check if there are pending outbox messages.
+    pub fn has_outbox_messages(&self) -> bool {
+        !self.outbox.is_empty()
     }
 }
 
-/// Test IoHandler with synchronous driver.
-///
-/// Processes storage requests immediately through the driver and stores
-/// responses for retrieval via `take_pending_responses()`. This allows
-/// tests to use real storage behavior without async scheduling.
-///
-/// # Example
-///
-/// ```ignore
-/// let handler = TestIoHandler::new(TestDriver::new());
-/// let mut core = RuntimeCore::new(schema_manager, handler);
-/// core.insert("users", values)?;
-/// core.immediate_tick();
-/// core.batched_tick(); // Processes pending storage
-/// ```
-pub struct TestIoHandler<D: crate::driver::Driver> {
-    driver: D,
-    pending_responses: Vec<StorageResponse>,
-}
+// ============================================================================
+// Value Encoding for Index Keys
+// ============================================================================
+//
+// Values must be encoded so lexicographic byte ordering equals semantic ordering.
+// This enables range queries via BTreeMap::range().
 
-impl<D: crate::driver::Driver> TestIoHandler<D> {
-    /// Create a new TestIoHandler wrapping the given driver.
-    pub fn new(driver: D) -> Self {
-        Self {
-            driver,
-            pending_responses: Vec::new(),
+/// Encode a Value into bytes that sort correctly for range queries.
+fn encode_value(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Null => vec![0x00], // Null sorts first
+
+        Value::Boolean(b) => {
+            // false (0x01) < true (0x02)
+            vec![0x01, if *b { 0x02 } else { 0x01 }]
+        }
+
+        Value::Integer(n) => {
+            // Flip sign bit so negative < positive, big-endian for correct ordering
+            let mut bytes = vec![0x02];
+            bytes.extend_from_slice(&((*n as i64) ^ i64::MIN).to_be_bytes());
+            bytes
+        }
+
+        Value::BigInt(n) => {
+            // Flip sign bit so negative < positive, big-endian for correct ordering
+            let mut bytes = vec![0x03];
+            bytes.extend_from_slice(&(*n ^ i64::MIN).to_be_bytes());
+            bytes
+        }
+
+        Value::Timestamp(ts) => {
+            // Unsigned, big-endian (already sorts correctly)
+            let mut bytes = vec![0x04];
+            bytes.extend_from_slice(&ts.to_be_bytes());
+            bytes
+        }
+
+        Value::Text(s) => {
+            // UTF-8 bytes sort correctly for ASCII; good enough for now
+            let mut bytes = vec![0x05];
+            bytes.extend_from_slice(s.as_bytes());
+            bytes
+        }
+
+        Value::Uuid(id) => {
+            // UUID bytes (UUIDv7 is time-ordered)
+            let mut bytes = vec![0x06];
+            bytes.extend_from_slice(id.uuid().as_bytes());
+            bytes
+        }
+
+        Value::Array(_) => {
+            // Arrays not typically indexed; use hash for equality only
+            let mut bytes = vec![0x07];
+            // Simple approach: serialize and hash. Not order-preserving.
+            let json = serde_json::to_string(value).unwrap_or_default();
+            bytes.extend_from_slice(json.as_bytes());
+            bytes
+        }
+
+        Value::Row(_) => {
+            // Rows not typically indexed; use hash for equality only
+            let mut bytes = vec![0x08];
+            let json = serde_json::to_string(value).unwrap_or_default();
+            bytes.extend_from_slice(json.as_bytes());
+            bytes
         }
     }
-
-    /// Get mutable access to the underlying driver.
-    pub fn driver_mut(&mut self) -> &mut D {
-        &mut self.driver
-    }
-
-    /// Take driver out (for cold-start transfer between runtimes)
-    pub fn into_driver(self) -> D {
-        self.driver
-    }
 }
 
-impl<D: crate::driver::Driver> IoHandler for TestIoHandler<D> {
-    fn send_storage_request(&mut self, request: StorageRequest) {
-        // Process synchronously through driver
-        let responses = self.driver.process(vec![request]);
-        self.pending_responses.extend(responses);
+impl IoHandler for MemoryIoHandler {
+    // ================================================================
+    // Object storage
+    // ================================================================
+
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.objects.insert(
+            id,
+            ObjectData {
+                metadata,
+                branches: HashMap::new(),
+            },
+        );
+        Ok(())
     }
 
-    fn send_sync_message(&mut self, _message: OutboxEntry) {
-        // Drop sync messages in tests (unless test needs them)
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        Ok(self.objects.get(&id).map(|obj| obj.metadata.clone()))
     }
 
-    fn schedule_batched_tick(&self) {
-        // No-op - tests call batched_tick explicitly
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        let Some(obj) = self.objects.get(&object_id) else {
+            return Ok(None);
+        };
+        let Some(branch_data) = obj.branches.get(branch) else {
+            return Ok(None);
+        };
+        Ok(Some(LoadedBranch {
+            commits: branch_data.commits.clone(),
+            tails: branch_data.tails.clone(),
+        }))
     }
 
-    fn take_pending_responses(&mut self) -> Vec<StorageResponse> {
-        std::mem::take(&mut self.pending_responses)
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit: Commit,
+    ) -> Result<(), StorageError> {
+        let obj = self.objects.entry(object_id).or_default();
+        let branch_data = obj.branches.entry(*branch).or_default();
+
+        let commit_id = commit.id();
+
+        // Remove parents from tips
+        for parent in &commit.parents {
+            branch_data.tails.remove(parent);
+        }
+
+        // Add this commit as a tip
+        branch_data.tails.insert(commit_id);
+        branch_data.commits.push(commit);
+
+        Ok(())
     }
-}
 
-/// IoHandler that delays storage responses for testing async scenarios.
-/// Unlike TestIoHandler which processes synchronously, this queues requests
-/// and requires explicit `flush()` to process them.
-#[cfg(test)]
-pub use delayed_io_handler::DelayedIoHandler;
-
-#[cfg(test)]
-mod delayed_io_handler {
-    use super::{IoHandler, OutboxEntry, StorageRequest, StorageResponse};
-    use crate::driver::{Driver, TestDriver};
-
-    pub struct DelayedIoHandler {
-        driver: TestDriver,
-        pending_requests: Vec<StorageRequest>,
-        ready_responses: Vec<StorageResponse>,
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit_id: CommitId,
+    ) -> Result<(), StorageError> {
+        if let Some(branch_data) = self
+            .objects
+            .get_mut(&object_id)
+            .and_then(|obj| obj.branches.get_mut(branch))
+        {
+            branch_data.commits.retain(|c| c.id() != commit_id);
+            branch_data.tails.remove(&commit_id);
+        }
+        Ok(())
     }
 
-    impl DelayedIoHandler {
-        pub fn new() -> Self {
-            Self {
-                driver: TestDriver::new(),
-                pending_requests: Vec::new(),
-                ready_responses: Vec::new(),
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        tails: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        if let Some(branch_data) = self
+            .objects
+            .get_mut(&object_id)
+            .and_then(|obj| obj.branches.get_mut(branch))
+        {
+            branch_data.tails = tails.unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    // ================================================================
+    // Blob storage
+    // ================================================================
+
+    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
+        self.blobs.insert(hash, data.to_vec());
+        Ok(())
+    }
+
+    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.blobs.get(&hash).cloned())
+    }
+
+    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
+        self.blobs.remove(&hash);
+        Ok(())
+    }
+
+    // ================================================================
+    // Index operations
+    // ================================================================
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let index = self.indices.entry(key).or_default();
+        let encoded = encode_value(value);
+        index.entry(encoded).or_default().insert(row_id);
+        Ok(())
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        if let Some(index) = self.indices.get_mut(&key) {
+            let encoded = encode_value(value);
+            if let Some(row_ids) = index.get_mut(&encoded) {
+                row_ids.remove(&row_id);
+                if row_ids.is_empty() {
+                    index.remove(&encoded);
+                }
             }
         }
-
-        /// Create with existing driver (for cold-start scenarios)
-        pub fn with_driver(driver: TestDriver) -> Self {
-            Self {
-                driver,
-                pending_requests: Vec::new(),
-                ready_responses: Vec::new(),
-            }
-        }
-
-        /// Process all pending requests and queue responses
-        pub fn process_pending(&mut self) {
-            let requests: Vec<_> = self.pending_requests.drain(..).collect();
-            let responses = self.driver.process(requests);
-            self.ready_responses.extend(responses);
-        }
-
-        /// Take ready responses for parking in RuntimeCore
-        pub fn take_responses(&mut self) -> Vec<StorageResponse> {
-            std::mem::take(&mut self.ready_responses)
-        }
-
-        /// Check if there are pending requests
-        pub fn has_pending_requests(&self) -> bool {
-            !self.pending_requests.is_empty()
-        }
-
-        /// Convenience: process pending and return responses
-        pub fn flush(&mut self) -> Vec<StorageResponse> {
-            self.process_pending();
-            self.take_responses()
-        }
-
-        /// Get driver reference (for verification)
-        pub fn driver(&self) -> &TestDriver {
-            &self.driver
-        }
-
-        /// Take driver out (for cold-start transfer)
-        pub fn into_driver(self) -> TestDriver {
-            self.driver
-        }
+        Ok(())
     }
 
-    impl IoHandler for DelayedIoHandler {
-        fn send_storage_request(&mut self, request: StorageRequest) {
-            self.pending_requests.push(request);
-        }
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let Some(index) = self.indices.get(&key) else {
+            return Vec::new();
+        };
+        let encoded = encode_value(value);
+        index
+            .get(&encoded)
+            .map(|ids| ids.iter().copied().collect())
+            .unwrap_or_default()
+    }
 
-        fn send_sync_message(&mut self, _message: OutboxEntry) {
-            // No-op for local tests
-        }
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Option<&Value>,
+        end: Option<&Value>,
+    ) -> Vec<ObjectId> {
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let Some(index) = self.indices.get(&key) else {
+            return Vec::new();
+        };
 
-        fn schedule_batched_tick(&self) {
-            // No-op - tests control ticking explicitly
-        }
+        use std::ops::Bound;
 
-        fn take_pending_responses(&mut self) -> Vec<StorageResponse> {
-            Vec::new() // Responses come via explicit flush()
-        }
+        let start_bound = match start {
+            Some(v) => Bound::Included(encode_value(v)),
+            None => Bound::Unbounded,
+        };
+        let end_bound = match end {
+            Some(v) => Bound::Excluded(encode_value(v)),
+            None => Bound::Unbounded,
+        };
+
+        index
+            .range((start_bound, end_bound))
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect()
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let Some(index) = self.indices.get(&key) else {
+            return Vec::new();
+        };
+        index.values().flat_map(|ids| ids.iter().copied()).collect()
+    }
+
+    // ================================================================
+    // Sync messages
+    // ================================================================
+
+    fn send_sync_message(&mut self, message: OutboxEntry) {
+        self.outbox.push(message);
+    }
+
+    // ================================================================
+    // Scheduling
+    // ================================================================
+
+    fn schedule_batched_tick(&self) {
+        // No-op for memory handler - tests call tick explicitly
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smallvec::smallvec;
 
-    #[test]
-    fn null_io_handler_implements_trait() {
-        let mut handler = NullIoHandler;
-        // These should not panic
-        handler.send_storage_request(crate::storage::StorageRequest::CreateObject {
-            id: crate::object::ObjectId::new(),
-            metadata: std::collections::HashMap::new(),
-        });
-        handler.send_sync_message(crate::sync_manager::OutboxEntry {
-            destination: crate::sync_manager::Destination::Server(
-                crate::sync_manager::ServerId::new(),
-            ),
-            payload: crate::sync_manager::SyncPayload::ObjectUpdated {
-                object_id: crate::object::ObjectId::new(),
-                metadata: None,
-                branch_name: crate::object::BranchName::new("main"),
-                commits: vec![],
-            },
-        });
-        handler.schedule_batched_tick();
+    fn make_commit(content: &[u8]) -> Commit {
+        Commit {
+            parents: smallvec![],
+            content: content.to_vec(),
+            timestamp: 12345,
+            author: ObjectId::new(),
+            metadata: None,
+            stored_state: Default::default(),
+        }
     }
 
     #[test]
-    fn test_io_handler_processes_through_driver() {
-        use crate::driver::TestDriver;
+    fn memory_io_handler_object_lifecycle() {
+        let mut io = MemoryIoHandler::new();
 
-        let driver = TestDriver::new();
-        let mut handler = TestIoHandler::new(driver);
+        let id = ObjectId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert("table".to_string(), "users".to_string());
 
-        // Send a storage request
-        let object_id = crate::object::ObjectId::new();
-        handler.send_storage_request(StorageRequest::CreateObject {
-            id: object_id,
-            metadata: std::collections::HashMap::new(),
+        // Create object
+        io.create_object(id, metadata.clone()).unwrap();
+
+        // Load metadata
+        let loaded = io.load_object_metadata(id).unwrap();
+        assert_eq!(loaded, Some(metadata));
+
+        // Non-existent object
+        let other_id = ObjectId::new();
+        assert_eq!(io.load_object_metadata(other_id).unwrap(), None);
+    }
+
+    #[test]
+    fn memory_io_handler_branch_and_commits() {
+        let mut io = MemoryIoHandler::new();
+
+        let id = ObjectId::new();
+        let branch = BranchName::new("main");
+
+        io.create_object(id, HashMap::new()).unwrap();
+
+        // Initially no branch
+        assert_eq!(io.load_branch(id, &branch).unwrap(), None);
+
+        // Append commit creates branch
+        let commit = make_commit(b"first");
+        let commit_id = commit.id();
+        io.append_commit(id, &branch, commit).unwrap();
+
+        let loaded = io.load_branch(id, &branch).unwrap().unwrap();
+        assert_eq!(loaded.commits.len(), 1);
+        assert!(loaded.tails.contains(&commit_id));
+
+        // Delete commit
+        io.delete_commit(id, &branch, commit_id).unwrap();
+        let loaded = io.load_branch(id, &branch).unwrap().unwrap();
+        assert_eq!(loaded.commits.len(), 0);
+    }
+
+    #[test]
+    fn memory_io_handler_blob_storage() {
+        let mut io = MemoryIoHandler::new();
+
+        let hash = ContentHash([42u8; 32]);
+        let data = b"hello world";
+
+        // Store
+        io.store_blob(hash, data).unwrap();
+
+        // Load
+        let loaded = io.load_blob(hash).unwrap();
+        assert_eq!(loaded, Some(data.to_vec()));
+
+        // Delete
+        io.delete_blob(hash).unwrap();
+        assert_eq!(io.load_blob(hash).unwrap(), None);
+    }
+
+    #[test]
+    fn memory_io_handler_index_insert_lookup() {
+        let mut io = MemoryIoHandler::new();
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+
+        // Insert two rows with same value
+        io.index_insert("users", "age", "main", &Value::Integer(25), row1)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(25), row2)
+            .unwrap();
+
+        // Lookup should return both
+        let results = io.index_lookup("users", "age", "main", &Value::Integer(25));
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row1));
+        assert!(results.contains(&row2));
+
+        // Different value returns empty
+        let results = io.index_lookup("users", "age", "main", &Value::Integer(30));
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn memory_io_handler_index_remove() {
+        let mut io = MemoryIoHandler::new();
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+
+        io.index_insert("users", "age", "main", &Value::Integer(25), row1)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(25), row2)
+            .unwrap();
+
+        // Remove one
+        io.index_remove("users", "age", "main", &Value::Integer(25), row1)
+            .unwrap();
+
+        let results = io.index_lookup("users", "age", "main", &Value::Integer(25));
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&row2));
+    }
+
+    #[test]
+    fn memory_io_handler_index_range() {
+        let mut io = MemoryIoHandler::new();
+
+        let row20 = ObjectId::new();
+        let row25 = ObjectId::new();
+        let row30 = ObjectId::new();
+        let row35 = ObjectId::new();
+
+        io.index_insert("users", "age", "main", &Value::Integer(20), row20)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(25), row25)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(30), row30)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(35), row35)
+            .unwrap();
+
+        // Range [25, 35) should return 25 and 30
+        let results = io.index_range(
+            "users",
+            "age",
+            "main",
+            Some(&Value::Integer(25)),
+            Some(&Value::Integer(35)),
+        );
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row25));
+        assert!(results.contains(&row30));
+
+        // Unbounded start
+        let results = io.index_range("users", "age", "main", None, Some(&Value::Integer(26)));
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row20));
+        assert!(results.contains(&row25));
+
+        // Unbounded end
+        let results = io.index_range("users", "age", "main", Some(&Value::Integer(30)), None);
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&row30));
+        assert!(results.contains(&row35));
+    }
+
+    #[test]
+    fn memory_io_handler_index_scan_all() {
+        let mut io = MemoryIoHandler::new();
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+        let row3 = ObjectId::new();
+
+        io.index_insert("users", "age", "main", &Value::Integer(20), row1)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(25), row2)
+            .unwrap();
+        io.index_insert("users", "age", "main", &Value::Integer(30), row3)
+            .unwrap();
+
+        let results = io.index_scan_all("users", "age", "main");
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn memory_io_handler_index_branch_isolation() {
+        let mut io = MemoryIoHandler::new();
+
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
+
+        io.index_insert("users", "age", "main", &Value::Integer(25), row1)
+            .unwrap();
+        io.index_insert("users", "age", "feature", &Value::Integer(25), row2)
+            .unwrap();
+
+        // Each branch sees only its own data
+        let main_results = io.index_lookup("users", "age", "main", &Value::Integer(25));
+        assert_eq!(main_results.len(), 1);
+        assert!(main_results.contains(&row1));
+
+        let feature_results = io.index_lookup("users", "age", "feature", &Value::Integer(25));
+        assert_eq!(feature_results.len(), 1);
+        assert!(feature_results.contains(&row2));
+    }
+
+    #[test]
+    fn memory_io_handler_outbox() {
+        use crate::sync_manager::{Destination, ServerId, SyncPayload};
+
+        let mut io = MemoryIoHandler::new();
+
+        assert!(!io.has_outbox_messages());
+
+        io.send_sync_message(OutboxEntry {
+            destination: Destination::Server(ServerId::new()),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: ObjectId::new(),
+                metadata: None,
+                branch_name: BranchName::new("main"),
+                commits: vec![],
+            },
         });
 
-        // Responses should be available immediately
-        let responses = handler.take_pending_responses();
-        assert_eq!(responses.len(), 1);
-        match &responses[0] {
-            StorageResponse::CreateObject { id, result } => {
-                assert_eq!(*id, object_id);
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected CreateObject response"),
-        }
+        assert!(io.has_outbox_messages());
 
-        // Second take should return empty
-        let responses = handler.take_pending_responses();
-        assert!(responses.is_empty());
+        let messages = io.take_outbox();
+        assert_eq!(messages.len(), 1);
+        assert!(!io.has_outbox_messages());
+    }
+
+    #[test]
+    fn encode_value_ordering() {
+        // Null < Boolean < Integer < BigInt < Timestamp < Text < Uuid
+
+        let null = encode_value(&Value::Null);
+        let bool_false = encode_value(&Value::Boolean(false));
+        let bool_true = encode_value(&Value::Boolean(true));
+        let int_neg = encode_value(&Value::Integer(-100));
+        let int_zero = encode_value(&Value::Integer(0));
+        let int_pos = encode_value(&Value::Integer(100));
+
+        assert!(null < bool_false);
+        assert!(bool_false < bool_true);
+        assert!(bool_true < int_neg);
+        assert!(int_neg < int_zero);
+        assert!(int_zero < int_pos);
     }
 }

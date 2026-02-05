@@ -158,11 +158,17 @@ fn park_storage_response(&mut self, response: StorageResponse) { ... }
 
 ### New (Sync)
 
-The new `IoHandler` has **synchronous storage and index methods**. Index operations are built into the trait (not a separate abstraction):
+The new `IoHandler` has **synchronous storage and index methods**. Index operations are built into the trait (not a separate abstraction).
+
+**Design decision: Single-threaded only.** No `Send + Sync` bounds on the trait, no `RwLock` in implementations. This simplifies the design significantly - all Groove operations happen on a single thread (main thread or worker thread). Cross-thread communication uses message passing (sync protocol), not shared mutable state.
 
 ```rust
 /// Synchronous I/O handler for storage, indices, and sync messages.
-pub trait IoHandler: Send + Sync {
+///
+/// Single-threaded: no Send + Sync bounds. Each thread (main, worker)
+/// has its own IoHandler instance. Cross-thread communication uses
+/// the sync protocol over postMessage, not shared state.
+pub trait IoHandler {
     // ================================================================
     // Object storage (sync - returns immediately with result)
     // ================================================================
@@ -188,21 +194,25 @@ pub trait IoHandler: Send + Sync {
     //
     // These replace our entire BTreeIndex implementation.
     // Implementations can use bf-tree, SQLite, or simple HashMaps.
+    //
+    // NOTE: Branch is included to support multi-branch scenarios.
+    // NOTE: Methods take `Value` not raw bytes - each implementation
+    //       handles encoding internally (cleaner separation of concerns).
 
     /// Insert an index entry.
-    fn index_insert(&mut self, table: &str, column: &str, value: &[u8], row_id: ObjectId) -> Result<(), StorageError>;
+    fn index_insert(&mut self, table: &str, column: &str, branch: &str, value: &Value, row_id: ObjectId) -> Result<(), StorageError>;
 
     /// Remove an index entry.
-    fn index_remove(&mut self, table: &str, column: &str, value: &[u8], row_id: ObjectId) -> Result<(), StorageError>;
+    fn index_remove(&mut self, table: &str, column: &str, branch: &str, value: &Value, row_id: ObjectId) -> Result<(), StorageError>;
 
     /// Lookup exact value - returns all row IDs with this value.
-    fn index_lookup(&self, table: &str, column: &str, value: &[u8]) -> Vec<ObjectId>;
+    fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value) -> Vec<ObjectId>;
 
     /// Range scan - returns row IDs where start <= value < end.
-    fn index_range(&self, table: &str, column: &str, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<ObjectId>;
+    fn index_range(&self, table: &str, column: &str, branch: &str, start: Option<&Value>, end: Option<&Value>) -> Vec<ObjectId>;
 
     /// Full scan - returns all row IDs in this index.
-    fn index_scan_all(&self, table: &str, column: &str) -> Vec<ObjectId>;
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
 
     // ================================================================
     // Sync messages (already sync in current design)
@@ -222,13 +232,15 @@ pub trait IoHandler: Send + Sync {
 
 | Implementation | Use Case | Index Backing |
 |----------------|----------|---------------|
-| `MemoryIoHandler` | Tests, main thread | `HashMap<(table, col, value), Vec<ObjectId>>` |
+| `MemoryIoHandler` | Tests, main thread | `HashMap<(table, col, branch), BTreeMap<encoded_value, HashSet<ObjectId>>>` |
 | `BfTreeIoHandler` | Worker (OPFS), Native | bf-tree with composite keys |
 
 **`MemoryIoHandler`** is simple and sufficient for:
 - All groove unit tests
 - All groove integration tests
 - Main thread in browser (it's just a cache)
+
+**Implementation note**: `MemoryIoHandler` uses simple `HashMap`/`BTreeMap` with `&mut self` for mutations. No `RwLock` needed since we're single-threaded. The `&self` methods (`load_*`, `index_lookup`, etc.) only need shared references.
 
 **`BfTreeIoHandler`** adds persistence and is only needed for:
 - Worker with OPFS
@@ -406,10 +418,19 @@ pub struct QueryManager {
     // ...
 }
 
-// After
+// After: No internal index structures - IoHandler provides index ops
 pub struct QueryManager {
-    io: Arc<dyn IoHandler>,  // Indices accessed via io.index_*() methods
+    // No BTreeIndex HashMap here anymore
+    // Index operations receive &mut IoHandler from RuntimeCore
     // ...
+}
+
+impl QueryManager {
+    // Methods that need indices take IoHandler as parameter
+    pub fn process_delta(&mut self, io: &mut impl IoHandler, ...) { ... }
+    pub fn index_scan(&self, io: &impl IoHandler, table: &str, ...) -> Vec<ObjectId> {
+        io.index_lookup(table, column, branch, value)
+    }
 }
 ```
 
@@ -769,14 +790,16 @@ fn encode_index_value(value: &Value) -> Vec<u8> {
 }
 ```
 
-### Storage Trait Implementation
+### IoHandler Implementation
+
+Single-threaded, no interior mutability needed:
 
 ```rust
-pub struct BfTreeStorage {
+pub struct BfTreeIoHandler {
     tree: BfTree,
 }
 
-impl Storage for BfTreeStorage {
+impl IoHandler for BfTreeIoHandler {
     fn create_object(&mut self, id: ObjectId, metadata: HashMap<String, String>) -> Result<(), StorageError> {
         let key = format!("obj:{}:meta", id.uuid());
         let value = serde_json::to_vec(&metadata)?;
@@ -1096,6 +1119,9 @@ This is acceptable because:
 | Durability default | Fire-and-forget, Promise-based `.persisted()` API |
 | Persistence API style | Promise-based |
 | Leader failover | Accept potential loss (fire-and-forget semantics) |
+| Index method branch param | Include branch in all index methods (supports multi-branch) |
+| Index value encoding | Methods take `Value`, not raw bytes - encoding inside IoHandler |
+| Thread safety | **Single-threaded only.** No `Send + Sync` on `IoHandler`, no `RwLock` in `MemoryIoHandler`. Each thread has its own instance; cross-thread uses message passing. |
 
 ## Open Questions
 
@@ -1155,3 +1181,25 @@ This is acceptable because:
 - [ ] Query latency < X ms
 - [ ] Cold start < X ms
 - [ ] Worker persistence overhead acceptable
+
+---
+
+## Phase 10: Cleanup & Ergonomics
+
+**Goal**: Simplify the `&mut io` drilling pattern introduced in Phase 2.
+
+### The Problem
+
+Phase 2 added `io: &mut H` as a parameter to nearly every method in the call chain: `RuntimeCore` → `SchemaManager` → `QueryManager` → `SyncManager` → `ObjectManager`. This is architecturally correct (IoHandler is owned by RuntimeCore, passed down as needed) but ergonomically noisy—every test helper, every call site, every new method needs to thread it through.
+
+### Approaches to Explore
+
+1. **Store `&mut IoHandler` in managers during `process()`**: RuntimeCore could set a temporary reference before calling into SchemaManager, clearing it after. Avoids permanent ownership issues while reducing parameter drilling during the processing phase. Tricky with Rust lifetimes.
+
+2. **RuntimeCore mediates all IO**: Instead of passing `io` down, managers return "intent" values (what they want to read/write), and RuntimeCore executes them. Clean separation but may be too indirect for sync operations that need immediate results.
+
+3. **Accept the drilling**: The current pattern is explicit, Rust-idiomatic, and zero-cost. The verbosity is real but mechanical—it doesn't add conceptual complexity. If the other approaches add lifetime gymnastics or indirection, the cure may be worse than the disease.
+
+### When
+
+After Phase 3 (delete BTreeIndex) settles, since that phase will change the index call patterns significantly. No point optimizing ergonomics on a shape that's about to change.

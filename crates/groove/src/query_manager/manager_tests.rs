@@ -5,7 +5,7 @@
 use serde_json::json;
 use smallvec::smallvec;
 
-use crate::driver::TestDriver;
+use crate::io_handler::MemoryIoHandler;
 use crate::sync_manager::SyncManager;
 
 use super::{
@@ -27,10 +27,13 @@ fn test_schema() -> Schema {
 }
 
 /// Helper to create QueryManager with schema on default branch.
-fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
+fn create_query_manager(
+    sync_manager: SyncManager,
+    schema: Schema,
+) -> (QueryManager, MemoryIoHandler) {
     let mut qm = QueryManager::new(sync_manager);
     qm.set_current_schema(schema, "dev", "main");
-    qm
+    (qm, MemoryIoHandler::new())
 }
 
 /// Get the current branch name from a QueryManager.
@@ -45,10 +48,11 @@ use crate::query_manager::query::Query;
 /// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
 fn execute_query(
     qm: &mut QueryManager,
+    io: &mut MemoryIoHandler,
     query: Query,
 ) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
     let sub_id = qm.subscribe(query)?;
-    qm.process();
+    qm.process(io);
     let results = qm.get_subscription_results(sub_id);
     qm.unsubscribe_with_sync(sub_id);
     Ok(results)
@@ -58,10 +62,14 @@ fn execute_query(
 fn insert_and_get() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     let row = qm.test_get_row_if_loaded(handle.row_id).unwrap();
@@ -73,13 +81,22 @@ fn insert_and_get() {
 fn insert_and_query() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
-    qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
     qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
         "users",
         &[Value::Text("Charlie".into()), Value::Integer(75)],
     )
@@ -87,7 +104,7 @@ fn insert_and_query() {
 
     // Query all
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Query with filter
@@ -95,7 +112,7 @@ fn insert_and_query() {
         .query("users")
         .filter_ge("score", Value::Integer(75))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -103,20 +120,29 @@ fn insert_and_query() {
 fn query_with_sort_and_limit() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
-    qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
     qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
         "users",
         &[Value::Text("Charlie".into()), Value::Integer(75)],
     )
     .unwrap();
 
     let query = qm.query("users").order_by_desc("score").limit(2).build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
@@ -127,13 +153,18 @@ fn query_with_sort_and_limit() {
 fn update_row() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice Updated".into()), Value::Integer(150)],
     )
@@ -148,9 +179,9 @@ fn update_row() {
 fn table_not_found_error() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
-    let result = qm.insert("nonexistent", &[Value::Text("test".into())]);
+    let result = qm.insert(&mut io, "nonexistent", &[Value::Text("test".into())]);
     assert!(matches!(result, Err(QueryError::TableNotFound(_))));
 }
 
@@ -158,9 +189,9 @@ fn table_not_found_error() {
 fn column_count_mismatch_error() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
-    let result = qm.insert("users", &[Value::Text("Alice".into())]);
+    let result = qm.insert(&mut io, "users", &[Value::Text("Alice".into())]);
     assert!(matches!(
         result,
         Err(QueryError::ColumnCountMismatch { .. })
@@ -171,10 +202,14 @@ fn column_count_mismatch_error() {
 fn insert_returns_handle_with_commit_id() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Handle should have the row ID
@@ -188,10 +223,14 @@ fn insert_returns_handle_with_commit_id() {
 fn row_is_indexed_after_insert() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Row should be indexed immediately after insert
@@ -202,11 +241,15 @@ fn row_is_indexed_after_insert() {
 fn index_persistence_via_insert() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Test".into()), Value::Integer(42)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Test".into()), Value::Integer(42)],
+        )
         .unwrap();
 
     // Verify row is indexed
@@ -221,7 +264,7 @@ fn index_persistence_via_insert() {
 fn can_register_query_immediately() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Can register a query subscription immediately
     let query = qm.query("users").build();
@@ -233,18 +276,22 @@ fn can_register_query_immediately() {
 fn subscription_updates_after_insert_and_process() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Register subscription
     let query = qm.query("users").build();
     let sub_id = qm.subscribe(query).unwrap();
 
     // Insert a row
-    qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
 
     // Process - should settle subscriptions
-    qm.process();
+    qm.process(&mut io);
 
     // Now we should have subscription updates
     let updates = qm.take_updates();
@@ -257,17 +304,26 @@ fn subscription_updates_after_insert_and_process() {
 fn multiple_inserts_all_visible_in_query() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Multiple inserts
     let h1 = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let h2 = qm
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(50)],
+        )
         .unwrap();
     let h3 = qm
         .insert(
+            &mut io,
             "users",
             &[Value::Text("Charlie".into()), Value::Integer(75)],
         )
@@ -280,161 +336,21 @@ fn multiple_inserts_all_visible_in_query() {
 
     // Query returns all rows
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Sorted query works
     let query = qm.query("users").order_by_desc("score").limit(2).build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
     assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
 }
 
-#[test]
-fn cold_start_loads_persisted_indices_and_rows() {
-    // Shared driver persists index pages across QM instances
-    let mut driver = TestDriver::new();
-
-    // Phase 1: Create QM, insert rows, persist indices
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let mut qm1 = create_query_manager(sync_manager, schema.clone());
-
-    // Insert some rows
-    let h1 = qm1
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    let h2 = qm1
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
-
-    // Persist storage (row objects + index pages)
-    qm1.process_storage_with_driver(&mut driver);
-
-    // Rows are indexed
-    assert!(h1.is_indexed(&qm1, "users"));
-    assert!(h2.is_indexed(&qm1, "users"));
-
-    // Phase 2: "Cold start" - create new QM with same underlying ObjectManager
-    let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
-    let mut qm2 = create_query_manager(sync_manager2, schema);
-
-    // Load indices from driver (cold start)
-    qm2.load_indices_from_driver(&mut driver);
-
-    // Verify rows are discoverable via get()
-    assert!(qm2.test_get_row_if_loaded(h1.row_id).is_some());
-    assert!(qm2.test_get_row_if_loaded(h2.row_id).is_some());
-
-    // Verify queries work
-    let query = qm2.query("users").build();
-    let results = execute_query(&mut qm2, query).unwrap();
-    assert_eq!(results.len(), 2);
-
-    // Verify filtered query works (proves indices were loaded)
-    let query = qm2
-        .query("users")
-        .filter_ge("score", Value::Integer(75))
-        .build();
-    let results = execute_query(&mut qm2, query).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
-}
-
-#[test]
-fn cold_start_only_loads_queried_rows() {
-    // This test verifies that after cold start:
-    // 1. process() does NOT eagerly load all rows into a cache
-    // 2. Queries access ObjectManager directly (no redundant row_cache)
-    // 3. Rows not yet in ObjectManager return None gracefully
-
-    // Shared driver persists index pages across QM instances
-    let mut driver = TestDriver::new();
-
-    // Phase 1: Create QM, insert multiple rows
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let mut qm1 = create_query_manager(sync_manager, schema.clone());
-
-    let h1 = qm1
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    let h2 = qm1
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
-    let h3 = qm1
-        .insert(
-            "users",
-            &[Value::Text("Charlie".into()), Value::Integer(75)],
-        )
-        .unwrap();
-
-    // Persist storage
-    qm1.process_storage_with_driver(&mut driver);
-
-    // Phase 2: Simulate cold start with new QM
-    let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
-    let mut qm2 = create_query_manager(sync_manager2, schema);
-
-    // Load indices from driver (cold start)
-    qm2.load_indices_from_driver(&mut driver);
-
-    // Query for specific rows (filter: score >= 75)
-    let query = qm2
-        .query("users")
-        .filter_ge("score", Value::Integer(75))
-        .build();
-    let results = execute_query(&mut qm2, query).unwrap();
-
-    // Should find 2 rows (Alice: 100, Charlie: 75)
-    assert_eq!(results.len(), 2);
-
-    // Verify all rows are accessible via get() - reads from ObjectManager directly
-    assert!(qm2.test_get_row_if_loaded(h1.row_id).is_some()); // Alice
-    assert!(qm2.test_get_row_if_loaded(h2.row_id).is_some()); // Bob
-    assert!(qm2.test_get_row_if_loaded(h3.row_id).is_some()); // Charlie
-}
-
-#[test]
-fn cold_start_with_sorted_query() {
-    // Shared driver persists index pages across QM instances
-    let mut driver = TestDriver::new();
-
-    // Phase 1: Insert rows
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let mut qm1 = create_query_manager(sync_manager, schema.clone());
-
-    qm1.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    qm1.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
-    qm1.insert(
-        "users",
-        &[Value::Text("Charlie".into()), Value::Integer(75)],
-    )
-    .unwrap();
-
-    // Persist storage
-    qm1.process_storage_with_driver(&mut driver);
-
-    // Phase 2: Cold start
-    let sync_manager2 = std::mem::replace(qm1.sync_manager_mut(), SyncManager::new());
-    let mut qm2 = create_query_manager(sync_manager2, schema);
-
-    // Load indices from driver (cold start)
-    qm2.load_indices_from_driver(&mut driver);
-
-    // Sorted query should work
-    let query = qm2.query("users").order_by_desc("score").build();
-    let results = execute_query(&mut qm2, query).unwrap();
-
-    assert_eq!(results.len(), 3);
-    assert_eq!(results[0].1[0], Value::Text("Alice".into())); // 100
-    assert_eq!(results[1].1[0], Value::Text("Charlie".into())); // 75
-    assert_eq!(results[2].1[0], Value::Text("Bob".into())); // 50
-}
+// NOTE: cold_start_loads_persisted_indices_and_rows, cold_start_only_loads_queried_rows,
+// and cold_start_with_sorted_query tests were removed because they used
+// process_storage_with_driver() and load_indices_from_driver() which no longer exist.
+// Cold start behavior is now handled by the IoHandler-based storage layer.
 
 #[test]
 fn local_update_updates_all_column_indices() {
@@ -443,11 +359,15 @@ fn local_update_updates_all_column_indices() {
     // 2. Adds new values to column indices
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert row with name="Alice", score=100
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Query by name="Alice" → finds row
@@ -455,7 +375,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
 
     // Query by score=100 → finds row
@@ -463,11 +383,12 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
 
     // Update to name="Bob", score=200
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Bob".into()), Value::Integer(200)],
     )
@@ -478,7 +399,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -490,7 +411,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Bob".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1, "New name value should be in index");
 
     // Query by score=100 → empty (old value removed from index)
@@ -498,7 +419,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -510,7 +431,7 @@ fn local_update_updates_all_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(200))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1, "New score value should be in index");
 }
 
@@ -525,7 +446,7 @@ fn synced_update_updates_column_indices() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
     // Simulate receiving a new object from sync
@@ -537,7 +458,7 @@ fn synced_update_updates_column_indices() {
     metadata.insert("table".to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(row_id, metadata);
+        .receive_object(&mut io, row_id, metadata);
 
     // Subscribe to all objects so we get AllObjectUpdate notifications
     qm.sync_manager_mut().object_manager.subscribe_all();
@@ -565,18 +486,18 @@ fn synced_update_updates_column_indices() {
     let commit1_id = qm
         .sync_manager_mut()
         .object_manager
-        .receive_commit(row_id, &branch, commit1)
+        .receive_commit(&mut io, row_id, &branch, commit1)
         .unwrap();
 
     // Process to handle the AllObjectUpdate
-    qm.process();
+    qm.process(&mut io);
 
     // Query by name="Alice" → finds row
     let query = qm
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -588,7 +509,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -613,18 +534,18 @@ fn synced_update_updates_column_indices() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id, &branch, commit2)
+        .receive_commit(&mut io, row_id, &branch, commit2)
         .unwrap();
 
     // Process to handle the AllObjectUpdate with old_content
-    qm.process();
+    qm.process(&mut io);
 
     // Query by name="Alice" → empty (old value removed from index)
     let query = qm
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -636,7 +557,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("name", Value::Text("Bob".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -648,7 +569,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(100))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -660,7 +581,7 @@ fn synced_update_updates_column_indices() {
         .query("users")
         .filter_eq("score", Value::Integer(200))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -678,7 +599,7 @@ fn synced_insert_appears_in_subscription_delta() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
     // Simulate receiving a new row from sync BEFORE subscribing
@@ -691,7 +612,7 @@ fn synced_insert_appears_in_subscription_delta() {
     metadata.insert("table".to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(row_id, metadata);
+        .receive_object(&mut io, row_id, metadata);
 
     // Subscribe to all objects so we get AllObjectUpdate notifications
     qm.sync_manager_mut().object_manager.subscribe_all();
@@ -722,11 +643,11 @@ fn synced_insert_appears_in_subscription_delta() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id, &branch, commit)
+        .receive_commit(&mut io, row_id, &branch, commit)
         .unwrap();
 
     // Process to handle the AllObjectUpdate
-    qm.process();
+    qm.process(&mut io);
 
     // Verify subscription delta contains the added row
     let updates = qm.take_updates();
@@ -760,7 +681,7 @@ fn synced_update_is_visible_in_query() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
     // Subscribe to all objects for sync updates
@@ -768,20 +689,24 @@ fn synced_update_is_visible_in_query() {
 
     // Insert a row locally first
     let insert_handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let row_id = insert_handle.row_id;
     let first_commit_id = insert_handle.row_commit_id;
 
     // Process to settle the initial insert
-    qm.process();
+    qm.process(&mut io);
 
     // Verify initial data is queryable
     let query = qm
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1, "Should find initial row");
     assert_eq!(results[0].1[0], Value::Text("Alice".into()));
     assert_eq!(results[0].1[1], Value::Integer(100));
@@ -808,18 +733,18 @@ fn synced_update_is_visible_in_query() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id, &branch, update_commit)
+        .receive_commit(&mut io, row_id, &branch, update_commit)
         .unwrap();
 
     // Process to handle the synced update
-    qm.process();
+    qm.process(&mut io);
 
     // Old data should no longer be in index
     let query = qm
         .query("users")
         .filter_eq("name", Value::Text("Alice".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 0, "Old name should not be found");
 
     // New data should be queryable
@@ -827,7 +752,7 @@ fn synced_update_is_visible_in_query() {
         .query("users")
         .filter_eq("name", Value::Text("Alice Updated".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1, "Should find updated row by new name");
     assert_eq!(results[0].1[0], Value::Text("Alice Updated".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
@@ -837,7 +762,7 @@ fn synced_update_is_visible_in_query() {
         .query("users")
         .filter_eq("score", Value::Integer(200))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1, "Should find updated row by new score");
 }
 
@@ -852,7 +777,7 @@ fn synced_row_visible_in_filtered_subscription() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
     // Subscribe to all objects for sync updates
@@ -880,7 +805,7 @@ fn synced_row_visible_in_filtered_subscription() {
     metadata_1.insert("table".to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(row_id_1, metadata_1);
+        .receive_object(&mut io, row_id_1, metadata_1);
 
     let data_1 = encode_row(
         &descriptor,
@@ -898,10 +823,10 @@ fn synced_row_visible_in_filtered_subscription() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id_1, &branch, commit_1)
+        .receive_commit(&mut io, row_id_1, &branch, commit_1)
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     assert_eq!(
@@ -931,7 +856,7 @@ fn synced_row_visible_in_filtered_subscription() {
     metadata_2.insert("table".to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(row_id_2, metadata_2);
+        .receive_object(&mut io, row_id_2, metadata_2);
 
     let data_2 = encode_row(
         &descriptor,
@@ -949,10 +874,10 @@ fn synced_row_visible_in_filtered_subscription() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id_2, &branch, commit_2)
+        .receive_commit(&mut io, row_id_2, &branch, commit_2)
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     // Should have NO updates because the row doesn't match the filter
@@ -967,7 +892,7 @@ fn synced_row_visible_in_filtered_subscription() {
         .query("users")
         .filter_eq("name", Value::Text("LowScorer".into()))
         .build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -984,11 +909,15 @@ fn local_update_emits_subscription_delta() {
     // Verify that local qm.update() causes subscription to emit an update delta
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Subscribe to all users
@@ -996,20 +925,21 @@ fn local_update_emits_subscription_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get the initial add
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].delta.added.len(), 1);
 
     // Update the row
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice Updated".into()), Value::Integer(200)],
     )
     .unwrap();
 
     // Process
-    qm.process();
+    qm.process(&mut io);
 
     // Should have an update delta
     let updates = qm.take_updates();
@@ -1047,14 +977,18 @@ fn synced_update_emits_subscription_delta() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Subscribe to all objects for sync updates
     qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Insert a row locally first
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let row_id = handle.row_id;
     let first_commit_id = handle.row_commit_id;
@@ -1064,7 +998,7 @@ fn synced_update_emits_subscription_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get the initial add
-    qm.process();
+    qm.process(&mut io);
     let _updates = qm.take_updates(); // Clear initial add
 
     // Now simulate a synced update
@@ -1090,11 +1024,11 @@ fn synced_update_emits_subscription_delta() {
     let branch = get_branch(&qm);
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id, &branch, update_commit)
+        .receive_commit(&mut io, row_id, &branch, update_commit)
         .unwrap();
 
     // Process
-    qm.process();
+    qm.process(&mut io);
 
     // Should have an update delta
     let updates = qm.take_updates();
@@ -1121,33 +1055,39 @@ fn multiple_updates_same_row_single_delta() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert and subscribe
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     let query = qm.query("users").build();
     let _sub_id = qm.subscribe(query).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let _updates = qm.take_updates(); // Clear initial add
 
     // Update twice before process()
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice V2".into()), Value::Integer(200)],
     )
     .unwrap();
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice V3".into()), Value::Integer(300)],
     )
     .unwrap();
 
     // Single process()
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1, "Should have one subscription update");
@@ -1175,11 +1115,15 @@ fn update_fails_filter_emits_removal() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert row with score=100
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Subscribe to score > 50
@@ -1189,7 +1133,7 @@ fn update_fails_filter_emits_removal() {
         .build();
     let sub_id = qm.subscribe(query).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(
@@ -1200,12 +1144,13 @@ fn update_fails_filter_emits_removal() {
 
     // Update score to 30 (fails filter)
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(30)],
     )
     .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
@@ -1223,11 +1168,15 @@ fn update_passes_filter_emits_addition() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert row with score=30 (fails filter)
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(30)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(30)],
+        )
         .unwrap();
 
     // Subscribe to score > 50
@@ -1237,19 +1186,20 @@ fn update_passes_filter_emits_addition() {
         .build();
     let sub_id = qm.subscribe(query).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     // Row doesn't match filter, so no delta or empty delta
     assert!(updates.is_empty() || updates[0].delta.added.is_empty());
 
     // Update score to 100 (passes filter)
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     )
     .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
@@ -1267,11 +1217,15 @@ fn update_still_passes_filter_emits_update() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert row with score=100
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Subscribe to score > 50
@@ -1281,17 +1235,18 @@ fn update_still_passes_filter_emits_update() {
         .build();
     let sub_id = qm.subscribe(query).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let _updates = qm.take_updates(); // Clear initial add
 
     // Update score to 200 (still passes filter)
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice Updated".into()), Value::Integer(200)],
     )
     .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
@@ -1309,11 +1264,15 @@ fn update_to_untracked_row_is_silent() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert row with score=30 (fails filter)
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(30)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(30)],
+        )
         .unwrap();
 
     // Subscribe to score > 50
@@ -1323,17 +1282,18 @@ fn update_to_untracked_row_is_silent() {
         .build();
     let _sub_id = qm.subscribe(query).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let _updates = qm.take_updates();
 
     // Update score to 40 (still fails filter)
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(40)],
     )
     .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     // Should be no updates (or empty delta)
@@ -1352,7 +1312,7 @@ fn insert_then_update_same_cycle() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Subscribe first
     let query = qm.query("users").build();
@@ -1360,18 +1320,23 @@ fn insert_then_update_same_cycle() {
 
     // Insert
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Update before process()
     qm.update(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice Updated".into()), Value::Integer(200)],
     )
     .unwrap();
 
     // Single process()
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
@@ -1409,7 +1374,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
     // Add a "server" that we'll receive updates from
@@ -1424,7 +1389,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to initialize - expect an initial empty update (subscription settled)
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1, "Should have initial settlement update");
     assert!(
@@ -1474,10 +1439,10 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     });
 
     // Process the inbox (SyncManager level)
-    qm.sync_manager_mut().process_inbox();
+    qm.sync_manager_mut().process_inbox(&mut io);
 
     // Process (QueryManager level) - this should pick up the object update
-    qm.process();
+    qm.process(&mut io);
 
     // Verify subscription received the delta
     let updates = qm.take_updates();
@@ -1505,7 +1470,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
     // Add a "server"
@@ -1515,7 +1480,11 @@ fn sync_inbox_update_flows_to_subscription_delta() {
 
     // Insert a row locally first
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let row_id = handle.row_id;
     let first_commit_id = handle.row_commit_id;
@@ -1525,7 +1494,7 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial state
-    qm.process();
+    qm.process(&mut io);
     let _ = qm.take_updates(); // Clear initial delta
 
     // Now simulate receiving an update from sync (as if another peer modified the row)
@@ -1560,8 +1529,8 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     });
 
     // Process both layers
-    qm.sync_manager_mut().process_inbox();
-    qm.process();
+    qm.sync_manager_mut().process_inbox(&mut io);
+    qm.process(&mut io);
 
     // Verify subscription received update delta
     let updates = qm.take_updates();
@@ -1585,7 +1554,7 @@ fn two_peer_sync_insert_reaches_subscription() {
     // Full two-peer test: Peer A inserts → (simulated sync) → Peer B subscription delta
     // This demonstrates the conceptual flow even though we construct the payload manually
     use crate::commit::{Commit, StoredState};
-    use crate::object::{BranchName, ObjectState};
+    use crate::object::BranchName;
     use crate::query_manager::encoding::decode_row;
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
 
@@ -1593,8 +1562,8 @@ fn two_peer_sync_insert_reaches_subscription() {
     let sync_manager_a = SyncManager::new();
     let sync_manager_b = SyncManager::new();
     let schema = test_schema();
-    let mut peer_a = create_query_manager(sync_manager_a, schema.clone());
-    let mut peer_b = create_query_manager(sync_manager_b, schema);
+    let (mut peer_a, mut io_a) = create_query_manager(sync_manager_a, schema.clone());
+    let (mut peer_b, mut io_b) = create_query_manager(sync_manager_b, schema);
 
     // Peer B subscribes to all objects and sets up query subscription
     peer_b.sync_manager_mut().object_manager.subscribe_all();
@@ -1606,13 +1575,14 @@ fn two_peer_sync_insert_reaches_subscription() {
     peer_b.sync_manager_mut().add_server(peer_a_as_server);
 
     // Process both to initialize
-    peer_a.process();
-    peer_b.process();
+    peer_a.process(&mut io_a);
+    peer_b.process(&mut io_b);
     let _ = peer_b.take_updates();
 
     // Peer A inserts a row
     let handle = peer_a
         .insert(
+            &mut io_a,
             "users",
             &[Value::Text("FromPeerA".into()), Value::Integer(123)],
         )
@@ -1623,20 +1593,15 @@ fn two_peer_sync_insert_reaches_subscription() {
     // This simulates "what would be sent over the wire"
     let branch_name = get_branch(&peer_a);
     let (row_data, metadata) = {
-        let state = peer_a
+        let obj = peer_a
             .sync_manager_mut()
             .object_manager
-            .get_state(row_id)
-            .unwrap();
-        match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                let branch = obj.branches.get(&BranchName::new(&branch_name)).unwrap();
-                let tip_id = branch.tips.iter().next().unwrap();
-                let commit = branch.commits.get(tip_id).unwrap();
-                (commit.content.clone(), obj.metadata.clone())
-            }
-            _ => panic!("Object should be available"),
-        }
+            .get(row_id)
+            .expect("Object should be available");
+        let branch = obj.branches.get(&BranchName::new(&branch_name)).unwrap();
+        let tip_id = branch.tips.iter().next().unwrap();
+        let commit = branch.commits.get(tip_id).unwrap();
+        (commit.content.clone(), obj.metadata.clone())
     };
 
     // Construct the sync payload as it would appear on the wire
@@ -1664,8 +1629,8 @@ fn two_peer_sync_insert_reaches_subscription() {
     });
 
     // Peer B processes the sync message
-    peer_b.sync_manager_mut().process_inbox();
-    peer_b.process();
+    peer_b.sync_manager_mut().process_inbox(&mut io_b);
+    peer_b.process(&mut io_b);
 
     // Verify Peer B's subscription received the row
     let updates = peer_b.take_updates();
@@ -1700,18 +1665,22 @@ fn two_peer_sync_insert_reaches_subscription() {
 fn soft_delete_removes_from_id_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Verify row is in _id index
     assert!(qm.row_is_indexed("users", handle.row_id));
 
     // Delete the row
-    let delete_handle = qm.delete(handle.row_id).unwrap();
+    let delete_handle = qm.delete(&mut io, handle.row_id).unwrap();
     assert_eq!(delete_handle.row_id, handle.row_id);
 
     // Verify row is no longer in _id index
@@ -1722,18 +1691,22 @@ fn soft_delete_removes_from_id_index() {
 fn soft_delete_adds_to_id_deleted_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Verify row is NOT in _id_deleted index
     assert!(!qm.row_is_deleted("users", handle.row_id));
 
     // Delete the row
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
 
     // Verify row IS in _id_deleted index
     assert!(qm.row_is_deleted("users", handle.row_id));
@@ -1743,26 +1716,34 @@ fn soft_delete_adds_to_id_deleted_index() {
 fn soft_deleted_row_not_in_query_results() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert rows
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
 
     // Verify both rows are visible
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 2);
 
     // Delete Alice
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
 
     // Verify only Bob is visible
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
@@ -1771,18 +1752,22 @@ fn soft_deleted_row_not_in_query_results() {
 fn delete_already_deleted_row_fails() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Delete the row
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
 
     // Try to delete again - should fail
-    let result = qm.delete(handle.row_id);
+    let result = qm.delete(&mut io, handle.row_id);
     assert!(matches!(result, Err(QueryError::RowAlreadyDeleted(_))));
 }
 
@@ -1791,21 +1776,22 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     // Test that soft deleting an object with two concurrent tips results
     // in a soft delete commit with content from the LWW winner (highest timestamp).
     use crate::commit::{Commit, StoredState};
-    use crate::object::{BranchName, ObjectState};
+    use crate::object::BranchName;
     use crate::query_manager::encoding::encode_row;
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
         .insert(
+            &mut io,
             "users",
             &[Value::Text("Original".into()), Value::Integer(0)],
         )
         .unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     // Get the initial commit as the common parent
     let branch = get_branch(&qm);
@@ -1865,12 +1851,12 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     let commit_a_id = qm
         .sync_manager_mut()
         .object_manager
-        .receive_commit(handle.row_id, &branch, commit_a)
+        .receive_commit(&mut io, handle.row_id, &branch, commit_a)
         .unwrap();
     let commit_b_id = qm
         .sync_manager_mut()
         .object_manager
-        .receive_commit(handle.row_id, &branch, commit_b)
+        .receive_commit(&mut io, handle.row_id, &branch, commit_b)
         .unwrap();
 
     // Verify we now have concurrent tips
@@ -1887,43 +1873,40 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     assert!(tips.contains(&commit_b_id));
 
     // Process updates
-    qm.process();
+    qm.process(&mut io);
 
     // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
-    let delete_handle = qm.delete(handle.row_id).unwrap();
+    let delete_handle = qm.delete(&mut io, handle.row_id).unwrap();
 
     // Get the delete commit and verify its content
-    let state = qm
+    let obj = qm
         .sync_manager_mut()
         .object_manager
-        .get_state(handle.row_id)
-        .unwrap();
-    match state {
-        ObjectState::Available(obj) | ObjectState::Creating(obj) => {
-            let branch = obj.branches.get(&branch_name).unwrap();
-            let delete_commit = branch.commits.get(&delete_handle.delete_commit_id).unwrap();
+        .get(handle.row_id)
+        .expect("Object should be available");
+    {
+        let branch = obj.branches.get(&branch_name).unwrap();
+        let delete_commit = branch.commits.get(&delete_handle.delete_commit_id).unwrap();
 
-            // Verify the soft delete commit has content from the LWW winner (TipB)
-            assert_eq!(
-                delete_commit.content, content_b,
-                "Soft delete should preserve content from LWW winner"
-            );
+        // Verify the soft delete commit has content from the LWW winner (TipB)
+        assert_eq!(
+            delete_commit.content, content_b,
+            "Soft delete should preserve content from LWW winner"
+        );
 
-            // Also verify metadata
-            assert_eq!(
-                delete_commit
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("delete")),
-                Some(&"soft".to_string())
-            );
-        }
-        _ => panic!("Object should be available"),
+        // Also verify metadata
+        assert_eq!(
+            delete_commit
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("delete")),
+            Some(&"soft".to_string())
+        );
     }
 
     // Additionally verify that querying with include_deleted shows the correct content
     let query = qm.query("users").include_deleted().build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("TipB".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
@@ -1937,21 +1920,26 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
 fn undelete_adds_to_id_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Delete the row
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is not in _id index
     assert!(!qm.row_is_indexed("users", handle.row_id));
 
     // Undelete with new values
     qm.undelete(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice Restored".into()), Value::Integer(150)],
     )
@@ -1965,19 +1953,24 @@ fn undelete_adds_to_id_index() {
 fn undelete_removes_from_id_deleted_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Delete the row
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
     assert!(qm.row_is_deleted("users", handle.row_id));
 
     // Undelete
     qm.undelete(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     )
@@ -1991,23 +1984,28 @@ fn undelete_removes_from_id_deleted_index() {
 fn undelete_row_appears_in_query_results() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Delete the row
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
 
     // Verify not visible
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 0);
 
     // Undelete with new values
     qm.undelete(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice Restored".into()), Value::Integer(200)],
     )
@@ -2015,7 +2013,7 @@ fn undelete_row_appears_in_query_results() {
 
     // Verify visible again with new values
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Alice Restored".into()));
     assert_eq!(results[0].1[1], Value::Integer(200));
@@ -2025,15 +2023,20 @@ fn undelete_row_appears_in_query_results() {
 fn undelete_nondeleted_row_fails() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Try to undelete a non-deleted row - should fail
     let result = qm.undelete(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
@@ -2048,15 +2051,19 @@ fn undelete_nondeleted_row_fails() {
 fn hard_delete_removes_from_id_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Hard delete the row
-    qm.hard_delete(handle.row_id).unwrap();
+    qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is not in _id index
     assert!(!qm.row_is_indexed("users", handle.row_id));
@@ -2066,19 +2073,23 @@ fn hard_delete_removes_from_id_index() {
 fn hard_delete_removes_from_id_deleted_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Soft delete first (puts it in _id_deleted)
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
     assert!(qm.row_is_deleted("users", handle.row_id));
 
     // Then hard delete (removes from _id_deleted)
-    qm.hard_delete(handle.row_id).unwrap();
+    qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is NOT in _id_deleted index
     assert!(!qm.row_is_deleted("users", handle.row_id));
@@ -2088,15 +2099,19 @@ fn hard_delete_removes_from_id_deleted_index() {
 fn hard_deleted_row_not_in_any_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Hard delete
-    qm.hard_delete(handle.row_id).unwrap();
+    qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Verify row is not in _id index
     assert!(!qm.row_is_indexed("users", handle.row_id));
@@ -2108,19 +2123,23 @@ fn hard_deleted_row_not_in_any_index() {
 fn soft_then_hard_delete_removes_from_id_deleted() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Soft delete - row should be in _id_deleted
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
     assert!(qm.row_is_deleted("users", handle.row_id));
 
     // Hard delete - row should be removed from _id_deleted
-    qm.hard_delete(handle.row_id).unwrap();
+    qm.hard_delete(&mut io, handle.row_id).unwrap();
     assert!(!qm.row_is_deleted("users", handle.row_id));
 }
 
@@ -2128,18 +2147,23 @@ fn soft_then_hard_delete_removes_from_id_deleted() {
 fn undelete_hard_deleted_row_fails() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Hard delete
-    qm.hard_delete(handle.row_id).unwrap();
+    qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Try to undelete - should fail
     let result = qm.undelete(
+        &mut io,
         handle.row_id,
         &[Value::Text("Alice".into()), Value::Integer(100)],
     );
@@ -2154,19 +2178,23 @@ fn undelete_hard_deleted_row_fails() {
 fn truncate_soft_deleted_row() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Soft delete
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
     assert!(qm.row_is_deleted("users", handle.row_id));
 
     // Truncate (upgrade to hard delete)
-    qm.truncate(handle.row_id).unwrap();
+    qm.truncate(&mut io, handle.row_id).unwrap();
 
     // Verify row is completely gone
     assert!(!qm.row_is_indexed("users", handle.row_id));
@@ -2177,15 +2205,19 @@ fn truncate_soft_deleted_row() {
 fn truncate_nondeleted_row_fails() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Try to truncate a non-deleted row - should fail
-    let result = qm.truncate(handle.row_id);
+    let result = qm.truncate(&mut io, handle.row_id);
     assert!(matches!(result, Err(QueryError::RowNotDeleted(_))));
 }
 
@@ -2197,28 +2229,36 @@ fn truncate_nondeleted_row_fails() {
 fn include_deleted_query_returns_soft_deleted_rows() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert rows
     let handle1 = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
 
     // Delete Alice
-    qm.delete(handle1.row_id).unwrap();
+    qm.delete(&mut io, handle1.row_id).unwrap();
 
     // Normal query - only Bob (Alice is in _id_deleted, not _id)
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 
     // Include deleted query - scans both _id and _id_deleted indices
     // Soft-deleted rows have preserved content, so both Alice and Bob are returned
     let query = qm.query("users").include_deleted().build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 2);
 
     // Verify Alice's data is preserved
@@ -2236,21 +2276,29 @@ fn include_deleted_query_returns_soft_deleted_rows() {
 fn include_deleted_query_does_not_return_hard_deleted_rows() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert rows
     let handle1 = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
 
     // Hard delete Alice
-    qm.hard_delete(handle1.row_id).unwrap();
+    qm.hard_delete(&mut io, handle1.row_id).unwrap();
 
     // Include deleted query - only Bob (Alice is hard deleted)
     let query = qm.query("users").include_deleted().build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("Bob".into()));
 }
@@ -2263,11 +2311,15 @@ fn include_deleted_query_does_not_return_hard_deleted_rows() {
 fn soft_delete_emits_removal_delta() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Subscribe to all users
@@ -2275,16 +2327,16 @@ fn soft_delete_emits_removal_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial delta
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].delta.added.len(), 1); // Alice added
 
     // Delete Alice
-    qm.delete(handle.row_id).unwrap();
+    qm.delete(&mut io, handle.row_id).unwrap();
 
     // Process and check for removal delta
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
@@ -2296,11 +2348,15 @@ fn soft_delete_emits_removal_delta() {
 fn hard_delete_emits_removal_delta() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a row
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Subscribe to all users
@@ -2308,16 +2364,16 @@ fn hard_delete_emits_removal_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial delta
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].delta.added.len(), 1); // Alice added
 
     // Hard delete Alice
-    qm.hard_delete(handle.row_id).unwrap();
+    qm.hard_delete(&mut io, handle.row_id).unwrap();
 
     // Process and check for removal delta
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
@@ -2329,14 +2385,22 @@ fn hard_delete_emits_removal_delta() {
 fn delete_row_not_in_subscription_no_delta() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert rows
     let alice_handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
 
     // Subscribe to users with score >= 75 (only Alice)
     let query = qm
@@ -2346,16 +2410,16 @@ fn delete_row_not_in_subscription_no_delta() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get initial delta
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].delta.added.len(), 1); // Only Alice
 
     // Delete Alice (who IS in subscription) - should emit removal delta
-    qm.delete(alice_handle.row_id).unwrap();
+    qm.delete(&mut io, alice_handle.row_id).unwrap();
 
     // Process and verify we got removal delta
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
@@ -2395,7 +2459,7 @@ fn join_compiles_but_not_executed_yet() {
     // Once execute() supports joins, this test can be extended.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Build a join query
     let query = qm
@@ -2413,7 +2477,7 @@ fn join_compiles_but_not_executed_yet() {
 fn join_query_with_projection_compiles() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("users")
@@ -2433,7 +2497,7 @@ fn join_query_with_projection_compiles() {
 fn join_query_with_alias_compiles() {
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("users")
@@ -2463,7 +2527,7 @@ fn self_join_query_compiles() {
     );
 
     let sync_manager = SyncManager::new();
-    let qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("employees")
@@ -2510,7 +2574,7 @@ fn multi_join_query_compiles() {
     );
 
     let sync_manager = SyncManager::new();
-    let qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     let query = qm
         .query("orders")
@@ -2536,7 +2600,7 @@ fn join_subscription_marks_dirty_for_joined_table() {
     // joined table get marked dirty when we insert into that table.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Subscribe to a join query: users JOIN posts ON users.id = posts.author_id
     let query = qm
@@ -2547,7 +2611,7 @@ fn join_subscription_marks_dirty_for_joined_table() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process once to settle initial state
-    qm.process();
+    qm.process(&mut io);
     let _ = qm.take_updates();
 
     // Verify the subscription has index scan nodes for BOTH tables
@@ -2576,6 +2640,7 @@ fn join_subscription_marks_dirty_for_joined_table() {
 
     // Insert into the JOINED table (posts), not the base table (users)
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -2600,16 +2665,21 @@ fn join_produces_combined_tuples() {
     // This verifies basic join functionality and tuple structure.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert a user
     let user_id = qm
-        .insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
         .unwrap();
 
     // Insert a post by that user
     let post_id = qm
         .insert(
+            &mut io,
             "posts",
             &[
                 Value::Integer(100),
@@ -2628,7 +2698,7 @@ fn join_produces_combined_tuples() {
     let sub_id = qm.subscribe(query).unwrap();
 
     // Process to get join results
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     let delta = updates
         .iter()
@@ -2657,16 +2727,25 @@ fn join_filter_on_joined_table_column() {
     // FilterNode now uses TupleDescriptor to resolve column indices to correct tuple elements.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert users
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
-    qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
 
     // Insert posts - one should match filter, one should not
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -2676,6 +2755,7 @@ fn join_filter_on_joined_table_column() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -2698,7 +2778,7 @@ fn join_filter_on_joined_table_column() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     let delta = updates
         .iter()
@@ -2762,14 +2842,19 @@ fn users_with_posts_descriptor() -> RowDescriptor {
 fn array_subquery_single_user_with_posts() {
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert one user: Alice with id=1
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
 
     // Insert two posts for Alice
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -2779,6 +2864,7 @@ fn array_subquery_single_user_with_posts() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -2797,7 +2883,7 @@ fn array_subquery_single_user_with_posts() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -2843,11 +2929,15 @@ fn array_subquery_single_user_with_posts() {
 fn array_subquery_user_with_no_posts() {
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user with no posts
-    qm.insert("users", &[Value::Integer(1), Value::Text("Lonely".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Lonely".into())],
+    )
+    .unwrap();
 
     let query = qm
         .query("users")
@@ -2857,7 +2947,7 @@ fn array_subquery_user_with_no_posts() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -2884,16 +2974,25 @@ fn array_subquery_user_with_no_posts() {
 fn array_subquery_multiple_users_correct_correlation() {
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert users
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
-    qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
 
     // Alice's posts (author_id = 1)
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -2905,6 +3004,7 @@ fn array_subquery_multiple_users_correct_correlation() {
 
     // Bob's posts (author_id = 2)
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(200),
@@ -2922,7 +3022,7 @@ fn array_subquery_multiple_users_correct_correlation() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -2978,14 +3078,19 @@ fn array_subquery_delta_on_inner_insert() {
     // with the updated user row containing the new post in the array.
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user Alice
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
 
     // Insert initial post
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3004,7 +3109,7 @@ fn array_subquery_delta_on_inner_insert() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     // Consume initial update
     let initial_updates = qm.take_updates();
@@ -3024,6 +3129,7 @@ fn array_subquery_delta_on_inner_insert() {
 
     // NOW: Insert a new post for Alice
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -3032,7 +3138,7 @@ fn array_subquery_delta_on_inner_insert() {
         ],
     )
     .unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     // Check delta after inner insert
     let updates_after_insert = qm.take_updates();
@@ -3085,12 +3191,17 @@ fn array_subquery_delta_on_outer_insert() {
     // with the new user row (with their posts array).
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user Alice with a post
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
     qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3102,6 +3213,7 @@ fn array_subquery_delta_on_outer_insert() {
 
     // Also insert a post for Bob (who doesn't exist yet)
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(200),
@@ -3120,7 +3232,7 @@ fn array_subquery_delta_on_outer_insert() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     // Consume initial update (just Alice)
     let initial_updates = qm.take_updates();
@@ -3132,9 +3244,13 @@ fn array_subquery_delta_on_outer_insert() {
     assert_eq!(initial_delta.added.len(), 1, "Initial: only Alice");
 
     // NOW: Insert Bob
-    qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
-        .unwrap();
-    qm.process();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
+    qm.process(&mut io);
 
     // Check delta after outer insert
     let updates_after = qm.take_updates();
@@ -3175,14 +3291,19 @@ fn array_subquery_with_order_by() {
     // Test: posts should be ordered by id descending
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
 
     // Insert posts in random order
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(102),
@@ -3192,6 +3313,7 @@ fn array_subquery_with_order_by() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3201,6 +3323,7 @@ fn array_subquery_with_order_by() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -3221,7 +3344,7 @@ fn array_subquery_with_order_by() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -3256,15 +3379,20 @@ fn array_subquery_with_limit() {
     // Test: limit should restrict number of posts returned
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
 
     // Insert 5 posts
     for i in 100..105 {
         qm.insert(
+            &mut io,
             "posts",
             &[
                 Value::Integer(i),
@@ -3287,7 +3415,7 @@ fn array_subquery_with_limit() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -3318,12 +3446,17 @@ fn array_subquery_with_select_columns() {
     // Test: select specific columns from inner query
     let sync_manager = SyncManager::new();
     let schema = users_posts_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user and post
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
     qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3344,7 +3477,7 @@ fn array_subquery_with_select_columns() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -3411,14 +3544,19 @@ fn array_subquery_with_join() {
         .into(),
     );
 
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
 
     // Insert posts
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3428,6 +3566,7 @@ fn array_subquery_with_join() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -3439,6 +3578,7 @@ fn array_subquery_with_join() {
 
     // Insert comments
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1000),
@@ -3448,6 +3588,7 @@ fn array_subquery_with_join() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1001),
@@ -3457,6 +3598,7 @@ fn array_subquery_with_join() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1002),
@@ -3479,7 +3621,7 @@ fn array_subquery_with_join() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -3566,14 +3708,19 @@ fn array_subquery_nested() {
         .into(),
     );
 
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert user
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
 
     // Insert posts
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3583,6 +3730,7 @@ fn array_subquery_nested() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -3594,6 +3742,7 @@ fn array_subquery_nested() {
 
     // Insert comments - 2 on Post A, 1 on Post B
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1000),
@@ -3603,6 +3752,7 @@ fn array_subquery_nested() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1001),
@@ -3612,6 +3762,7 @@ fn array_subquery_nested() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1002),
@@ -3634,7 +3785,7 @@ fn array_subquery_nested() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -3745,16 +3896,25 @@ fn array_subquery_multiple_columns() {
         .into(),
     );
 
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert users
-    qm.insert("users", &[Value::Integer(1), Value::Text("Alice".into())])
-        .unwrap();
-    qm.insert("users", &[Value::Integer(2), Value::Text("Bob".into())])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
 
     // Insert posts - Alice has 2, Bob has 1
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(100),
@@ -3764,6 +3924,7 @@ fn array_subquery_multiple_columns() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(101),
@@ -3773,6 +3934,7 @@ fn array_subquery_multiple_columns() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "posts",
         &[
             Value::Integer(102),
@@ -3784,6 +3946,7 @@ fn array_subquery_multiple_columns() {
 
     // Insert comments (directly on users) - Alice has 1, Bob has 2
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1000),
@@ -3793,6 +3956,7 @@ fn array_subquery_multiple_columns() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1001),
@@ -3802,6 +3966,7 @@ fn array_subquery_multiple_columns() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "comments",
         &[
             Value::Integer(1002),
@@ -3823,7 +3988,7 @@ fn array_subquery_multiple_columns() {
         .build();
 
     let sub_id = qm.subscribe(query).unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     let updates = qm.take_updates();
     let delta = updates
@@ -3915,10 +4080,11 @@ fn policy_schema() -> Schema {
 fn policy_filters_select_results() {
     let sync_manager = SyncManager::new();
     let schema = policy_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert documents
     qm.insert(
+        &mut io,
         "documents",
         &[
             Value::Text("alice".into()),
@@ -3928,6 +4094,7 @@ fn policy_filters_select_results() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "documents",
         &[
             Value::Text("bob".into()),
@@ -3937,6 +4104,7 @@ fn policy_filters_select_results() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "documents",
         &[
             Value::Text("bob".into()),
@@ -3946,6 +4114,7 @@ fn policy_filters_select_results() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "documents",
         &[
             Value::Text("charlie".into()),
@@ -3963,7 +4132,7 @@ fn policy_filters_select_results() {
         .subscribe_with_session(query, Some(alice_session))
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     let alice_update = updates
         .iter()
@@ -3984,7 +4153,7 @@ fn policy_filters_select_results() {
         .subscribe_with_session(query2, Some(bob_session))
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let updates2 = qm.take_updates();
     let bob_update = updates2
         .iter()
@@ -4002,10 +4171,11 @@ fn policy_filters_select_results() {
 fn no_session_returns_all_rows() {
     let sync_manager = SyncManager::new();
     let schema = policy_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert documents
     qm.insert(
+        &mut io,
         "documents",
         &[
             Value::Text("alice".into()),
@@ -4015,6 +4185,7 @@ fn no_session_returns_all_rows() {
     )
     .unwrap();
     qm.insert(
+        &mut io,
         "documents",
         &[
             Value::Text("bob".into()),
@@ -4028,7 +4199,7 @@ fn no_session_returns_all_rows() {
     let query = qm.query("documents").build();
     let sub_id = qm.subscribe(query).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     let update = updates
         .iter()
@@ -4047,19 +4218,27 @@ fn table_without_policy_returns_all_rows() {
     let sync_manager = SyncManager::new();
     // Use the regular test_schema which has no policies
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
-    qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(200)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(200)],
+    )
+    .unwrap();
 
     // Even with session, table without policy returns all rows
     let session = PolicySession::new("some_user");
     let query = qm.query("users").build();
     let sub_id = qm.subscribe_with_session(query, Some(session)).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
     let updates = qm.take_updates();
     let update = updates
         .iter()
@@ -4085,11 +4264,15 @@ fn index_key_includes_branch() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert on the schema's branch
     let handle = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
 
     // Verify the row is indexed on the schema's branch
@@ -4110,21 +4293,25 @@ fn index_key_includes_branch() {
 fn query_builder_single_branch_uses_correct_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert on default "main" branch
-    qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
 
     // Query explicitly specifying "main" branch
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 1, "Should find row on main branch");
 
     // Query specifying a different branch should return no results
     // (since we haven't inserted on that branch)
     let query = qm.query("users").branch("draft").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(results.len(), 0, "Should not find row on draft branch");
 }
 
@@ -4132,19 +4319,27 @@ fn query_builder_single_branch_uses_correct_index() {
 fn query_builder_explicit_main_branch() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
-    qm.insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
-        .unwrap();
-    qm.insert("users", &[Value::Text("Bob".into()), Value::Integer(50)])
-        .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    qm.insert(
+        &mut io,
+        "users",
+        &[Value::Text("Bob".into()), Value::Integer(50)],
+    )
+    .unwrap();
 
     // Explicit .branch("main") should work same as default
     let query_explicit = qm.query("users").build();
     let query_default = qm.query("users").build();
 
-    let results_explicit = execute_query(&mut qm, query_explicit).unwrap();
-    let results_default = execute_query(&mut qm, query_default).unwrap();
+    let results_explicit = execute_query(&mut qm, &mut io, query_explicit).unwrap();
+    let results_default = execute_query(&mut qm, &mut io, query_default).unwrap();
 
     assert_eq!(results_explicit.len(), results_default.len());
     assert_eq!(results_explicit.len(), 2);
@@ -4155,7 +4350,7 @@ fn query_multi_branch_requires_explicit_branch() {
     // Verify Query.branches field exists and works
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Multi-branch query with explicit branches
     let query = qm.query("users").branches(&["main", "draft"]).build();
@@ -4179,7 +4374,7 @@ fn handle_object_update_respects_branch() {
     // Rows on a non-schema branch should NOT appear in queries on the schema branch.
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Get the actual schema branch
     let schema_branch = get_branch(&qm);
@@ -4194,7 +4389,7 @@ fn handle_object_update_respects_branch() {
     metadata.insert("table".to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(row_id, metadata);
+        .receive_object(&mut io, row_id, metadata);
 
     let descriptor = RowDescriptor::new(vec![
         ColumnDescriptor::new("name", ColumnType::Text),
@@ -4217,14 +4412,14 @@ fn handle_object_update_respects_branch() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id, "other-branch", commit)
+        .receive_commit(&mut io, row_id, "other-branch", commit)
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     // Query schema branch - should NOT find the row (it's on other-branch)
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         0,
@@ -4237,7 +4432,7 @@ fn handle_object_update_respects_branch() {
     metadata2.insert("table".to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_object(row_id2, metadata2);
+        .receive_object(&mut io, row_id2, metadata2);
 
     let commit2 = Commit {
         parents: smallvec![],
@@ -4249,14 +4444,14 @@ fn handle_object_update_respects_branch() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(row_id2, &schema_branch, commit2)
+        .receive_commit(&mut io, row_id2, &schema_branch, commit2)
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     // Schema branch should now have 1 row
     let query = qm.query("users").build();
-    let results = execute_query(&mut qm, query).unwrap();
+    let results = execute_query(&mut qm, &mut io, query).unwrap();
     assert_eq!(
         results.len(),
         1,
@@ -4272,17 +4467,26 @@ fn handle_object_update_respects_branch() {
 fn contributing_ids_reflect_filter() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert 3 rows with different scores
     let handle1 = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let handle2 = qm
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
         .unwrap();
     let handle3 = qm
         .insert(
+            &mut io,
             "users",
             &[Value::Text("Charlie".into()), Value::Integer(75)],
         )
@@ -4295,7 +4499,7 @@ fn contributing_ids_reflect_filter() {
         .build();
     let sub_id = qm.subscribe(query.clone()).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     // Get contributing ObjectIds
     let contributing = qm.get_subscription_contributing_ids(sub_id);
@@ -4323,14 +4527,22 @@ fn contributing_ids_reflect_filter() {
 fn contributing_ids_update_reactively() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
+    let (mut qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Insert 2 rows initially
     let _handle1 = qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let handle2 = qm
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
         .unwrap();
 
     // Subscribe to query: score > 50
@@ -4340,7 +4552,7 @@ fn contributing_ids_update_reactively() {
         .build();
     let sub_id = qm.subscribe(query.clone()).unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     // Initially 1 match (Alice: 100)
     let contributing = qm.get_subscription_contributing_ids(sub_id);
@@ -4353,12 +4565,13 @@ fn contributing_ids_update_reactively() {
     // Insert new row with score > 50
     let handle3 = qm
         .insert(
+            &mut io,
             "users",
             &[Value::Text("Charlie".into()), Value::Integer(75)],
         )
         .unwrap();
 
-    qm.process();
+    qm.process(&mut io);
 
     // Now 2 matches
     let contributing = qm.get_subscription_contributing_ids(sub_id);
@@ -4377,11 +4590,12 @@ fn contributing_ids_update_reactively() {
 
     // Update Bob's score to > 50
     qm.update(
+        &mut io,
         handle2.row_id,
         &[Value::Text("Bob".into()), Value::Integer(60)],
     )
     .unwrap();
-    qm.process();
+    qm.process(&mut io);
 
     // Now 3 matches
     let contributing = qm.get_subscription_contributing_ids(sub_id);
@@ -4407,22 +4621,31 @@ fn server_builds_query_graph_on_subscription() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut server_qm = create_query_manager(sync_manager, schema);
+    let (mut server_qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Server has existing data: 3 users, 2 with score > 50
     let handle1 = server_qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
     let _handle2 = server_qm
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
         .unwrap();
     let handle3 = server_qm
         .insert(
+            &mut io,
             "users",
             &[Value::Text("Charlie".into()), Value::Integer(75)],
         )
         .unwrap();
-    server_qm.process();
+    server_qm.process(&mut io);
 
     // Add a client
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4443,7 +4666,7 @@ fn server_builds_query_graph_on_subscription() {
         },
     });
 
-    server_qm.process();
+    server_qm.process(&mut io);
 
     // Server should send ObjectUpdated for matching users (Alice, Charlie)
     let outbox = server_qm.sync_manager_mut().take_outbox();
@@ -4484,13 +4707,17 @@ fn server_pushes_new_matches() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut server_qm = create_query_manager(sync_manager, schema);
+    let (mut server_qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Server has 1 user initially
     let _handle1 = server_qm
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(100)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
         .unwrap();
-    server_qm.process();
+    server_qm.process(&mut io);
 
     // Add client and subscribe
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4510,7 +4737,7 @@ fn server_pushes_new_matches() {
         },
     });
 
-    server_qm.process();
+    server_qm.process(&mut io);
 
     // Clear initial outbox
     let _ = server_qm.sync_manager_mut().take_outbox();
@@ -4518,11 +4745,12 @@ fn server_pushes_new_matches() {
     // Insert new matching user
     let handle2 = server_qm
         .insert(
+            &mut io,
             "users",
             &[Value::Text("Charlie".into()), Value::Integer(75)],
         )
         .unwrap();
-    server_qm.process();
+    server_qm.process(&mut io);
 
     // Should send ObjectUpdated for new matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
@@ -4552,7 +4780,7 @@ fn server_does_not_push_non_matching() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut server_qm = create_query_manager(sync_manager, schema);
+    let (mut server_qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Add client and subscribe to score > 50
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4572,14 +4800,18 @@ fn server_does_not_push_non_matching() {
         },
     });
 
-    server_qm.process();
+    server_qm.process(&mut io);
     let _ = server_qm.sync_manager_mut().take_outbox();
 
     // Insert non-matching user (score = 30)
     let _handle = server_qm
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
         .unwrap();
-    server_qm.process();
+    server_qm.process(&mut io);
 
     // Should NOT send ObjectUpdated for non-matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
@@ -4608,7 +4840,7 @@ fn subscribe_with_sync_sends_to_servers() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut client_qm = create_query_manager(sync_manager, schema);
+    let (mut client_qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4648,7 +4880,7 @@ fn unsubscribe_with_sync_sends_to_servers() {
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut client_qm = create_query_manager(sync_manager, schema);
+    let (mut client_qm, mut io) = create_query_manager(sync_manager, schema);
 
     // Add a server
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4697,7 +4929,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
     // Setup mid-tier server with schema
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut mid_tier = create_query_manager(sync_manager, schema);
+    let (mut mid_tier, mut io) = create_query_manager(sync_manager, schema);
 
     // Add upstream server
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4726,7 +4958,7 @@ fn mid_tier_forwards_query_subscription_upstream() {
     });
 
     // Process the subscription
-    mid_tier.process();
+    mid_tier.process(&mut io);
 
     // Check that QuerySubscription was forwarded to upstream server
     let outbox = mid_tier.sync_manager_mut().take_outbox();
@@ -4753,7 +4985,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
     // Setup mid-tier server
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut mid_tier = create_query_manager(sync_manager, schema);
+    let (mut mid_tier, mut io) = create_query_manager(sync_manager, schema);
 
     // Add upstream server and downstream client
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4777,7 +5009,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
             session: None,
         },
     });
-    mid_tier.process();
+    mid_tier.process(&mut io);
 
     // Clear outbox
     let _ = mid_tier.sync_manager_mut().take_outbox();
@@ -4787,7 +5019,7 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
         source: Source::Client(client_id),
         payload: SyncPayload::QueryUnsubscription { query_id },
     });
-    mid_tier.process();
+    mid_tier.process(&mut io);
 
     // Check that QueryUnsubscription was forwarded upstream
     let outbox = mid_tier.sync_manager_mut().take_outbox();
@@ -4818,7 +5050,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     // Setup mid-tier server
     let sync_manager = SyncManager::new();
     let schema = test_schema();
-    let mut mid_tier = create_query_manager(sync_manager, schema.clone());
+    let (mut mid_tier, mut io) = create_query_manager(sync_manager, schema.clone());
 
     // Add upstream server and downstream client
     let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -4828,9 +5060,13 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
 
     // Insert a matching row locally first (so it's in scope)
     let handle = mid_tier
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(75)])
+        .insert(
+            &mut io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
         .unwrap();
-    mid_tier.process();
+    mid_tier.process(&mut io);
 
     // Get the schema branch
     let branch_str = get_branch(&mid_tier);
@@ -4850,7 +5086,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             session: None,
         },
     });
-    mid_tier.process();
+    mid_tier.process(&mut io);
 
     // Clear outbox (initial sync messages)
     let _ = mid_tier.sync_manager_mut().take_outbox();
@@ -4901,7 +5137,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
             commits: vec![commit],
         },
     });
-    mid_tier.process();
+    mid_tier.process(&mut io);
 
     // Check that the update was forwarded to the client
     let outbox = mid_tier.sync_manager_mut().take_outbox();
@@ -4928,6 +5164,8 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
 fn pump_messages(
     client: &mut QueryManager,
     server: &mut QueryManager,
+    client_io: &mut MemoryIoHandler,
+    server_io: &mut MemoryIoHandler,
     client_id: crate::sync_manager::ClientId,
     server_id: crate::sync_manager::ServerId,
 ) {
@@ -4947,7 +5185,7 @@ fn pump_messages(
                 payload: entry.payload,
             });
         }
-        server.process();
+        server.process(server_io);
 
         // Server → Client
         let server_outbox = server.sync_manager_mut().take_outbox();
@@ -4966,7 +5204,7 @@ fn pump_messages(
                 payload: entry.payload,
             });
         }
-        client.process();
+        client.process(client_io);
     }
 }
 
@@ -4980,25 +5218,34 @@ fn e2e_client_receives_server_data_via_subscription() {
 
     // Setup server with data
     let server_sync = SyncManager::new();
-    let mut server = create_query_manager(server_sync, schema.clone());
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
 
     server
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(75)])
-        .unwrap();
-    server
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .insert(
+            &mut server_io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
         .unwrap();
     server
         .insert(
+            &mut server_io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
+        .unwrap();
+    server
+        .insert(
+            &mut server_io,
             "users",
             &[Value::Text("Charlie".into()), Value::Integer(90)],
         )
         .unwrap();
-    server.process();
+    server.process(&mut server_io);
 
     // Setup client (no data yet)
     let client_sync = SyncManager::new();
-    let mut client = create_query_manager(client_sync, schema.clone());
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
 
     // Subscribe to all object updates (needed to receive sync'd data)
 
@@ -5021,7 +5268,14 @@ fn e2e_client_receives_server_data_via_subscription() {
     let sub_id = client.subscribe_with_sync(query, None).unwrap();
 
     // Exchange messages between client and server
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Client should now have the matching rows
     let results = client.get_subscription_results(sub_id);
@@ -5054,11 +5308,11 @@ fn e2e_client_receives_new_matching_row() {
 
     // Setup server (initially empty)
     let server_sync = SyncManager::new();
-    let mut server = create_query_manager(server_sync, schema.clone());
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
 
     // Setup client
     let client_sync = SyncManager::new();
-    let mut client = create_query_manager(client_sync, schema.clone());
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
 
     // Connect
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5077,7 +5331,14 @@ fn e2e_client_receives_new_matching_row() {
     let sub_id = client.subscribe_with_sync(query, None).unwrap();
 
     // Initial sync (empty)
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
     assert_eq!(
         client.get_subscription_results(sub_id).len(),
         0,
@@ -5086,12 +5347,23 @@ fn e2e_client_receives_new_matching_row() {
 
     // Server inserts a matching row
     server
-        .insert("users", &[Value::Text("Alice".into()), Value::Integer(75)])
+        .insert(
+            &mut server_io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
         .unwrap();
-    server.process();
+    server.process(&mut server_io);
 
     // Exchange messages
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Client should now have Alice
     let results = client.get_subscription_results(sub_id);
@@ -5109,10 +5381,10 @@ fn e2e_client_does_not_receive_non_matching_row() {
 
     // Setup server and client
     let server_sync = SyncManager::new();
-    let mut server = create_query_manager(server_sync, schema.clone());
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
 
     let client_sync = SyncManager::new();
-    let mut client = create_query_manager(client_sync, schema.clone());
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
 
     // Connect
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5129,16 +5401,34 @@ fn e2e_client_does_not_receive_non_matching_row() {
         .build();
 
     let sub_id = client.subscribe_with_sync(query, None).unwrap();
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Server inserts a NON-matching row (score = 30)
     server
-        .insert("users", &[Value::Text("Bob".into()), Value::Integer(30)])
+        .insert(
+            &mut server_io,
+            "users",
+            &[Value::Text("Bob".into()), Value::Integer(30)],
+        )
         .unwrap();
-    server.process();
+    server.process(&mut server_io);
 
     // Exchange messages
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Client should NOT have Bob
     let results = client.get_subscription_results(sub_id);
@@ -5172,10 +5462,11 @@ fn e2e_permissions_prevent_sync() {
 
     // Setup server with docs owned by different users
     let server_sync = SyncManager::new();
-    let mut server = create_query_manager(server_sync, schema.clone());
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
 
     server
         .insert(
+            &mut server_io,
             "documents",
             &[
                 Value::Text("Alice's doc".into()),
@@ -5185,15 +5476,16 @@ fn e2e_permissions_prevent_sync() {
         .unwrap();
     server
         .insert(
+            &mut server_io,
             "documents",
             &[Value::Text("Bob's doc".into()), Value::Text("bob".into())],
         )
         .unwrap();
-    server.process();
+    server.process(&mut server_io);
 
     // Setup client
     let client_sync = SyncManager::new();
-    let mut client = create_query_manager(client_sync, schema.clone());
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
 
     // Connect
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5212,7 +5504,14 @@ fn e2e_permissions_prevent_sync() {
         .unwrap();
 
     // Exchange messages
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Client should ONLY have Alice's doc
     let results = client.get_subscription_results(sub_id);
@@ -5251,10 +5550,10 @@ fn e2e_permissions_prevent_new_row_sync() {
 
     // Setup server and client
     let server_sync = SyncManager::new();
-    let mut server = create_query_manager(server_sync, schema.clone());
+    let (mut server, mut server_io) = create_query_manager(server_sync, schema.clone());
 
     let client_sync = SyncManager::new();
-    let mut client = create_query_manager(client_sync, schema.clone());
+    let (mut client, mut client_io) = create_query_manager(client_sync, schema.clone());
 
     // Connect
     let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -5271,11 +5570,19 @@ fn e2e_permissions_prevent_new_row_sync() {
     let sub_id = client
         .subscribe_with_sync(query, Some(alice_session))
         .unwrap();
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Server inserts Alice's doc
     server
         .insert(
+            &mut server_io,
             "documents",
             &[
                 Value::Text("Alice's doc".into()),
@@ -5283,8 +5590,15 @@ fn e2e_permissions_prevent_new_row_sync() {
             ],
         )
         .unwrap();
-    server.process();
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    server.process(&mut server_io);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     assert_eq!(
         client.get_subscription_results(sub_id).len(),
@@ -5295,12 +5609,20 @@ fn e2e_permissions_prevent_new_row_sync() {
     // Server inserts Bob's doc (owner_id = "bob")
     server
         .insert(
+            &mut server_io,
             "documents",
             &[Value::Text("Bob's doc".into()), Value::Text("bob".into())],
         )
         .unwrap();
-    server.process();
-    pump_messages(&mut client, &mut server, client_id, server_id);
+    server.process(&mut server_io);
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
 
     // Client should still only have Alice's doc
     let results = client.get_subscription_results(sub_id);

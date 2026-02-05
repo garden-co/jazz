@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::commit::{CommitId, StoredState};
-use crate::object::{BranchName, ObjectId, ObjectState};
+use crate::io_handler::IoHandler;
+use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::sync_manager::{
@@ -662,12 +663,8 @@ impl QueryManager {
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
     fn is_hard_deleted(&self, id: ObjectId) -> bool {
-        let Some(state) = self.sync_manager.object_manager.get_state(id) else {
+        let Some(obj) = self.sync_manager.object_manager.get(id) else {
             return false;
-        };
-        let obj = match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
-            ObjectState::Loading => return false,
         };
         let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
             return false;
@@ -690,12 +687,8 @@ impl QueryManager {
 
     /// Check if the current tip has `delete: soft` metadata.
     fn is_soft_delete_commit(&self, id: ObjectId) -> bool {
-        let Some(state) = self.sync_manager.object_manager.get_state(id) else {
+        let Some(obj) = self.sync_manager.object_manager.get(id) else {
             return false;
-        };
-        let obj = match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
-            ObjectState::Loading => return false,
         };
         let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
             return false;
@@ -717,19 +710,15 @@ impl QueryManager {
 
     /// Check if a commit has been stored to disk.
     ///
+    /// With sync storage, commits are stored immediately.
     /// Used by `InsertHandle::is_complete()` to check durability.
     pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
-        if let Some(state) = self.sync_manager.object_manager.get_state(object_id) {
-            match state {
-                ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                    // Check all branches for the commit
-                    for branch in obj.branches.values() {
-                        if let Some(commit) = branch.commits.get(commit_id) {
-                            return matches!(commit.stored_state, StoredState::Stored);
-                        }
-                    }
+        if let Some(obj) = self.sync_manager.object_manager.get(object_id) {
+            // Check all branches for the commit
+            for branch in obj.branches.values() {
+                if let Some(commit) = branch.commits.get(commit_id) {
+                    return matches!(commit.stored_state, StoredState::Stored);
                 }
-                ObjectState::Loading => {}
             }
         }
         false
@@ -739,8 +728,13 @@ impl QueryManager {
     ///
     /// Returns an `InsertHandle` that can be polled to check durability.
     /// Index updates happen immediately (creating sentinels if needed).
-    pub fn insert(&mut self, table: &str, values: &[Value]) -> Result<InsertHandle, QueryError> {
-        self.insert_with_session(table, values, None)
+    pub fn insert<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        table: &str,
+        values: &[Value],
+    ) -> Result<InsertHandle, QueryError> {
+        self.insert_with_session(io, table, values, None)
     }
 
     /// Insert a new row with session-based policy checking.
@@ -748,8 +742,9 @@ impl QueryManager {
     /// If the table has an INSERT WITH CHECK policy and a session is provided,
     /// the policy is evaluated against the new row values. If the policy
     /// denies the insert, `PolicyDenied` is returned.
-    pub fn insert_with_session(
+    pub fn insert_with_session<H: IoHandler>(
         &mut self,
+        io: &mut H,
         table: &str,
         values: &[Value],
         session: Option<&Session>,
@@ -787,7 +782,7 @@ impl QueryManager {
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), table.to_string());
 
-        let object_id = self.sync_manager.object_manager.create(Some(metadata));
+        let object_id = self.sync_manager.object_manager.create(io, Some(metadata));
         let author = object_id; // Self-authored
 
         // Add commit with row data
@@ -795,7 +790,7 @@ impl QueryManager {
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(object_id, &branch, vec![], data.clone(), author, None)
+            .add_commit(io, object_id, &branch, vec![], data.clone(), author, None)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
@@ -817,18 +812,20 @@ impl QueryManager {
     /// Insert a new row into a table on a specific branch.
     ///
     /// Used by SchemaManager for schema-aware inserts.
-    pub fn insert_on_branch(
+    pub fn insert_on_branch<H: IoHandler>(
         &mut self,
+        io: &mut H,
         table: &str,
         branch: &str,
         values: &[Value],
     ) -> Result<InsertHandle, QueryError> {
-        self.insert_on_branch_with_session(table, branch, values, None)
+        self.insert_on_branch_with_session(io, table, branch, values, None)
     }
 
     /// Insert a new row on a specific branch with session-based policy checking.
-    pub fn insert_on_branch_with_session(
+    pub fn insert_on_branch_with_session<H: IoHandler>(
         &mut self,
+        io: &mut H,
         table: &str,
         branch: &str,
         values: &[Value],
@@ -870,14 +867,14 @@ impl QueryManager {
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), table.to_string());
 
-        let object_id = self.sync_manager.object_manager.create(Some(metadata));
+        let object_id = self.sync_manager.object_manager.create(io, Some(metadata));
         let author = object_id; // Self-authored
 
         // Add commit with row data to specified branch
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(object_id, branch, vec![], data.clone(), author, None)
+            .add_commit(io, object_id, branch, vec![], data.clone(), author, None)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
@@ -1027,8 +1024,13 @@ impl QueryManager {
     }
 
     /// Update a row.
-    pub fn update(&mut self, id: ObjectId, values: &[Value]) -> Result<(), QueryError> {
-        self.update_with_session(id, values, None)
+    pub fn update<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        id: ObjectId,
+        values: &[Value],
+    ) -> Result<(), QueryError> {
+        self.update_with_session(io, id, values, None)
     }
 
     /// Update a row with session-based policy checking.
@@ -1036,8 +1038,9 @@ impl QueryManager {
     /// If the table has policies and a session is provided:
     /// - USING policy is checked against the old row (if exists)
     /// - WITH CHECK policy is checked against the new values
-    pub fn update_with_session(
+    pub fn update_with_session<H: IoHandler>(
         &mut self,
+        io: &mut H,
         id: ObjectId,
         values: &[Value],
         session: Option<&Session>,
@@ -1113,6 +1116,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
+                io,
                 id,
                 self.current_branch(),
                 parents,
@@ -1159,7 +1163,11 @@ impl QueryManager {
     /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
     /// This preserves the row data for queries with `include_deleted`.
     /// Removes from `_id` and all column indices, adds to `_id_deleted` index.
-    pub fn delete(&mut self, id: ObjectId) -> Result<DeleteHandle, QueryError> {
+    pub fn delete<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        id: ObjectId,
+    ) -> Result<DeleteHandle, QueryError> {
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -1212,6 +1220,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
+                io,
                 id,
                 self.current_branch(),
                 parents,
@@ -1238,8 +1247,9 @@ impl QueryManager {
     ///
     /// Checks DELETE USING policy against the existing row before allowing deletion.
     /// Falls back to UPDATE's USING policy if no DELETE policy is defined.
-    pub fn delete_with_session(
+    pub fn delete_with_session<H: IoHandler>(
         &mut self,
+        io: &mut H,
         id: ObjectId,
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
@@ -1307,6 +1317,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
+                io,
                 id,
                 self.current_branch(),
                 parents,
@@ -1332,8 +1343,9 @@ impl QueryManager {
     /// Soft delete a row on a specific branch.
     ///
     /// Used by SchemaManager for schema-aware deletes.
-    pub fn delete_on_branch(
+    pub fn delete_on_branch<H: IoHandler>(
         &mut self,
+        io: &mut H,
         table: &str,
         branch: &str,
         id: ObjectId,
@@ -1384,6 +1396,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
+                io,
                 id,
                 branch,
                 parents,
@@ -1410,7 +1423,12 @@ impl QueryManager {
     ///
     /// Restores a row from the `_id_deleted` index back to the `_id` and column indices.
     /// Creates a new commit with the provided values (no `delete` metadata).
-    pub fn undelete(&mut self, id: ObjectId, values: &[Value]) -> Result<InsertHandle, QueryError> {
+    pub fn undelete<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        id: ObjectId,
+        values: &[Value],
+    ) -> Result<InsertHandle, QueryError> {
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -1464,6 +1482,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
+                io,
                 id,
                 self.current_branch(),
                 parents,
@@ -1491,7 +1510,11 @@ impl QueryManager {
     /// Removes from ALL indices including `_id_deleted`.
     /// Truncates history: only the hard delete tombstone remains.
     /// Hard deletes are authoritative and override any concurrent or subsequent commits.
-    pub fn hard_delete(&mut self, id: ObjectId) -> Result<DeleteHandle, QueryError> {
+    pub fn hard_delete<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        id: ObjectId,
+    ) -> Result<DeleteHandle, QueryError> {
         // Check if already hard-deleted
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -1540,6 +1563,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
+                io,
                 id,
                 self.current_branch(),
                 parents,
@@ -1557,10 +1581,12 @@ impl QueryManager {
         // For now, we just record the hard delete tombstone
         let mut tail_ids = std::collections::HashSet::new();
         tail_ids.insert(delete_commit_id);
-        let _ =
-            self.sync_manager
-                .object_manager
-                .truncate_branch(id, self.current_branch(), tail_ids);
+        let _ = self.sync_manager.object_manager.truncate_branch(
+            io,
+            id,
+            self.current_branch(),
+            tail_ids,
+        );
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1576,7 +1602,11 @@ impl QueryManager {
     ///
     /// Can only be called on rows that are already soft-deleted.
     /// Removes the row from `_id_deleted` and truncates history.
-    pub fn truncate(&mut self, id: ObjectId) -> Result<DeleteHandle, QueryError> {
+    pub fn truncate<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        id: ObjectId,
+    ) -> Result<DeleteHandle, QueryError> {
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -1596,7 +1626,7 @@ impl QueryManager {
         }
 
         // Upgrade to hard delete
-        self.hard_delete(id)
+        self.hard_delete(io, id)
     }
 
     /// Get a row by ID if loaded in ObjectManager.
@@ -1913,9 +1943,9 @@ impl QueryManager {
     /// - Flushes pending index updates when indices become ready
     /// - Marks subscriptions with pending IDs dirty when objects become available
     /// - Settles all subscription graphs (row data loaded on-demand from ObjectManager)
-    pub fn process(&mut self) {
+    pub fn process<H: IoHandler>(&mut self, io: &mut H) {
         // 1. Process SyncManager inbox (receives client writes)
-        self.sync_manager.process_inbox();
+        self.sync_manager.process_inbox(io);
 
         // 2. Process object updates from SyncManager FIRST
         // This ensures indices are updated before query subscriptions are processed,
@@ -1933,10 +1963,10 @@ impl QueryManager {
         self.process_pending_query_unsubscriptions();
 
         // 4. Pick up new permission check intents from SyncManager
-        self.pick_up_pending_permission_checks();
+        self.pick_up_pending_permission_checks(io);
 
         // 4b. Settle policy graphs and finalize completed checks
-        self.settle_policy_checks();
+        self.settle_policy_checks(io);
 
         // 5. Index storage is handled by IoHandler via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullIoHandler.
@@ -1965,69 +1995,62 @@ impl QueryManager {
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let state = om.get_state(id)?;
-                match state {
-                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        // Find the newest commit across all subscription branches (LWW)
-                        // Also track which branch it came from for schema transformation
-                        let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
+                let obj = om.get(id)?;
+                // Find the newest commit across all subscription branches (LWW)
+                // Also track which branch it came from for schema transformation
+                let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
 
-                        for branch_name in branches {
-                            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                                for &tip_id in &branch.tips {
-                                    if let Some(commit) = branch.commits.get(&tip_id) {
-                                        match &best {
-                                            None => {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                    branch_name.clone(),
-                                                ));
-                                            }
-                                            Some((best_ts, _, _, _))
-                                                if commit.timestamp > *best_ts =>
-                                            {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                    branch_name.clone(),
-                                                ));
-                                            }
-                                            _ => {}
-                                        }
+                for branch_name in branches {
+                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                        for &tip_id in &branch.tips {
+                            if let Some(commit) = branch.commits.get(&tip_id) {
+                                match &best {
+                                    None => {
+                                        best = Some((
+                                            commit.timestamp,
+                                            commit.content.clone(),
+                                            tip_id,
+                                            branch_name.clone(),
+                                        ));
                                     }
+                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                                        best = Some((
+                                            commit.timestamp,
+                                            commit.content.clone(),
+                                            tip_id,
+                                            branch_name.clone(),
+                                        ));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
-
-                        // Filter out empty content (hard delete tombstones only)
-                        let (_, content, commit_id, source_branch) =
-                            best.filter(|(_, content, _, _)| !content.is_empty())?;
-
-                        // Apply lens transform if row is from an old schema branch
-                        if let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                            && source_hash != schema_context.current_hash
-                        {
-                            // Transform the row data using lens
-                            let transformer = LensTransformer::new(schema_context, &table);
-                            match transformer.transform(&content, commit_id, source_hash) {
-                                Ok(result) => {
-                                    return Some((result.data, commit_id));
-                                }
-                                Err(_) => {
-                                    // Transform failed - return original data
-                                    // This allows graceful degradation
-                                    return Some((content, commit_id));
-                                }
-                            }
-                        }
-
-                        Some((content, commit_id))
                     }
-                    ObjectState::Loading => None,
                 }
+
+                // Filter out empty content (hard delete tombstones only)
+                let (_, content, commit_id, source_branch) =
+                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+
+                // Apply lens transform if row is from an old schema branch
+                if let Some(&source_hash) = branch_schema_map.get(&source_branch)
+                    && source_hash != schema_context.current_hash
+                {
+                    // Transform the row data using lens
+                    let transformer = LensTransformer::new(schema_context, &table);
+                    match transformer.transform(&content, commit_id, source_hash) {
+                        Ok(result) => {
+                            return Some((result.data, commit_id));
+                        }
+                        Err(_) => {
+                            // Transform failed - return original data
+                            // This allows graceful degradation
+                            return Some((content, commit_id));
+                        }
+                    }
+                }
+
+                Some((content, commit_id))
             };
 
             // Set the default branch for pending ID tracking
@@ -2054,30 +2077,8 @@ impl QueryManager {
             }
         }
 
-        // 7b. Request loading for any pending object IDs
-        // Collect pending IDs and their branches, then request loads
-        let mut load_requests: Vec<(ObjectId, String)> = Vec::new();
-        for subscription in self.subscriptions.values() {
-            for compact in &subscription.graph.nodes {
-                if let super::graph::GraphNode::Materialize(mat_node) = &compact.node {
-                    for (&pending_id, tracked_branch) in mat_node.pending_ids_with_branches() {
-                        // Use tracked branch, or fall back to subscription's first branch
-                        let branch = if tracked_branch.is_empty() {
-                            subscription.branches.first().cloned().unwrap_or_default()
-                        } else {
-                            tracked_branch.clone()
-                        };
-                        load_requests.push((pending_id, branch));
-                    }
-                }
-            }
-        }
-        // Now request loads (mutable borrow of object_manager)
-        for (object_id, branch) in load_requests {
-            self.sync_manager
-                .object_manager
-                .request_load(object_id, branch);
-        }
+        // Note: With sync storage, object loading is immediate. No need to request
+        // async loads - objects are available when we query for them.
 
         // 9. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions();
@@ -2092,11 +2093,11 @@ impl QueryManager {
     }
 
     /// Pick up pending permission checks from SyncManager and evaluate them.
-    fn pick_up_pending_permission_checks(&mut self) {
+    fn pick_up_pending_permission_checks<H: IoHandler>(&mut self, io: &mut H) {
         let pending = self.sync_manager.take_pending_permission_checks();
 
         for check in pending {
-            self.evaluate_write_permission(check);
+            self.evaluate_write_permission(io, check);
         }
     }
 
@@ -2163,42 +2164,35 @@ impl QueryManager {
 
             // Simple row loader for server-side graphs (no schema transform needed)
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let state = om.get_state(id)?;
-                match state {
-                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
-                        for branch_name in &branches {
-                            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                                for &tip_id in &branch.tips {
-                                    if let Some(commit) = branch.commits.get(&tip_id) {
-                                        match &best {
-                                            None => {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                ));
-                                            }
-                                            Some((best_ts, _, _))
-                                                if commit.timestamp > *best_ts =>
-                                            {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                ));
-                                            }
-                                            _ => {}
-                                        }
+                let obj = om.get(id)?;
+                let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                for branch_name in &branches {
+                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                        for &tip_id in &branch.tips {
+                            if let Some(commit) = branch.commits.get(&tip_id) {
+                                match &best {
+                                    None => {
+                                        best = Some((
+                                            commit.timestamp,
+                                            commit.content.clone(),
+                                            tip_id,
+                                        ));
                                     }
+                                    Some((best_ts, _, _)) if commit.timestamp > *best_ts => {
+                                        best = Some((
+                                            commit.timestamp,
+                                            commit.content.clone(),
+                                            tip_id,
+                                        ));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
-                        best.filter(|(_, content, _)| !content.is_empty())
-                            .map(|(_, content, commit_id)| (content, commit_id))
                     }
-                    ObjectState::Loading => None,
                 }
+                best.filter(|(_, content, _)| !content.is_empty())
+                    .map(|(_, content, commit_id)| (content, commit_id))
             };
 
             let _delta = graph.settle(indices, om, row_loader);
@@ -2278,42 +2272,35 @@ impl QueryManager {
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let state = om.get_state(id)?;
-                match state {
-                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
-                        for branch_name in branches {
-                            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                                for &tip_id in &branch.tips {
-                                    if let Some(commit) = branch.commits.get(&tip_id) {
-                                        match &best {
-                                            None => {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                ));
-                                            }
-                                            Some((best_ts, _, _))
-                                                if commit.timestamp > *best_ts =>
-                                            {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                ));
-                                            }
-                                            _ => {}
-                                        }
+                let obj = om.get(id)?;
+                let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
+                for branch_name in branches {
+                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                        for &tip_id in &branch.tips {
+                            if let Some(commit) = branch.commits.get(&tip_id) {
+                                match &best {
+                                    None => {
+                                        best = Some((
+                                            commit.timestamp,
+                                            commit.content.clone(),
+                                            tip_id,
+                                        ));
                                     }
+                                    Some((best_ts, _, _)) if commit.timestamp > *best_ts => {
+                                        best = Some((
+                                            commit.timestamp,
+                                            commit.content.clone(),
+                                            tip_id,
+                                        ));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
-                        best.filter(|(_, content, _)| !content.is_empty())
-                            .map(|(_, content, commit_id)| (content, commit_id))
                     }
-                    ObjectState::Loading => None,
                 }
+                best.filter(|(_, content, _)| !content.is_empty())
+                    .map(|(_, content, commit_id)| (content, commit_id))
             };
 
             // Settle the graph
@@ -2348,13 +2335,17 @@ impl QueryManager {
     /// For UPDATE operations, we evaluate two policies:
     /// - USING against old_content (can the session see the old row?)
     /// - WITH CHECK against new_content (is the new row valid?)
-    fn evaluate_write_permission(&mut self, check: PendingPermissionCheck) {
+    fn evaluate_write_permission<H: IoHandler>(
+        &mut self,
+        io: &mut H,
+        check: PendingPermissionCheck,
+    ) {
         // Get table name from metadata
         let table_name = match check.metadata.get("table") {
             Some(t) => TableName::new(t),
             None => {
                 // Not a row object, allow
-                self.sync_manager.approve_permission_check(check);
+                self.sync_manager.approve_permission_check(io, check);
                 return;
             }
         };
@@ -2364,14 +2355,14 @@ impl QueryManager {
             Some(s) => s,
             None => {
                 // Unknown table, allow
-                self.sync_manager.approve_permission_check(check);
+                self.sync_manager.approve_permission_check(io, check);
                 return;
             }
         };
 
         // Handle UPDATE specially - needs both USING and WITH CHECK
         if check.operation == Operation::Update {
-            self.evaluate_update_permission(check, table_name, table_schema);
+            self.evaluate_update_permission(io, check, table_name, table_schema);
             return;
         }
 
@@ -2382,7 +2373,7 @@ impl QueryManager {
             Operation::Delete => table_schema.policies.effective_delete_using(),
             Operation::Select => {
                 // SELECT not checked via write permission
-                self.sync_manager.approve_permission_check(check);
+                self.sync_manager.approve_permission_check(io, check);
                 return;
             }
         };
@@ -2391,7 +2382,7 @@ impl QueryManager {
         let policy = match policy {
             Some(p) => p.clone(),
             None => {
-                self.sync_manager.approve_permission_check(check);
+                self.sync_manager.approve_permission_check(io, check);
                 return;
             }
         };
@@ -2402,7 +2393,7 @@ impl QueryManager {
             Operation::Update => unreachable!(), // Handled above
             Operation::Delete => check.old_content.as_ref(),
             Operation::Select => {
-                self.sync_manager.approve_permission_check(check);
+                self.sync_manager.approve_permission_check(io, check);
                 return;
             }
         };
@@ -2411,7 +2402,7 @@ impl QueryManager {
             Some(c) => c,
             None => {
                 // No content to evaluate - allow
-                self.sync_manager.approve_permission_check(check);
+                self.sync_manager.approve_permission_check(io, check);
                 return;
             }
         };
@@ -2432,7 +2423,7 @@ impl QueryManager {
 
         if result.complex_clauses.is_empty() {
             // All simple parts passed and no complex clauses - approve immediately
-            self.sync_manager.approve_permission_check(check);
+            self.sync_manager.approve_permission_check(io, check);
             return;
         }
 
@@ -2447,7 +2438,7 @@ impl QueryManager {
 
         if graphs.is_empty() {
             // No graphs created (maybe missing tables) - allow
-            self.sync_manager.approve_permission_check(check);
+            self.sync_manager.approve_permission_check(io, check);
             return;
         }
 
@@ -2470,8 +2461,9 @@ impl QueryManager {
     /// 2. WITH CHECK policy against new_content - is the resulting row valid?
     ///
     /// Both must pass for the update to be allowed.
-    fn evaluate_update_permission(
+    fn evaluate_update_permission<H: IoHandler>(
         &mut self,
+        io: &mut H,
         check: PendingPermissionCheck,
         table_name: TableName,
         table_schema: TableSchema,
@@ -2481,7 +2473,7 @@ impl QueryManager {
 
         // If no policies defined, allow
         if using_policy.is_none() && check_policy.is_none() {
-            self.sync_manager.approve_permission_check(check);
+            self.sync_manager.approve_permission_check(io, check);
             return;
         }
 
@@ -2528,7 +2520,7 @@ impl QueryManager {
                 Some(c) => c,
                 None => {
                     // No new content - allow (shouldn't happen for UPDATE)
-                    self.sync_manager.approve_permission_check(check);
+                    self.sync_manager.approve_permission_check(io, check);
                     return;
                 }
             };
@@ -2558,7 +2550,7 @@ impl QueryManager {
 
         // If no complex clauses, both simple checks passed - approve
         if all_complex_clauses.is_empty() {
-            self.sync_manager.approve_permission_check(check);
+            self.sync_manager.approve_permission_check(io, check);
             return;
         }
 
@@ -2577,7 +2569,7 @@ impl QueryManager {
 
         if graphs.is_empty() {
             // No graphs created (maybe missing tables) - allow
-            self.sync_manager.approve_permission_check(check);
+            self.sync_manager.approve_permission_check(io, check);
             return;
         }
 
@@ -2687,7 +2679,7 @@ impl QueryManager {
     }
 
     /// Settle active policy checks and finalize completed ones.
-    fn settle_policy_checks(&mut self) {
+    fn settle_policy_checks<H: IoHandler>(&mut self, io: &mut H) {
         // Collect IDs to finalize
         let mut to_approve = Vec::new();
         let mut to_reject = Vec::new();
@@ -2700,19 +2692,14 @@ impl QueryManager {
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj_state = om.get_state(id)?;
-                match obj_state {
-                    ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                        let branch = obj.branches.get(&BranchName::new(&current_branch))?;
-                        let tip_id = branch.tips.iter().next()?;
-                        let commit = branch.commits.get(tip_id)?;
-                        if commit.content.is_empty() {
-                            return None;
-                        }
-                        Some((commit.content.clone(), *tip_id))
-                    }
-                    ObjectState::Loading => None,
+                let obj = om.get(id)?;
+                let branch = obj.branches.get(&BranchName::new(&current_branch))?;
+                let tip_id = branch.tips.iter().next()?;
+                let commit = branch.commits.get(tip_id)?;
+                if commit.content.is_empty() {
+                    return None;
                 }
+                Some((commit.content.clone(), *tip_id))
             };
 
             // Settle all graphs
@@ -2741,7 +2728,7 @@ impl QueryManager {
         for id in to_approve {
             if let Some(state) = self.active_policy_checks.remove(&id) {
                 self.sync_manager
-                    .approve_permission_check(state.pending_check);
+                    .approve_permission_check(io, state.pending_check);
             }
         }
 
@@ -2777,19 +2764,14 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<(Vec<u8>, CommitId)> {
-        let state = self.sync_manager.object_manager.get_state(row_id)?;
-        match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => {
-                let branch = obj.branches.get(&BranchName::new(branch_name))?;
-                // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
-                let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-                tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
-                let tip_id = tips.last()?;
-                let commit = branch.commits.get(tip_id)?;
-                Some((commit.content.clone(), *tip_id))
-            }
-            ObjectState::Loading => None,
-        }
+        let obj = self.sync_manager.object_manager.get(row_id)?;
+        let branch = obj.branches.get(&BranchName::new(branch_name))?;
+        // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
+        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
+        tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
+        let tip_id = tips.last()?;
+        let commit = branch.commits.get(tip_id)?;
+        Some((commit.content.clone(), *tip_id))
     }
 
     /// Load a row's data from ObjectManager using the default branch.
@@ -2815,11 +2797,7 @@ impl QueryManager {
         row_id: ObjectId,
         branches: &[String],
     ) -> Option<(Vec<u8>, CommitId)> {
-        let state = self.sync_manager.object_manager.get_state(row_id)?;
-        let obj = match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
-            ObjectState::Loading => return None,
-        };
+        let obj = self.sync_manager.object_manager.get(row_id)?;
 
         // Collect the newest tip from each branch
         let mut best: Option<(u64, Vec<u8>, CommitId)> = None; // (timestamp, content, commit_id)
@@ -2855,11 +2833,7 @@ impl QueryManager {
         row_id: ObjectId,
         branches: &[String],
     ) -> Option<(Vec<u8>, CommitId, String)> {
-        let state = self.sync_manager.object_manager.get_state(row_id)?;
-        let obj = match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
-            ObjectState::Loading => return None,
-        };
+        let obj = self.sync_manager.object_manager.get(row_id)?;
 
         // Collect the newest tip from each branch
         let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
@@ -3076,12 +3050,8 @@ impl QueryManager {
 
     /// Check if an incoming update has hard delete metadata.
     fn is_incoming_hard_delete(&self, id: ObjectId) -> bool {
-        let Some(state) = self.sync_manager.object_manager.get_state(id) else {
+        let Some(obj) = self.sync_manager.object_manager.get(id) else {
             return false;
-        };
-        let obj = match state {
-            ObjectState::Creating(obj) | ObjectState::Available(obj) => obj,
-            ObjectState::Loading => return false,
         };
         let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
             return false;
@@ -3410,24 +3380,6 @@ impl QueryManager {
         graph.involves_table(table)
     }
 
-    /// Mark subscriptions dirty when an index transitions to ready.
-    /// Called when LoadIndexMeta or LoadIndexPage causes is_ready() to become true.
-    fn mark_subscriptions_dirty_for_index(&mut self, table: &str, column: &str) {
-        // Mark local subscriptions dirty
-        for subscription in self.subscriptions.values_mut() {
-            if subscription.graph.uses_index(table, column) {
-                subscription.graph.mark_dirty_for_column(table, column);
-            }
-        }
-
-        // Mark server subscriptions dirty (for downstream clients)
-        for server_sub in self.server_subscriptions.values_mut() {
-            if server_sub.graph.uses_index(table, column) {
-                server_sub.graph.mark_dirty_for_column(table, column);
-            }
-        }
-    }
-
     // ========================================================================
     // No-op storage driver (for tests)
     // ========================================================================
@@ -3440,188 +3392,6 @@ impl QueryManager {
         for index in self.indices.values_mut() {
             index.reset_for_cold_start();
         }
-    }
-
-    /// Load indices from storage using a real driver (test-only).
-    ///
-    /// This is a convenience method that calls `reset_indices_for_cold_start()` and then
-    /// processes storage in a loop until all indices are loaded. Use this after creating
-    /// a new QueryManager with an existing SyncManager (cold start scenario).
-    #[cfg(test)]
-    pub fn load_indices_from_driver(&mut self, driver: &mut dyn crate::driver::Driver) {
-        self.reset_indices_for_cold_start();
-        // Loop until no more pending requests
-        for _ in 0..10 {
-            self.process_storage_with_driver(driver);
-        }
-    }
-
-    /// Process storage requests through a real driver (test-only).
-    ///
-    /// This handles both ObjectManager requests and index storage requests.
-    /// Use this for tests that need actual persistence (e.g., cold_start tests).
-    /// Note: May need to be called multiple times when loading indices (meta first, then pages).
-    ///
-    /// Returns `true` if work was done (requests were processed), `false` if no requests pending.
-    #[cfg(test)]
-    pub fn process_storage_with_driver(&mut self, driver: &mut dyn crate::driver::Driver) -> bool {
-        use super::index::PageId;
-        use crate::storage::StorageResponse;
-
-        // Collect all storage requests: ObjectManager + indices
-        let mut all_requests = self.sync_manager.object_manager.take_requests();
-        for index in self.indices.values_mut() {
-            all_requests.extend(index.take_storage_requests());
-        }
-
-        if all_requests.is_empty() {
-            return false;
-        }
-
-        // Process through driver
-        let responses = driver.process(all_requests);
-
-        // Route responses to appropriate handlers
-        // TODO: Add branch to StorageResponse for proper branch-aware storage
-        for response in responses {
-            match &response {
-                // Index responses - route to indices (using default branch for now)
-                StorageResponse::LoadIndexMeta {
-                    table,
-                    column,
-                    result,
-                } => {
-                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    if let Some(index) = self.indices.get_mut(&key) {
-                        index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
-                    }
-                }
-                StorageResponse::LoadIndexPage {
-                    table,
-                    column,
-                    page_id,
-                    result,
-                } => {
-                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    if let Some(index) = self.indices.get_mut(&key) {
-                        index.process_page_load(
-                            PageId(*page_id),
-                            result.as_ref().ok().and_then(|o| o.clone()),
-                        );
-                    }
-                }
-                StorageResponse::StoreIndexMeta { .. }
-                | StorageResponse::StoreIndexPage { .. }
-                | StorageResponse::DeleteIndexPage { .. } => {
-                    // Store/delete responses don't need routing
-                }
-
-                // Object/blob responses - route to ObjectManager
-                _ => {
-                    self.sync_manager.object_manager.push_response(response);
-                }
-            }
-        }
-
-        // Process ObjectManager responses
-        self.sync_manager.object_manager.process_storage_responses();
-
-        true
-    }
-
-    /// Take all pending storage requests (for fire-and-forget dispatch).
-    ///
-    /// Used by RuntimeCore's batched_tick to collect requests before
-    /// sending them to the IoHandler.
-    pub fn take_storage_requests(&mut self) -> Vec<crate::storage::StorageRequest> {
-        let mut all_requests = self.sync_manager.object_manager.take_requests();
-        for index in self.indices.values_mut() {
-            all_requests.extend(index.take_storage_requests());
-        }
-        all_requests
-    }
-
-    /// Check if there are pending storage requests.
-    pub fn has_pending_storage_requests(&self) -> bool {
-        if self.sync_manager.object_manager.has_pending_requests() {
-            return true;
-        }
-        for index in self.indices.values() {
-            if index.has_pending_requests() {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Apply storage responses (from parked async responses).
-    ///
-    /// Routes responses to the appropriate handlers (ObjectManager or indices).
-    /// Call this when storage responses arrive from the IoHandler callback.
-    pub fn apply_storage_responses(&mut self, responses: Vec<crate::storage::StorageResponse>) {
-        use super::index::PageId;
-        use crate::storage::StorageResponse;
-
-        for response in responses {
-            match &response {
-                // Index responses - route to indices
-                StorageResponse::LoadIndexMeta {
-                    table,
-                    column,
-                    result,
-                } => {
-                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    let needs_dirty_mark = if let Some(index) = self.indices.get_mut(&key) {
-                        let was_ready = index.is_ready();
-                        index.process_meta_load(result.as_ref().ok().and_then(|o| o.clone()));
-                        !was_ready && index.is_ready()
-                    } else {
-                        false
-                    };
-
-                    // If index just became ready, mark affected subscriptions dirty
-                    if needs_dirty_mark {
-                        self.mark_subscriptions_dirty_for_index(table, column);
-                    }
-                }
-                StorageResponse::LoadIndexPage {
-                    table,
-                    column,
-                    page_id,
-                    result,
-                } => {
-                    let key: IndexKey = (table.clone(), column.clone(), self.current_branch());
-                    let needs_dirty_mark = if let Some(index) = self.indices.get_mut(&key) {
-                        let was_ready = index.is_ready();
-                        index.process_page_load(
-                            PageId(*page_id),
-                            result.as_ref().ok().and_then(|o| o.clone()),
-                        );
-                        !was_ready && index.is_ready()
-                    } else {
-                        false
-                    };
-
-                    // If index just became ready, mark affected subscriptions dirty
-                    if needs_dirty_mark {
-                        self.mark_subscriptions_dirty_for_index(table, column);
-                    }
-                }
-                StorageResponse::StoreIndexMeta { .. }
-                | StorageResponse::StoreIndexPage { .. }
-                | StorageResponse::DeleteIndexPage { .. } => {
-                    // Store/delete responses don't need routing
-                }
-
-                // Object/blob responses - route to ObjectManager
-                _ => {
-                    self.sync_manager.object_manager.push_response(response);
-                }
-            }
-        }
-
-        // Process ObjectManager responses
-        self.sync_manager.object_manager.process_storage_responses();
     }
 
     // ========================================================================
