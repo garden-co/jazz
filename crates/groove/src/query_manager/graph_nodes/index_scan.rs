@@ -124,7 +124,6 @@ impl SourceNode for IndexScanNode {
             added: added.into_iter().map(Tuple::from_id).collect(),
             removed: removed.into_iter().map(Tuple::from_id).collect(),
             updated: vec![],
-            pending: false,
         }
     }
 

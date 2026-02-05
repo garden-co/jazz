@@ -45,9 +45,6 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
-    /// Query has pending objects that need to be loaded from storage.
-    /// Caller should retry after storage processing.
-    Pending,
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
 }
@@ -72,7 +69,6 @@ impl std::fmt::Display for QueryError {
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
             }
-            QueryError::Pending => write!(f, "query pending: objects being loaded from storage"),
             QueryError::UnknownSchema(hash) => {
                 write!(
                     f,
@@ -1880,14 +1876,10 @@ impl QueryManager {
         // 5. Index storage is handled by IoHandler via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullIoHandler.
 
-        // 6. Mark subscriptions dirty if they have pending IDs that might now be available
-        // This ensures settle() will be called to check pending rows
-        self.mark_subscriptions_with_pending_dirty();
-
-        // 7. Recompile any subscriptions marked as stale due to schema changes
+        // 6. Recompile any subscriptions marked as stale due to schema changes
         self.recompile_stale_subscriptions();
 
-        // 8. Settle all subscriptions - row_loader reads from subscription's branches
+        // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
         let io_ref: &dyn IoHandler = io;
@@ -1962,21 +1954,11 @@ impl QueryManager {
                 Some((content, commit_id))
             };
 
-            // Set the default branch for pending ID tracking
-            if let Some(first_branch) = branches.first() {
-                subscription.graph.set_pending_branch(first_branch);
-            }
-
             let delta = subscription.graph.settle(io_ref, om, row_loader);
 
-            // Check if this subscription has pending loads (row data OR index pages)
-            let has_pending_loads = subscription.graph.has_pending_ids() || delta.pending;
+            let needs_initial = !subscription.settled_once;
 
-            // Emit on first settle ONLY if no pending loads, or when delta is non-empty
-            // Never emit while pending - wait for index/row loading to complete
-            let needs_initial = !subscription.settled_once && !has_pending_loads;
-
-            if !delta.pending && (needs_initial || !delta.is_empty()) {
+            if needs_initial || !delta.is_empty() {
                 subscription.settled_once = true;
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
@@ -1989,7 +1971,7 @@ impl QueryManager {
         // Note: With sync storage, object loading is immediate. No need to request
         // async loads - objects are available when we query for them.
 
-        // 9. Settle server-side subscriptions and update scopes
+        // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(io_ref);
     }
 
@@ -2636,23 +2618,6 @@ impl QueryManager {
             if let Some(state) = self.active_policy_checks.remove(&id) {
                 self.sync_manager
                     .reject_permission_check(state.pending_check, reason);
-            }
-        }
-    }
-
-    /// Mark subscriptions dirty if they have pending IDs.
-    /// This ensures settle() will re-check pending rows on each process() call.
-    fn mark_subscriptions_with_pending_dirty(&mut self) {
-        for subscription in self.subscriptions.values_mut() {
-            // Check if the MaterializeNode has any pending IDs
-            for compact in &subscription.graph.nodes {
-                if let super::graph::GraphNode::Materialize(mat_node) = &compact.node
-                    && mat_node.has_pending()
-                {
-                    // Mark the graph dirty so settle() will be called
-                    subscription.graph.mark_materialize_dirty();
-                    break;
-                }
             }
         }
     }

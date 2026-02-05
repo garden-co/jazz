@@ -293,7 +293,6 @@ impl RowNode for FilterNode {
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
         let mut result = TupleDelta::new();
-        result.pending = input.pending;
 
         // Filter removed tuples
         for tuple in input.removed {
@@ -419,7 +418,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2],
             removed: vec![],
             updated: vec![],
@@ -474,7 +472,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
             updated: vec![],
@@ -529,7 +526,6 @@ mod tests {
         );
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2, tuple3],
             removed: vec![],
             updated: vec![],
@@ -570,7 +566,6 @@ mod tests {
 
         // First add the tuple
         let add_delta = TupleDelta {
-            pending: false,
             added: vec![old_tuple.clone()],
             removed: vec![],
             updated: vec![],
@@ -579,7 +574,6 @@ mod tests {
 
         // Then update it to fail the filter
         let update_delta = TupleDelta {
-            pending: false,
             added: vec![],
             removed: vec![],
             updated: vec![(old_tuple, new_tuple)],
@@ -621,7 +615,6 @@ mod tests {
 
         // Tuple doesn't pass filter initially, so not added
         let add_delta = TupleDelta {
-            pending: false,
             added: vec![old_tuple.clone()],
             removed: vec![],
             updated: vec![],
@@ -631,7 +624,6 @@ mod tests {
 
         // Update makes it pass
         let update_delta = TupleDelta {
-            pending: false,
             added: vec![],
             removed: vec![],
             updated: vec![(old_tuple, new_tuple)],
@@ -801,7 +793,6 @@ mod tests {
         ]);
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2],
             removed: vec![],
             updated: vec![],
@@ -860,7 +851,6 @@ mod tests {
         ]);
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1, tuple2],
             removed: vec![],
             updated: vec![],

@@ -12,6 +12,9 @@ use crate::query_manager::types::{
 ///
 /// Supports selective per-element materialization: only specified elements
 /// will be materialized, others pass through unchanged.
+///
+/// When the loader returns None for an element, the entire tuple is dropped
+/// (the row is genuinely unavailable, e.g. hard-deleted).
 #[derive(Debug)]
 pub struct MaterializeNode {
     /// Output tuple descriptor (with updated materialization state).
@@ -24,17 +27,12 @@ pub struct MaterializeNode {
     rows: AHashMap<ObjectId, Row>,
     /// Current tuples (fully or partially materialized).
     current_tuples: AHashSet<Tuple>,
-    /// IDs that are pending (loader returned None, still loading).
-    /// Maps ObjectId to the branch it should be loaded from.
-    pending_ids: AHashMap<ObjectId, String>,
     /// IDs to check for content updates (row data may have changed).
     updated_ids: AHashSet<ObjectId>,
     /// IDs that were deleted (emit removal delta during settle).
     deleted_ids: AHashSet<ObjectId>,
     /// Whether this node needs reprocessing.
     dirty: bool,
-    /// Default branch to use for pending IDs when source branch is unknown.
-    default_pending_branch: String,
 }
 
 /// Function type for loading row data from storage.
@@ -56,11 +54,9 @@ impl MaterializeNode {
             elements_to_materialize,
             rows: AHashMap::new(),
             current_tuples: AHashSet::new(),
-            pending_ids: AHashMap::new(),
             updated_ids: AHashSet::new(),
             deleted_ids: AHashSet::new(),
             dirty: true,
-            default_pending_branch: String::new(),
         }
     }
 
@@ -79,27 +75,6 @@ impl MaterializeNode {
     /// Check if an element should be materialized.
     fn should_materialize(&self, element_index: usize) -> bool {
         self.elements_to_materialize.contains(&element_index)
-    }
-
-    /// Check if there are any pending IDs.
-    pub fn has_pending(&self) -> bool {
-        !self.pending_ids.is_empty()
-    }
-
-    /// Get the set of pending IDs (just the IDs, for backward compatibility).
-    pub fn pending_ids(&self) -> impl Iterator<Item = &ObjectId> {
-        self.pending_ids.keys()
-    }
-
-    /// Get pending IDs with their associated branches.
-    pub fn pending_ids_with_branches(&self) -> impl Iterator<Item = (&ObjectId, &String)> {
-        self.pending_ids.iter()
-    }
-
-    /// Set the default branch to use when tracking pending IDs.
-    /// Should be called before materialize_tuples if branch tracking is desired.
-    pub fn set_pending_branch(&mut self, branch: &str) {
-        self.default_pending_branch = branch.to_string();
     }
 
     /// Mark an ID for content update checking (only if we're tracking it).
@@ -137,7 +112,7 @@ impl MaterializeNode {
 
     /// Process a TupleDelta, materializing any TupleElement::Id into TupleElement::Row.
     /// Returns a TupleDelta with fully materialized tuples.
-    /// If loader returns None for any ID, that element remains as Id and pending is set.
+    /// If loader returns None for any element in a tuple, that tuple is silently dropped.
     pub fn materialize_tuples<F>(&mut self, delta: TupleDelta, mut loader: F) -> TupleDelta
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
@@ -158,7 +133,6 @@ impl MaterializeNode {
             // Remove from tracking
             for elem in tuple.iter() {
                 let id = elem.id();
-                self.pending_ids.remove(&id);
                 self.updated_ids.remove(&id);
                 self.rows.remove(&id);
             }
@@ -170,112 +144,75 @@ impl MaterializeNode {
 
         // Handle added tuples - materialize each element
         for tuple in delta.added {
-            let materialized = self.materialize_tuple(&tuple, &mut loader);
-            self.current_tuples.insert(materialized.clone());
-            result.added.push(materialized);
+            if let Some(materialized) = self.materialize_tuple(&tuple, &mut loader) {
+                self.current_tuples.insert(materialized.clone());
+                result.added.push(materialized);
+            }
+            // If materialize_tuple returns None, the tuple is dropped (unavailable row)
         }
 
         // Handle updated tuples
         for (old_tuple, new_tuple) in delta.updated {
             self.current_tuples.remove(&old_tuple);
-            let materialized = self.materialize_tuple(&new_tuple, &mut loader);
-            self.current_tuples.insert(materialized.clone());
-            result.updated.push((old_tuple, materialized));
+            if let Some(materialized) = self.materialize_tuple(&new_tuple, &mut loader) {
+                self.current_tuples.insert(materialized.clone());
+                result.updated.push((old_tuple, materialized));
+            } else {
+                // New version unavailable - emit as removal
+                result.removed.push(old_tuple);
+            }
         }
 
-        result.pending = !self.pending_ids.is_empty();
         self.dirty = false;
         result
     }
 
     /// Materialize a single tuple, converting Id elements to Row elements.
     /// Only materializes elements in `elements_to_materialize`.
-    fn materialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Tuple
+    /// Returns None if any element that should be materialized can't be loaded.
+    fn materialize_tuple<F>(&mut self, tuple: &Tuple, loader: &mut F) -> Option<Tuple>
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
-        let materialized_elements: Vec<TupleElement> = tuple
-            .iter()
-            .enumerate()
-            .map(|(elem_idx, elem)| {
-                // Only materialize if this element is in our list
-                if !self.should_materialize(elem_idx) {
-                    return elem.clone();
-                }
+        let mut materialized_elements = Vec::with_capacity(tuple.len());
 
-                match elem {
-                    TupleElement::Id(id) => {
-                        // Try to load the row data
-                        if let Some((data, commit_id)) = loader(*id) {
-                            let row = Row::new(*id, data.clone(), commit_id);
-                            self.rows.insert(*id, row);
-                            // Remove from pending since we successfully loaded
-                            self.pending_ids.remove(id);
-                            TupleElement::Row {
-                                id: *id,
-                                content: data,
-                                commit_id,
-                            }
-                        } else {
-                            // Still pending - track with branch info
-                            self.pending_ids
-                                .insert(*id, self.default_pending_branch.clone());
-                            elem.clone()
-                        }
-                    }
-                    TupleElement::Row {
-                        id,
-                        content,
-                        commit_id,
-                    } => {
-                        // Already materialized - update our cache
-                        let row = Row::new(*id, content.clone(), *commit_id);
+        for (elem_idx, elem) in tuple.iter().enumerate() {
+            // Only materialize if this element is in our list
+            if !self.should_materialize(elem_idx) {
+                materialized_elements.push(elem.clone());
+                continue;
+            }
+
+            match elem {
+                TupleElement::Id(id) => {
+                    // Try to load the row data
+                    if let Some((data, commit_id)) = loader(*id) {
+                        let row = Row::new(*id, data.clone(), commit_id);
                         self.rows.insert(*id, row);
-                        // Ensure not in pending
-                        self.pending_ids.remove(id);
-                        elem.clone()
+                        materialized_elements.push(TupleElement::Row {
+                            id: *id,
+                            content: data,
+                            commit_id,
+                        });
+                    } else {
+                        // Row unavailable - drop the entire tuple
+                        return None;
                     }
                 }
-            })
-            .collect();
-
-        Tuple::new(materialized_elements)
-    }
-
-    /// Re-check pending tuples and return newly-materialized ones.
-    pub fn check_pending_tuples<F>(&mut self, mut loader: F) -> TupleDelta
-    where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
-    {
-        let mut result = TupleDelta::new();
-
-        // Find tuples that have pending elements
-        let pending_tuples: Vec<Tuple> = self
-            .current_tuples
-            .iter()
-            .filter(|t| t.iter().any(|e| !e.is_materialized()))
-            .cloned()
-            .collect();
-
-        for old_tuple in pending_tuples {
-            // Try to materialize
-            let new_tuple = self.materialize_tuple(&old_tuple, &mut loader);
-
-            // If any element changed from Id to Row, emit update
-            let changed = old_tuple
-                .iter()
-                .zip(new_tuple.iter())
-                .any(|(old, new)| !old.is_materialized() && new.is_materialized());
-
-            if changed {
-                self.current_tuples.remove(&old_tuple);
-                self.current_tuples.insert(new_tuple.clone());
-                result.updated.push((old_tuple, new_tuple));
+                TupleElement::Row {
+                    id,
+                    content,
+                    commit_id,
+                } => {
+                    // Already materialized - update our cache
+                    let row = Row::new(*id, content.clone(), *commit_id);
+                    self.rows.insert(*id, row);
+                    materialized_elements.push(elem.clone());
+                }
             }
         }
 
-        result.pending = !self.pending_ids.is_empty();
-        result
+        Some(Tuple::new(materialized_elements))
     }
 
     /// Check for deleted IDs and return removal deltas (tuple version).
@@ -284,7 +221,6 @@ impl MaterializeNode {
         let ids_to_remove: Vec<_> = self.deleted_ids.drain().collect();
 
         for id in ids_to_remove {
-            self.pending_ids.remove(&id);
             self.updated_ids.remove(&id);
             self.rows.remove(&id);
 
@@ -302,7 +238,6 @@ impl MaterializeNode {
             }
         }
 
-        result.pending = !self.pending_ids.is_empty();
         result
     }
 
@@ -336,7 +271,6 @@ impl MaterializeNode {
             }
         }
 
-        result.pending = !self.pending_ids.is_empty();
         result
     }
 
@@ -421,7 +355,6 @@ mod tests {
             added: ids.iter().map(|&id| Tuple::from_id(id)).collect(),
             removed: vec![],
             updated: vec![],
-            pending: false,
         }
     }
 
@@ -430,7 +363,6 @@ mod tests {
             added: vec![],
             removed: tuples,
             updated: vec![],
-            pending: false,
         }
     }
 
@@ -540,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_tracks_pending_when_loader_returns_none() {
+    fn materialize_drops_tuples_when_loader_returns_none() {
         let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
@@ -555,33 +487,23 @@ mod tests {
             if id == id1 {
                 Some((data1.clone(), commit1))
             } else {
-                None // id2 is pending
+                None // id2 is unavailable (hard-deleted)
             }
         };
 
         let result = node.materialize_tuples(delta, loader);
 
-        // Both tuples are added (tuple-based API adds all, pending or not)
-        assert_eq!(result.added.len(), 2);
+        // Only id1's tuple should be added; id2 is silently dropped
+        assert_eq!(result.added.len(), 1);
+        assert!(result.added[0].is_fully_materialized());
+        assert_eq!(result.added[0].ids()[0], id1);
 
-        // Delta should be marked as pending (id2 is still loading)
-        assert!(result.pending);
-
-        // Node should track id2 as pending
-        assert!(node.has_pending());
-        assert!(node.pending_ids().any(|id| *id == id2));
-        assert!(!node.pending_ids().any(|id| *id == id1));
-
-        // id1's tuple should be materialized, id2's should not
-        let id1_tuple = result.added.iter().find(|t| t.ids()[0] == id1).unwrap();
-        assert!(id1_tuple.is_fully_materialized());
-
-        let id2_tuple = result.added.iter().find(|t| t.ids()[0] == id2).unwrap();
-        assert!(!id2_tuple.is_fully_materialized());
+        // Node should only track id1
+        assert_eq!(node.current_tuples().len(), 1);
     }
 
     #[test]
-    fn materialize_not_pending_when_all_loaded() {
+    fn materialize_all_loaded() {
         let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
@@ -596,81 +518,21 @@ mod tests {
 
         // Row should be materialized
         assert_eq!(result.added.len(), 1);
-
-        // Delta should NOT be pending
-        assert!(!result.pending);
-
-        // Node should not have pending IDs
-        assert!(!node.has_pending());
+        assert!(result.added[0].is_fully_materialized());
     }
 
     #[test]
-    fn check_pending_emits_newly_loaded_rows() {
-        let mut node = make_materialize_node();
-
-        let id1 = ObjectId::new();
-        let id2 = ObjectId::new();
-        let data1 = vec![1, 2, 3];
-        let data2 = vec![4, 5, 6];
-        let commit1 = make_commit_id(1);
-        let commit2 = make_commit_id(2);
-
-        // First materialize - id2 is pending
-        let delta = make_tuple_delta_add(&[id1, id2]);
-
-        let loader1 = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-            if id == id1 {
-                Some((data1.clone(), commit1))
-            } else {
-                None
-            }
-        };
-
-        let result = node.materialize_tuples(delta, loader1);
-        // Both tuples are added (tuple-based API)
-        assert_eq!(result.added.len(), 2);
-        assert!(result.pending);
-        assert!(node.pending_ids().any(|id| *id == id2));
-
-        // Now id2 becomes available
-        let loader2 = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-            if id == id2 {
-                Some((data2.clone(), commit2))
-            } else {
-                None
-            }
-        };
-
-        let pending_result = node.check_pending_tuples(loader2);
-
-        // Should emit id2 as newly materialized (as an update from Id->Row)
-        // The check_pending_tuples emits updates for tuples that become materialized
-        assert_eq!(pending_result.updated.len(), 1);
-
-        // Should no longer be pending
-        assert!(!pending_result.pending);
-        assert!(!node.has_pending());
-    }
-
-    #[test]
-    fn remove_clears_from_pending() {
+    fn remove_unavailable_row_is_noop() {
         let mut node = make_materialize_node();
 
         let id1 = ObjectId::new();
 
-        // Add as pending
+        // Add but loader returns None - tuple is dropped
         let add_delta = make_tuple_delta_add(&[id1]);
         let result = node.materialize_tuples(add_delta, |_| None);
-        assert!(result.pending);
-        assert!(node.pending_ids().any(|id| *id == id1));
+        assert_eq!(result.added.len(), 0);
 
-        // Remove while still pending - need to use a tuple that matches
-        let tuple = Tuple::from_id(id1);
-        let remove_delta = make_tuple_delta_remove(vec![tuple]);
-        let result = node.materialize_tuples(remove_delta, |_| None);
-
-        // Should no longer be pending
-        assert!(!result.pending);
-        assert!(!node.pending_ids().any(|id| *id == id1));
+        // Node should have no tuples
+        assert_eq!(node.current_tuples().len(), 0);
     }
 }

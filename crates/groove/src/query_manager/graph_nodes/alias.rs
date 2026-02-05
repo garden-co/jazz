@@ -170,7 +170,6 @@ mod tests {
         let tuple1 = make_tuple(id1, 1, "Alice");
 
         let delta = TupleDelta {
-            pending: false,
             added: vec![tuple1.clone()],
             removed: vec![],
             updated: vec![],
@@ -211,7 +210,6 @@ mod tests {
 
         // Add tuple
         node.process(TupleDelta {
-            pending: false,
             added: vec![tuple1.clone()],
             removed: vec![],
             updated: vec![],
@@ -220,30 +218,10 @@ mod tests {
 
         // Remove tuple
         node.process(TupleDelta {
-            pending: false,
             added: vec![],
             removed: vec![tuple1],
             updated: vec![],
         });
         assert_eq!(node.current_tuples().len(), 0);
-    }
-
-    #[test]
-    fn alias_preserves_pending_flag() {
-        let descriptor = test_descriptor();
-        let mut node = AliasNode::new("users".to_string(), "u1".to_string(), descriptor);
-
-        let id1 = ObjectId::new();
-        let tuple1 = make_tuple(id1, 1, "Alice");
-
-        let delta = TupleDelta {
-            pending: true,
-            added: vec![tuple1],
-            removed: vec![],
-            updated: vec![],
-        };
-
-        let result = node.process(delta);
-        assert!(result.pending);
     }
 }

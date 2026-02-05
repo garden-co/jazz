@@ -85,8 +85,6 @@ pub struct QueryGraph {
     pub table_descriptors: Vec<RowDescriptor>,
     /// Combined descriptor for output (all columns from all tables).
     pub combined_descriptor: RowDescriptor,
-    /// Cached pending state from last settle (avoids iterating all nodes).
-    has_pending: bool,
 }
 
 impl QueryGraph {
@@ -101,7 +99,6 @@ impl QueryGraph {
             policy_filter_tables: Vec::new(),
             table_descriptors: vec![descriptor.clone()],
             combined_descriptor: descriptor,
-            has_pending: false,
         }
     }
 
@@ -219,40 +216,6 @@ impl QueryGraph {
         }
 
         result
-    }
-
-    /// Check if the graph is waiting for pending objects to load.
-    ///
-    /// Returns true if the OutputNode is held pending (waiting for objects to materialize).
-    pub fn is_pending(&self) -> bool {
-        if let Some(GraphNode::Output(output)) = self.get_node(self.output_node) {
-            return output.is_held_pending();
-        }
-        false
-    }
-
-    /// Get all pending object IDs with their branches from MaterializeNodes.
-    ///
-    /// Returns (ObjectId, branch_name) pairs for all objects that are pending.
-    pub fn pending_ids_with_branches(&self) -> Vec<(ObjectId, String)> {
-        let mut result = Vec::new();
-        for compact in &self.nodes {
-            if let GraphNode::Materialize(mat) = &compact.node {
-                for (&id, branch) in mat.pending_ids_with_branches() {
-                    result.push((id, branch.clone()));
-                }
-            }
-        }
-        result
-    }
-
-    /// Set the default branch for pending ID tracking on all MaterializeNodes.
-    pub fn set_pending_branch(&mut self, branch: &str) {
-        for compact in &mut self.nodes {
-            if let GraphNode::Materialize(mat) = &mut compact.node {
-                mat.set_pending_branch(branch);
-            }
-        }
     }
 
     /// Compile a query into a graph (without policy filtering).
@@ -1111,40 +1074,6 @@ impl QueryGraph {
             .any(|(_, t, c)| t.as_str() == table && c.as_str() == column)
     }
 
-    /// Check if any MaterializeNode has pending IDs (objects being loaded).
-    /// O(1) - uses cached state from last settle().
-    pub fn has_pending_ids(&self) -> bool {
-        self.has_pending
-    }
-
-    /// Check if the MaterializeNode has a specific object ID pending.
-    pub fn has_pending_id(&self, object_id: ObjectId) -> bool {
-        for compact in &self.nodes {
-            if let GraphNode::Materialize(mat_node) = &compact.node
-                && mat_node.pending_ids().any(|id| *id == object_id)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Mark the materialize node dirty (to re-check pending IDs).
-    /// Also marks downstream nodes (like Output) so they process the delta.
-    pub fn mark_materialize_dirty(&mut self) {
-        let materialize_ids: Vec<NodeId> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| matches!(c.node, GraphNode::Materialize(_)))
-            .map(|(idx, _)| NodeId(idx as u64))
-            .collect();
-        for node_id in materialize_ids {
-            self.mark_dirty(node_id);
-            self.mark_downstream_dirty(node_id);
-        }
-    }
-
     /// Mark a row ID as updated for content checking.
     /// This tells MaterializeNodes to check if the row's content has changed.
     pub fn mark_row_updated(&mut self, id: ObjectId) {
@@ -1255,9 +1184,6 @@ impl QueryGraph {
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
-        // Reset pending state - will be updated by MaterializeNode processing
-        self.has_pending = false;
-
         let order = self.topo_sort_dirty();
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
 
@@ -1315,7 +1241,6 @@ impl QueryGraph {
                         merged.added.extend(right_result.added);
                         merged.removed.extend(left_result.removed);
                         merged.removed.extend(right_result.removed);
-                        merged.pending = left_result.pending || right_result.pending;
 
                         tuple_deltas.insert(node_id, merged);
                     }
@@ -1339,31 +1264,17 @@ impl QueryGraph {
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
-                    // Capture input pending state - this propagates pending from IndexScanNode
-                    let input_pending = input_delta.pending;
-
                     if let Some(GraphNode::Materialize(mat_node)) = self.get_node_mut(node_id) {
                         let deleted_delta = mat_node.check_deleted_tuples();
-                        let pending_delta = mat_node.check_pending_tuples(&mut row_loader);
                         let new_delta = mat_node.materialize_tuples(input_delta, &mut row_loader);
                         let update_delta = mat_node.check_updated_tuples(&mut row_loader);
 
                         let mut merged = TupleDelta::new();
-                        merged.added.extend(pending_delta.added);
                         merged.added.extend(new_delta.added);
                         merged.removed.extend(deleted_delta.removed);
-                        merged.removed.extend(pending_delta.removed);
                         merged.removed.extend(new_delta.removed);
-                        merged.updated.extend(pending_delta.updated);
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
-                        // Propagate pending from both input (index loading) and output (row loading)
-                        merged.pending = new_delta.pending || input_pending;
-
-                        // Update graph-level pending state for O(1) has_pending_ids() check
-                        if merged.pending {
-                            self.has_pending = true;
-                        }
 
                         tuple_deltas.insert(node_id, merged);
                     }

@@ -148,7 +148,6 @@ impl ArraySubqueryNode {
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
         let mut result = TupleDelta::new();
-        result.pending = input.pending;
 
         // Process removed tuples
         for tuple in input.removed {
@@ -375,7 +374,6 @@ impl RowNode for ArraySubqueryNode {
         // Real processing should use process_with_context.
         // For now, just pass through with empty arrays.
         let mut result = TupleDelta::new();
-        result.pending = input.pending;
 
         for tuple in input.removed {
             if let Some(outer_id) = tuple.first_id() {

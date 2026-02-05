@@ -183,9 +183,8 @@ impl PolicyGraph {
         })
     }
 
-    /// Settle the graph. Returns true if complete (not pending).
+    /// Settle the graph. With synchronous IoHandler, always completes in one pass.
     ///
-    /// Call this repeatedly (with process loop) until it returns true.
     /// The row_loader trait object is used to fetch row content by ObjectId.
     /// Using trait object instead of generic to avoid recursion limit when
     /// INHERITS evaluation calls this method.
@@ -195,32 +194,11 @@ impl PolicyGraph {
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
-        // Settle the graph
         let _delta = self.graph.settle(io, om, row_loader);
-
-        // Check if the ExistsOutput node is complete
-        self.is_complete()
+        true
     }
 
-    /// Returns true if the graph has finished settling (not pending).
-    pub fn is_complete(&self) -> bool {
-        match self
-            .graph
-            .nodes
-            .get(self.exists_node.0 as usize)
-            .map(|c| &c.node)
-        {
-            Some(GraphNode::ExistsOutput(node)) => node.is_complete(),
-            _ => false,
-        }
-    }
-
-    /// Returns true if the graph is still pending upstream data.
-    pub fn is_pending(&self) -> bool {
-        !self.is_complete()
-    }
-
-    /// Get result (only valid when complete).
+    /// Get result.
     ///
     /// Returns true if at least one row passed the policy check.
     pub fn result(&self) -> bool {

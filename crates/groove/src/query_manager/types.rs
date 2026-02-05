@@ -1031,8 +1031,6 @@ pub struct RowDelta {
     pub removed: Vec<Row>,
     /// Updated rows as (old, new) pairs.
     pub updated: Vec<(Row, Row)>,
-    /// True if some rows are still loading (hold back results until ready).
-    pub pending: bool,
 }
 
 impl RowDelta {
@@ -1270,8 +1268,6 @@ pub struct TupleDelta {
     pub removed: Vec<Tuple>,
     /// Updated tuples as (old, new) pairs - same IDs, different content.
     pub updated: Vec<(Tuple, Tuple)>,
-    /// True if any elements are still loading (hold back results until ready).
-    pub pending: bool,
 }
 
 impl TupleDelta {
@@ -1324,7 +1320,6 @@ impl TupleDelta {
             added: added?,
             removed: removed?,
             updated: updated?,
-            pending: self.pending,
         })
     }
 
@@ -1391,7 +1386,6 @@ impl TupleDelta {
             added: added?,
             removed: removed?,
             updated: updated?,
-            pending: self.pending,
         })
     }
 
@@ -1400,7 +1394,6 @@ impl TupleDelta {
         self.added.extend(other.added);
         self.removed.extend(other.removed);
         self.updated.extend(other.updated);
-        self.pending = self.pending || other.pending;
     }
 }
 
@@ -2024,13 +2017,11 @@ mod tests {
             added: vec![tuple],
             removed: vec![],
             updated: vec![],
-            pending: true,
         };
 
         let row_delta = tuple_delta.to_row_delta().unwrap();
         assert_eq!(row_delta.added.len(), 1);
         assert_eq!(row_delta.added[0].id, id);
-        assert!(row_delta.pending);
     }
 
     #[test]
