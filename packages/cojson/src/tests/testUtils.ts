@@ -277,15 +277,22 @@ export function blockMessageTypeOnOutgoingPeer(
   const blockedIds = new Set<string>();
 
   peer.outgoing.push = async (msg) => {
+    if (typeof msg !== "object" || msg.action !== messageType) {
+      return push.call(peer.outgoing, msg);
+    }
+
+    // BatchMessage doesn't have an id field, so we skip id-based filtering for it
+    const msgId = "id" in msg ? msg.id : undefined;
+
     if (
-      typeof msg === "object" &&
-      msg.action === messageType &&
-      (!opts.id || msg.id === opts.id) &&
-      (!opts.once || !blockedIds.has(msg.id)) &&
+      (!opts.id || msgId === opts.id) &&
+      (!opts.once || (msgId && !blockedIds.has(msgId))) &&
       (!opts.matcher || opts.matcher(msg))
     ) {
       blockedMessages.push(msg);
-      blockedIds.add(msg.id);
+      if (msgId) {
+        blockedIds.add(msgId);
+      }
       return Promise.resolve();
     }
     return push.call(peer.outgoing, msg);
