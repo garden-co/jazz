@@ -1329,6 +1329,9 @@ impl QueryGraph {
                         .and_then(|dep| tuple_deltas.get(dep).cloned())
                         .unwrap_or_default();
 
+                    // Capture input pending state - this propagates pending from IndexScanNode
+                    let input_pending = input_delta.pending;
+
                     if let Some(GraphNode::Materialize(mat_node)) = self.get_node_mut(node_id) {
                         let deleted_delta = mat_node.check_deleted_tuples();
                         let pending_delta = mat_node.check_pending_tuples(&mut row_loader);
@@ -1344,7 +1347,8 @@ impl QueryGraph {
                         merged.updated.extend(pending_delta.updated);
                         merged.updated.extend(new_delta.updated);
                         merged.updated.extend(update_delta.updated);
-                        merged.pending = new_delta.pending;
+                        // Propagate pending from both input (index loading) and output (row loading)
+                        merged.pending = new_delta.pending || input_pending;
 
                         // Update graph-level pending state for O(1) has_pending_ids() check
                         if merged.pending {

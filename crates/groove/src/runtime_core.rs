@@ -1044,7 +1044,9 @@ mod delayed_io_tests {
     fn run_to_completion(core: &mut RuntimeCore<DelayedIoHandler>) {
         let mut iterations = 0;
         loop {
-            core.immediate_tick();
+            // Use batched_tick to send storage requests to IoHandler
+            core.batched_tick();
+            // Flush to process the requests and get responses
             let responses = core.io_handler_mut().flush();
             if responses.is_empty() {
                 break;
@@ -1082,19 +1084,10 @@ mod delayed_io_tests {
         let results = index.scan_all();
         assert!(results.is_empty(), "No results without meta loaded");
 
-        // THE BUG: There's no way to distinguish "empty index" from "not loaded yet"
-        // After Phase 1: assert!(!index.is_ready(), "Should not be ready without meta");
-
-        // This assertion will FAIL today because is_ready() doesn't exist.
-        // Workaround: We check that the index considers itself not ready by
-        // verifying that operations return "not ready" indicators.
-        // But insert() triggers loading, scan_all() just returns empty silently.
-        // The invariant we need: a way to ASK if the index is ready.
-
-        // For now, fail explicitly to document the missing API:
+        // THE KEY INVARIANT: is_ready() returns false when meta not loaded
         assert!(
-            false,
-            "BTreeIndex lacks is_ready() method - cannot distinguish empty from not-loaded"
+            !index.is_ready(),
+            "Index should not be ready without meta loaded"
         );
     }
 
@@ -1166,18 +1159,11 @@ mod delayed_io_tests {
         let root_page = BTreePage::new_leaf();
         index.process_page_load(PageId(1), Some(root_page.serialize()));
 
-        // THE INVARIANT: Once meta AND root are loaded, is_ready() == true
-        // Today we can only check root_exists() which is a partial check.
-
+        // THE KEY INVARIANT: Once meta AND root are loaded, is_ready() == true
         assert!(index.root_exists(), "Root page should exist after loading");
-
-        // After Phase 1, this is the real test:
-        // assert!(index.is_ready(), "Index should be ready with meta and root");
-
-        // For now, fail to document the missing API:
         assert!(
-            false,
-            "BTreeIndex lacks is_ready() method to confirm full readiness"
+            index.is_ready(),
+            "Index should be ready with meta and root page loaded"
         );
     }
 
