@@ -19,7 +19,6 @@ Users need to guarantee that multiple CoValue mutations either all persist toget
 * When the callback completes successfully:
   * All mutations shall be persisted to IndexedDB in a single transaction
   * All mutations shall be sent to sync servers in a single network message
-  * If either persistence or sync fails, the system shall retry until success
 * When the callback throws an error:
   * Mutations executed before the error shall remain in memory
   * No mutations shall be persisted or synced
@@ -43,9 +42,8 @@ Users need to guarantee that multiple CoValue mutations either all persist toget
   * The transaction shall either commit all changes or rollback all changes
 * If the IndexedDB transaction fails:
   * No partial data shall be written to storage
-  * The system shall retry the entire batch with exponential backoff
   * In-memory state shall remain unchanged
-* The system shall continue retrying until the transaction succeeds
+  * The failure shall be surfaced to the caller of `withTransaction()`
 * Storage implementations used in production (IndexedDB, SQLite) shall provide
   equivalent atomic batch guarantees
 * Empty batches shall be treated as a no-op without opening a storage transaction
@@ -68,34 +66,33 @@ Users need to guarantee that multiple CoValue mutations either all persist toget
   * The server may optionally store all mutations in a single database transaction
   * The server shall preserve the order of mutations within the batch
 * If network sync fails:
-  * The system shall retry sending the entire `BatchMessage`
+  * The system shall not perform automatic retries for the `BatchMessage`
   * In-memory state and local storage shall remain unchanged
-  * The system shall use existing sync state tracking to know when all CoValues are synced
+  * The failure shall be surfaced to the caller of `withTransaction()`
 * If a server does not support `BatchMessage`:
   * The client shall fall back to sending individual `NewContentMessage`s
   * The fallback shall preserve per-CoValue ordering
-  * The client shall continue retrying until the server acknowledges receipt
 
 ---
 
-### US-4: Eventual Consistency with Retry
+### US-4: Eventual Consistency Without Automatic Retry
 
 > **As a** Jazz application developer
-> **I want** failed transactions to automatically retry until they succeed
-> **So that** I don't need to implement complex retry logic
+> **I want** failed transactions to surface clear errors
+> **So that** I can decide how to handle retries in my application code
 
 **Acceptance Criteria:**
-* When persistence or sync fails:
+* When **network sync** fails:
   * The system shall NOT rollback in-memory changes
-  * The system shall retry with exponential backoff
-  * The system shall continue retrying indefinitely until success
+  * The system shall NOT retry automatically
+  * The failure shall be surfaced to the caller of `withTransaction()`
+* When **local persistence** fails:
+  * The system shall NOT rollback in-memory changes
+  * The system shall NOT retry the failed storage operation automatically
+  * The failure shall be surfaced to the caller of `withTransaction()`
 * Users shall be able to:
-  * Await the transaction promise to wait for full persistence
+  * Await the transaction promise to wait for the single persistence and sync attempt
   * Continue using the app with optimistic in-memory state
-  * Optionally specify a timeout for the transaction
-* If a timeout is reached:
-  * The promise shall reject with a timeout error
-  * Retry shall continue in the background until success
 
 ---
 
