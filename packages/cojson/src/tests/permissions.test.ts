@@ -21,6 +21,14 @@ import { Role } from "../permissions.js";
 
 const Crypto = await WasmCrypto.create();
 
+// Ensure that the order of transactions is deterministic
+// otherwise transactions that happen at the same time will be ordered randomly
+// based on the random part of the session ID.
+let txCount = 0;
+WasmCrypto.prototype.newRandomSessionID = (accountID) => {
+  return `${accountID}_session_z${txCount++}`;
+};
+
 test("Initial admin can add another admin to a group", () => {
   groupWithTwoAdmins();
 });
@@ -1124,6 +1132,8 @@ test("Admins can create an adminInvite, which can add an admin (high-level)", as
 
   await nodeAsInvitedAdmin.acceptInvite(group.id, inviteSecret);
 
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
   const thirdAdmin = Crypto.newRandomAgentSecret();
   const thirdAdminID = Crypto.getAgentID(thirdAdmin);
 
@@ -1177,6 +1187,8 @@ test("Admins can create a writerInvite, which can add a writer", async () => {
   });
 
   group.set(`${readKeyID}_for_${inviteID}`, revelationForInvite, "trusting");
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
 
   const groupAsInvite = expectGroup(
     await groupCore.contentInClonedNodeWithDifferentAccount(
@@ -1276,6 +1288,8 @@ test("Admins can create a readerInvite, which can add a reader", async () => {
   });
 
   group.set(`${readKeyID}_for_${inviteID}`, revelationForInvite, "trusting");
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
 
   const groupAsInvite = expectGroup(
     await groupCore.contentInClonedNodeWithDifferentAccount(
@@ -1457,6 +1471,9 @@ test.each([
       new ControlledAgent(inviteSecret, Crypto),
     ),
   );
+
+  // Wait for the cloned node to sync all transactions
+  await new Promise((resolve) => setTimeout(resolve, 10));
 
   const invitedAdminSecret = Crypto.newRandomAgentSecret();
   const invitedAdminID = Crypto.getAgentID(invitedAdminSecret);
@@ -2379,6 +2396,8 @@ test("revoking access on a parent group doesn't block access to the child group 
   const childMap = group.createMap();
 
   childMap.set("foo", "bar", "private");
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
 
   const mapOnNode2 = await loadCoValueOrFail(node2.node, childMap.id);
 

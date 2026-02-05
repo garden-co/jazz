@@ -221,16 +221,20 @@ describe("Branching Logic", () => {
       // Add new items to first branch
       branch1.appendItems(["cheese"]);
 
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
       const branch2 = expectList(
         list.core
           .createBranch("feature-branch-2", group.id)
           .getCurrentContent(),
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       // Add different items to second branch
       branch2.appendItems(["apples", "oranges", "carrots"]);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       const anotherSession = client.spawnNewSession();
 
@@ -247,19 +251,21 @@ describe("Branching Logic", () => {
       loadedBranch2.core.mergeBranch();
 
       await loadedBranch2.core.waitForSync();
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       branch1.core.mergeBranch();
 
-      expect(list.toJSON()).toEqual([
-        "bread",
-        "apples",
-        "oranges",
-        "carrots",
-        "tomatoes",
-        "cucumber",
-        "cheese",
-      ]);
+      await waitFor(() => {
+        expect(list.toJSON()).toEqual([
+          "bread",
+          "apples",
+          "oranges",
+          "carrots",
+          "tomatoes",
+          "cucumber",
+          "cheese",
+        ]);
+      });
     });
 
     test("should work with co.plainText when merging the same branch twice on different sessions", async () => {
@@ -293,6 +299,9 @@ describe("Branching Logic", () => {
       loadedBranch.insertAfter("hello world".length, " people");
 
       branch.core.mergeBranch();
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
       const loadedBranchMergeResult = loadedBranch.core.mergeBranch();
 
       anotherSession.connectToSyncServer();

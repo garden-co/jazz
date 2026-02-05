@@ -365,9 +365,8 @@ test("syncing prepends with an older timestamp", async () => {
 
   await waitFor(() => {
     expect(list.toJSON()).toEqual([6, 4, 5, 3, 2, 1]);
+    expect(listOnOtherClient.toJSON()).toEqual(list.toJSON());
   });
-
-  expect(listOnOtherClient.toJSON()).toEqual(list.toJSON());
 });
 
 test("totalValidTransactions should return the number of valid transactions processed", async () => {
