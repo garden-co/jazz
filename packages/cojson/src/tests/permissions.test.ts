@@ -1398,6 +1398,8 @@ test.each([
     ),
   );
 
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
   const invitedAdminSecret = Crypto.newRandomAgentSecret();
   const invitedAdminID = Crypto.getAgentID(invitedAdminSecret);
 

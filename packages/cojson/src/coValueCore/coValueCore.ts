@@ -1890,7 +1890,20 @@ export class CoValueCore {
       return a.txID.txIndex - b.txID.txIndex;
     }
 
-    return 0;
+    // Tie-breaker: compare sessionIDs from the last character for deterministic ordering
+    // when timestamps are equal but sessions are different. Comparing from the end
+    // provides better distribution and performance since sessionIDs often share common prefixes.
+    const aSession = a.txID.sessionID;
+    const bSession = b.txID.sessionID;
+    const minLen = Math.min(aSession.length, bSession.length);
+    for (let i = 1; i <= minLen; i++) {
+      const aChar = aSession.charCodeAt(aSession.length - i);
+      const bChar = bSession.charCodeAt(bSession.length - i);
+      if (aChar !== bChar) {
+        return aChar - bChar;
+      }
+    }
+    return aSession.length - bSession.length;
   }
 
   getCurrentReadKey(): {
