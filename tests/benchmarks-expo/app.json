@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Jazz Benchmarks",
+    "slug": "benchmarks-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "tools.jazz.benchmarks"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0a0a"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "tools.jazz.benchmarks"
+    }
+  }
+}

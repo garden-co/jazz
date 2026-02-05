@@ -8,7 +8,48 @@ const hasNativeBase64 =
   typeof (Uint8Array as unknown as { fromBase64?: unknown }).fromBase64 ===
     "function";
 
+// Native implementation hooks for React Native (set via setNativeBase64Implementation)
+let nativeBytesToBase64url: ((bytes: ArrayBuffer) => string) | undefined;
+let nativeBase64urlToBytes: ((base64: string) => ArrayBuffer) | undefined;
+let nativeBytesToBase64: ((bytes: ArrayBuffer) => string) | undefined;
+
+/**
+ * Set native base64 implementation for React Native.
+ * Called by RNCrypto.create() to register native Rust implementations.
+ * @internal
+ */
+export function setNativeBase64Implementation(impl: {
+  bytesToBase64url: (bytes: ArrayBuffer) => string;
+  base64urlToBytes: (base64: string) => ArrayBuffer;
+  bytesToBase64: (bytes: ArrayBuffer) => string;
+}): void {
+  nativeBytesToBase64url = impl.bytesToBase64url;
+  nativeBase64urlToBytes = impl.base64urlToBytes;
+  nativeBytesToBase64 = impl.bytesToBase64;
+}
+
+/**
+ * Convert Uint8Array to ArrayBuffer, handling views correctly.
+ */
+function toArrayBuffer(view: Uint8Array): ArrayBuffer {
+  if (
+    view.byteOffset === 0 &&
+    view.byteLength === view.buffer.byteLength &&
+    view.buffer instanceof ArrayBuffer
+  ) {
+    return view.buffer;
+  }
+  const buffer = new ArrayBuffer(view.byteLength);
+  new Uint8Array(buffer).set(view);
+  return buffer;
+}
+
 export function base64URLtoBytes(base64: string): Uint8Array {
+  // Use React Native native implementation if available
+  if (nativeBase64urlToBytes) {
+    return new Uint8Array(nativeBase64urlToBytes(base64));
+  }
+  // Use browser native implementation if available
   if (hasNativeBase64) {
     return (
       Uint8Array as unknown as {
@@ -20,6 +61,11 @@ export function base64URLtoBytes(base64: string): Uint8Array {
 }
 
 export function bytesToBase64url(bytes: Uint8Array): string {
+  // Use React Native native implementation if available
+  if (nativeBytesToBase64url) {
+    return nativeBytesToBase64url(toArrayBuffer(bytes));
+  }
+  // Use browser native implementation if available
   if (hasNativeBase64) {
     return (
       bytes as unknown as {
@@ -35,6 +81,11 @@ export function bytesToBase64url(bytes: Uint8Array): string {
  * Use this for data URLs and other contexts requiring standard base64.
  */
 export function bytesToBase64(bytes: Uint8Array): string {
+  // Use React Native native implementation if available
+  if (nativeBytesToBase64) {
+    return nativeBytesToBase64(toArrayBuffer(bytes));
+  }
+  // Use browser native implementation if available
   if (hasNativeBase64) {
     return (
       bytes as unknown as {

@@ -116,6 +116,10 @@ interface NativeModuleInterface {
     encryptionKey: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_base64url_to_bytes(
+    base64: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_fn_func_blake3_hash_once(
     data: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
@@ -123,6 +127,14 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_fn_func_blake3_hash_once_with_context(
     data: Uint8Array,
     context: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_bytes_to_base64(
+    bytes: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_bytes_to_base64url(
+    bytes: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_fn_func_decrypt(
@@ -237,8 +249,11 @@ interface NativeModuleInterface {
     privateKey: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_checksum_func_base64url_to_bytes(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_blake3_hash_once(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_blake3_hash_once_with_context(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_bytes_to_base64(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_bytes_to_base64url(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_decrypt(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_decrypt_xsalsa20(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_sign(): number;
