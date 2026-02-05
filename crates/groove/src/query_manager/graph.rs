@@ -1003,6 +1003,7 @@ impl QueryGraph {
     }
 
     /// Mark index scan nodes dirty for a given table/column.
+    /// Also propagates dirty marks to downstream nodes.
     pub fn mark_dirty_for_column(&mut self, table: &str, column: &str) {
         let affected: Vec<NodeId> = self
             .index_scan_nodes
@@ -1014,6 +1015,7 @@ impl QueryGraph {
             .collect();
         for node_id in affected {
             self.mark_dirty(node_id);
+            self.mark_downstream_dirty(node_id);
         }
     }
 
@@ -1099,6 +1101,13 @@ impl QueryGraph {
                 .policy_filter_tables
                 .iter()
                 .any(|(_, t)| t.as_str() == table)
+    }
+
+    /// Check if this graph uses a specific index (table + column combination).
+    pub fn uses_index(&self, table: &str, column: &str) -> bool {
+        self.index_scan_nodes
+            .iter()
+            .any(|(_, t, c)| t.as_str() == table && c.as_str() == column)
     }
 
     /// Check if any MaterializeNode has pending IDs (objects being loaded).
@@ -1250,6 +1259,9 @@ impl QueryGraph {
 
         let order = self.topo_sort_dirty();
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
+        // Track source nodes that returned pending (index not ready)
+        // so we can re-mark them dirty after clearing the bitmap
+        let mut pending_source_nodes: Vec<NodeId> = Vec::new();
 
         let ctx = SourceContext { indices };
         let _ = om; // om is still passed to other nodes that need it
@@ -1259,6 +1271,9 @@ impl QueryGraph {
                 Some(GraphNode::IndexScan(_)) => {
                     if let Some(GraphNode::IndexScan(scan_node)) = self.get_node_mut(node_id) {
                         let delta = SourceNode::scan(scan_node, &ctx);
+                        if delta.pending {
+                            pending_source_nodes.push(node_id);
+                        }
                         tuple_deltas.insert(node_id, delta);
                     }
                 }
@@ -1472,6 +1487,13 @@ impl QueryGraph {
         }
 
         self.dirty_bitmap.fill(false);
+
+        // Re-mark pending source nodes as dirty so they will be re-evaluated on next settle.
+        // This ensures IndexScanNodes waiting for index loading stay dirty until ready.
+        for node_id in pending_source_nodes {
+            self.mark_dirty(node_id);
+            self.mark_downstream_dirty(node_id);
+        }
 
         // Convert TupleDelta to RowDelta for output
         // For single-table queries: use simple conversion

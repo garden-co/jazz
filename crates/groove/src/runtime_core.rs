@@ -1049,6 +1049,18 @@ mod delayed_io_tests {
             // Flush to process the requests and get responses
             let responses = core.io_handler_mut().flush();
             if responses.is_empty() {
+                // Check if there are pending requests (might have been queued during handle_storage)
+                if core
+                    .schema_manager()
+                    .query_manager()
+                    .has_pending_storage_requests()
+                {
+                    iterations += 1;
+                    if iterations > 100 {
+                        panic!("Infinite loop in run_to_completion");
+                    }
+                    continue;
+                }
                 break;
             }
             for response in responses {
@@ -1544,6 +1556,11 @@ mod delayed_io_tests {
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
         let handler = DelayedIoHandler::with_driver(driver);
         let mut core = RuntimeCore::new(schema_manager, handler);
+
+        // CRITICAL: Reset indices so they know to load from storage
+        core.schema_manager_mut()
+            .query_manager_mut()
+            .reset_indices_for_cold_start();
 
         let users_callbacks = Arc::new(Mutex::new(Vec::<usize>::new()));
         let todos_callbacks = Arc::new(Mutex::new(Vec::<usize>::new()));
