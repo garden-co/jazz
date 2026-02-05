@@ -945,15 +945,10 @@ describe("StorageApiAsync", () => {
         return true;
       });
 
-      let releaseBarrier!: () => void;
-      const barrier = new Promise<void>((resolve) => {
-        releaseBarrier = resolve;
-      });
-
-      let firstTxStartedResolve!: () => void;
-      const firstTxStarted = new Promise<void>((resolve) => {
-        firstTxStartedResolve = resolve;
-      });
+      const { promise: barrier, resolve: releaseBarrier } =
+        Promise.withResolvers<void>();
+      const { promise: firstTxStarted, resolve: firstTxStartedResolve } =
+        Promise.withResolvers<void>();
 
       // @ts-expect-error - dbClient is private
       const dbClient = storage.dbClient;
