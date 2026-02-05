@@ -395,7 +395,7 @@ Add the two methods to `StorageAPI`; implementations delegate to the underlying 
 
 **SQLite** (`packages/cojson-storage-sqlite`):
 
-- Add table `storage_reconciliation_locks` with columns for peerId and lock/lastRun (e.g. composite key `(peerId, key)` or `peer_id`, `key`, `holder_session_id`, `acquired_at`, `expires_at`, `timestamp`).
+- Add table `storageReconciliationLocks` with columns for peerId and lock/lastRun (e.g. composite key `(peerId, key)` or `peer_id`, `key`, `holder_session_id`, `acquired_at`, `expires_at`, `timestamp`).
 - Implement using SQLite transactions.
 
 #### 5.4. Integration point

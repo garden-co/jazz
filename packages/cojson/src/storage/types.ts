@@ -171,6 +171,14 @@ export type SignatureAfterRow = {
   signature: Signature;
 };
 
+export type StorageReconciliationLockRow = {
+  key: string;
+  holderSessionId: SessionID;
+  acquiredAt: number;
+  expiresAt: number;
+  releasedAt?: number;
+};
+
 export interface DBTransactionInterfaceAsync {
   getSingleCoValueSession(
     coValueRowId: number,
@@ -211,6 +219,14 @@ export interface DBTransactionInterfaceAsync {
   deleteCoValueContent(
     coValueRow: Pick<StoredCoValueRow, "rowID" | "id">,
   ): Promise<unknown>;
+
+  getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined>;
+
+  putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void>;
 }
 
 export interface DBClientInterfaceAsync {
@@ -317,6 +333,12 @@ export interface DBTransactionInterfaceSync {
     idx: number;
     signature: Signature;
   }): number | undefined | unknown;
+
+  getStorageReconciliationLock(
+    key: string,
+  ): StorageReconciliationLockRow | undefined;
+
+  putStorageReconciliationLock(entry: StorageReconciliationLockRow): void;
 }
 
 export interface DBClientInterfaceSync {

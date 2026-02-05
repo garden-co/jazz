@@ -9,6 +9,7 @@ import type {
   DBClientInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
@@ -25,14 +26,6 @@ import {
 type DeletedCoValueQueueEntry = {
   coValueID: RawCoID;
   status?: "pending" | "done";
-};
-
-type StorageReconciliationLock = {
-  key: string;
-  holderSessionId: string;
-  acquiredAt: number;
-  expiresAt: number;
-  releasedAt?: number;
 };
 
 /**
@@ -227,16 +220,16 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     await this.run((tx) => tx.getObjectStore("unsyncedCoValues").put(record));
   }
 
-  async getStorageReconciliationLocks(
+  async getStorageReconciliationLock(
     key: string,
-  ): Promise<StorageReconciliationLock | undefined> {
+  ): Promise<StorageReconciliationLockRow | undefined> {
     return this.run((tx) =>
       tx.getObjectStore("storageReconciliationLocks").get(key),
     );
   }
 
   async putStorageReconciliationLock(
-    entry: StorageReconciliationLock,
+    entry: StorageReconciliationLockRow,
   ): Promise<void> {
     await this.run((tx) =>
       tx.getObjectStore("storageReconciliationLocks").put(entry),
@@ -441,7 +434,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     let result: StorageReconciliationAcquireResult;
     await this.transaction(
       async (tx) => {
-        const lock = await tx.getStorageReconciliationLocks(lockKey);
+        const lock = await tx.getStorageReconciliationLock(lockKey);
         if (
           lock?.releasedAt &&
           now - lock.releasedAt < RECONCILIATION_INTERVAL_MS
@@ -479,7 +472,7 @@ export class IDBClient implements DBClientInterfaceAsync {
 
     await this.transaction(
       async (tx) => {
-        const lock = await tx.getStorageReconciliationLocks(lockKey);
+        const lock = await tx.getStorageReconciliationLock(lockKey);
         if (lock?.holderSessionId === sessionId) {
           await tx.putStorageReconciliationLock({
             ...lock,

@@ -11,6 +11,7 @@ import type {
   DBTransactionInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
@@ -153,6 +154,25 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
         DeletedCoValueDeletionStatus.Done,
         DeletedCoValueDeletionStatus.Done,
       ],
+    );
+  }
+
+  async getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined> {
+    return this.tx.get<StorageReconciliationLockRow>(
+      "SELECT * FROM storageReconciliationLocks WHERE key = ?",
+      [key],
+    );
+  }
+
+  async putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void> {
+    const { key, holderSessionId, acquiredAt, expiresAt, releasedAt } = entry;
+    await this.tx.run(
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt) VALUES (?, ?, ?, ?, ?)`,
+      [key, holderSessionId, acquiredAt, expiresAt, releasedAt ?? null],
     );
   }
 }
@@ -354,35 +374,31 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
       acquired: false,
       reason: "not_due",
     };
-    await this.transaction(async () => {
+    await this.transaction(async (tx) => {
       const now = Date.now();
       const lockKey = `lock#${peerId}`;
 
-      const lockRow = await this.db.get<{
-        expires_at: number;
-        released_at: number;
-      }>(
-        "SELECT expires_at, released_at FROM storage_reconciliation_locks WHERE key = ?",
-        [lockKey],
-      );
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
       if (
-        lockRow?.released_at &&
-        now - lockRow.released_at <
+        lockRow?.releasedAt &&
+        now - lockRow.releasedAt <
           STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS
       ) {
         result = { acquired: false, reason: "not_due" };
         return;
       }
-      if (lockRow && !lockRow.released_at && lockRow.expires_at >= now) {
+      if (lockRow && !lockRow.releasedAt && lockRow.expiresAt >= now) {
         result = { acquired: false, reason: "lock_held" };
         return;
       }
 
       const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
-      await this.db.run(
-        `INSERT OR REPLACE INTO storage_reconciliation_locks (key, holder_session_id, acquired_at, expires_at, released_at) VALUES (?, ?, ?, ?, NULL)`,
-        [lockKey, sessionId, now, expiresAt],
-      );
+      await tx.putStorageReconciliationLock({
+        key: lockKey,
+        holderSessionId: sessionId,
+        acquiredAt: now,
+        expiresAt,
+      });
       result = { acquired: true };
     });
     return result;
@@ -392,18 +408,15 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     sessionId: SessionID,
     peerId: PeerID,
   ): Promise<void> {
-    await this.transaction(async () => {
+    await this.transaction(async (tx) => {
       const lockKey = `lock#${peerId}`;
       const releasedAt = Date.now();
-      const lockRow = await this.db.get<{ holder_session_id: string }>(
-        "SELECT holder_session_id FROM storage_reconciliation_locks WHERE key = ?",
-        [lockKey],
-      );
-      if (lockRow && lockRow.holder_session_id === sessionId) {
-        await this.db.run(
-          "UPDATE storage_reconciliation_locks SET released_at = ? WHERE key = ?",
-          [releasedAt, lockKey],
-        );
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (lockRow && lockRow.holderSessionId === sessionId) {
+        await tx.putStorageReconciliationLock({
+          ...lockRow,
+          releasedAt,
+        });
       }
     });
   }
