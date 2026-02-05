@@ -70,7 +70,7 @@
   - Implement method in `packages/cojson/src/storage/storageAsync.ts`
   - Use `dbClient.transaction()` to wrap all stores
   - Call `storeSingleInTransaction()` for each message
-  - Throw error on failure for retry logic
+  - Throw error on failure so the caller can decide how to handle it
   - Add unit tests
 
 - [ ] **Task 9**: Create storeSingleInTransaction() helper
@@ -90,20 +90,11 @@
 - [ ] **Task 11**: Implement SyncManager.syncAtomicBatch()
   - Add method to `SyncManager` in `packages/cojson/src/sync.ts`
   - Extract CoValue IDs from messages
-  - Call `storeAtomicBatchWithRetry()` for IndexedDB persistence
+  - Call `storage.storeAtomicBatch()` once for IndexedDB persistence (no retry loop)
   - Call `syncBatchToServers()` for network sync
   - Run both in parallel with `Promise.all()`
   - Short-circuit empty batches (no-op)
-  - Ensure successful side is not re-run if the other side retries
   - Return Promise that resolves when both complete
-
-- [ ] **Task 12**: Implement storeAtomicBatchWithRetry()
-  - Add private method to `SyncManager`
-  - Call `storage.storeAtomicBatch()` in a retry loop
-  - Implement exponential backoff using named constants
-  - Log warnings on retry
-  - Continue retrying indefinitely until success
-  - Add unit tests for retry logic
 
 - [ ] **Task 13**: Implement syncBatchToServers()
   - Add private method to `SyncManager`
@@ -115,13 +106,7 @@
   - Call `waitForBatchSynced()` to wait for completion
   - Add unit tests
 
-- [ ] **Task 14**: Implement waitForBatchSynced()
-  - Add private method to `SyncManager`
-  - Check `syncState.isSynced(peer, coValueId)` for all CoValues and server peers
-  - If not synced, wait with exponential backoff and check again
-  - Continue until all CoValues are synced to all servers
-  - Ensure sync state is updated per message within a batch
-  - Add unit tests with mocked sync state
+// Task 14 removed: no automatic network retry or polling for batch sync
 
 ## Phase 6: Public API (US-1)
 
@@ -175,12 +160,10 @@
   - Test with messages for different CoValues
   - Location: `packages/cojson/src/tests/storageAsync.batch.test.ts`
 
-- [ ] **Task 21**: Test SyncManager retry logic
-  - Test storeAtomicBatchWithRetry() retries on failure
-  - Test exponential backoff timing
-  - Test waitForBatchSynced() polls sync state
-  - Test stops retrying after success
-  - Test timeout rejection without stopping retries
+- [ ] **Task 21**: Test SyncManager batch sync logic
+  - Test SyncManager.syncAtomicBatch() calls `storage.storeAtomicBatch()` once
+  - Test `syncBatchToServers()` sends a `BatchMessage` to all relevant server peers
+  - Ensure no automatic retry or backoff logic is present for failed storage or network operations
   - Location: `packages/cojson/src/tests/sync.atomicBatch.test.ts`
 
 ### Integration Tests
@@ -202,19 +185,17 @@
   - Verify no sync occurred
   - Location: `packages/jazz-tools/src/tools/tests/transactions.error.test.ts`
 
-- [ ] **Task 24**: Test storage failure and retry
-  - Mock IndexedDB to fail N times
+- [ ] **Task 24**: Test storage failure (no automatic retry)
+  - Mock IndexedDB to fail on `storeAtomicBatch()`
   - Execute transaction
-  - Verify retries occur with backoff
-  - Verify eventual success
-  - Verify mutations remain in memory during retries
+  - Verify the failure is surfaced to the caller of `withTransaction()`
+  - Verify mutations remain in memory despite the storage failure
   - Location: `packages/jazz-tools/src/tools/tests/transactions.storageRetry.test.ts`
 
-- [ ] **Task 25**: Test network sync and retry
+- [ ] **Task 25**: Test network sync failure (no automatic retry)
   - Execute transaction with server disconnected
-  - Verify retry attempts
-  - Reconnect server
-  - Verify batch eventually syncs
+  - Verify a single send attempt is made
+  - Verify failure is surfaced to the caller and not retried automatically
   - Location: `packages/jazz-tools/src/tools/tests/transactions.syncRetry.test.ts`
 
 - [ ] **Task 26**: Test server batch processing
@@ -266,7 +247,7 @@
   - Document that callback must be synchronous (no async/await)
   - Add usage examples to docs site (sync callback)
   - Document atomicity guarantees
-  - Document retry behavior
+  - Document that the framework does not perform automatic retries; application code is responsible for any retry policy
   - Document error handling
 
 - [ ] **Task 33**: Update migration guide

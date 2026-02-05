@@ -2,7 +2,7 @@
 
 ## Overview
 
-This design implements atomic transactions for CoValue mutations, allowing multiple mutations to be persisted together to IndexedDB and synced together to servers in a single network message. The core principle is **optimistic in-memory updates with atomic persistence** - mutations are applied immediately to memory, but persistence and sync happen atomically with automatic retry on failure.
+This design implements atomic transactions for CoValue mutations, allowing multiple mutations to be persisted together to IndexedDB and synced together to servers in a single network message. The core principle is **optimistic in-memory updates with atomic persistence** - mutations are applied immediately to memory, but persistence and sync happen atomically, each with a single attempt per transaction.
 
 The key flow:
 1. User calls `account.withTransaction(callback)` with a **synchronous** callback
@@ -11,7 +11,7 @@ The key flow:
 4. After callback returns, all mutations are:
    - Stored in a single IndexedDB transaction
    - Sent in a single `BatchMessage` to sync servers
-5. If either fails, retry with exponential backoff (no rollback)
+5. If either network sync or local persistence fails, the failure is surfaced to the caller and no automatic retry is performed.
 
 ## Architecture / Components
 
@@ -200,38 +200,15 @@ export class SyncManager {
       return;
     }
 
-    // Start both operations in parallel
+    // Start both operations in parallel (single attempt for storage and network)
     const storagePromise = storage
-      ? this.storeAtomicBatchWithRetry(messages)
+      ? storage.storeAtomicBatch(messages)
       : Promise.resolve();
 
     const syncPromise = this.syncBatchToServers(messages, coValueIds);
 
     // Wait for both to complete
     await Promise.all([storagePromise, syncPromise]);
-  }
-
-  private async storeAtomicBatchWithRetry(
-    messages: NewContentMessage[]
-  ): Promise<void> {
-    let attempt = 0;
-    const maxDelayMs = MAX_ATOMIC_BATCH_BACKOFF_MS;
-
-    while (true) {
-      try {
-        await this.local.storage!.storeAtomicBatch(messages);
-        return; // Success
-      } catch (error) {
-        attempt++;
-        const delay = Math.min(BASE_ATOMIC_BATCH_BACKOFF_MS * Math.pow(2, attempt), maxDelayMs);
-        logger.warn("IndexedDB atomic batch failed, retrying", {
-          attempt,
-          delay,
-          error
-        });
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
   }
 
   private async syncBatchToServers(
@@ -259,7 +236,6 @@ export class SyncManager {
 
   private async waitForBatchSynced(coValueIds: Set<RawCoID>): Promise<void> {
     let attempt = 0;
-    const maxDelayMs = MAX_ATOMIC_BATCH_BACKOFF_MS;
 
     while (true) {
       // Check if all CoValues are synced to all server peers
@@ -274,9 +250,9 @@ export class SyncManager {
         return; // Success
       }
 
-      // Not synced yet, wait and retry
+      // Not synced yet, wait
       attempt++;
-      const delay = Math.min(BASE_ATOMIC_BATCH_BACKOFF_MS * Math.pow(2, attempt), maxDelayMs);
+      const delay = 100;
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
@@ -284,10 +260,7 @@ export class SyncManager {
 ```
 
 Design notes:
-- Storage and sync retry independently; if one succeeds, it must not be re-run on retry.
-- Backoff values should be defined as named constants (avoid magic numbers).
-- If a transaction timeout is configured, only the caller promise is rejected; retries
-  continue in the background until success.
+- Both storage and network sync are attempted once per transaction; failures are surfaced to the caller.
 
 ### 7. Server-Side: Handle Batch Messages
 
@@ -417,7 +390,7 @@ async transaction(
     tx.commit(); // Commit atomically
   } catch (error) {
     tx.rollback(); // Rollback on error
-    throw error; // Re-throw for retry logic
+    throw error;
   }
 }
 ```
@@ -463,7 +436,7 @@ Parallel execution:
     │   ↓
     │   [Commit or rollback]
     │   ↓
-    │   [Retry on failure]
+    │   [Surface failure to caller if any]
     │
     └─> syncBatchToServers()
         ↓
@@ -491,13 +464,11 @@ Parallel execution:
 Return to user
 ```
 
-## Error Handling / Retry Strategy
+## Error Handling Strategy
 
-### Core Principle: No Rollback, Only Retry
+### Core Principle: No Rollback, No Automatic Retry
 
-In-memory mutations are permanent. If persistence or sync fails, the system retries until success.
-
-### Error Scenarios
+In-memory mutations are permanent. If persistence or sync fails, the failure is surfaced to the caller and no automatic retry is performed by the framework.
 
 **1. Error During Callback Execution**
 - Mutations before the error remain in memory
@@ -508,36 +479,19 @@ In-memory mutations are permanent. If persistence or sync fails, the system retr
 **2. IndexedDB Storage Failure**
 - Mutations already in memory (visible to user)
 - Storage operation fails atomically (no partial writes)
-- System retries with exponential backoff
-- Continues retrying until success
+- No automatic retry is attempted
 
 **3. Network Sync Failure**
-- Mutations already in memory and persisted to IndexedDB
-- System queues for retry
-- Retries when network reconnects or with exponential backoff
-- Continues until all CoValues show as synced in `syncState`
+- Mutations already in memory (and may already be persisted to IndexedDB)
+- A single attempt is made to send the batch
+- No automatic retry is attempted by the framework
 
 **4. Partial Sync (Multiple Server Peers)**
-- Track sync state for each server peer
-- Keep retrying to servers that haven't ACKed
-- Batch considered "fully synced" when all servers have it
+- Sync state for each server peer may still be tracked for diagnostics, but the framework does not automatically retry failed deliveries
 
 **5. Nested Transactions**
 - Throw error immediately
 - Alternative: flatten into outer transaction (not implemented)
-
-### Retry Strategy
-
-```typescript
-// Exponential backoff with max delay
-attempt = 1: wait 100ms
-attempt = 2: wait 200ms
-attempt = 3: wait 400ms
-attempt = 4: wait 800ms
-...
-max delay: 30 seconds
-continues indefinitely until success
-```
 
 ## Testing Strategy
 
@@ -582,15 +536,13 @@ continues indefinitely until success
    - Verify partial mutations remain in memory
    - Verify no persistence or sync occurred
 
-3. **Storage Failure and Retry:**
+3. **Storage Failure Handling:**
    - Mock IndexedDB failure
-   - Verify retry with exponential backoff
-   - Verify eventual success
+   - Verify failure is surfaced to the caller without automatic retry
 
-4. **Network Failure and Retry:**
+4. **Network Failure Handling:**
    - Mock network disconnection
-   - Verify retry when network returns
-   - Verify batch eventually syncs
+   - Verify failure is surfaced to the caller without automatic retry
 
 5. **Server Batch Processing:**
    - Send BatchMessage to server
@@ -616,5 +568,5 @@ continues indefinitely until success
   and the batch is fixed.
 - Batch size limits (count and/or payload size) must be enforced with explicit behavior
   (reject, split, or fallback).
-- If storage succeeds but sync does not (or vice versa), the system must continue retrying
-  only the failing side without repeating the successful side.
+- If storage succeeds but sync does not (or vice versa), the system surfaces the failure
+  and does not automatically retry either side.
