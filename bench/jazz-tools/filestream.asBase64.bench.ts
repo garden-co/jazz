@@ -1,9 +1,5 @@
 import cronometro from "cronometro";
-import * as localTools from "jazz-tools";
-import * as latestPublishedTools from "jazz-tools-latest";
-import { WasmCrypto as LocalWasmCrypto } from "cojson/crypto/WasmCrypto";
 import { cojsonInternals } from "cojson";
-import { WasmCrypto as LatestPublishedWasmCrypto } from "cojson-latest/crypto/WasmCrypto";
 
 // --- Test data (pre-generated, not measured) ---
 
@@ -24,60 +20,77 @@ function makeChunks(totalBytes: number, chunkSize: number): Uint8Array[] {
   return chunks;
 }
 
-// --- Context setup helper ---
+function asBase64Old(chunks: Uint8Array[]): string | undefined {
+  // Using String.fromCharCode.apply with batches of bytes is significantly faster
+  // than building the string byte-by-byte (e.g., `result += String.fromCharCode(byte)`).
+  // Each string concatenation creates a new string object, making byte-by-byte O(n²).
+  // With apply, we convert many bytes at once, reducing string allocations.
+  //
+  // We limit batch size to 32KB because V8 has ~64k argument limit for function calls.
+  const BATCH_SIZE = 32768;
+  const parts: string[] = [];
 
-type Tools = typeof localTools;
-type WasmCryptoClass = typeof LocalWasmCrypto;
-
-interface BenchContext {
-  account: InstanceType<Tools["Account"]>;
-  node: ReturnType<Tools["createJazzContextForNewAccount"]> extends Promise<
-    infer R
-  >
-    ? R extends { node: infer N }
-      ? N
-      : never
-    : never;
-  FileStream: Tools["FileStream"];
-}
-
-async function createContext(
-  tools: Tools,
-  wasmCrypto: WasmCryptoClass,
-): Promise<BenchContext> {
-  const ctx = await tools.createJazzContextForNewAccount({
-    creationProps: { name: "Bench Account" },
-    peers: [],
-    crypto: await wasmCrypto.create(),
-    sessionProvider: new tools.MockSessionProvider(),
-  });
-  return {
-    account: ctx.account as InstanceType<Tools["Account"]>,
-    node: ctx.node as BenchContext["node"],
-    FileStream: tools.FileStream,
-  };
-}
-
-// --- Stream population helper ---
-
-function populateStream(ctx: BenchContext, chunks: Uint8Array[]) {
-  let totalBytes = 0;
-  for (const c of chunks) totalBytes += c.length;
-
-  const stream = ctx.FileStream.create({ owner: ctx.account });
-  stream.start({
-    mimeType: "application/octet-stream",
-    totalSizeBytes: totalBytes,
-  });
+  // Process each chunk directly without merging into a single buffer
   for (const chunk of chunks) {
-    stream.push(chunk);
+    for (let i = 0; i < chunk.length; i += BATCH_SIZE) {
+      parts.push(
+        String.fromCharCode.apply(
+          null,
+          chunk.subarray(
+            i,
+            Math.min(i + BATCH_SIZE, chunk.length),
+          ) as unknown as number[],
+        ),
+      );
+    }
   }
-  stream.end();
-  return stream;
+
+  return btoa(parts.join(""));
+}
+
+function asBase64New(chunks: Uint8Array[]) {
+  // Calculate actual loaded bytes (may differ from totalSizeBytes when allowUnfinished)
+  let loadedBytes = 0;
+  for (const chunk of chunks) {
+    loadedBytes += chunk.length;
+  }
+
+  // Merge all chunks into a single Uint8Array
+  const merged = new Uint8Array(loadedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  const base64 = cojsonInternals.bytesToBase64url(merged);
+
+  return base64;
+}
+
+function asBase64Native(chunks: Uint8Array[]) {
+  // Calculate actual loaded bytes (may differ from totalSizeBytes when allowUnfinished)
+  let loadedBytes = 0;
+  for (const chunk of chunks) {
+    loadedBytes += chunk.length;
+  }
+
+  // Merge all chunks into a single Uint8Array
+  const merged = new Uint8Array(loadedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  // @ts-expect-error - toBase64 is not a method of Uint8Array
+  const base64 = merged.toBase64({ alphabet: "base64url" });
+
+  return base64;
 }
 
 const benchOptions = {
-  iterations: 50,
+  iterations: 100,
   warmup: true,
   print: {
     colors: true,
@@ -90,43 +103,32 @@ const benchOptions = {
 };
 
 const TOTAL_BYTES = 5 * 1024 * 1024;
-let readCtx: BenchContext;
-let readStream: InstanceType<Tools["FileStream"]>;
+let chunks: Uint8Array[];
 
 await cronometro(
   {
-    "asBase64 - @latest": {
+    "asBase64 - old (btoa + String.fromCharCode)": {
       async before() {
-        readCtx = await createContext(
-          // @ts-expect-error version mismatch
-          latestPublishedTools,
-          LatestPublishedWasmCrypto,
-        );
-        readStream = populateStream(
-          readCtx,
-          makeChunks(TOTAL_BYTES, CHUNK_SIZE),
-        );
+        chunks = makeChunks(TOTAL_BYTES, CHUNK_SIZE);
       },
       test() {
-        readStream.asBase64();
-      },
-      async after() {
-        (readCtx.node as any).gracefulShutdown();
+        asBase64Old(chunks);
       },
     },
-    "asBase64 - @workspace": {
+    "asBase64 - new (bytesToBase64url)": {
       async before() {
-        readCtx = await createContext(localTools, LocalWasmCrypto);
-        readStream = populateStream(
-          readCtx,
-          makeChunks(TOTAL_BYTES, CHUNK_SIZE),
-        );
+        chunks = makeChunks(TOTAL_BYTES, CHUNK_SIZE);
       },
       test() {
-        readStream.asBase64();
+        asBase64New(chunks);
       },
-      async after() {
-        (readCtx.node as any).gracefulShutdown();
+    },
+    "asBase64 - native (toBase64)": {
+      async before() {
+        chunks = makeChunks(TOTAL_BYTES, CHUNK_SIZE);
+      },
+      test() {
+        asBase64Native(chunks);
       },
     },
   },

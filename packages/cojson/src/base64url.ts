@@ -1,7 +1,38 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export function base64URLtoBytes(base64: string) {
+// Check for native base64 support (available in modern runtimes)
+const hasNativeBase64 =
+  typeof (Uint8Array.prototype as unknown as { toBase64?: unknown })
+    .toBase64 === "function" &&
+  typeof (Uint8Array as unknown as { fromBase64?: unknown }).fromBase64 ===
+    "function";
+
+export function base64URLtoBytes(base64: string): Uint8Array {
+  if (hasNativeBase64) {
+    return (
+      Uint8Array as unknown as {
+        fromBase64: (s: string, opts: { alphabet: string }) => Uint8Array;
+      }
+    ).fromBase64(base64, { alphabet: "base64url" });
+  }
+  return base64URLtoBytesFallback(base64);
+}
+
+export function bytesToBase64url(bytes: Uint8Array): string {
+  if (hasNativeBase64) {
+    return (
+      bytes as unknown as {
+        toBase64: (opts: { alphabet: string }) => string;
+      }
+    ).toBase64({ alphabet: "base64url" });
+  }
+  return bytesToBase64urlFallback(bytes);
+}
+
+// --- Fallback implementations ---
+
+function base64URLtoBytesFallback(base64: string): Uint8Array {
   base64 = base64.replace(/=/g, "");
   const n = base64.length;
   const rem = n % 4;
@@ -24,8 +55,7 @@ export function base64URLtoBytes(base64: string) {
   return new Uint8Array(encoded.buffer, 0, m);
 }
 
-export function bytesToBase64url(bytes: Uint8Array) {
-  // const before = performance.now();
+function bytesToBase64urlFallback(bytes: Uint8Array): string {
   const m = bytes.length;
   const k = m % 3;
   const n = Math.floor(m / 3) * 4 + (k && k + 1);

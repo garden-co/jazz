@@ -956,31 +956,21 @@ export class FileStream extends CoValueBase implements CoValue {
 
     if (!data) return undefined;
 
-    // Using String.fromCharCode.apply with batches of bytes is significantly faster
-    // than building the string byte-by-byte (e.g., `result += String.fromCharCode(byte)`).
-    // Each string concatenation creates a new string object, making byte-by-byte O(n²).
-    // With apply, we convert many bytes at once, reducing string allocations.
-    //
-    // We limit batch size to 32KB because V8 has ~64k argument limit for function calls.
-    const CHUNK_SIZE = 32768;
-    const parts: string[] = [];
-
-    // Process each chunk directly without merging into a single buffer
+    // Calculate actual loaded bytes (may differ from totalSizeBytes when allowUnfinished)
+    let loadedBytes = 0;
     for (const chunk of data.chunks) {
-      for (let i = 0; i < chunk.length; i += CHUNK_SIZE) {
-        parts.push(
-          String.fromCharCode.apply(
-            null,
-            chunk.subarray(
-              i,
-              Math.min(i + CHUNK_SIZE, chunk.length),
-            ) as unknown as number[],
-          ),
-        );
-      }
+      loadedBytes += chunk.length;
     }
 
-    const base64 = btoa(parts.join(""));
+    // Merge all chunks into a single Uint8Array
+    const merged = new Uint8Array(loadedBytes);
+    let offset = 0;
+    for (const chunk of data.chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    const base64 = cojsonInternals.bytesToBase64url(merged);
 
     if (options?.dataURL) {
       return `data:${data.mimeType};base64,${base64}`;
