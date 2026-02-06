@@ -423,7 +423,7 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async tryAcquireStorageReconciliationLock(
-    sessionId: string,
+    sessionId: SessionID,
     peerId: string,
   ): Promise<StorageReconciliationAcquireResult> {
     const lockKey = `lock#${peerId}`;
