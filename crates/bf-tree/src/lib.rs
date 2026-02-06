@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 #![doc = include_str!("../README.md")]
+#![allow(unexpected_cfgs, unused_imports, clippy::derivable_impls)]
 pub mod circular_buffer;
 mod config;
 mod error;

@@ -9,6 +9,11 @@
 //! Storage instance. Cross-thread communication uses the sync protocol over
 //! postMessage, not shared mutable state.
 
+#[cfg(feature = "bftree")]
+mod bftree;
+#[cfg(feature = "bftree")]
+pub use bftree::BfTreeStorage;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
@@ -244,7 +249,7 @@ impl MemoryStorage {
 // This enables range queries via BTreeMap::range().
 
 /// Encode a Value into bytes that sort correctly for range queries.
-fn encode_value(value: &Value) -> Vec<u8> {
+pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
     match value {
         Value::Null => vec![0x00], // Null sorts first
 

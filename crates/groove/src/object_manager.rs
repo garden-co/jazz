@@ -209,6 +209,56 @@ impl ObjectManager {
         self.objects.get(&id)
     }
 
+    /// Get an object, loading from storage if not in memory (lazy cold-start load).
+    pub fn get_or_load(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branches: &[String],
+    ) -> Option<&Object> {
+        if self.objects.contains_key(&id) {
+            return self.objects.get(&id);
+        }
+
+        // Load metadata
+        let metadata = storage.load_object_metadata(id).ok()??;
+
+        // Build Object with branches
+        let mut object = Object {
+            id,
+            metadata,
+            branches: HashMap::new(),
+        };
+        for branch_name in branches {
+            let bn = BranchName::new(branch_name);
+            if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
+                let mut commits = HashMap::new();
+                let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
+                for commit in loaded.commits {
+                    let cid = commit.id();
+                    tips.insert(cid);
+                    commits.insert(cid, commit);
+                }
+                object.branches.insert(
+                    bn,
+                    Branch {
+                        commits,
+                        tips,
+                        tails: if loaded.tails.is_empty() {
+                            None
+                        } else {
+                            Some(loaded.tails.into_iter().collect())
+                        },
+                        loaded_state: BranchLoadedState::AllCommits,
+                    },
+                );
+            }
+        }
+
+        self.objects.insert(id, object);
+        self.objects.get(&id)
+    }
+
     /// Get mutable object by id.
     fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
         self.objects.get_mut(&id)

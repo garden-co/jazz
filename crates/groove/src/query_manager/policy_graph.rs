@@ -5,7 +5,6 @@
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::object_manager::ObjectManager;
 
 use crate::storage::Storage;
 
@@ -191,10 +190,9 @@ impl PolicyGraph {
     pub fn settle(
         &mut self,
         io: &dyn Storage,
-        om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
-        let _delta = self.graph.settle(io, om, row_loader);
+        let _delta = self.graph.settle(io, row_loader);
         true
     }
 
@@ -235,7 +233,6 @@ impl PolicyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object_manager::ObjectManager;
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema,
     };
@@ -327,15 +324,14 @@ mod tests {
             PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
                 .unwrap();
 
-        // With no actual data in the io/om, the scan will return no rows
-        let om = ObjectManager::new();
+        // With no actual data in storage, the scan will return no rows
         let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
         let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };
 
         // Settle the graph
-        pg.settle(&storage, &om, &mut row_loader);
+        pg.settle(&storage, &mut row_loader);
 
         // No rows found (object doesn't exist in empty OM), so result is false
         assert!(!pg.result());
