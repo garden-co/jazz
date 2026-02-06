@@ -51,6 +51,14 @@ Example structure:
 - Where [optional condition], the system shall [handle appropriately]
 ```
 
+**After creating the requirements document, refine it:**
+
+1. **Scan for missing requirements** — Review the document for gaps such as missing edge cases, undefined behavior, unspecified error handling, unclear scope boundaries, missing performance constraints, or unaddressed user roles/permissions.
+2. **Identify ambiguities** — Flag any requirements that could be interpreted in multiple ways, have vague language (e.g., "fast", "simple", "flexible"), or lack concrete acceptance criteria.
+3. **Ask clarifying questions** — Present the user with a clear list of questions covering the missing and ambiguous areas. Group them logically and explain why each question matters.
+
+**Do not proceed until all critical ambiguities are resolved.** Minor open questions can be noted as assumptions in the design document.
+
 If requirements are created, get approval before proceeding to the design document.
 
 ### Step 3: Create Design Document
@@ -65,6 +73,14 @@ Create `design.md` in the feature directory with:
 Show the code snippets of the core parts of the implementation in the design.
 
 We prioritize integration testing, and show a couple of test snippets as example of testing strategy.
+
+**After creating the design document, refine it:**
+
+1. **Scan for missing requirements** — Check whether the design covers all stated requirements and user stories. Identify any requirements that were dropped, under-specified, or only partially addressed.
+2. **Identify ambiguities** — Flag design decisions that are vague or leave open questions about behavior, data flow, or component responsibilities.
+3. **Ask clarifying questions** — Present the user with questions about any gaps or ambiguities discovered. Explain how each gap could affect implementation.
+
+**Do not proceed until all critical gaps are resolved.** Minor open questions can be noted as assumptions.
 
 ### Step 4: Design Approval Gate
 
