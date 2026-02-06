@@ -4,6 +4,9 @@
     "target": "es2017",
     "baseUrl": ".",
     "paths": {
+      "@tiptap/*": [
+        "./content/docs/code-snippets/core-concepts/covalues/cotexts/*"
+      ],
       "@/lib/*": [
         "./content/docs/code-snippets/key-features/authentication/better-auth/*",
         "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*",
