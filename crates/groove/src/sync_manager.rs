@@ -213,6 +213,12 @@ pub enum SyncPayload {
         tier: PersistenceTier,
     },
 
+    /// Query settlement notification — a query has settled at a given persistence tier.
+    QuerySettled {
+        query_id: QueryId,
+        tier: PersistenceTier,
+    },
+
     /// Error response.
     Error(SyncError),
 }
@@ -228,6 +234,7 @@ impl SyncPayload {
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::PersistenceAck { .. } => "PersistenceAck",
+            SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::Error(_) => "Error",
         }
     }
@@ -337,6 +344,11 @@ pub struct SyncManager {
     my_tier: Option<PersistenceTier>,
     /// Tracks which clients are interested in acks for each commit.
     commit_interest: HashMap<CommitId, HashSet<ClientId>>,
+
+    /// Tracks which clients originated each query (for relaying QuerySettled).
+    query_origin: HashMap<QueryId, HashSet<ClientId>>,
+    /// Pending QuerySettled notifications for QueryManager to process.
+    pending_query_settled: Vec<(QueryId, PersistenceTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -360,6 +372,8 @@ impl std::fmt::Debug for SyncManager {
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tier", &self.my_tier)
             .field("commit_interest", &self.commit_interest)
+            .field("query_origin", &self.query_origin)
+            .field("pending_query_settled", &self.pending_query_settled)
             .finish()
     }
 }
@@ -385,6 +399,8 @@ impl SyncManager {
             next_pending_id: 0,
             my_tier: None,
             commit_interest: HashMap::new(),
+            query_origin: HashMap::new(),
+            pending_query_settled: Vec::new(),
         }
     }
 
@@ -403,6 +419,8 @@ impl SyncManager {
             next_pending_id: 0,
             my_tier: None,
             commit_interest: HashMap::new(),
+            query_origin: HashMap::new(),
+            pending_query_settled: Vec::new(),
         }
     }
 
@@ -446,6 +464,11 @@ impl SyncManager {
         self.clients.remove(&client_id);
         // Clean up interest map
         self.commit_interest.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
+        // Clean up query origin map
+        self.query_origin.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });
@@ -680,6 +703,23 @@ impl SyncManager {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::QueryUnsubscription { query_id },
+            });
+        }
+    }
+
+    /// Take pending QuerySettled notifications for QueryManager to process.
+    pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, PersistenceTier)> {
+        std::mem::take(&mut self.pending_query_settled)
+    }
+
+    /// Emit a QuerySettled notification to a client.
+    ///
+    /// Called by QueryManager when a server subscription settles for the first time.
+    pub fn emit_query_settled(&mut self, client_id: ClientId, query_id: QueryId) {
+        if let Some(tier) = self.my_tier {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::QuerySettled { query_id, tier },
             });
         }
     }
@@ -1223,6 +1263,20 @@ impl SyncManager {
                     data.clone(),
                 );
             }
+            SyncPayload::QuerySettled { query_id, tier } => {
+                // Queue for local QueryManager to process
+                self.pending_query_settled.push((query_id, tier));
+
+                // Relay to interested clients
+                if let Some(clients) = self.query_origin.get(&query_id) {
+                    for &cid in clients {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::QuerySettled { query_id, tier },
+                        });
+                    }
+                }
+            }
             SyncPayload::Error(err) => {
                 // Log or handle server error
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
@@ -1413,6 +1467,11 @@ impl SyncManager {
                 query,
                 session,
             } => {
+                // Track origin for QuerySettled relay
+                self.query_origin
+                    .entry(*query_id)
+                    .or_default()
+                    .insert(client_id);
                 self.pending_query_subscriptions
                     .push(PendingQuerySubscription {
                         client_id,
@@ -1426,6 +1485,13 @@ impl SyncManager {
             SyncPayload::QueryUnsubscription { query_id } => {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.queries.remove(query_id);
+                }
+                // Clean up query origin
+                if let Some(clients) = self.query_origin.get_mut(query_id) {
+                    clients.remove(&client_id);
+                    if clients.is_empty() {
+                        self.query_origin.remove(query_id);
+                    }
                 }
                 self.pending_query_unsubscriptions
                     .push(PendingQueryUnsubscription {
@@ -1473,6 +1539,10 @@ impl SyncManager {
                         },
                     });
                 }
+            }
+            SyncPayload::QuerySettled { query_id, tier } => {
+                // Client relaying a QuerySettled from downstream
+                self.pending_query_settled.push((*query_id, *tier));
             }
             // Clients shouldn't send these
             SyncPayload::BlobResponse { .. } | SyncPayload::Error(_) => {}

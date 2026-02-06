@@ -7,7 +7,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::sync_manager::{
-    ClientId, PendingPermissionCheck, PendingUpdateId, QueryId, SyncManager,
+    ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -145,6 +145,10 @@ pub(crate) struct QuerySubscription {
     /// Flag indicating this subscription has settled at least once.
     /// Used to ensure one-shot queries receive an initial callback (even if empty).
     pub(crate) settled_once: bool,
+    /// Required persistence tier before first delivery (None = immediate).
+    pub(crate) settled_tier: Option<PersistenceTier>,
+    /// Tiers that have confirmed settlement for this query.
+    pub(crate) achieved_tiers: HashSet<PersistenceTier>,
 }
 
 /// Subscription mode (reserved for future use).
@@ -194,6 +198,9 @@ struct ServerQuerySubscription {
     last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
     needs_recompile: bool,
+    /// Flag indicating this server subscription has settled at least once.
+    /// Used to emit QuerySettled to the client on first settlement.
+    settled_once: bool,
 }
 
 /// A catalogue object update received via sync.
@@ -1572,7 +1579,7 @@ impl QueryManager {
 
     /// Subscribe to query results (delta mode).
     pub fn subscribe(&mut self, query: Query) -> Result<QuerySubscriptionId, QueryError> {
-        self.subscribe_with_session(query, None)
+        self.subscribe_with_session(query, None, None)
     }
 
     /// Subscribe to query results with session-based policy filtering.
@@ -1584,10 +1591,13 @@ impl QueryManager {
     /// - Automatic branch expansion to include all live schemas
     /// - Column name translation for old schema indices
     /// - Lens transforms for rows from old schema branches
+    ///
+    /// `settled_tier`: If Some, holds first delivery until the specified tier confirms.
     pub fn subscribe_with_session(
         &mut self,
         query: Query,
         session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
@@ -1626,6 +1636,8 @@ impl QueryManager {
                 session,
                 needs_recompile: false,
                 settled_once: false,
+                settled_tier,
+                achieved_tiers: HashSet::new(),
             },
         );
 
@@ -1689,6 +1701,8 @@ impl QueryManager {
                 session,
                 needs_recompile: false,
                 settled_once: false,
+                settled_tier: None,
+                achieved_tiers: HashSet::new(),
             },
         );
 
@@ -1710,9 +1724,10 @@ impl QueryManager {
         &mut self,
         query: Query,
         session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Create local subscription
-        let sub_id = self.subscribe_with_session(query.clone(), session.clone())?;
+        let sub_id = self.subscribe_with_session(query.clone(), session.clone(), settled_tier)?;
 
         // Expand branches for sync payload - server needs explicit branch to resolve schema
         let mut sync_query = query;
@@ -1879,6 +1894,15 @@ impl QueryManager {
         // 6. Recompile any subscriptions marked as stale due to schema changes
         self.recompile_stale_subscriptions();
 
+        // 7a. Process incoming QuerySettled notifications
+        let settled_notifications = self.sync_manager.take_pending_query_settled();
+        for (query_id, tier) in settled_notifications {
+            let sub_id = QuerySubscriptionId(query_id.0);
+            if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
+                sub.achieved_tiers.insert(tier);
+            }
+        }
+
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
@@ -1956,10 +1980,31 @@ impl QueryManager {
 
             let delta = subscription.graph.settle(io_ref, om, row_loader);
 
-            let needs_initial = !subscription.settled_once;
+            let tier_satisfied = match &subscription.settled_tier {
+                None => true, // No tier requirement → immediate (current behavior)
+                Some(required) => subscription.achieved_tiers.iter().any(|t| t >= required),
+            };
 
-            if needs_initial || !delta.is_empty() {
+            if !tier_satisfied {
+                // Graph state updated by settle(), but don't deliver yet
+                continue;
+            }
+
+            if !subscription.settled_once {
+                // First delivery — full current state snapshot
                 subscription.settled_once = true;
+                let full_result = subscription.graph.current_result_as_delta();
+                // For settled_tier=None, deliver even if empty (preserves current behavior
+                // where one-shot queries get an initial callback)
+                if !full_result.is_empty() || subscription.settled_tier.is_none() {
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: *sub_id,
+                        delta: full_result,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                }
+            } else if !delta.is_empty() {
+                // Incremental delivery
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,
                     delta,
@@ -2109,6 +2154,7 @@ impl QueryManager {
                     branches,
                     last_scope: scope,
                     needs_recompile: false,
+                    settled_once: false,
                 },
             );
         }
@@ -2146,6 +2192,7 @@ impl QueryManager {
             HashSet<(ObjectId, BranchName)>,
             Option<Session>,
         )> = Vec::new();
+        let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
 
         let om = &self.sync_manager.object_manager;
 
@@ -2188,6 +2235,12 @@ impl QueryManager {
             // Settle the graph
             let _delta = sub.graph.settle(io, om, row_loader);
 
+            // Emit QuerySettled on first settlement
+            if !sub.settled_once {
+                sub.settled_once = true;
+                settled_notifications.push((*client_id, *query_id));
+            }
+
             // Check if scope changed
             let new_scope = sub.graph.contributing_object_ids();
             if new_scope != sub.last_scope {
@@ -2205,6 +2258,11 @@ impl QueryManager {
         for (client_id, query_id, new_scope, session) in scope_updates {
             self.sync_manager
                 .set_client_query_scope(client_id, query_id, new_scope, session);
+        }
+
+        // Emit QuerySettled notifications
+        for (client_id, query_id) in settled_notifications {
+            self.sync_manager.emit_query_settled(client_id, query_id);
         }
     }
 

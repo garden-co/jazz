@@ -1639,7 +1639,9 @@ mod tests {
     // Multi-Client Server Schema Sync Tests
     // ========================================================================
 
-    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncPayload};
+    use crate::sync_manager::{
+        ClientId, Destination, InboxEntry, PersistenceTier, QueryId, ServerId, Source, SyncPayload,
+    };
 
     /// Approve all pending updates on a SyncManager (test helper).
     fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryIoHandler) {
@@ -2076,7 +2078,7 @@ mod tests {
 
         let _sub_a = client_a
             .query_manager_mut()
-            .subscribe_with_sync(query_a.clone(), Some(Session::new("alice")))
+            .subscribe_with_sync(query_a.clone(), Some(Session::new("alice")), None)
             .unwrap();
 
         client_a.process(&mut io_a);
@@ -2144,7 +2146,7 @@ mod tests {
 
         let _sub_b = client_b
             .query_manager_mut()
-            .subscribe_with_sync(query_b.clone(), Some(Session::new("bob")))
+            .subscribe_with_sync(query_b.clone(), Some(Session::new("bob")), None)
             .unwrap();
 
         client_b.process(&mut io_b);
@@ -2362,7 +2364,7 @@ mod tests {
 
         let _sub_id = client
             .query_manager_mut()
-            .subscribe_with_sync(query, None)
+            .subscribe_with_sync(query, None, None)
             .unwrap();
 
         client.process(&mut io_client);
@@ -2593,5 +2595,461 @@ mod tests {
 
         assert_eq!(results[0].1[id_idx], Value::Uuid(row_id));
         assert_eq!(results[0].1[name_idx], Value::Text("Alice".to_string()));
+    }
+
+    // ========================================================================
+    // Query Settlement Tier Tests
+    // ========================================================================
+
+    /// Test 1: Subscribe with settled_tier=None — immediate delivery (current behavior).
+    #[test]
+    fn query_settled_no_tier_immediate() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let mut manager = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io = MemoryIoHandler::new();
+
+        // Insert a row
+        let row_id = ObjectId::new();
+        let values = vec![Value::Uuid(row_id), Value::Text("hello".into())];
+        manager.insert(&mut io, "items", &values).unwrap();
+        manager.process(&mut io);
+
+        // Subscribe with settled_tier=None
+        let query = QueryBuilder::new("items").build();
+        let sub_id = manager
+            .query_manager_mut()
+            .subscribe_with_session(query, None, None)
+            .unwrap();
+        manager.process(&mut io);
+
+        // Should get immediate callback on first process
+        let updates = manager.query_manager_mut().take_updates();
+        assert!(
+            !updates.is_empty(),
+            "settled_tier=None should deliver immediately"
+        );
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].delta.added.len(), 1);
+    }
+
+    /// Test 2: Client A subscribes on server B with settled_tier=Worker.
+    /// B settles → emits QuerySettled(Worker). After A receives it, A delivers.
+    #[test]
+    fn query_settled_direct() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        // === Setup Client A ===
+        let mut client_a = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_a = MemoryIoHandler::new();
+
+        // === Setup Server B (Worker tier) ===
+        let mut server_b = SchemaManager::new(
+            SyncManager::new().with_tier(PersistenceTier::Worker),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_b = MemoryIoHandler::new();
+
+        // === Network topology ===
+        let client_a_id = ClientId::new();
+        let server_b_id = ServerId::new();
+
+        server_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_client(client_a_id);
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server(server_b_id);
+
+        // Insert a row on server B
+        let row_id = ObjectId::new();
+        let values = vec![Value::Uuid(row_id), Value::Text("srv".into())];
+        server_b.insert(&mut io_b, "items", &values).unwrap();
+        server_b.process(&mut io_b);
+
+        // === Client A subscribes with settled_tier=Worker ===
+        let query = QueryBuilder::new("items")
+            .branch(&client_a.branch_name().to_string())
+            .build();
+        let sub_id = client_a
+            .query_manager_mut()
+            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .unwrap();
+        client_a.process(&mut io_a);
+
+        // First process: no data yet (no QuerySettled received)
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.added.is_empty()),
+            "Should not deliver before QuerySettled"
+        );
+
+        // === Forward QuerySubscription from A to B ===
+        let outbox_a = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let query_sub = outbox_a
+            .iter()
+            .find(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+            .expect("Should have QuerySubscription");
+
+        server_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Client(client_a_id),
+                payload: query_sub.payload.clone(),
+            });
+
+        // Server B processes (settles server sub → emits QuerySettled)
+        server_b.process(&mut io_b);
+        // Approve any pending updates
+        approve_all_pending(server_b.query_manager_mut().sync_manager_mut(), &mut io_b);
+        server_b.process(&mut io_b);
+
+        let outbox_b = server_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+
+        // Expect QuerySettled(Worker) in outbox
+        let settled_msg = outbox_b
+            .iter()
+            .find(|e| matches!(e.payload, SyncPayload::QuerySettled { .. }));
+        assert!(
+            settled_msg.is_some(),
+            "Server B should emit QuerySettled(Worker)"
+        );
+
+        // Forward all from B to A (including data + QuerySettled)
+        for entry in &outbox_b {
+            if matches!(entry.destination, Destination::Client(cid) if cid == client_a_id) {
+                client_a
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Server(server_b_id),
+                        payload: entry.payload.clone(),
+                    });
+            }
+        }
+
+        // Process client A with QuerySettled now available
+        client_a.process(&mut io_a);
+        // Second process to settle after data arrives
+        client_a.process(&mut io_a);
+
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "Should deliver after QuerySettled(Worker) received"
+        );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert!(total_added >= 1, "Should have at least 1 row delivered");
+    }
+
+    /// Test 3: A subscribes with settled_tier=EdgeServer through B (Worker) to C (EdgeServer).
+    /// Worker settling is insufficient. EdgeServer settling satisfies the requirement.
+    #[test]
+    fn query_settled_holds_until_tier() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        // Client A — no tier (end client)
+        let mut client_a = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io_a = MemoryIoHandler::new();
+
+        // Subscribe with settled_tier=EdgeServer
+        let query = QueryBuilder::new("items")
+            .branch(&client_a.branch_name().to_string())
+            .build();
+        let sub_id = client_a
+            .query_manager_mut()
+            .subscribe_with_sync(query, None, Some(PersistenceTier::EdgeServer))
+            .unwrap();
+        client_a.process(&mut io_a);
+
+        // Insert a row locally on A (so there's data to deliver)
+        let row_id = ObjectId::new();
+        let values = vec![Value::Uuid(row_id), Value::Text("local".into())];
+        client_a.insert(&mut io_a, "items", &values).unwrap();
+        client_a.process(&mut io_a);
+
+        // No delivery yet — tier not satisfied
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "Should not deliver — EdgeServer tier not achieved"
+        );
+
+        // Simulate receiving QuerySettled(Worker) — insufficient
+        let query_id = QueryId(sub_id.0);
+        let server_b_id = ServerId::new();
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(server_b_id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: PersistenceTier::Worker,
+                },
+            });
+        client_a.process(&mut io_a);
+
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "Worker < EdgeServer — should still not deliver"
+        );
+
+        // Simulate receiving QuerySettled(EdgeServer) — sufficient
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(server_b_id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: PersistenceTier::EdgeServer,
+                },
+            });
+        client_a.process(&mut io_a);
+
+        let updates = client_a.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "EdgeServer >= EdgeServer — should deliver now"
+        );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert_eq!(total_added, 1, "Should deliver the accumulated row");
+    }
+
+    /// Test 4: Data accumulates while waiting for tier. First delivery contains all rows.
+    #[test]
+    fn query_settled_data_accumulates() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let mut client = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io = MemoryIoHandler::new();
+
+        // Subscribe with settled_tier=Worker
+        let query = QueryBuilder::new("items")
+            .branch(&client.branch_name().to_string())
+            .build();
+        let sub_id = client
+            .query_manager_mut()
+            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .unwrap();
+        client.process(&mut io);
+
+        // Insert 3 rows before tier is satisfied
+        for i in 0..3 {
+            let row_id = ObjectId::new();
+            let values = vec![Value::Uuid(row_id), Value::Text(format!("item_{}", i))];
+            client.insert(&mut io, "items", &values).unwrap();
+            client.process(&mut io);
+        }
+
+        // No delivery yet
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "Should not deliver before tier is satisfied"
+        );
+
+        // Send QuerySettled(Worker)
+        let query_id = QueryId(sub_id.0);
+        let server_id = ServerId::new();
+        client
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: PersistenceTier::Worker,
+                },
+            });
+        client.process(&mut io);
+
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "Should deliver after QuerySettled(Worker)"
+        );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert_eq!(
+            total_added, 3,
+            "First delivery should contain all 3 accumulated rows"
+        );
+    }
+
+    /// Test 5: One-shot query() with settled_tier via subscribe_with_sync.
+    /// The subscription should not deliver until the required tier confirms.
+    #[test]
+    fn query_one_shot_settled_tier() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("items")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let mut client = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut io = MemoryIoHandler::new();
+
+        // Insert a row first
+        let row_id = ObjectId::new();
+        let values = vec![Value::Uuid(row_id), Value::Text("one-shot".into())];
+        client.insert(&mut io, "items", &values).unwrap();
+        client.process(&mut io);
+
+        // Subscribe with settled_tier=Worker (simulating one-shot behavior)
+        let query = QueryBuilder::new("items")
+            .branch(&client.branch_name().to_string())
+            .build();
+        let sub_id = client
+            .query_manager_mut()
+            .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
+            .unwrap();
+        client.process(&mut io);
+
+        // First process: no delivery (waiting for Worker tier)
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "One-shot with settled_tier should not resolve on first local settle"
+        );
+
+        // Send QuerySettled(Worker)
+        let query_id = QueryId(sub_id.0);
+        let server_id = ServerId::new();
+        client
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: SyncPayload::QuerySettled {
+                    query_id,
+                    tier: PersistenceTier::Worker,
+                },
+            });
+        client.process(&mut io);
+
+        // Now should resolve with correct data
+        let updates = client.query_manager_mut().take_updates();
+        let matching: Vec<_> = updates
+            .iter()
+            .filter(|u| u.subscription_id == sub_id)
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "Should deliver after QuerySettled(Worker)"
+        );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert_eq!(total_added, 1, "Should contain the one row");
     }
 }
