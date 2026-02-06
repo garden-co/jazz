@@ -1,3 +1,4 @@
+import { base58 } from "@scure/base";
 import { md5 } from "@noble/hashes/legacy";
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
@@ -367,7 +368,7 @@ export class SyncManager {
       offset: number,
     ) => {
       if (entries.length === 0) return;
-      const batchId = crypto.randomUUID();
+      const batchId = base58.encode(this.local.crypto.randomBytes(12));
       const msg: ReconcileMessage = {
         action: "reconcile",
         id: batchId,
