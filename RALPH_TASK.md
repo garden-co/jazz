@@ -80,8 +80,8 @@ Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making i
 
 #### Node.js (NAPI)
 
-16. [ ] Export `NativeStorage` class from `cojson-core-napi`
-17. [ ] Support file-based persistence using BF-Tree with file backing
+16. [x] Export `NativeStorage` class from `cojson-core-napi`
+17. [x] Support file-based persistence using BF-Tree with file backing
 18. [ ] Implement async operations via NAPI ThreadSafeFunction
 
 #### WebAssembly

@@ -571,6 +571,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cojson-core",
+ "cojson-storage",
  "console_error_panic_hook",
  "getrandom 0.2.16",
  "napi",

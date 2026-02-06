@@ -81,3 +81,19 @@ Note: OPFS Synchronous Access Handle only available in Web Worker contexts.
 This is a browser constraint, not an implementation limitation.
 
 Next: Phase 4 - Platform Bindings (NAPI, WASM, React Native exports)
+
+**Phase 4 - Node.js NAPI Bindings completed**
+
+Accomplished:
+- Added cojson-storage dependency to cojson-core-napi
+- Created NativeStorage class with NAPI bindings
+- Implemented all StorageBackend methods as NAPI exports
+- Added JavaScript-friendly type conversions (JsCoValueHeader, etc.)
+- Support for CoValue CRUD, session management, sync state, deletions
+
+Files created/modified:
+- `crates/cojson-core-napi/Cargo.toml` - Added cojson-storage dependency
+- `crates/cojson-core-napi/src/storage/mod.rs` - NativeStorage NAPI class
+- `crates/cojson-core-napi/src/lib.rs` - Re-export storage module
+
+Next: Phase 4 items 18-25 (WASM and React Native exports)

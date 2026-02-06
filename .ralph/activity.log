@@ -77,3 +77,29 @@ EOF
 [11:31:31] 🟡 TOKENS: 53065 / 80000 (66%) [read:201KB write:0KB assist:2KB shell:0KB]
 [11:31:50] 🟡 SHELL cd crates && cargo test -p cojson-storage --features "async,serde,bftree" 2>&1 | tail -20 → exit 0
 [11:32:06] 🟡 TOKENS: 53098 / 80000 (66%) [read:201KB write:0KB assist:2KB shell:0KB]
+[11:32:16] 🟡 SHELL git add -A && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+feat(cojson-storage): add OPFS file I/O for browser support
+
+Complete Phase 3 - Platform-Specific File I/O Layer:
+
+- Add `opfs` feature flag with web-sys dependencies for WASM
+- Implement OpfsFileIO for browser Origin Private File System
+- Implement OpfsFileHandle using FileSystemSyncAccessHandle
+- Support synchronous read/write for optimal BF-Tree performance
+- Handle async directory operations and file creation
+
+Note: OPFS SyncAccessHandle only available in Web Worker contexts
+(browser constraint, provides synchronous I/O for performance).
+EOF
+)" → exit 0
+[11:32:22] 🟡 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-napi/src/lib.rs (331 lines, ~32.3KB)
+[11:32:23] 🟡 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-napi/Cargo.toml (27 lines, ~2.6KB)
+[11:32:37] 🟡 TOKENS: 62104 / 80000 (77%) - approaching limit [read:236KB write:0KB assist:2KB shell:0KB]
+[11:33:38] 🟡 TOKENS: 62117 / 80000 (77%) - approaching limit [read:236KB write:0KB assist:2KB shell:0KB]
+[11:33:59] 🟡 SHELL cd crates && cargo check -p cojson_core_napi 2>&1 | head -60 → exit 0
+[11:34:10] 🟡 TOKENS: 62142 / 80000 (77%) - approaching limit [read:236KB write:0KB assist:2KB shell:0KB]
+[11:34:12] 🟡 SHELL cd crates && cargo check -p cojson_core_napi 2>&1 → exit 0
+[11:34:26] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-napi/src/lib.rs (338 lines, ~33.0KB)
+[11:34:26] 🔴 WARN: Approaching token limit (70608 >= 70000)
+[11:34:40] 🔴 SHELL cd crates && cargo check -p cojson_core_napi 2>&1 → exit 0
+[11:34:40] 🔴 TOKENS: 70608 / 80000 (88%) - approaching limit [read:269KB write:0KB assist:3KB shell:0KB]
