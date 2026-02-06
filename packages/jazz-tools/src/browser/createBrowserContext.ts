@@ -29,7 +29,7 @@ setupInspector();
 export type BaseBrowserContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
-  storage?: "indexedDB";
+  storage?: "indexedDB" | "sqlite-wasm";
   crypto?: CryptoProvider;
   authSecretStorage: AuthSecretStorage;
 };
@@ -53,7 +53,13 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   const peers: Peer[] = [];
 
-  const storage = await getIndexedDBStorage();
+  let storage;
+  if (options.storage === "sqlite-wasm") {
+    const { getSqliteWasmStorage } = await import("cojson-storage-sqlite-wasm");
+    storage = await getSqliteWasmStorage();
+  } else {
+    storage = await getIndexedDBStorage();
+  }
 
   if (options.sync.when === "never") {
     return {
