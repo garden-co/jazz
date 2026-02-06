@@ -51,3 +51,29 @@ EOF
 [11:29:28] 🟢 TOKENS: 40433 / 80000 (50%) [read:152KB write:0KB assist:2KB shell:0KB]
 [11:29:29] 🟡 READ /Users/antonio.musolino/Workspace/github/jazz/RALPH_TASK.md (481 lines, ~46.9KB)
 [11:29:59] 🟡 TOKENS: 52458 / 80000 (65%) [read:199KB write:0KB assist:2KB shell:0KB]
+[11:30:00] 🟡 SHELL git add -A && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+feat(cojson-storage): add BTree storage backend and file I/O layer
+
+Phase 2 & 3 progress for native storage engine:
+
+BTree Storage (Phase 2):
+- Add BTreeStorage backend with concurrent index using BTreeMap
+- Implement efficient range queries for session lookups
+- Support sync state tracking and deletion queue
+- Note: bf-tree crate has cfg-if version conflict, using fallback
+
+File I/O Layer (Phase 3):
+- Define FileIO and FileHandle traits for platform abstraction
+- Implement StdFileIO for Node.js/React Native (std::fs)
+- Implement InMemoryFileIO for Cloudflare Workers and testing
+- Support read_at/write_at for random access patterns
+
+34 tests passing covering all new functionality.
+EOF
+)" → exit 0
+[11:30:07] 🟡 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-wasm/Cargo.toml (22 lines, ~2.1KB)
+[11:30:13] 🟡 SHELL git push origin feat/building-native-storage 2>&1 → exit 0
+[11:30:31] 🟡 TOKENS: 53049 / 80000 (66%) [read:201KB write:0KB assist:2KB shell:0KB]
+[11:31:31] 🟡 TOKENS: 53065 / 80000 (66%) [read:201KB write:0KB assist:2KB shell:0KB]
+[11:31:50] 🟡 SHELL cd crates && cargo test -p cojson-storage --features "async,serde,bftree" 2>&1 | tail -20 → exit 0
+[11:32:06] 🟡 TOKENS: 53098 / 80000 (66%) [read:201KB write:0KB assist:2KB shell:0KB]

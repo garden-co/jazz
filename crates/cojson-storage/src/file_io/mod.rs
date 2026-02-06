@@ -6,6 +6,10 @@
 //! - **std_fs**: Standard filesystem (Node.js, React Native)
 //! - **memory**: In-memory filesystem (Cloudflare Workers, testing)
 //! - **opfs**: Origin Private File System (browsers, requires WASM)
+//!
+//! # Feature Flags
+//!
+//! - `opfs`: Enable OPFS support for browsers (requires `wasm32` target)
 
 mod traits;
 pub use traits::*;
@@ -18,8 +22,8 @@ mod std_fs;
 #[cfg(not(target_arch = "wasm32"))]
 pub use std_fs::StdFileIO;
 
-// OPFS implementation would go here for WASM targets
-// #[cfg(target_arch = "wasm32")]
-// mod opfs;
-// #[cfg(target_arch = "wasm32")]
-// pub use opfs::OpfsFileIO;
+// OPFS implementation for WASM targets (browsers)
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+mod opfs;
+#[cfg(all(target_arch = "wasm32", feature = "opfs"))]
+pub use opfs::{OpfsFileIO, OpfsFileHandle, OpfsError};

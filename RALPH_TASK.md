@@ -70,8 +70,8 @@ BF-Tree needs a file I/O abstraction to work across platforms:
 
 11. [x] Define `FileIO` trait for platform-agnostic file operations
 12. [x] Implement `StdFileIO` for Node.js and React Native (std::fs with disk persistence)
-13. [ ] Implement `OpfsFileIO` for browsers using Origin Private File System
-14. [ ] Use OPFS Synchronous Access Handle for optimal BF-Tree performance
+13. [x] Implement `OpfsFileIO` for browsers using Origin Private File System
+14. [x] Use OPFS Synchronous Access Handle for optimal BF-Tree performance
 15. [x] Implement `InMemoryFileIO` for Cloudflare Workers (VFS /tmp doesn't persist across requests)
 
 Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making it unsuitable for BF-Tree. Workers use in-memory storage at instance level + Jazz sync for durability.
