@@ -511,7 +511,7 @@ describe("full storage reconciliation", () => {
       await group.core.waitForSync();
 
       // Wait for the next reconciliation window to start
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       const anotherClient = setupTestNode();
       anotherClient.addStorage({ storage });
@@ -520,8 +520,7 @@ describe("full storage reconciliation", () => {
 
       // Runs storage reconciliation again
       anotherClient.connectToSyncServer({ persistent: true });
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await waitForStorageReconciliationToComplete(anotherClient.node);
 
       const messages = SyncMessagesLog.getMessages({
         Group: group.core,
