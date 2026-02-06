@@ -90,6 +90,14 @@ export class StorageApiSync implements StorageAPI {
     callback(result);
   }
 
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    this.dbClient.renewStorageReconciliationLock(sessionId, peerId, offset);
+  }
+
   releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
     this.dbClient.releaseStorageReconciliationLock(sessionId, peerId);
   }

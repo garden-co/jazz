@@ -430,6 +430,59 @@ Run this check when a persistent server peer is added (and at startup for alread
 
 7. **Scheduling**: Reconciliation runs at most every 30 days per peer, triggered when peers connect. Lock and lastRun are per peer; reconciliation with different peers can run independently. Storage backends persist lock and `lastRun` per peerId; the lock ensures only one tab/process runs reconciliation for a given peer at a time. Lock TTL is 1 day; if interrupted, another tab/process can acquire when it expires. `lastRun` is only updated on successful completion (via `releaseStorageReconciliationLock`), so interrupted runs do not block the next due run.
 
+## Resuming Storage Reconciliation
+
+If `startStorageReconciliation` is interrupted (tab close, crash, app restart), the run currently starts again from offset 0 on the next acquire. To avoid re-processing already-synced CoValues, we keep the **last processed offset** as part of the lock and resume from that offset when a new run acquires the lock (e.g. after app restart or lock TTL expiry).
+
+### Strategy
+
+1. **Persist progress in the lock row**  
+   Extend the storage reconciliation lock row with a required `lastProcessedOffset` (number). Semantics:
+   - `0`: start from the beginning (first batch).
+   - `N`: all CoValues up to offset `N` (by the same stable ordering as `getCoValueIDs`) have been reconciled for this peer; the next run should call `getCoValueIDs(batchSize, N)` and continue from there.
+
+2. **When to advance the offset (out-of-order acks)**  
+   We advance only after the server has acknowledged a batch (client receives **reconcile-ack**).
+
+3. **New storage API**  
+   - **Acquire result**: When `tryAcquireStorageReconciliationLock` returns `{ acquired: true }`, also return the offset to resume from. Change the type to:
+     - `{ acquired: true; lastProcessedOffset: number }` (0 for a fresh run, or the value from the previous lock row when resuming after an expired lock).
+   - **Update progress**: Add a method so the client can persist progress after each acked batch:
+     - `renewStorageReconciliationLock(peerId: PeerID, offset: number)` (sync/async as per existing storage style).
+   - Implementation: when acquiring, if we take over an existing lock row (expired or due for a new run): if the previous row has `releasedAt` set (completed run), set `lastProcessedOffset` to 0 and return 0 (full run). If the previous row has no `releasedAt` (interrupted run) and we are acquiring because the lock expired, preserve its `lastProcessedOffset` in the new row and return it. When there is no previous row, set `lastProcessedOffset` to 0 and return 0.
+
+4. **Lock row shape**  
+   Add to `StorageReconciliationLockRow`: `lastProcessedOffset: number` (required). Backends store it in the same table (e.g. new column). On `putStorageReconciliationLock` when acquiring, the backend sets `lastProcessedOffset` from the previous row when resuming, or 0 when starting fresh. `renewStorageReconciliationLock` only updates `lastProcessedOffset` for the lock row key for that peer (and must only update if the current holder is the same session).
+
+5. **Client flow**  
+   - `maybeStartStorageReconciliationForPeer`: on `result.acquired`, read `result.lastProcessedOffset` (0 or from storage) and call `startStorageReconciliation(peer, onComplete, result.lastProcessedOffset)`.
+   - `startStorageReconciliation(peer, onComplete?, initialOffset?)`: start the batch loop at `initialOffset ?? 0` (i.e. first call is `processStorageBatch(initialOffset ?? 0)`).
+   - When sending a reconcile at offset `O` with length `L`, record `batchId → offset`. On **reconcile-ack** for `batchId`: mark that batch acked and call `renewStorageReconciliationLock(peerId, offset)`.
+   - On successful completion, call `releaseStorageReconciliationLock`; the row gets `releasedAt` and `lastProcessedOffset` set to 0.
+
+6. **Ordering and stability**  
+   `getCoValueIDs(limit, offset)` uses stable ordering (e.g. `ORDER BY rowID`). Offsets are therefore stable across restarts as long as the ordering is unchanged. New CoValues get new rowIDs at the end, so the “already processed” prefix remains valid. Deletions (if any) are implementation-dependent; SQLite with a monotonic rowID does not reuse IDs, so the prefix remains well-defined.
+
+7. **Completion vs resume**  
+   When we call `releaseStorageReconciliationLock` (full completion), set `lastProcessedOffset` to 0 so that the next due run (after 30 days) is a full sweep from the start. Resuming is only for **interrupted** runs (no release called); in that case the row keeps `lastProcessedOffset` and no `releasedAt` (or an old one), and the next acquire after TTL will see the expired lock and return the stored `lastProcessedOffset`.
+
+### Implementation checklist (resume)
+
+- Extend `StorageReconciliationLockRow` with `lastProcessedOffset: number` (required).
+- Extend `StorageReconciliationAcquireResult` for `acquired: true` with `lastProcessedOffset: number`.
+- Add `renewStorageReconciliationLock(peerId, offset)` to `StorageAPI` and DB clients; implement in SQLite (sync/async) and IndexedDB (migration for new column/store).
+- In `tryAcquireStorageReconciliationLock`: when taking over an existing row, return `lastProcessedOffset` from the previous row only when the previous run was interrupted (no `releasedAt`); when the previous run completed (`releasedAt` set), use 0. New row gets the same value so future progress updates are correct.
+- In `startStorageReconciliation`: accept optional `initialOffset`, start at `processStorageBatch(initialOffset ?? 0)`.
+- In reconcile-ack handler: track `batchId → offset` when sending; on ack, mark batch acked and call `renewStorageReconciliationLock(peerId, offset)`.
+- In `releaseStorageReconciliationLock`: when writing the row with `releasedAt`, set `lastProcessedOffset` to 0 so the next due run starts from the beginning.
+- Wire `maybeStartStorageReconciliationForPeer` to pass `result.lastProcessedOffset` into `startStorageReconciliation`.
+
+### Testing (resume)
+
+- Test that after an interrupted run (e.g. simulate by not calling release and expiring the lock), the next acquire returns `lastProcessedOffset` equal to the last acked batch’s next offset, and the next run only processes CoValues from that offset onward.
+- Test that after a successful completion (release), the next run (when due) starts from offset 0.
+- Test that progress is only updated after reconcile-ack for the batch, not just after sending.
+
 ## Testing
 
 - Test `startStorageReconciliation(peer)` with CoValues only in storage (single peer)

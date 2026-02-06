@@ -50,9 +50,10 @@ export const migrations: Record<number, string[]> = {
   6: [
     `CREATE TABLE IF NOT EXISTS storageReconciliationLocks (
       key TEXT PRIMARY KEY,
-      holderSessionId TEXT,
-      acquiredAt INTEGER,
-      expiresAt INTEGER,
+      holderSessionId TEXT NOT NULL,
+      acquiredAt INTEGER NOT NULL,
+      expiresAt INTEGER NOT NULL,
+      lastProcessedOffset INTEGER NOT NULL DEFAULT 0,
       releasedAt INTEGER
     ) WITHOUT ROWID;`,
   ],

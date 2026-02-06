@@ -137,8 +137,8 @@ export class SyncManager {
   peers: { [key: PeerID]: PeerState } = {};
   local: LocalNode;
 
-  /** Tracks pending reconcile acks: "batchId#peerId". Cleared in handleReconcileAck. */
-  pendingReconciliationAck: Set<string> = new Set();
+  /** Tracks pending reconcile acks: "batchId#peerId->offset". Cleared in handleReconcileAck. */
+  pendingReconciliationAck: Map<string, number> = new Map();
 
   // When true, transactions will not be verified.
   // This is useful when syncing only for storage purposes, with the expectation that
@@ -334,24 +334,36 @@ export class SyncManager {
    * so that client can send missing content.
    * Processes CoValues in batches of RECONCILIATION_BATCH_SIZE.
    * @param peer - The server peer to reconcile with.
+   * @param initialOffset - Offset to start from (for resuming after interrupt). Default 0.
    * @param onComplete - Called when reconciliation is fully complete (all batches sent and acked).
    */
-  startStorageReconciliation(peer: PeerState, onComplete?: () => void): void {
+  startStorageReconciliation(
+    peer: PeerState,
+    initialOffset?: number,
+    onComplete?: () => void,
+  ): void {
     if (!this.local.storage) return;
     if (!isPersistentServerPeer(peer)) return;
 
+    const peerId = peer.id;
+    const startOffset = initialOffset ?? 0;
+
     const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
     let lastBatchSent = false;
-    const peerId = peer.id;
     const hasPendingAcksForPeer = () =>
-      [...this.pendingReconciliationAck].some((k) => k.endsWith(`#${peerId}`));
+      this.pendingReconciliationAck
+        .keys()
+        .some((k) => k.endsWith(`#${peerId}`));
     const maybeComplete = () => {
       if (lastBatchSent && !hasPendingAcksForPeer() && onComplete) {
         onComplete();
       }
     };
 
-    const sendReconcileBatch = (entries: [RawCoID, string][]) => {
+    const sendReconcileBatch = (
+      entries: [RawCoID, string][],
+      offset: number,
+    ) => {
       if (entries.length === 0) return;
       const batchId = crypto.randomUUID();
       const msg: ReconcileMessage = {
@@ -359,7 +371,10 @@ export class SyncManager {
         id: batchId,
         values: entries,
       };
-      this.pendingReconciliationAck.add(`${batchId}#${peer.id}`);
+      this.pendingReconciliationAck.set(
+        `${batchId}#${peer.id}`,
+        offset + batchSize,
+      );
       this.trySendToPeer(peer, msg);
     };
 
@@ -372,7 +387,7 @@ export class SyncManager {
         const entries: [RawCoID, string][] = [];
         const sendReconcileMessageWhenDone = () => {
           if (++done === pending.length) {
-            sendReconcileBatch(entries);
+            sendReconcileBatch(entries, offset);
             if (batch.length === batchSize) {
               processStorageBatch(offset + batch.length);
             } else {
@@ -414,10 +429,10 @@ export class SyncManager {
             clearInterval(checkInterval);
             completionCallback();
           }
-        }, 1000)
+        }, 500)
       : undefined;
 
-    processStorageBatch(0);
+    processStorageBatch(startOffset);
   }
 
   private maybeStartStorageReconciliationForPeer(peer: PeerState): void {
@@ -430,7 +445,8 @@ export class SyncManager {
       (result) => {
         if (!result.acquired) return;
 
-        this.startStorageReconciliation(peer, () => {
+        const lastProcessedOffset = result.lastProcessedOffset;
+        this.startStorageReconciliation(peer, lastProcessedOffset, () => {
           this.local.storage?.releaseStorageReconciliationLock(
             sessionId,
             peer.id,
@@ -947,7 +963,15 @@ export class SyncManager {
 
   handleReconcileAck(msg: ReconcileAckMessage, peer: PeerState): void {
     const key = `${msg.id}#${peer.id}`;
+    const nextOffset = this.pendingReconciliationAck.get(key);
     this.pendingReconciliationAck.delete(key);
+    if (nextOffset !== undefined) {
+      this.local.storage?.renewStorageReconciliationLock(
+        this.local.currentSessionID,
+        peer.id,
+        nextOffset,
+      );
+    }
   }
 
   private hashKnownStateSessions(sessions: KnownStateSessions): string {

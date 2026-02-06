@@ -169,10 +169,24 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
   async putStorageReconciliationLock(
     entry: StorageReconciliationLockRow,
   ): Promise<void> {
-    const { key, holderSessionId, acquiredAt, expiresAt, releasedAt } = entry;
+    const {
+      key,
+      holderSessionId,
+      acquiredAt,
+      expiresAt,
+      releasedAt,
+      lastProcessedOffset,
+    } = entry;
     await this.tx.run(
-      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt) VALUES (?, ?, ?, ?, ?)`,
-      [key, holderSessionId, acquiredAt, expiresAt, releasedAt ?? null],
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        key,
+        holderSessionId,
+        acquiredAt,
+        expiresAt,
+        releasedAt ?? null,
+        lastProcessedOffset,
+      ],
     );
   }
 }
@@ -393,15 +407,39 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
       }
 
       const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+      const lastProcessedOffset =
+        lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
       await tx.putStorageReconciliationLock({
         key: lockKey,
         holderSessionId: sessionId,
         acquiredAt: now,
         expiresAt,
+        lastProcessedOffset,
       });
-      result = { acquired: true };
+      result = { acquired: true, lastProcessedOffset };
     });
     return result;
+  }
+
+  async renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): Promise<void> {
+    await this.transaction(async (tx) => {
+      const lockKey = `lock#${peerId}`;
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow &&
+        lockRow.holderSessionId === sessionId &&
+        !lockRow.releasedAt
+      ) {
+        await tx.putStorageReconciliationLock({
+          ...lockRow,
+          lastProcessedOffset: offset,
+        });
+      }
+    });
   }
 
   async releaseStorageReconciliationLock(
@@ -416,6 +454,7 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
         await tx.putStorageReconciliationLock({
           ...lockRow,
           releasedAt,
+          lastProcessedOffset: 0,
         });
       }
     });

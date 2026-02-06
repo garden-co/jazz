@@ -63,6 +63,11 @@ function createMockStorage(
       peerId: string,
       callback: (result: StorageReconciliationAcquireResult) => void,
     ) => void;
+    renewStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      offset: number,
+    ) => void;
     releaseStorageReconciliationLock?: (
       sessionId: string,
       peerId: string,
@@ -91,6 +96,8 @@ function createMockStorage(
       vi.fn((_sessionId, _peerId, callback) =>
         callback({ acquired: false as const, reason: "not_due" as const }),
       ),
+    renewStorageReconciliationLock:
+      opts.renewStorageReconciliationLock || vi.fn(),
     releaseStorageReconciliationLock:
       opts.releaseStorageReconciliationLock || vi.fn(),
   };

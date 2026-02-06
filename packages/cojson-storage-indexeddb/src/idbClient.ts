@@ -450,17 +450,40 @@ export class IDBClient implements DBClientInterfaceAsync {
           result = { acquired: false, reason: "lock_held" };
           return;
         }
+        const lastProcessedOffset =
+          lock && !lock.releasedAt ? (lock.lastProcessedOffset ?? 0) : 0;
         await tx.putStorageReconciliationLock({
           key: lockKey,
           holderSessionId: sessionId,
           acquiredAt: now,
           expiresAt: now + LOCK_TTL_MS,
+          lastProcessedOffset,
         });
-        result = { acquired: true };
+        result = { acquired: true, lastProcessedOffset };
       },
       ["storageReconciliationLocks"],
     );
     return result!;
+  }
+
+  async renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+    offset: number,
+  ): Promise<void> {
+    const lockKey = `lock#${peerId}`;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (lock && lock.holderSessionId === sessionId && !lock.releasedAt) {
+          await tx.putStorageReconciliationLock({
+            ...lock,
+            lastProcessedOffset: offset,
+          });
+        }
+      },
+      ["storageReconciliationLocks"],
+    );
   }
 
   async releaseStorageReconciliationLock(
@@ -477,6 +500,7 @@ export class IDBClient implements DBClientInterfaceAsync {
           await tx.putStorageReconciliationLock({
             ...lock,
             releasedAt,
+            lastProcessedOffset: 0,
           });
         }
       },

@@ -604,6 +604,97 @@ describe("full storage reconciliation", () => {
         ]
       `);
     });
+
+    test("after interrupted run, next acquire returns lastProcessedOffset and reconciliation resumes from that offset", async () => {
+      setStorageReconciliationBatchSize(1);
+      setStorageReconciliationLockTTL(100);
+      setStorageReconciliationInterval(200);
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage();
+      const { peer } = client.connectToSyncServer({ persistent: true });
+
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      map.set("x", "y", "trusting");
+      await map.core.waitForSync();
+      await client.node.gracefulShutdown();
+
+      // Wait for the reconciliation interval to pass
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      SyncMessagesLog.clear();
+      const anotherClient = setupTestNode();
+      anotherClient.addStorage({ storage });
+      anotherClient.connectToSyncServer({ persistent: true });
+
+      const { promise, resolve } = Promise.withResolvers<void>();
+      const syncManager = anotherClient.node.syncManager;
+      const originalHandler = syncManager.handleReconcileAck.bind(syncManager);
+      let processReconciliationAcks = true;
+      syncManager.handleReconcileAck = (msg, peer) => {
+        if (processReconciliationAcks) {
+          originalHandler(msg, peer);
+          processReconciliationAcks = false;
+          resolve();
+        }
+      };
+      await promise;
+      await anotherClient.node.gracefulShutdown();
+      expect(syncManager.pendingReconciliationAck.size).toBe(1);
+
+      // Wait for the lock to expire
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const acquireResult =
+        await new Promise<StorageReconciliationAcquireResult>((resolve) =>
+          storage.tryAcquireStorageReconciliationLock(
+            anotherClient.node.currentSessionID,
+            peer.id,
+            resolve,
+          ),
+        );
+      expect(acquireResult.acquired).toBe(true);
+      if (acquireResult.acquired) {
+        expect(acquireResult.lastProcessedOffset).toBe(1);
+      }
+    });
+
+    test("after successful completion, next due run starts from the beginning", async () => {
+      setStorageReconciliationInterval(100);
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage();
+      client.connectToSyncServer({ persistent: true });
+
+      const group = client.node.createGroup();
+      await group.core.waitForSync();
+      await client.node.gracefulShutdown();
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const anotherClient = setupTestNode();
+      anotherClient.addStorage({ storage });
+      const { peer } = anotherClient.connectToSyncServer({
+        persistent: true,
+      });
+      await waitForStorageReconciliationToComplete(anotherClient.node);
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      const acquireResult =
+        await new Promise<StorageReconciliationAcquireResult>((resolve) =>
+          storage.tryAcquireStorageReconciliationLock(
+            anotherClient.node.currentSessionID,
+            peer.id,
+            resolve,
+          ),
+        );
+      expect(acquireResult.acquired).toBe(true);
+      if (acquireResult.acquired) {
+        expect(acquireResult.lastProcessedOffset).toBe(0);
+      }
+    });
   });
 });
 
@@ -611,7 +702,7 @@ function waitForStorageReconciliationToComplete(
   node: LocalNode,
 ): Promise<void> {
   const pendingReconciliationAck = node.syncManager.pendingReconciliationAck;
-  expect(pendingReconciliationAck.size).toEqual(1);
+  expect(pendingReconciliationAck.size).toBeGreaterThan(0);
 
   return waitFor(() => pendingReconciliationAck.size === 0);
 }

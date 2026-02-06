@@ -14,7 +14,7 @@ export type CorrectionCallback = (
 ) => NewContentMessage[] | undefined;
 
 export type StorageReconciliationAcquireResult =
-  | { acquired: true }
+  | { acquired: true; lastProcessedOffset: number }
   | { acquired: false; reason: "not_due" | "lock_held" };
 
 /**
@@ -116,6 +116,16 @@ export interface StorageAPI {
   ): void;
 
   /**
+   * Update the last processed offset for the storage reconciliation lock held for this peer.
+   * Only call after a batch has been acked; used to resume from this offset on interrupt.
+   */
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void;
+
+  /**
    * Release the storage reconciliation lock for a peer and record completion. Only call on successful completion.
    * On failure/interrupt, do not call; the lock expires after LOCK_TTL_MS and another process can retry for this peer.
    */
@@ -177,6 +187,8 @@ export type StorageReconciliationLockRow = {
   acquiredAt: number;
   expiresAt: number;
   releasedAt?: number;
+  /** Offset up to which all batches have been acked; used to resume after interrupt. */
+  lastProcessedOffset: number;
 };
 
 export interface DBTransactionInterfaceAsync {
@@ -291,6 +303,12 @@ export interface DBClientInterfaceAsync {
     peerId: PeerID,
   ): Promise<StorageReconciliationAcquireResult>;
 
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): Promise<void>;
+
   releaseStorageReconciliationLock(
     sessionId: SessionID,
     peerId: PeerID,
@@ -393,6 +411,12 @@ export interface DBClientInterfaceSync {
     sessionId: SessionID,
     peerId: PeerID,
   ): StorageReconciliationAcquireResult;
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void;
 
   releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void;
 }

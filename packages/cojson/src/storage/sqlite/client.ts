@@ -281,10 +281,24 @@ export class SQLiteClient
   }
 
   putStorageReconciliationLock(entry: StorageReconciliationLockRow): void {
-    const { key, holderSessionId, acquiredAt, expiresAt, releasedAt } = entry;
+    const {
+      key,
+      holderSessionId,
+      acquiredAt,
+      expiresAt,
+      releasedAt,
+      lastProcessedOffset,
+    } = entry;
     this.db.run(
-      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt) VALUES (?, ?, ?, ?, ?)`,
-      [key, holderSessionId, acquiredAt, expiresAt, releasedAt ?? null],
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        key,
+        holderSessionId,
+        acquiredAt,
+        expiresAt,
+        releasedAt ?? null,
+        lastProcessedOffset,
+      ],
     );
   }
 
@@ -356,15 +370,37 @@ export class SQLiteClient
       }
 
       const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+      const lastProcessedOffset =
+        lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
       this.putStorageReconciliationLock({
         key: lockKey,
         holderSessionId: sessionId,
         acquiredAt: now,
         expiresAt,
+        lastProcessedOffset,
       });
-      result = { acquired: true };
+      result = { acquired: true, lastProcessedOffset };
     });
     return result;
+  }
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    const lockKey = `lock#${peerId}`;
+    const lockRow = this.getStorageReconciliationLock(lockKey);
+    if (
+      lockRow &&
+      lockRow.holderSessionId === sessionId &&
+      !lockRow.releasedAt
+    ) {
+      this.putStorageReconciliationLock({
+        ...lockRow,
+        lastProcessedOffset: offset,
+      });
+    }
   }
 
   releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
@@ -373,7 +409,11 @@ export class SQLiteClient
       const releasedAt = Date.now();
       const lockRow = this.getStorageReconciliationLock(lockKey);
       if (lockRow?.holderSessionId === sessionId) {
-        this.putStorageReconciliationLock({ ...lockRow, releasedAt });
+        this.putStorageReconciliationLock({
+          ...lockRow,
+          releasedAt,
+          lastProcessedOffset: 0,
+        });
       }
     });
   }
