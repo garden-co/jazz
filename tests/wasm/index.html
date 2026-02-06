@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>bf-tree WASM Test Suite</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+            padding: 20px;
+            max-width: 900px;
+            margin: 0 auto;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        h2 {
+            color: #555;
+            margin-top: 30px;
+        }
+        .pass { color: #28a745; }
+        .fail { color: #dc3545; }
+        .pending { color: #6c757d; }
+        table {
+            border-collapse: collapse;
+            margin: 20px 0;
+            width: 100%;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        td, th {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background: #f8f9fa;
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 15px;
+            background: white;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .control-row {
+            margin-bottom: 10px;
+        }
+        .control-row:last-child {
+            margin-bottom: 0;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 14px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        button.secondary {
+            background: #6c757d;
+        }
+        button.secondary:hover {
+            background: #545b62;
+        }
+        button.opfs {
+            background: #28a745;
+        }
+        button.opfs:hover {
+            background: #1e7e34;
+        }
+        button.danger {
+            background: #dc3545;
+        }
+        button.danger:hover {
+            background: #c82333;
+        }
+        input[type="number"] {
+            width: 100px;
+            padding: 8px;
+            margin: 0 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        label {
+            margin-right: 5px;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px;
+            background: #e9ecef;
+            border-radius: 4px;
+        }
+        #storage-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #d4edda;
+            border-radius: 4px;
+            display: none;
+        }
+        .result-row {
+            animation: fadeIn 0.3s ease-in;
+        }
+        .opfs-row {
+            background: #d4edda !important;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .separator {
+            background: #e9ecef;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>bf-tree WASM Test Suite</h1>
+
+    <div class="controls">
+        <div class="control-row">
+            <label>Operations:</label>
+            <input type="number" id="opCount" value="100000" min="1000" step="10000">
+            <label>Cache Size (MB):</label>
+            <input type="number" id="cacheSize" value="8" min="1" max="64">
+        </div>
+        <div class="control-row">
+            <button id="runBenchmarks">Run Memory Benchmarks</button>
+            <button id="runOpfsBenchmarks" class="opfs">Run OPFS Benchmarks</button>
+            <button id="runAllBenchmarks" class="secondary">Run All</button>
+        </div>
+        <div class="control-row">
+            <button id="getStorageInfo" class="secondary">Check OPFS Storage</button>
+            <button id="clearOpfsStorage" class="danger">Clear OPFS Storage</button>
+            <button id="clearResults" class="secondary">Clear Results</button>
+        </div>
+    </div>
+
+    <div id="status">Status: Ready</div>
+    <div id="storage-info"></div>
+
+    <h2>Benchmark Results</h2>
+    <table id="benchmark-results">
+        <thead>
+            <tr>
+                <th>Operation</th>
+                <th>Count</th>
+                <th>Time (ms)</th>
+                <th>Ops/sec</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <h2>Notes</h2>
+    <ul>
+        <li><strong>Memory benchmarks</strong> use in-memory storage (fastest, no persistence)</li>
+        <li><strong>OPFS benchmarks</strong> use Origin Private File System (persistent storage)</li>
+        <li>OPFS tests require HTTPS or localhost</li>
+        <li>OPFS benchmarks create temporary database files in the browser's storage</li>
+        <li>Build with: <code>RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' wasm-pack build --target web</code></li>
+    </ul>
+
+    <script type="module">
+        const runBtn = document.getElementById('runBenchmarks');
+        const runOpfsBtn = document.getElementById('runOpfsBenchmarks');
+        const runAllBtn = document.getElementById('runAllBenchmarks');
+        const clearBtn = document.getElementById('clearResults');
+        const storageBtn = document.getElementById('getStorageInfo');
+        const clearOpfsBtn = document.getElementById('clearOpfsStorage');
+        const statusDiv = document.getElementById('status');
+        const storageDiv = document.getElementById('storage-info');
+        const resultsTable = document.getElementById('benchmark-results').querySelector('tbody');
+        const opCountInput = document.getElementById('opCount');
+        const cacheSizeInput = document.getElementById('cacheSize');
+
+        let worker = null;
+        let pendingCommand = null;
+
+        function setStatus(msg, isError = false) {
+            statusDiv.textContent = `Status: ${msg}`;
+            statusDiv.style.background = isError ? '#f8d7da' : '#e9ecef';
+        }
+
+        function setButtons(disabled) {
+            runBtn.disabled = disabled;
+            runOpfsBtn.disabled = disabled;
+            runAllBtn.disabled = disabled;
+            storageBtn.disabled = disabled;
+            clearOpfsBtn.disabled = disabled;
+        }
+
+        function addSeparator(label) {
+            const row = document.createElement('tr');
+            row.className = 'separator';
+            row.innerHTML = `<td colspan="4">${label}</td>`;
+            resultsTable.appendChild(row);
+        }
+
+        function addResult(data) {
+            const row = document.createElement('tr');
+            row.className = 'result-row';
+            if (data.operation.startsWith('opfs_')) {
+                row.classList.add('opfs-row');
+            }
+            row.innerHTML = `
+                <td>${data.operation}</td>
+                <td>${data.count.toLocaleString()}</td>
+                <td>${data.total_ms.toFixed(2)}</td>
+                <td>${Math.round(data.ops_per_sec).toLocaleString()}</td>
+            `;
+            resultsTable.appendChild(row);
+        }
+
+        function clearResults() {
+            resultsTable.innerHTML = '';
+            storageDiv.style.display = 'none';
+        }
+
+        function showStorageInfo(info) {
+            const usageKB = (info.usage / 1024).toFixed(2);
+            const quotaMB = (info.quota / 1024 / 1024).toFixed(2);
+            storageDiv.innerHTML = `<strong>OPFS Storage:</strong> ${usageKB} KB used / ${quotaMB} MB quota`;
+            storageDiv.style.display = 'block';
+        }
+
+        function initWorker() {
+            if (worker) {
+                worker.terminate();
+            }
+
+            worker = new Worker('./worker.js', { type: 'module' });
+
+            worker.onmessage = (e) => {
+                const { type, data, error, message } = e.data;
+
+                switch (type) {
+                    case 'ready':
+                        if (pendingCommand) {
+                            const cmd = pendingCommand;
+                            pendingCommand = null;
+                            worker.postMessage(cmd);
+                        }
+                        break;
+
+                    case 'status':
+                        setStatus(message);
+                        break;
+
+                    case 'benchmark-result':
+                        addResult(data);
+                        break;
+
+                    case 'storage-info':
+                        showStorageInfo(data);
+                        setStatus('Storage info retrieved');
+                        setButtons(false);
+                        break;
+
+                    case 'storage-cleared':
+                        setStatus(`OPFS storage cleared (${data.deletedCount} files deleted)`);
+                        storageDiv.style.display = 'none';
+                        setButtons(false);
+                        break;
+
+                    case 'complete':
+                        setStatus('Benchmarks complete!');
+                        setButtons(false);
+                        break;
+
+                    case 'error':
+                        setStatus(`Error: ${error}`, true);
+                        setButtons(false);
+                        break;
+                }
+            };
+
+            worker.onerror = (e) => {
+                setStatus(`Worker error: ${e.message}`, true);
+                setButtons(false);
+            };
+        }
+
+        async function runBenchmarks(command) {
+            setButtons(true);
+            setStatus('Loading WASM module...');
+
+            const params = {
+                count: parseInt(opCountInput.value),
+                cacheSizeMb: parseInt(cacheSizeInput.value)
+            };
+
+            pendingCommand = { command, params };
+            initWorker();
+        }
+
+        async function runAllBenchmarksSequentially() {
+            setButtons(true);
+            setStatus('Loading WASM module...');
+
+            addSeparator('Memory Benchmarks');
+
+            const params = {
+                count: parseInt(opCountInput.value),
+                cacheSizeMb: parseInt(cacheSizeInput.value)
+            };
+
+            // Run memory benchmarks first
+            pendingCommand = { command: 'run-benchmarks', params };
+            initWorker();
+
+            // Wait for completion and then run OPFS
+            const originalOnMessage = worker.onmessage;
+            worker.onmessage = (e) => {
+                originalOnMessage(e);
+                if (e.data.type === 'complete') {
+                    addSeparator('OPFS Benchmarks');
+                    setStatus('Running OPFS benchmarks...');
+                    worker.postMessage({ command: 'run-opfs-benchmarks', params });
+                }
+            };
+        }
+
+        async function getStorageInfo() {
+            setButtons(true);
+            setStatus('Getting storage info...');
+            pendingCommand = { command: 'get-storage-info' };
+            initWorker();
+        }
+
+        async function clearOpfsStorage() {
+            if (!confirm('This will delete all bf-tree database files from OPFS. Continue?')) {
+                return;
+            }
+            setButtons(true);
+            setStatus('Clearing OPFS storage...');
+            pendingCommand = { command: 'clear-storage' };
+            initWorker();
+        }
+
+        runBtn.addEventListener('click', () => {
+            addSeparator('Memory Benchmarks');
+            runBenchmarks('run-benchmarks');
+        });
+
+        runOpfsBtn.addEventListener('click', () => {
+            addSeparator('OPFS Benchmarks');
+            runBenchmarks('run-opfs-benchmarks');
+        });
+
+        runAllBtn.addEventListener('click', runAllBenchmarksSequentially);
+        clearBtn.addEventListener('click', clearResults);
+        storageBtn.addEventListener('click', getStorageInfo);
+        clearOpfsBtn.addEventListener('click', clearOpfsStorage);
+    </script>
+</body>
+</html>

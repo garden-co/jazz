@@ -1,0 +1,12 @@
+/target
+/benchmark/target
+/Cargo.lock
+/proptest-regressions
+/.idea
+/.vs
+/.vscode
+/.jj
+
+# WASM test build output
+/tests/wasm/target
+/tests/wasm/pkg
