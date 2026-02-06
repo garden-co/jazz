@@ -216,10 +216,9 @@ export class CoMap extends CoValueBase implements CoValue {
         if (
           ref &&
           typeof ref === "object" &&
-          "toJSON" in ref &&
-          typeof ref.toJSON === "function"
+          typeof (ref as any).toJSON === "function"
         ) {
-          const jsonedRef = ref.toJSON(tKey, [
+          const jsonedRef = (ref as any).toJSON(tKey, [
             ...(processedValues || []),
             this.$jazz.id,
           ]);
@@ -789,7 +788,11 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    * @internal
    */
   getDescriptor(key: string): Schema | undefined {
-    return this.schema?.[key] || this.schema?.[ItemsSym];
+    return (
+      this.schema?.[key] ||
+      this.schema?.[ItemsSym] ||
+      (this.coMap as any)[ItemsSym]
+    );
   }
 
   /**
@@ -955,7 +958,7 @@ export type CoMapInit<Map extends object> = {
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<CoMap> = {
   get(target, key, receiver) {
-    if (key === "_schema") {
+    if (key === "_schema" || key === ItemsSym) {
       return Reflect.get(target, key);
     } else if (key in target) {
       return Reflect.get(target, key, receiver);
@@ -993,6 +996,10 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
       (target.constructor as typeof CoMap)._schema ||= {};
       (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
       return true;
+    }
+
+    if (typeof key !== "string") {
+      return Reflect.set(target, key, value, receiver);
     }
 
     const descriptor = target.$jazz.getDescriptor(key as string);

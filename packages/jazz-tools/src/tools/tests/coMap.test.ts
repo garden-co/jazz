@@ -414,6 +414,47 @@ describe("CoMap", async () => {
       });
     });
 
+    test("co.map with nested co.record should toJSON correctly", async () => {
+      const Chat = co.map({
+        title: z.string(),
+      });
+
+      const ChatRoot = co.map({
+        chats: co.record(z.string(), Chat),
+      });
+
+      const chat = Chat.create({ title: "General" });
+      const root = ChatRoot.create({
+        chats: {
+          general: chat,
+        },
+      });
+
+      console.log("Local root JSON:", root.toJSON());
+
+      // Simulate loading in another context/component
+      const loadedRoot = await ChatRoot.load(root.$jazz.id, {
+        resolve: {
+          chats: true,
+        },
+      });
+
+      if (!loadedRoot || !loadedRoot.$isLoaded)
+        throw new Error("Failed to load root");
+
+      console.log("Loaded root JSON:", loadedRoot.toJSON());
+
+      expect(loadedRoot.toJSON()).toEqual(
+        expect.objectContaining({
+          chats: expect.objectContaining({
+            general: expect.objectContaining({
+              title: "General",
+            }),
+          }),
+        }),
+      );
+    });
+
     test("setting optional date as undefined should not throw", () => {
       const Person = co.map({
         name: z.string(),

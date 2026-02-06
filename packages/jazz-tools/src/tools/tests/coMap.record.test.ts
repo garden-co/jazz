@@ -631,4 +631,21 @@ describe("CoRecord unique methods", () => {
     const foundId = ItemRecord.findUnique("find-test", group.$jazz.id);
     expect(foundId).toBe(originalRecord.$jazz.id);
   });
+
+  test("co.record should toJSON correctly", () => {
+    const Item = co.map({ val: z.number() });
+    const RecordMap = co.record(z.string(), Item);
+
+    const record = RecordMap.create({
+      key1: Item.create({ val: 1 }),
+    });
+
+    expect(record.toJSON()).toEqual(
+      expect.objectContaining({
+        key1: expect.objectContaining({
+          val: 1,
+        }),
+      }),
+    );
+  });
 });
