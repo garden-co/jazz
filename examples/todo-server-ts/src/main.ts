@@ -7,8 +7,8 @@
 import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
-import { JazzClient, SqliteNodeDriver } from "jazz-ts";
-import type { Value, WasmSchema, StorageDriver } from "jazz-ts";
+import { JazzClient } from "jazz-ts";
+import type { Value, WasmSchema } from "jazz-ts";
 
 // ============================================================================
 // Types
@@ -101,17 +101,15 @@ function buildQuery(table: string) {
 // ============================================================================
 
 /**
- * Create a todo server with the given driver.
+ * Create a todo server.
  *
- * @param driver Storage driver to use (e.g., SqliteNodeDriver)
  * @returns TodoServer with app, client, and shutdown function
  */
-export async function createServer(driver: StorageDriver): Promise<TodoServer> {
-  // Connect to Jazz
+export async function createServer(): Promise<TodoServer> {
+  // Connect to Jazz (in-memory storage)
   const client = await JazzClient.connect({
     appId: "todo-server-ts",
     schema,
-    driver,
     env: "dev",
     userBranch: "main",
   });
@@ -371,16 +369,7 @@ export async function stopServer(server: RunningServer): Promise<void> {
 // ============================================================================
 
 async function main() {
-  // Initialize storage driver
-  const dbPath = process.env.DB_PATH ?? "./data/todos.db";
-  console.log(`Using database: ${dbPath}`);
-
-  // Ensure data directory exists
-  const { mkdir } = await import("node:fs/promises");
-  await mkdir("./data", { recursive: true });
-
-  const driver = await SqliteNodeDriver.open(dbPath);
-  const todoServer = await createServer(driver);
+  const todoServer = await createServer();
 
   // Start server
   const port = parseInt(process.env.PORT ?? "3000", 10);

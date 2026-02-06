@@ -7,22 +7,23 @@
 //!
 //! # Architecture
 //!
-//! - `WasmIoHandler` implements `IoHandler` using JS callbacks and spawn_local
+//! - `WasmIoHandler` wraps `MemoryIoHandler`, delegating all sync storage ops
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<WasmIoHandler>>>`
-//! - Storage requests are fire-and-forget to JS; responses come via `on_storage_response`
 //! - `schedule_batched_tick` uses `wasm_bindgen_futures::spawn_local` (debounced)
 //! - No explicit tick loops - scheduling emerges from IoHandler
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Bound;
 use std::rc::{Rc, Weak};
 
 use js_sys::Function;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use groove::io_handler::IoHandler;
-use groove::object::ObjectId;
+use groove::commit::{Commit, CommitId};
+use groove::io_handler::{IoHandler, LoadedBranch, MemoryIoHandler};
+use groove::object::{BranchName, ObjectId};
 use groove::query_manager::encoding::decode_row;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Row, RowDescriptor, Schema, Value};
@@ -30,13 +31,26 @@ use groove::runtime_core::RuntimeCore;
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::StorageRequest;
-use groove::sync_manager::{InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload};
+use groove::storage::{ContentHash, StorageError};
+use groove::sync_manager::{
+    ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
+};
 
 use crate::query::parse_query;
-use crate::types::{
-    storage_request_to_wasm, wasm_response_to_storage, WasmSchema, WasmStorageResponse, WasmValue,
-};
+use crate::types::{WasmSchema, WasmValue};
+
+/// Parse a persistence tier string from JS.
+fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
+    match tier {
+        "worker" => Ok(PersistenceTier::Worker),
+        "edge" => Ok(PersistenceTier::EdgeServer),
+        "core" => Ok(PersistenceTier::CoreServer),
+        _ => Err(JsError::new(&format!(
+            "Invalid tier '{}'. Must be 'worker', 'edge', or 'core'.",
+            tier
+        ))),
+    }
+}
 
 // ============================================================================
 // WasmIoHandler
@@ -44,12 +58,11 @@ use crate::types::{
 
 /// IoHandler implementation for WASM.
 ///
-/// - Storage requests are sent to JS via callback (fire-and-forget)
-/// - Sync messages are sent via callback
-/// - `schedule_batched_tick` uses spawn_local (debounced)
+/// Wraps `MemoryIoHandler` for all synchronous storage/index operations.
+/// Adds JS callbacks for sync messages and batched tick scheduling.
 pub struct WasmIoHandler {
-    /// JS callback for storage requests (fire-and-forget).
-    storage_callback: Function,
+    /// Delegate all storage/index ops to MemoryIoHandler.
+    inner: MemoryIoHandler,
     /// JS callback for sync messages.
     sync_callback: Option<Function>,
     /// Debounce flag for scheduled ticks.
@@ -59,9 +72,9 @@ pub struct WasmIoHandler {
 }
 
 impl WasmIoHandler {
-    fn new(storage_callback: Function) -> Self {
+    fn new() -> Self {
         Self {
-            storage_callback,
+            inner: MemoryIoHandler::new(),
             sync_callback: None,
             scheduled: Rc::new(RefCell::new(false)),
             core_ref: Weak::new(),
@@ -78,19 +91,145 @@ impl WasmIoHandler {
 }
 
 impl IoHandler for WasmIoHandler {
-    fn send_storage_request(&mut self, request: StorageRequest) {
-        // Convert to WASM type and serialize directly to JS object
-        // Use serialize_maps_as_objects to convert HashMap to plain objects (not JS Map)
-        let wasm_request = storage_request_to_wasm(request);
-        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-        if let Ok(js_value) = wasm_request.serialize(&serializer) {
-            let _ = self.storage_callback.call1(&JsValue::NULL, &js_value);
-        }
+    // ================================================================
+    // Object storage — delegate to inner
+    // ================================================================
+
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.create_object(id, metadata)
     }
+
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_object_metadata(id)
+    }
+
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.inner.load_branch(object_id, branch)
+    }
+
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit: Commit,
+    ) -> Result<(), StorageError> {
+        self.inner.append_commit(object_id, branch, commit)
+    }
+
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit_id: CommitId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_commit(object_id, branch, commit_id)
+    }
+
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        tails: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        self.inner.set_branch_tails(object_id, branch, tails)
+    }
+
+    // ================================================================
+    // Blob storage — delegate to inner
+    // ================================================================
+
+    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
+        self.inner.store_blob(hash, data)
+    }
+
+    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_blob(hash)
+    }
+
+    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
+        self.inner.delete_blob(hash)
+    }
+
+    // ================================================================
+    // Persistence ack storage — delegate to inner
+    // ================================================================
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: CommitId,
+        tier: PersistenceTier,
+    ) -> Result<(), StorageError> {
+        self.inner.store_ack_tier(commit_id, tier)
+    }
+
+    // ================================================================
+    // Index operations — delegate to inner
+    // ================================================================
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    // ================================================================
+    // Sync messages — bridge to JS
+    // ================================================================
 
     fn send_sync_message(&mut self, message: OutboxEntry) {
         if let Some(ref callback) = self.sync_callback {
-            // Serialize just the payload
             if let Ok(json) = serde_json::to_string(&message.payload) {
                 let js_value = JsValue::from_str(&json);
                 let _ = callback.call1(&JsValue::NULL, &js_value);
@@ -98,8 +237,11 @@ impl IoHandler for WasmIoHandler {
         }
     }
 
+    // ================================================================
+    // Scheduling — spawn_local with debounce
+    // ================================================================
+
     fn schedule_batched_tick(&self) {
-        // Debounce: only schedule if not already scheduled
         let mut scheduled = self.scheduled.borrow_mut();
         if !*scheduled {
             *scheduled = true;
@@ -108,10 +250,7 @@ impl IoHandler for WasmIoHandler {
             let flag = self.scheduled.clone();
 
             wasm_bindgen_futures::spawn_local(async move {
-                // Clear the scheduled flag
                 *flag.borrow_mut() = false;
-
-                // Call batched_tick on the core
                 if let Some(core_rc) = core_ref.upgrade() {
                     core_rc.borrow_mut().batched_tick();
                 }
@@ -138,21 +277,23 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
+    /// Storage is synchronous (in-memory via MemoryIoHandler).
+    ///
     /// # Arguments
-    /// * `storage_callback` - JS function called with storage requests (JSON string)
     /// * `schema_json` - JSON-encoded schema definition
     /// * `app_id` - Application identifier
     /// * `env` - Environment (e.g., "dev", "prod")
     /// * `user_branch` - User's branch name (e.g., "main")
+    /// * `tier` - Optional persistence tier ("worker", "edge", "core").
+    ///            Set for server nodes to enable ack emission.
     #[wasm_bindgen(constructor)]
     pub fn new(
-        storage_callback: Function,
         schema_json: &str,
         app_id: &str,
         env: &str,
         user_branch: &str,
+        tier: Option<String>,
     ) -> Result<WasmRuntime, JsError> {
-        // Set up panic hook for better error messages
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
 
@@ -164,8 +305,17 @@ impl WasmRuntime {
             .try_into()
             .map_err(|e: String| JsError::new(&e))?;
 
+        // Parse optional tier
+        let persistence_tier = tier
+            .as_deref()
+            .map(parse_tier)
+            .transpose()?;
+
         // Create sync manager
-        let sync_manager = SyncManager::new();
+        let mut sync_manager = SyncManager::new();
+        if let Some(t) = persistence_tier {
+            sync_manager = sync_manager.with_tier(t);
+        }
 
         // Create schema manager
         let schema_manager = SchemaManager::new(
@@ -177,8 +327,8 @@ impl WasmRuntime {
         )
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
-        // Create IoHandler
-        let io_handler = WasmIoHandler::new(storage_callback);
+        // Create IoHandler (synchronous in-memory storage)
+        let io_handler = WasmIoHandler::new();
 
         // Create RuntimeCore
         let core = RuntimeCore::new(schema_manager, io_handler);
@@ -195,22 +345,6 @@ impl WasmRuntime {
         }
 
         Ok(WasmRuntime { core: core_rc })
-    }
-
-    /// Called by JS when a storage response arrives.
-    ///
-    /// # Arguments
-    /// * `response` - Storage response object (WasmStorageResponse)
-    #[wasm_bindgen(js_name = onStorageResponse)]
-    pub fn on_storage_response(&self, response: JsValue) -> Result<(), JsError> {
-        let wasm_response: WasmStorageResponse = serde_wasm_bindgen::from_value(response)
-            .map_err(|e| JsError::new(&format!("Invalid storage response: {}", e)))?;
-
-        let response = wasm_response_to_storage(wasm_response)
-            .map_err(|e| JsError::new(&format!("Failed to convert response: {}", e)))?;
-
-        self.core.borrow_mut().park_storage_response(response);
-        Ok(())
     }
 
     /// Called by JS when a sync message arrives from the server.
@@ -246,15 +380,10 @@ impl WasmRuntime {
 
     /// Insert a row into a table.
     ///
-    /// # Arguments
-    /// * `table` - Table name
-    /// * `values` - JS array of values
-    ///
     /// # Returns
     /// The new row's ObjectId as a UUID string.
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
-        // Parse values
         let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
         let groove_values: Vec<Value> = wasm_values
             .into_iter()
@@ -266,28 +395,22 @@ impl WasmRuntime {
         let result = core
             .insert(table, groove_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
-        // immediate_tick is called by RuntimeCore::insert
 
         Ok(result.uuid().to_string())
     }
 
     /// Execute a query and return results as a Promise.
     ///
-    /// # Arguments
-    /// * `query_json` - JSON-encoded query specification
-    /// * `session_json` - Optional JSON-encoded session for policy evaluation
-    ///
-    /// # Returns
-    /// Promise that resolves to JSON-encoded array of `{id: string, values: Value[]}` objects.
+    /// Optional `settled_tier` holds delivery until the tier confirms.
     #[wasm_bindgen]
     pub fn query(
         &self,
         query_json: &str,
         session_json: Option<String>,
+        settled_tier: Option<String>,
     ) -> Result<js_sys::Promise, JsError> {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
-        // Parse session from JSON if provided
         let session = if let Some(json) = session_json {
             Some(
                 serde_json::from_str::<Session>(&json)
@@ -297,19 +420,21 @@ impl WasmRuntime {
             None
         };
 
-        // Get the query future from RuntimeCore
+        let tier = settled_tier
+            .as_deref()
+            .map(parse_tier)
+            .transpose()?;
+
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query(query, session)
+            core.query_with_settled_tier(query, session, tier)
         };
 
-        // Convert to a JS Promise
         let promise = wasm_bindgen_futures::future_to_promise(async move {
             let results = future
                 .await
                 .map_err(|e| JsValue::from_str(&format!("Query failed: {:?}", e)))?;
 
-            // Convert results
             let wasm_results: Vec<_> = results
                 .into_iter()
                 .map(|(id, values)| {
@@ -331,10 +456,6 @@ impl WasmRuntime {
     }
 
     /// Update a row by ObjectId.
-    ///
-    /// # Arguments
-    /// * `object_id` - UUID string of the row to update
-    /// * `values` - JS object mapping column names to new values
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<(), JsError> {
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -355,15 +476,11 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
-        // immediate_tick is called by RuntimeCore::update
 
         Ok(())
     }
 
     /// Delete a row by ObjectId.
-    ///
-    /// # Arguments
-    /// * `object_id` - UUID string of the row to delete
     #[wasm_bindgen]
     pub fn delete(&self, object_id: &str) -> Result<(), JsError> {
         let uuid = uuid::Uuid::parse_str(object_id)
@@ -373,9 +490,111 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
-        // immediate_tick is called by RuntimeCore::delete
 
         Ok(())
+    }
+
+    // =========================================================================
+    // Persisted CRUD Operations
+    // =========================================================================
+
+    /// Insert a row and return a Promise that resolves when the tier acks.
+    ///
+    /// `tier` must be one of: "worker", "edge", "core".
+    #[wasm_bindgen(js_name = insertPersisted)]
+    pub fn insert_persisted(
+        &self,
+        table: &str,
+        values: JsValue,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let persistence_tier = parse_tier(tier)?;
+
+        let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<_, _>>()
+            .map_err(|e: String| JsError::new(&e))?;
+
+        let (object_id, receiver) = {
+            let mut core = self.core.borrow_mut();
+            core.insert_persisted(table, groove_values, None, persistence_tier)
+                .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
+        };
+
+        let id_str = object_id.uuid().to_string();
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = receiver.await;
+            Ok(JsValue::from_str(&id_str))
+        });
+
+        Ok(promise)
+    }
+
+    /// Update a row and return a Promise that resolves when the tier acks.
+    #[wasm_bindgen(js_name = updatePersisted)]
+    pub fn update_persisted(
+        &self,
+        object_id: &str,
+        values: JsValue,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let persistence_tier = parse_tier(tier)?;
+
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+
+        let partial_values: HashMap<String, WasmValue> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values
+            .into_iter()
+            .map(|(k, v)| {
+                let groove_value: Value = v.try_into()?;
+                Ok((k, groove_value))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|e: String| JsError::new(&e))?;
+
+        let receiver = {
+            let mut core = self.core.borrow_mut();
+            core.update_persisted(oid, updates, None, persistence_tier)
+                .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?
+        };
+
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = receiver.await;
+            Ok(JsValue::undefined())
+        });
+
+        Ok(promise)
+    }
+
+    /// Delete a row and return a Promise that resolves when the tier acks.
+    #[wasm_bindgen(js_name = deletePersisted)]
+    pub fn delete_persisted(
+        &self,
+        object_id: &str,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let persistence_tier = parse_tier(tier)?;
+
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+
+        let receiver = {
+            let mut core = self.core.borrow_mut();
+            core.delete_persisted(oid, None, persistence_tier)
+                .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
+        };
+
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = receiver.await;
+            Ok(JsValue::undefined())
+        });
+
+        Ok(promise)
     }
 
     // =========================================================================
@@ -384,13 +603,8 @@ impl WasmRuntime {
 
     /// Subscribe to a query with a callback.
     ///
-    /// # Arguments
-    /// * `query_json` - JSON-encoded query specification
-    /// * `on_update` - Callback function invoked with updates (receives JSON delta)
-    /// * `session_json` - Optional JSON-encoded session for policy evaluation
-    ///
     /// # Returns
-    /// Subscription handle (u64) for later unsubscription.
+    /// Subscription handle (f64) for later unsubscription.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
     pub fn subscribe(
@@ -398,10 +612,10 @@ impl WasmRuntime {
         query_json: &str,
         on_update: Function,
         session_json: Option<String>,
+        settled_tier: Option<String>,
     ) -> Result<f64, JsError> {
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
-        // Parse session from JSON if provided
         let session = if let Some(json) = session_json {
             Some(
                 serde_json::from_str::<Session>(&json)
@@ -411,13 +625,15 @@ impl WasmRuntime {
             None
         };
 
-        // Create a Rust callback that bridges to the JS function.
-        // The callback decodes row data, converts to WasmValues, and serializes.
+        let tier = settled_tier
+            .as_deref()
+            .map(parse_tier)
+            .transpose()?;
+
         let callback = move |delta: SubscriptionDelta| {
-            // Helper to decode a row and convert to WasmRow JSON format
             let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
                 let values = decode_row(descriptor, &row.data)
-                    .map(|vals| vals.into_iter().map(|v| WasmValue::from(v)).collect::<Vec<_>>())
+                    .map(|vals| vals.into_iter().map(WasmValue::from).collect::<Vec<_>>())
                     .unwrap_or_default();
                 serde_json::json!({
                     "id": row.id.uuid().to_string(),
@@ -427,7 +643,6 @@ impl WasmRuntime {
 
             let descriptor = &delta.descriptor;
 
-            // Build WasmRowDelta-compatible JSON
             let delta_json = serde_json::json!({
                 "added": delta.delta.added.iter()
                     .map(|row| row_to_json(row, descriptor))
@@ -437,8 +652,7 @@ impl WasmRuntime {
                     .collect::<Vec<_>>(),
                 "updated": delta.delta.updated.iter()
                     .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
-                    .collect::<Vec<_>>(),
-                "pending": delta.delta.pending
+                    .collect::<Vec<_>>()
             });
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
@@ -449,17 +663,13 @@ impl WasmRuntime {
         let handle = self
             .core
             .borrow_mut()
-            .subscribe(query, callback, session)
+            .subscribe_with_settled_tier(query, callback, session, tier)
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
 
-        // Return handle as f64 since JS doesn't have u64
         Ok(handle.0 as f64)
     }
 
     /// Unsubscribe from a query.
-    ///
-    /// # Arguments
-    /// * `handle` - Handle returned from `subscribe()`
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen]
     pub fn unsubscribe(&self, handle: f64) {
@@ -478,7 +688,24 @@ impl WasmRuntime {
         let server_id = ServerId::new();
         let mut core = self.core.borrow_mut();
         core.add_server(server_id);
-        // immediate_tick is called by RuntimeCore::add_server
+    }
+
+    /// Add a client connection (for server-side use in tests).
+    #[wasm_bindgen(js_name = addClient)]
+    pub fn add_client(&self) -> String {
+        let client_id = ClientId::new();
+        let mut core = self.core.borrow_mut();
+        core.add_client(client_id, None);
+        client_id.0.to_string()
+    }
+
+    /// Add a client connection with full sync (for test loopback).
+    #[wasm_bindgen(js_name = addClientWithFullSync)]
+    pub fn add_client_with_full_sync(&self) -> String {
+        let client_id = ClientId::new();
+        let mut core = self.core.borrow_mut();
+        core.add_client_with_full_sync(client_id, None);
+        client_id.0.to_string()
     }
 
     // =========================================================================
@@ -492,27 +719,5 @@ impl WasmRuntime {
         let schema = core.current_schema();
         let wasm_schema = WasmSchema::from(schema);
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
-    }
-
-    // =========================================================================
-    // Initialization
-    // =========================================================================
-
-    /// Load indices from storage (cold start).
-    ///
-    /// Call this after construction to initialize indices from persisted storage.
-    /// This triggers index loading through the normal storage request flow.
-    /// Since WASM storage is async (via JS callback), responses will arrive
-    /// via `on_storage_response()`.
-    #[wasm_bindgen(js_name = loadIndices)]
-    pub fn load_indices(&self) {
-        let mut core = self.core.borrow_mut();
-        // Reset indices to trigger loading (same pattern as TokioRuntime)
-        core.schema_manager_mut()
-            .query_manager_mut()
-            .reset_indices_for_cold_start();
-        // Trigger immediate tick to emit storage requests
-        // Responses will come back via on_storage_response()
-        core.immediate_tick();
     }
 }

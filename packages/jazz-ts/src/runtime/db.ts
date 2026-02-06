@@ -11,7 +11,7 @@
  */
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
-import { JazzClient, loadWasmModule, type WasmModule } from "./client.js";
+import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
@@ -23,8 +23,8 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 export interface DbConfig {
   /** Application identifier (used for isolation) */
   appId: string;
-  /** Storage driver implementation */
-  driver: StorageDriver;
+  /** Storage driver implementation (optional — storage is in-memory by default) */
+  driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
   /** Environment (e.g., "dev", "prod") */
@@ -150,6 +150,29 @@ export class Db {
   }
 
   /**
+   * Insert a new row and wait for persistence at the specified tier.
+   *
+   * @param table Table proxy from generated app module
+   * @param data Init object with column values
+   * @param tier Persistence tier to wait for
+   * @returns Promise resolving to the new row's ID when the tier acks
+   *
+   * @example
+   * ```typescript
+   * const id = await db.insertPersisted(app.todos, { title: "Buy milk", done: false }, "edge");
+   * ```
+   */
+  async insertPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    tier: PersistenceTier,
+  ): Promise<string> {
+    const client = this.getClient(table._schema);
+    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
+    return client.createPersisted(table._table, values, tier);
+  }
+
+  /**
    * Update an existing row.
    *
    * This is a **synchronous** operation - the row is updated immediately
@@ -168,6 +191,25 @@ export class Db {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     client.update(id, updates);
+  }
+
+  /**
+   * Update an existing row and wait for persistence at the specified tier.
+   *
+   * @param table Table proxy from generated app module
+   * @param id Row ID to update
+   * @param data Partial object with fields to update
+   * @param tier Persistence tier to wait for
+   */
+  async updatePersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    const client = this.getClient(table._schema);
+    const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
+    await client.updatePersisted(id, updates, tier);
   }
 
   /**
@@ -190,15 +232,31 @@ export class Db {
   }
 
   /**
+   * Delete a row and wait for persistence at the specified tier.
+   *
+   * @param table Table proxy from generated app module
+   * @param id Row ID to delete
+   * @param tier Persistence tier to wait for
+   */
+  async deleteFromPersisted<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    const client = this.getClient(table._schema);
+    await client.deletePersisted(id, tier);
+  }
+
+  /**
    * Execute a query and return all matching rows as typed objects.
    *
    * @param query QueryBuilder instance (e.g., app.todos.where({done: false}))
    * @returns Array of typed objects matching the query
    */
-  async all<T>(query: QueryBuilder<T>): Promise<T[]> {
+  async all<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T[]> {
     const client = this.getClient(query._schema);
     const wasmQuery = translateQuery(query._build(), query._schema);
-    const rows = await client.query(wasmQuery);
+    const rows = await client.query(wasmQuery, settledTier);
     return transformRows<T>(rows, query._schema, query._table);
   }
 
@@ -206,10 +264,11 @@ export class Db {
    * Execute a query and return the first matching row, or null.
    *
    * @param query QueryBuilder instance
+   * @param settledTier Optional tier to hold delivery until confirmed
    * @returns First matching typed object, or null if none found
    */
-  async one<T>(query: QueryBuilder<T>): Promise<T | null> {
-    const results = await this.all(query);
+  async one<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T | null> {
+    const results = await this.all(query, settledTier);
     return results[0] ?? null;
   }
 
@@ -242,6 +301,7 @@ export class Db {
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
+    settledTier?: PersistenceTier,
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
@@ -251,10 +311,14 @@ export class Db {
       return transformRows<T>([row], query._schema, query._table)[0];
     };
 
-    const subId = client.subscribe(wasmQuery, (delta) => {
-      const typedDelta = manager.handleDelta(delta, transform);
-      callback(typedDelta);
-    });
+    const subId = client.subscribe(
+      wasmQuery,
+      (delta) => {
+        const typedDelta = manager.handleDelta(delta, transform);
+        callback(typedDelta);
+      },
+      settledTier,
+    );
 
     // Return unsubscribe function
     return () => {
@@ -288,7 +352,7 @@ export class Db {
  * ```typescript
  * const db = await createDb({
  *   appId: "my-app",
- *   driver: await SqliteNodeDriver.open(":memory:"),
+ *   schema: mySchema,
  * });
  * ```
  */

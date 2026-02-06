@@ -5,6 +5,7 @@
 > We are throwing away the async storage assumption that permeates the entire codebase. This is not a refactor - it's a ground-up rearchitecture. Be aggressive. No backwards compatibility. No migration paths. No deprecation periods.
 >
 > **Priorities:**
+>
 > 1. Correctness and architectural clarity over speed
 > 2. Thoroughness over incremental progress
 > 3. Delete aggressively - less code is better
@@ -18,33 +19,34 @@
 
 The current architecture assumes storage is asynchronous. This assumption infects every layer:
 
-| Layer | Async Complexity |
-|-------|------------------|
-| **BTreeIndex** | `is_ready()`, `PageState::Loading`, `pending_inserts/deletes`, `IndexError::PageNotLoaded` |
+| Layer             | Async Complexity                                                                                |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| **BTreeIndex**    | `is_ready()`, `PageState::Loading`, `pending_inserts/deletes`, `IndexError::PageNotLoaded`      |
 | **ObjectManager** | `ObjectState::Loading`, `BlobState::Loading`, `Error::ObjectNotReady`, `Error::BranchNotLoaded` |
-| **QueryManager** | `MaterializeNode.pending_ids`, `TupleDelta.pending`, retry loops |
-| **RuntimeCore** | `park_storage_response()`, `IoHandler` trait, batched tick scheduling |
+| **QueryManager**  | `MaterializeNode.pending_ids`, `TupleDelta.pending`, retry loops                                |
+| **RuntimeCore**   | `park_storage_response()`, `IoHandler` trait, batched tick scheduling                           |
 
 This complexity exists because WASM can't block the main thread on IndexedDB/OPFS async APIs.
 
 **The insight**: OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` - but only in Dedicated Web Workers. By running the persistent groove instance in a worker, we get sync storage without blocking the UI.
 
 **The architecture**:
+
 - **Main thread**: Groove with memory-only storage (always sync, always fast)
 - **Worker**: Groove with OPFS storage (sync within worker), acts as upstream server
 - **Native**: Groove with sync file I/O (single process, no worker needed)
 
 ### Key Decisions (Resolved)
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| **bf-tree integration** | Full key-value store | bf-tree has range queries - that's all we need for index scans. Simpler than maintaining our own B-tree. |
-| **Index encoding** | Composite keys | `idx:{table}:{col}:{value}:{row_id}` - range scan on prefix gives index lookups naturally. |
-| **Tab coordination** | Leader election | One tab's worker owns OPFS, others sync through it. Leader election on tab close. |
-| **Leader failover** | Accept potential loss | Fire-and-forget means user accepted this. Lost writes are lost. Simplest. |
-| **Native architecture** | Single process | No worker needed. Groove uses sync filesystem directly. Simpler, native-optimized. |
-| **Durability default** | Fire-and-forget | Optimistic by default. Promise-based API (`await todo.persisted()`) for explicit durability. |
-| **Persistence API** | Promise-based | `await db.todos.create(...).persisted()` returns Promise that resolves on worker ACK. |
+| Decision                | Choice                | Rationale                                                                                                |
+| ----------------------- | --------------------- | -------------------------------------------------------------------------------------------------------- |
+| **bf-tree integration** | Full key-value store  | bf-tree has range queries - that's all we need for index scans. Simpler than maintaining our own B-tree. |
+| **Index encoding**      | Composite keys        | `idx:{table}:{col}:{value}:{row_id}` - range scan on prefix gives index lookups naturally.               |
+| **Tab coordination**    | Leader election       | One tab's worker owns OPFS, others sync through it. Leader election on tab close.                        |
+| **Leader failover**     | Accept potential loss | Fire-and-forget means user accepted this. Lost writes are lost. Simplest.                                |
+| **Native architecture** | Single process        | No worker needed. Groove uses sync filesystem directly. Simpler, native-optimized.                       |
+| **Durability default**  | Fire-and-forget       | Optimistic by default. `_persisted` API variants for explicit durability.                                |
+| **Persistence API**     | `_persisted` variants | `createPersisted()`/`insertPersisted()` return Promises that resolve on tier ACK.                        |
 
 ---
 
@@ -127,6 +129,7 @@ Phase 7 (bf-tree impl)                             Phase 6a (Write acks, Rust)
 **Key insight**: bf-tree integration (Phase 7) can happen LATE. We define the sync `IoHandler` trait first with index methods built-in, implement a simple `MemoryIoHandler` for testing, and rewrite everything against that. bf-tree becomes just "implement the trait with persistence."
 
 This allows us to:
+
 1. Validate the sync architecture works with in-memory testing
 2. Get all groove tests passing before touching bf-tree
 3. Defer bf-tree complexity until we're confident in the design
@@ -234,12 +237,13 @@ pub trait IoHandler {
 
 ### Implementations
 
-| Implementation | Use Case | Index Backing |
-|----------------|----------|---------------|
-| `MemoryIoHandler` | Tests, main thread | `HashMap<(table, col, branch), BTreeMap<encoded_value, HashSet<ObjectId>>>` |
-| `BfTreeIoHandler` | Worker (OPFS), Native | bf-tree with composite keys |
+| Implementation    | Use Case              | Index Backing                                                               |
+| ----------------- | --------------------- | --------------------------------------------------------------------------- |
+| `MemoryIoHandler` | Tests, main thread    | `HashMap<(table, col, branch), BTreeMap<encoded_value, HashSet<ObjectId>>>` |
+| `BfTreeIoHandler` | Worker (OPFS), Native | bf-tree with composite keys                                                 |
 
 **`MemoryIoHandler`** is simple and sufficient for:
+
 - All groove unit tests
 - All groove integration tests
 - Main thread in browser (it's just a cache)
@@ -247,6 +251,7 @@ pub trait IoHandler {
 **Implementation note**: `MemoryIoHandler` uses simple `HashMap`/`BTreeMap` with `&mut self` for mutations. No `RwLock` needed since we're single-threaded. The `&self` methods (`load_*`, `index_lookup`, etc.) only need shared references.
 
 **`BfTreeIoHandler`** adds persistence and is only needed for:
+
 - Worker with OPFS
 - Native with filesystem
 
@@ -368,11 +373,13 @@ pub fn load(&mut self, object_id: ObjectId, branch: &BranchName) -> Result<&Obje
 ### What Gets Deleted
 
 Our entire custom B-tree:
+
 - `crates/groove/src/query_manager/index/btree_index.rs`
 - `crates/groove/src/query_manager/index/btree_page.rs`
 - `crates/groove/src/query_manager/index/mod.rs`
 
 All related types:
+
 - `PageId`, `PageState`, `BTreePage`, `IndexMeta`, `LeafEntry`
 - `IndexError` enum
 - `pending_inserts`, `pending_deletes`
@@ -520,6 +527,7 @@ let mut core = RuntimeCore::new(schema, storage);
 ### Tests to Delete
 
 All tests specifically testing async behavior:
+
 - `delayed_io_tests` module (Phases 0-4 tests)
 - Any test using `DelayedIoHandler`
 - Tests for `pending` states
@@ -527,17 +535,18 @@ All tests specifically testing async behavior:
 ### Tests to Adapt
 
 Tests that happen to use async infrastructure but test other behavior:
+
 - Change `TestIoHandler` → `MemoryStorage`
 - Remove `flush()` calls
 - Remove "retry after response" patterns
 
 ---
 
-## Phase 6a: Write Persistence Acks (Rust)
+## Phase 6a: Write Persistence Acks (Rust) ✅
 
 **Goal**: Add persistence acknowledgment messages to the sync protocol. Implement emission, routing, relay, and consumption of write acks. Verify with three-tier E2E tests using three groove instances (A ↔ B ↔ C).
 
-**After Phase 6a**: `PersistenceAck` flows correctly through a multi-tier topology. Commits carry ack state. 544+ tests pass.
+**After Phase 6a**: `PersistenceAck` flows correctly through a multi-tier topology. Commits carry ack state. 558 tests pass.
 
 ### Key Design Decisions
 
@@ -600,6 +609,7 @@ A ◂──direct ack(tier=Worker)──┘
 ### Scope
 
 **ADD**:
+
 - `PersistenceTier` enum (with `Ord`: Worker < EdgeServer < CoreServer)
 - `CommitAckState` struct (on Commit, `#[serde(skip)]`)
 - `SyncPayload::PersistenceAck` variant
@@ -615,6 +625,7 @@ A ◂──direct ack(tier=Worker)──┘
 - Three-tier E2E tests (write ack only)
 
 **DON'T ADD** (later phases):
+
 - `QuerySettled` (Phase 6b)
 - `settled_tier` on subscriptions (Phase 6b)
 - TypeScript API (Phase 6c)
@@ -680,6 +691,7 @@ In `remove_client()` (or equivalent), remove the disconnected client from all in
 **Step 6: Three-tier E2E tests**
 
 Create `pump_messages_3tier()` helper. Tests:
+
 1. `persistence_ack_direct` — A writes to B, B acks A with B's tier
 2. `persistence_ack_relay` — A writes through B to C, C acks B, B relays to A with C's tier
 3. `persistence_ack_both_tiers` — A receives acks from both B and C tiers
@@ -689,13 +701,13 @@ Create `pump_messages_3tier()` helper. Tests:
 
 ### Files to Modify
 
-| File | Change |
-|------|--------|
-| `commit.rs` | Add `CommitAckState`, `ack_state` field on `Commit` |
-| `io_handler.rs` | Add `store_ack_tier()` to IoHandler trait, implement in MemoryIoHandler (+ `ack_tiers` field), update `load_branch()` to populate ack_state |
-| `sync_manager.rs` | Add `PersistenceTier`, `SyncPayload::PersistenceAck`, `my_tier` field, `commit_interest` map, interest population, ack emission/relay, disconnect cleanup |
-| `object_manager.rs` | Add `get_commit_mut()` method |
-| `sync_manager_tests.rs` | Three-tier E2E tests, `pump_messages_3tier()` helper |
+| File                    | Change                                                                                                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `commit.rs`             | Add `CommitAckState`, `ack_state` field on `Commit`                                                                                                       |
+| `io_handler.rs`         | Add `store_ack_tier()` to IoHandler trait, implement in MemoryIoHandler (+ `ack_tiers` field), update `load_branch()` to populate ack_state               |
+| `sync_manager.rs`       | Add `PersistenceTier`, `SyncPayload::PersistenceAck`, `my_tier` field, `commit_interest` map, interest population, ack emission/relay, disconnect cleanup |
+| `object_manager.rs`     | Add `get_commit_mut()` method                                                                                                                             |
+| `sync_manager_tests.rs` | Three-tier E2E tests, `pump_messages_3tier()` helper                                                                                                      |
 
 ### Verification
 
@@ -707,19 +719,20 @@ cargo clippy -p groove -- -D warnings
 
 ---
 
-## Phase 6b: Query Settlement Tiers (Rust)
+## Phase 6b: Query Settlement Tiers (Rust) ✅
 
 **Goal**: Add tier-aware query settlement to the sync protocol. A subscriber can request that initial delivery be held until a specific persistence tier confirms settlement (e.g., "don't show results until EdgeServer has settled"). Implement `QuerySettled` message emission, relay, and tier-gated delivery in QueryManager. Verify with E2E tests.
 
 **Depends on**: Phase 6a (PersistenceTier enum, SyncManager routing patterns).
 
-**After Phase 6b**: Subscribers can specify `settled_tier` on subscriptions. `QuerySettled` flows through the sync topology. First delivery is held until the required tier settles, then delivers the full accumulated state.
+**After Phase 6b**: Subscribers can specify `settled_tier` on subscriptions. `QuerySettled` flows through the sync topology. First delivery is held until the required tier settles, then delivers the full accumulated state. 558 tests pass.
 
 ### Key Design Decisions
 
 #### settled_tier controls initial delivery timing
 
-The `settled_tier` option on a subscription controls when the *first* update is delivered:
+The `settled_tier` option on a subscription controls when the _first_ update is delivered:
+
 - `None` (default): delivery is immediate on first local settle (current behavior preserved)
 - `Some(PersistenceTier)`: delivery is held until `QuerySettled` arrives from that tier (or higher)
 
@@ -749,6 +762,7 @@ SyncManager needs to know which client originated each forwarded query so it can
 ### Scope
 
 **ADD**:
+
 - `SyncPayload::QuerySettled` variant
 - `settled_tier: Option<PersistenceTier>` on `QuerySubscription`
 - `achieved_tiers: HashSet<PersistenceTier>` on `QuerySubscription`
@@ -761,6 +775,7 @@ SyncManager needs to know which client originated each forwarded query so it can
 - E2E tests for QuerySettled flow
 
 **DON'T ADD** (Phase 6c):
+
 - TypeScript API
 - Worker bridge integration
 
@@ -778,6 +793,7 @@ SyncPayload::QuerySettled {
 **Step 2: Add settled_tier to QuerySubscription**
 
 In `query_manager/manager.rs`, add to `QuerySubscription`:
+
 - `settled_tier: Option<PersistenceTier>` — required tier for initial delivery
 - `achieved_tiers: HashSet<PersistenceTier>` — tiers that have confirmed settlement
 
@@ -824,12 +840,12 @@ Add `settled_tier: Option<PersistenceTier>` parameter to `RuntimeCore::subscribe
 
 ### Files to Modify
 
-| File | Change |
-|------|--------|
-| `sync_manager.rs` | Add `SyncPayload::QuerySettled`, `query_origin` map, QuerySettled emission/relay |
+| File                       | Change                                                                                             |
+| -------------------------- | -------------------------------------------------------------------------------------------------- |
+| `sync_manager.rs`          | Add `SyncPayload::QuerySettled`, `query_origin` map, QuerySettled emission/relay                   |
 | `query_manager/manager.rs` | Add `settled_tier`/`achieved_tiers` to subscription, delivery hold logic, `notify_query_settled()` |
-| `runtime_core.rs` | Add `settled_tier` parameter to subscribe API |
-| `sync_manager_tests.rs` | QuerySettled E2E tests |
+| `runtime_core.rs`          | Add `settled_tier` parameter to subscribe API                                                      |
+| `sync_manager_tests.rs`    | QuerySettled E2E tests                                                                             |
 
 ### Verification
 
@@ -841,292 +857,471 @@ cargo clippy -p groove -- -D warnings
 
 ---
 
-## Phase 6c: Durability API (TypeScript)
+## Phase 6c: Durability API (TypeScript) ✅
 
-**Goal**: Expose durability confirmation to jazz-ts users via a Promise-based API. Depends on Phase 6a (write acks), Phase 6b (query settlement), and Phase 8 (worker architecture).
+**Goal**: Expose PersistenceAck (6a) and QuerySettled (6b) to TypeScript. Two patterns: sync mutations (fire-and-forget) + async `_persisted` variants that resolve when a tier confirms; and optional `settled_tier` on queries/subscriptions.
 
-### Durability API: Fire-and-Forget with Optional Persistence Promises
+**Depends on**: Phase 6a, Phase 6b. Does NOT depend on Phase 8 (worker) — tests use artificially connected RuntimeCore/WasmRuntime instances.
 
-**Default: Fire-and-forget** - writes return immediately, persistence happens async.
+**After Phase 6c**: 571 groove tests + 3 groove-tokio tests pass. `pnpm build` succeeds (all 4 turbo tasks). 1 known-red test (`jazz-rs::test_persistence` — needs persistent storage from Phase 7).
 
-```typescript
-// Default: returns immediately, persists in background
-const todo = db.todos.create({ title: "Buy milk" });
-// todo is usable immediately (in memory)
-// May be lost if tab closes before worker persists
-```
+### What was implemented
 
-**Optional: Wait for persistence** - Promise-based API for explicit durability.
-
-```typescript
-// Wait for worker (local OPFS) persistence
-await todo.persisted();  // or: await todo.persisted('worker')
-
-// Wait for edge server persistence
-await todo.persisted('edge');
-
-// Wait for core server persistence (strongest guarantee)
-await todo.persisted('core');
-
-// Can also chain
-const todo = await db.todos.create({ title: "Buy milk" }).persisted('edge');
-```
-
-### Implementation
-
-```typescript
-interface PersistedPromise<T> extends Promise<T> {
-    /** Wait for persistence at the specified tier. */
-    persisted(tier?: PersistenceTier): Promise<T>;
-}
-
-class MutationResult<T> implements PersistedPromise<T> {
-    private value: T;
-    private commitId: CommitId;
-    private bridge: WorkerBridge;
-
-    constructor(value: T, commitId: CommitId, bridge: WorkerBridge) {
-        this.value = value;
-        this.commitId = commitId;
-        this.bridge = bridge;
-    }
-
-    // Immediately resolves with the value (fire-and-forget)
-    then<R>(onFulfilled: (value: T) => R): Promise<R> {
-        return Promise.resolve(this.value).then(onFulfilled);
-    }
-
-    // Waits for persistence acknowledgment
-    async persisted(tier: PersistenceTier = 'worker'): Promise<T> {
-        await this.bridge.waitForPersistence(this.commitId, tier);
-        return this.value;
-    }
-}
-```
-
-### Multi-Tier Acknowledgment Flow
-
-```
-Main Thread          Worker              Edge Server         Core Server
-     │                  │                     │                   │
-     │ ── create() ──►  │                     │                   │
-     │ ◄── (immediate)  │                     │                   │
-     │                  │                     │                   │
-     │                  │ ── persist ──►      │                   │
-     │                  │ ◄── (sync I/O)      │                   │
-     │ ◄── PersistAck   │                     │                   │
-     │    (tier:Worker) │                     │                   │
-     │                  │                     │                   │
-     │                  │ ── sync ──────────► │                   │
-     │                  │ ◄── PersistAck ──── │                   │
-     │ ◄── PersistAck   │    (tier:Edge)      │                   │
-     │    (tier:Edge)   │                     │                   │
-     │                  │                     │ ── sync ────────► │
-     │                  │                     │ ◄── PersistAck ── │
-     │ ◄── PersistAck   │                     │    (tier:Core)    │
-     │    (tier:Core)   │                     │                   │
-```
-
-### Query Settlement Levels
+#### Rust: RuntimeCore API
 
 ```rust
-pub enum SettlementLevel {
-    /// Settled on local data only.
-    Local,
-    /// Settled including worker data.
-    Worker,
-    /// Settled including edge server data.
-    EdgeServer,
-    /// Settled including core server data (authoritative).
-    CoreServer,
-}
+// Fire-and-forget (existing, unchanged)
+pub fn insert(&mut self, table, values, session) -> Result<ObjectId, RuntimeError>
+pub fn update(&mut self, object_id, values, session) -> Result<(), RuntimeError>
+pub fn delete(&mut self, object_id, session) -> Result<(), RuntimeError>
 
-// Usage in jazz-ts
-const todos = await db.todos.findAll({
-    settlement: SettlementLevel.EdgeServer
-});
-// Returns only after edge server confirms "end of initial results"
+// Persisted variants (new) — return oneshot::Receiver that resolves on tier ack
+pub fn insert_persisted(&mut self, table, values, session, tier) -> Result<(ObjectId, Receiver<()>), RuntimeError>
+pub fn update_persisted(&mut self, object_id, values, session, tier) -> Result<Receiver<()>, RuntimeError>
+pub fn delete_persisted(&mut self, object_id, session, tier) -> Result<Receiver<()>, RuntimeError>
+
+// Query settlement (new parameter)
+pub fn subscribe_with_settled_tier(query, callback, session, settled_tier: Option<PersistenceTier>)
+pub fn query_with_settled_tier(query, session, settled_tier: Option<PersistenceTier>)
+
+// Schema persistence (new — uses RuntimeCore's own io_handler)
+pub fn persist_schema(&mut self) -> ObjectId
 ```
 
-### Cold Start Hydration Flow
+**Ack watcher mechanism**: `RuntimeCore` has `ack_watchers: HashMap<CommitId, Vec<(PersistenceTier, oneshot::Sender<()>)>>`. When a `PersistenceAck` arrives via sync, watchers for that commit are checked — a tier >= the requested tier satisfies the watcher (e.g., EdgeServer ack satisfies a Worker watcher).
 
+#### Rust: WasmRuntime API
+
+`WasmRuntime::new()` now takes an optional `tier: Option<String>` parameter to set the node's persistence tier at construction time.
+
+New methods: `insertPersisted`, `updatePersisted`, `deletePersisted` (return `Promise`), `addClient`, `addClientWithFullSync`. `query` and `subscribe` accept optional `settled_tier` parameter.
+
+#### Rust: TokioRuntime
+
+Removed `Driver` parameter from `TokioRuntime::new()` — storage is now internal via `MemoryIoHandler`. Removed `load_indices()` (indices load lazily). Added `persist_schema()`.
+
+#### TypeScript: JazzClient + Db
+
+```typescript
+// Fire-and-forget (existing)
+client.create(table, values): string
+db.insert(app.todos, data): string
+
+// Persisted variants (new)
+client.createPersisted(table, values, tier): Promise<string>
+db.insertPersisted(app.todos, data, tier): Promise<string>
+// Same for update/delete
+
+// Query settlement (new optional parameter)
+client.query(queryJson, settledTier?): Promise<Row[]>
+client.subscribe(queryJson, callback, settledTier?): number
+db.all(query, settledTier?): Promise<T[]>
+db.subscribeAll(query, callback, settledTier?): () => void
 ```
-Main Thread                    Worker
-     │                            │
-     │  ──── Connect ────────►    │
-     │                            │
-     │  ◄─── QuerySettled ─────   │  (worker sends current state)
-     │       (tier: Worker)       │
-     │                            │
-     │  [UI can now render]       │
-     │                            │
+
+`AppContext.tier` added — passed to `WasmRuntime` constructor. `AppContext.driver` made optional (storage is in-memory by default).
+
+#### Cleanup performed
+
+- **Removed `groove-rocksdb`** from workspace (will be replaced by bftree in Phase 7)
+- **Removed `SqliteNodeDriver`** and **`IndexedDBDriver`** from jazz-ts (dead code from old async storage pattern)
+- **Removed stale driver-dependent test files** (`client.test.ts`, `db.test.ts`, `codegen/e2e.test.ts`)
+- **Removed stale storage types** from `drivers/types.ts` (`StorageRequest`, `StorageResponse`, `Commit`, `LoadedBranch`, `BlobAssociation`)
+- **Fixed stale imports** in `jazz-rs`, `jazz-cli`, `groove-tokio`
+- **Removed `load_indices()`** and `reset_indices_for_cold_start()` — indices now load lazily via IoHandler
+
+#### Bug fix discovered during testing
+
+`update_with_session` and `delete_with_session` in `query_manager/manager.rs` were missing `forward_update_to_servers()` calls — updates and deletes never synced to servers. Fixed by adding the calls after `add_commit()`. Covered by `rc_update_sync` and `rc_delete_sync` tests.
+
+### E2E Tests (Rust, RuntimeCore level)
+
+10 tests using a 3-tier harness (A=client, B=Worker, C=EdgeServer):
+
+1. `rc_insert_returns_immediately` — sync insert returns ObjectId, data queryable locally
+2. `rc_insert_data_syncs_to_server` — data syncs via pump to server B
+3. `rc_update_sync` — update syncs to server (covers the bug fix)
+4. `rc_delete_sync` — delete syncs to server (covers the bug fix)
+5. `rc_insert_persisted_resolves_on_worker_ack` — receiver resolves when Worker acks
+6. `rc_insert_persisted_holds_until_correct_tier` — Worker ack doesn't satisfy EdgeServer request; EdgeServer ack does
+7. `rc_insert_persisted_higher_tier_satisfies_lower` — EdgeServer ack satisfies Worker request
+8. `rc_update_persisted_resolves_on_ack` — update_persisted receiver resolves
+9. `rc_delete_persisted_resolves_on_ack` — delete_persisted receiver resolves
+10. `rc_multiple_persisted_inserts_independent` — two inserts get independent receivers
+11. `rc_query_no_settled_tier_immediate` — query with `settled_tier=None` resolves immediately
+12. `rc_query_settled_tier_holds` — query with `settled_tier=Worker` holds until QuerySettled arrives
+13. `rc_subscribe_settled_tier` — subscribe with `settled_tier=Worker` holds callback until QuerySettled; first delivery contains accumulated data
+
+### Known gaps (deferred)
+
+- **TypeScript durability tests**: Discussed loopback transport design (wire WasmRuntime instances via `onSyncMessageToSend`/`onSyncMessageReceived`) but not yet implemented. Requires WASM module loading in test environment.
+
+### Deferred to Phase 8 (worker architecture)
+
+The original Phase 6c spec described `MutationResult.persisted()` chaining. This was dropped — the `_persisted` method variants (`insertPersisted`, `createPersisted`, etc.) that return Promises are the API. No chaining needed.
+
+---
+
+## Phase 7: bf-tree Persistence
+
+**Goal**: Persistent `IoHandler` backed by [bf-tree-web](https://github.com/garden-co/bf-tree-web) (garden-co fork of Microsoft Research's bf-tree). Split into three sub-phases:
+
+- **7a**: Subtree import + `BfTreeIoHandler` + native integration (jazz-rs, jazz-cli)
+- **7b**: `groove-napi` crate — NAPI addon for server-side TypeScript persistence
+- **7c**: OPFS persistence in WASM worker (wasm-pack test with headless browser)
+
+> All prior phases (1-6) work with `MemoryIoHandler`. bf-tree is only needed for actual persistence.
+
+### Key Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Monorepo integration** | git subtree into `crates/bf-tree` | Self-contained, no auth issues for CI (private repo). Treated as a workspace member. |
+| **Storage model** | BfTree as primary store | All reads/writes go through bf-tree directly. No MemoryIoHandler cache layer. bf-tree has its own in-memory cache. Simpler architecture. |
+| **IoHandler mutability** | Keep `&mut self` | BfTree takes `&self` (handles concurrency internally), but `&mut self` on IoHandler is a harmless superset. Avoids touching the trait. |
+| **Native constructor** | External construction | jazz-rs creates `BfTreeIoHandler`, passes it to `TokioRuntime::new()`. TokioRuntime stays generic over `H: IoHandler`. |
+| **Server-side TS** | NAPI addon (Phase 7b) | `groove-napi` wraps `RuntimeCore<BfTreeIoHandler>` via napi-rs. BfTree uses StdVfs natively. |
+| **OPFS tests** | wasm-pack test + headless browser | Reuse bf-tree-web's proven test pattern from `tests/wasm/`. |
+
+### Why bf-tree-web?
+
+1. **Synchronous OPFS**: Working `OpfsVfs` with `FileSystemSyncAccessHandle`
+2. **Cross-platform VFS**: `MemoryVfs`, `StdVfs`, `OpfsVfs` all implement `VfsImpl` (pub(crate))
+3. **Production-tested**: Based on MSR's bf-tree ([paper](https://badrish.net/papers/bftree-vldb2024.pdf))
+4. **WAL support**: Write-ahead logging for crash recovery
+5. **Range queries**: `scan_with_end_key()` — exactly what `IoHandler::index_range()` needs
+
+### bf-tree API Surface
+
+```rust
+// Constructors
+BfTree::new(path, cache_size_byte) -> Result<Self, ConfigError>  // StdVfs (native)
+BfTree::new(":memory:", cache_size_byte)                          // MemoryVfs
+BfTree::with_opfs_vfs(opfs_vfs, cache_size_byte)                 // OpfsVfs (WASM)
+
+// All methods take &self (not &mut self) — internal concurrency control
+tree.insert(key: &[u8], value: &[u8]) -> LeafInsertResult
+tree.read(key: &[u8], out_buffer: &mut [u8]) -> LeafReadResult
+tree.delete(key: &[u8])
+tree.scan_with_end_key(start: &[u8], end: &[u8], ...) -> ScanIter
+tree.scan_with_count(start: &[u8], count: usize, ...) -> ScanIter
 ```
 
 ---
 
-## Phase 7: bf-tree-web Integration
+## Phase 7a: BfTreeIoHandler + Native Integration
 
-**Goal**: Implement `BfTreeIoHandler` - a persistent `IoHandler` backed by bf-tree.
+**Goal**: Import bf-tree-web, implement `BfTreeIoHandler`, make `jazz-rs::test_persistence` pass.
 
-> **This phase can happen LATE.** All prior phases (1-6) work with `MemoryIoHandler`. bf-tree is only needed when we want actual persistence (worker with OPFS, native with filesystem).
+**Depends on**: Phase 6c (IoHandler trait is stable).
 
-### Why bf-tree-web?
+**After 7a**: Native Rust applications (jazz-rs, jazz-cli) have real disk persistence. The currently-red `test_persistence` test goes green.
 
-1. **Synchronous OPFS**: Already has working `OpfsVfs` with `FileSystemSyncAccessHandle`
-2. **Cross-platform VFS**: `MemoryVfs`, `StdVfs`, `OpfsVfs` all implement same trait
-3. **Production-tested**: Based on Microsoft Research's bf-tree
-4. **WAL support**: Write-ahead logging for crash recovery
-5. **Range queries**: Built-in `scan()` - exactly what `IoHandler.index_range()` needs
+### Step 1: Import bf-tree-web as subtree
 
-### Integration Approach: Full Key-Value Store
-
-Implement `IoHandler` trait using bf-tree. Store everything as key-value pairs with composite keys designed for range scans.
-
-**bf-tree provides:**
-- `insert(key, value)` - O(log n)
-- `read(key)` - O(log n)
-- `delete(key)` - O(log n)
-- `scan(start_key, end_key)` - range queries!
-
-**Note**: Our `BTreeIndex` was already deleted in Phase 3. bf-tree replaces it via the `IoHandler` index methods.
-
-### Key Encoding Scheme
-
-All data lives in a single bf-tree with carefully designed composite keys:
-
-```rust
-/// Key prefixes for different data types.
-/// Keys are designed so lexicographic ordering enables efficient range scans.
-
-// Object metadata
-// Key:   "obj:{object_id}:meta"
-// Value: JSON metadata
-
-// Branch tips
-// Key:   "obj:{object_id}:branch:{branch_name}:tips"
-// Value: serialized HashSet<CommitId>
-
-// Individual commits
-// Key:   "obj:{object_id}:branch:{branch_name}:commit:{commit_id}"
-// Value: serialized Commit
-
-// Blobs (content-addressed)
-// Key:   "blob:{content_hash}"
-// Value: raw blob data
-
-// Secondary index entries (THE KEY INSIGHT)
-// Key:   "idx:{table}:{column}:{encoded_value}:{object_id}"
-// Value: empty (presence is the information)
-//
-// Example: User with age=25 and id=abc123
-// Key:   "idx:users:age:\x00\x00\x00\x19:abc123"
-//        (age encoded as big-endian u32 for correct sort order)
-//
-// Range scan for age >= 20 AND age < 30:
-// scan("idx:users:age:\x00\x00\x00\x14", "idx:users:age:\x00\x00\x00\x1e")
+```bash
+git subtree add --prefix=crates/bf-tree \
+  git@github.com:garden-co/bf-tree-web.git main --squash
 ```
 
-### Value Encoding for Sortable Keys
+Add to workspace `Cargo.toml`:
+```toml
+members = [
+  "crates/bf-tree",
+  # ... existing members
+]
+```
 
-Index keys must sort correctly for range queries:
+Verify: `cargo check -p bf-tree`
+
+### Step 2: Key encoding module
+
+New file: `crates/groove/src/io_handler/encoding.rs`
+
+All data lives in a single bf-tree with composite keys designed for range scans:
+
+```
+Object metadata:    "obj:{object_id}:meta"         → JSON metadata
+Branch tips:        "obj:{object_id}:br:{branch}:tips"  → serialized HashSet<CommitId>
+Commits:            "obj:{object_id}:br:{branch}:c:{commit_id}" → serialized Commit
+Blobs:              "blob:{content_hash}"           → raw blob data
+Ack tiers:          "ack:{commit_id}"               → serialized PersistenceTier
+Index entries:      "idx:{table}:{column}:{branch}:{encoded_value}:{object_id}" → empty
+```
+
+Value encoding for sortable index keys:
 
 ```rust
-/// Encode a value for use in composite index keys.
-/// Encoding preserves sort order for the value type.
 fn encode_index_value(value: &Value) -> Vec<u8> {
     match value {
-        // Integers: big-endian with sign bit flipped for correct ordering
-        Value::Int(n) => {
-            let mut bytes = (*n as i64 ^ i64::MIN).to_be_bytes().to_vec();
-            bytes.insert(0, 0x01); // type tag
-            bytes
-        }
-        // Strings: UTF-8 bytes, null-terminated
-        Value::Text(s) => {
-            let mut bytes = vec![0x02]; // type tag
-            bytes.extend(s.as_bytes());
-            bytes.push(0x00); // terminator
-            bytes
-        }
-        // UUIDs: raw bytes (already sort correctly)
-        Value::Uuid(id) => {
-            let mut bytes = vec![0x03]; // type tag
-            bytes.extend(id.as_bytes());
-            bytes
-        }
-        // Null: sorts before all values
         Value::Null => vec![0x00],
+        Value::Int(n) => {
+            let mut bytes = vec![0x01];
+            bytes.extend((*n as i64 ^ i64::MIN).to_be_bytes()); // sign-flip for sort order
+            bytes
+        }
+        Value::Text(s) => {
+            let mut bytes = vec![0x02];
+            bytes.extend(s.as_bytes());
+            bytes.push(0x00); // null terminator
+            bytes
+        }
+        Value::Uuid(id) => {
+            let mut bytes = vec![0x03];
+            bytes.extend(id.0.as_bytes());
+            bytes
+        }
+        Value::Boolean(b) => vec![0x04, if *b { 1 } else { 0 }],
         // ... other types
     }
 }
 ```
 
-### IoHandler Implementation
+### Step 3: BfTreeIoHandler
 
-Single-threaded, no interior mutability needed:
+New file: `crates/groove/src/io_handler/bftree.rs` (behind a `bftree` feature flag, since bf-tree has heavy dependencies).
 
 ```rust
 pub struct BfTreeIoHandler {
     tree: BfTree,
+    outbox: Vec<OutboxEntry>,
 }
 
-impl IoHandler for BfTreeIoHandler {
-    fn create_object(&mut self, id: ObjectId, metadata: HashMap<String, String>) -> Result<(), StorageError> {
-        let key = format!("obj:{}:meta", id.uuid());
-        let value = serde_json::to_vec(&metadata)?;
-        self.tree.insert(key.as_bytes(), &value);
-        Ok(())
+impl BfTreeIoHandler {
+    /// Open or create a persistent store at the given path.
+    pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, ...> {
+        let tree = BfTree::new(path, cache_size_bytes)?;
+        Ok(Self { tree, outbox: Vec::new() })
     }
 
-    fn append_commit(&mut self, object_id: ObjectId, branch: &BranchName, commit: Commit) -> Result<(), StorageError> {
-        // Store commit
-        let commit_key = format!("obj:{}:branch:{}:commit:{}",
-            object_id.uuid(), branch.as_str(), commit.id());
-        self.tree.insert(commit_key.as_bytes(), &commit.serialize());
-
-        // Update tips (read-modify-write)
-        let tips_key = format!("obj:{}:branch:{}:tips", object_id.uuid(), branch.as_str());
-        let mut tips: HashSet<CommitId> = self.tree.read(tips_key.as_bytes())
-            .map(|data| deserialize(&data))
-            .unwrap_or_default();
-
-        for parent in &commit.parents {
-            tips.remove(parent);
-        }
-        tips.insert(commit.id());
-
-        self.tree.insert(tips_key.as_bytes(), &serialize(&tips));
-        Ok(())
-    }
-
-    // Index operations now use bf-tree's range queries directly
-    fn index_insert(&mut self, table: &str, column: &str, value: &Value, row_id: ObjectId) -> Result<(), StorageError> {
-        let key = format!("idx:{}:{}:{}:{}",
-            table, column, hex::encode(encode_index_value(value)), row_id.uuid());
-        self.tree.insert(key.as_bytes(), &[]); // Empty value - key presence is enough
-        Ok(())
-    }
-
-    fn index_range(&self, table: &str, column: &str, branch: &str, start: Bound<&Value>, end: Bound<&Value>) -> Vec<ObjectId> {
-        let prefix = format!("idx:{}:{}:", table, column);
-        let start_key = start
-            .map(|v| format!("{}{}", prefix, hex::encode(encode_index_value(v))))
-            .unwrap_or_else(|| prefix.clone());
-        let end_key = end
-            .map(|v| format!("{}{}", prefix, hex::encode(encode_index_value(v))))
-            .unwrap_or_else(|| format!("{}~", prefix)); // ~ sorts after hex chars
-
-        self.tree.scan(start_key.as_bytes(), end_key.as_bytes())
-            .map(|(key, _)| {
-                // Extract ObjectId from end of key
-                let key_str = std::str::from_utf8(&key).unwrap();
-                let id_str = key_str.rsplit(':').next().unwrap();
-                ObjectId::from_uuid(Uuid::parse_str(id_str).unwrap())
-            })
-            .collect()
+    /// Create an in-memory store (for tests).
+    pub fn memory(cache_size_bytes: usize) -> Result<Self, ...> {
+        let tree = BfTree::new(":memory:", cache_size_bytes)?;
+        Ok(Self { tree, outbox: Vec::new() })
     }
 }
 ```
+
+All IoHandler methods go directly to bf-tree. No MemoryIoHandler cache layer.
+
+Key implementation notes:
+- `create_object` → `tree.insert("obj:{id}:meta", &serde_json::to_vec(&metadata))`
+- `load_object_metadata` → `tree.read("obj:{id}:meta", &mut buf)` → deserialize
+- `append_commit` → insert commit + read-modify-write tips
+- `load_branch` → scan `"obj:{id}:br:{branch}:c:"` prefix for commits + read tips
+- `index_insert` → `tree.insert("idx:...:encoded_value:row_id", &[])`
+- `index_range` → `tree.scan_with_end_key(start, end)` → parse ObjectIds from keys
+- `index_scan_all` → `tree.scan_with_end_key("idx:{table}:{col}:{branch}:", "idx:{table}:{col}:{branch}:~")`
+- `send_sync_message` → push to outbox (same as MemoryIoHandler)
+- `schedule_batched_tick` → no-op (same as MemoryIoHandler)
+
+### Step 4: Integration with jazz-rs
+
+Update `crates/jazz-rs/src/client.rs`:
+- Create `BfTreeIoHandler::open(data_dir, cache_size)`
+- Pass to `TokioRuntime::new(schema_manager, io_handler, sync_callback)`
+- (TokioRuntime must become generic over `H: IoHandler` — currently hardcodes `MemoryIoHandler` in `TokioIoHandler`)
+
+**TokioRuntime change**: `TokioIoHandler` currently wraps `MemoryIoHandler`. It needs to either:
+- Become generic: `TokioIoHandler<H: IoHandler>` wrapping any `H`
+- Or: jazz-rs constructs `BfTreeIoHandler` directly and passes it + a sync callback to `RuntimeCore::new()`, bypassing `TokioRuntime` (TokioRuntime is just a thin Mutex wrapper)
+
+The simpler path: make `TokioRuntime::new()` accept any `H: IoHandler + Send` and wrap it.
+
+### Step 5: Tests
+
+1. **`jazz-rs::test_persistence`** (currently red) — goes green. Write data, shutdown, reopen from same path, query returns persisted data.
+2. **`bftree_iohandler_crud`** — unit test in `io_handler/bftree.rs`. Insert object + commit, load it back, verify round-trip.
+3. **`bftree_iohandler_index_ops`** — insert index entries, verify `index_lookup`, `index_range`, `index_scan_all` return correct results.
+4. **`bftree_iohandler_persistence`** — open store, insert data, drop, reopen from same path, verify data survives.
+5. **`bftree_iohandler_with_runtime_core`** — create `RuntimeCore<BfTreeIoHandler>`, insert/query/update/delete, verify end-to-end.
+
+### Files to Modify/Create
+
+| File | Change |
+|------|--------|
+| `Cargo.toml` (workspace) | Add `crates/bf-tree` to members |
+| `crates/groove/Cargo.toml` | Add `bf-tree` optional dependency behind `bftree` feature |
+| `crates/groove/src/io_handler/encoding.rs` | New: key encoding functions |
+| `crates/groove/src/io_handler/bftree.rs` | New: `BfTreeIoHandler` |
+| `crates/groove/src/io_handler.rs` | Re-export `BfTreeIoHandler` (behind feature) |
+| `crates/groove-tokio/src/lib.rs` | Make `TokioRuntime` generic over `H: IoHandler + Send` |
+| `crates/jazz-rs/Cargo.toml` | Add `groove/bftree` feature dependency |
+| `crates/jazz-rs/src/client.rs` | Use `BfTreeIoHandler::open()` |
+| `crates/jazz-cli/Cargo.toml` | Add `groove/bftree` feature dependency |
+| `crates/jazz-cli/src/commands/server.rs` | Use `BfTreeIoHandler::open()` |
+
+### Verification
+
+```bash
+cargo check -p bf-tree
+cargo test -p groove --features bftree
+cargo test -p jazz-rs  # test_persistence goes green
+cargo test -p todo-server-rs
+```
+
+### Expected test status after 7a
+
+| Test | Status | Notes |
+|------|--------|-------|
+| `jazz-rs::test_crud_operations` | GREEN | Already passes (in-memory) |
+| `jazz-rs::test_persistence` | **GREEN** | Currently red — this is the headline fix |
+| `todo-server-rs::test_health_check` | GREEN | Already passes |
+| `todo-server-rs::test_crud_operations` | GREEN | Already passes |
+| `todo-server-rs::test_local_persistence` | **GREEN** | Currently red — needs disk persistence |
+| `todo-server-rs::test_server_resync` | GREEN | Already passes |
+| `todo-server-rs::test_todos_live_sse` | GREEN | Already passes |
+| `groove::bftree_iohandler_*` (new) | GREEN | New unit + round-trip tests |
+
+---
+
+## Phase 7b: groove-napi (Server-side TypeScript)
+
+**Goal**: NAPI addon wrapping `RuntimeCore<BfTreeIoHandler>` for Node.js. Replaces groove-wasm for server-side TS.
+
+**Depends on**: Phase 7a (BfTreeIoHandler exists).
+
+**After 7b**: `jazz-ts` server applications (like `todo-server-ts`) can use real disk persistence via a native Node.js addon instead of WASM + in-memory storage.
+
+### Architecture
+
+```
+packages/jazz-ts/
+  └── src/runtime/client.ts     ← detects environment, loads NAPI or WASM
+
+crates/groove-napi/
+  ├── Cargo.toml                ← napi-rs dependency
+  ├── src/lib.rs                ← #[napi] exports wrapping RuntimeCore
+  └── npm/                      ← generated npm package
+```
+
+### Key Design
+
+- `groove-napi` wraps `RuntimeCore<BfTreeIoHandler>` using [napi-rs](https://napi.rs)
+- BfTree uses `StdVfs` natively (no WASM, no OPFS)
+- Exposes same API surface as `WasmRuntime`: `insert`, `update`, `delete`, `query`, `subscribe`, persisted variants
+- `jazz-ts` detects environment: Node.js → NAPI addon, browser → WASM
+
+### Steps
+
+1. Create `crates/groove-napi` with napi-rs boilerplate
+2. Wrap `RuntimeCore<BfTreeIoHandler>` with `#[napi]` class
+3. Expose: `insert`, `update`, `delete`, `query`, `subscribe`, `insertPersisted`, etc.
+4. Build system: `napi build` produces `.node` binary
+5. Update `jazz-ts` to conditionally load NAPI vs WASM
+6. Tests: run `todo-server-ts` integration tests against NAPI backend
+
+### Files to Create/Modify
+
+| File | Change |
+|------|--------|
+| `crates/groove-napi/Cargo.toml` | New: napi-rs + groove dependencies |
+| `crates/groove-napi/src/lib.rs` | New: #[napi] wrapper around RuntimeCore |
+| `Cargo.toml` (workspace) | Add `crates/groove-napi` |
+| `packages/jazz-ts/src/runtime/client.ts` | Environment detection: NAPI vs WASM |
+
+### Verification
+
+```bash
+cargo build -p groove-napi
+pnpm test --filter todo-server-ts  # runs against NAPI backend
+```
+
+### Expected test status after 7b
+
+| Test | Status | Notes |
+|------|--------|-------|
+| `todo-server-ts::Health Check` | GREEN | Already passes (in-memory) |
+| `todo-server-ts::CRUD Operations` (5 tests) | GREEN | Already passes |
+| `todo-server-ts::Error Handling` (2 tests) | GREEN | Already passes |
+| `todo-server-ts::SSE Live Endpoint` | GREEN | Already passes |
+| `jazz-ts::*` unit tests | GREEN | Already pass (pure logic, no persistence) |
+| New: `todo-server-ts` persistence test | **GREEN** | Shutdown + reopen, data survives (needs NAPI) |
+
+All the above currently pass with in-memory WASM. After 7b they run against the NAPI backend with real disk persistence, and a new persistence-specific test is added.
+
+---
+
+## Phase 7c: OPFS Persistence (WASM Worker)
+
+**Goal**: Make `BfTreeIoHandler` work with OPFS in a Web Worker. Verify with wasm-pack tests in headless browser.
+
+**Depends on**: Phase 7a (BfTreeIoHandler and key encoding exist).
+
+**After 7c**: groove-wasm can persist data via OPFS when running in a Dedicated Web Worker. This is the storage layer for Phase 8's worker architecture, but we don't build the worker bridge yet — just prove persistence works.
+
+### Architecture
+
+```
+groove-wasm (already exists)
+  └── WasmIoHandler
+        └── wraps MemoryIoHandler (current)
+
+After 7c:
+  └── WasmBfTreeIoHandler
+        └── wraps BfTreeIoHandler
+              └── wraps BfTree::with_opfs_vfs(opfs_vfs)
+```
+
+### Key Design
+
+- `BfTree::with_opfs_vfs()` is async (OPFS init requires async APIs) but the resulting `BfTree` is fully synchronous
+- `WasmRuntime` gains an async constructor: `WasmRuntime::open_persistent(db_name, cache_size)` → initializes OPFS, creates `BfTreeIoHandler`, wraps in `RuntimeCore`
+- Existing `WasmRuntime::new()` (in-memory) stays unchanged for main-thread use
+- Must run in a Dedicated Web Worker (OPFS sync API is Worker-only)
+
+### Steps
+
+1. Add `bf-tree` dependency to `groove-wasm/Cargo.toml` (WASM target)
+2. Create `WasmBfTreeIoHandler` that wraps `BfTreeIoHandler` + adds JS sync callback bridge
+3. Add `WasmRuntime::open_persistent()` async constructor
+4. WASM build: `RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' cargo build -p groove-wasm --target wasm32-unknown-unknown`
+5. Tests: wasm-pack test + headless browser (reuse bf-tree-web pattern from `tests/wasm/`)
+
+### Test Plan
+
+Using wasm-pack test with headless Chrome:
+
+1. **`opfs_crud_round_trip`** — Open persistent store in worker, insert data, read back, verify.
+2. **`opfs_persistence_across_reopen`** — Open store, insert data, drop, reopen same db_name, verify data survives.
+3. **`opfs_index_operations`** — Insert index entries via IoHandler, scan ranges, verify correct results.
+4. **`opfs_runtime_core_e2e`** — Full RuntimeCore with OPFS-backed BfTreeIoHandler: insert, query, update, delete.
+
+### Files to Create/Modify
+
+| File | Change |
+|------|--------|
+| `crates/groove-wasm/Cargo.toml` | Add `bf-tree` dependency |
+| `crates/groove-wasm/src/runtime.rs` | Add `open_persistent()` constructor |
+| `crates/groove-wasm/src/bftree_io.rs` | New: `WasmBfTreeIoHandler` |
+| `crates/groove-wasm/tests/` | New: wasm-pack browser tests |
+
+### Verification
+
+```bash
+RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' \
+  wasm-pack test --headless --chrome crates/groove-wasm
+```
+
+### Expected test status after 7c
+
+| Test | Status | Notes |
+|------|--------|-------|
+| `groove-wasm::opfs_crud_round_trip` (new) | **GREEN** | wasm-pack test, headless Chrome, Worker context |
+| `groove-wasm::opfs_persistence_across_reopen` (new) | **GREEN** | Drop + reopen in Worker, data survives |
+| `groove-wasm::opfs_index_operations` (new) | **GREEN** | Index insert/scan via OPFS-backed IoHandler |
+| `groove-wasm::opfs_runtime_core_e2e` (new) | **GREEN** | Full RuntimeCore lifecycle in Worker |
+
+These run in a **special test Worker** (spawned by wasm-pack test harness). They prove OPFS persistence works at the Rust/WASM level but don't exercise the JS worker bridge or main-thread coordination.
+
+### What does NOT work after 7c (needs Phase 8)
+
+- `examples/todo-ts-client` — browser app with OPFS persistence, leader election, tab sync
+- `jazz-ts` main-thread ↔ worker bridge (postMessage protocol)
+- Multi-tab coordination (BroadcastChannel leader election)
+- Production browser deployment
+
+These require the **Phase 8 worker architecture** which builds the JS bridge on top of 7c's proven OPFS layer.
 
 ---
 
@@ -1155,17 +1350,17 @@ packages/jazz-ts/
 ```typescript
 // Main thread → Worker
 type MainToWorkerMessage =
-    | { type: 'sync'; payload: SyncPayload }
-    | { type: 'query-register'; queryId: number; queryJson: string }
-    | { type: 'query-unregister'; queryId: number }
-    | { type: 'connect-upstream'; url: string };
+  | { type: "sync"; payload: SyncPayload }
+  | { type: "query-register"; queryId: number; queryJson: string }
+  | { type: "query-unregister"; queryId: number }
+  | { type: "connect-upstream"; url: string };
 
 // Worker → Main thread
 type WorkerToMainMessage =
-    | { type: 'sync'; payload: SyncPayload }
-    | { type: 'persistence-ack'; payload: PersistenceAck }
-    | { type: 'query-settled'; queryId: number; tier: PersistenceTier }
-    | { type: 'ready' };  // Worker initialized
+  | { type: "sync"; payload: SyncPayload }
+  | { type: "persistence-ack"; payload: PersistenceAck }
+  | { type: "query-settled"; queryId: number; tier: PersistenceTier }
+  | { type: "ready" }; // Worker initialized
 ```
 
 ### Initialization Flow
@@ -1174,23 +1369,23 @@ type WorkerToMainMessage =
 // jazz-ts/src/runtime/client.ts
 
 export async function createDb<S extends Schema>(options: DbOptions<S>): Promise<Db<S>> {
-    // 1. Spawn worker
-    const worker = new Worker(new URL('./worker/groove-worker.ts', import.meta.url));
+  // 1. Spawn worker
+  const worker = new Worker(new URL("./worker/groove-worker.ts", import.meta.url));
 
-    // 2. Wait for worker ready
-    await waitForMessage(worker, 'ready');
+  // 2. Wait for worker ready
+  await waitForMessage(worker, "ready");
 
-    // 3. Create main-thread groove with MemoryStorage
-    const mainGroove = new Groove(new MemoryStorage());
+  // 3. Create main-thread groove with MemoryStorage
+  const mainGroove = new Groove(new MemoryStorage());
 
-    // 4. Connect main groove to worker as "upstream server"
-    const bridge = new WorkerBridge(worker, mainGroove);
+  // 4. Connect main groove to worker as "upstream server"
+  const bridge = new WorkerBridge(worker, mainGroove);
 
-    // 5. Register initial queries, wait for settlement
-    await bridge.registerQuery(initialQuery, { settlement: 'worker' });
+  // 5. Register initial queries, wait for settlement
+  await bridge.registerQuery(initialQuery, { settlement: "worker" });
 
-    // 6. Return Db interface
-    return new Db(mainGroove, bridge);
+  // 6. Return Db interface
+  return new Db(mainGroove, bridge);
 }
 ```
 
@@ -1213,12 +1408,14 @@ Tab A (LEADER)                Tab B (FOLLOWER)           Tab C (FOLLOWER)
 ```
 
 **Leader responsibilities:**
+
 - Holds exclusive OPFS `SyncAccessHandle`
 - Maintains WebSocket to upstream server
 - Broadcasts changes to follower tabs via BroadcastChannel
 - Persists data from all tabs
 
 **Follower behavior:**
+
 - Memory-only storage (like main thread)
 - Sends writes to leader via BroadcastChannel
 - Receives updates from leader
@@ -1228,48 +1425,49 @@ Tab A (LEADER)                Tab B (FOLLOWER)           Tab C (FOLLOWER)
 
 ```typescript
 // On worker startup
-const LEADER_KEY = 'jazz-leader';
+const LEADER_KEY = "jazz-leader";
 const LEADER_HEARTBEAT_MS = 1000;
 const LEADER_TIMEOUT_MS = 3000;
 
 async function electLeader(): Promise<boolean> {
-    const channel = new BroadcastChannel('jazz-leader-election');
+  const channel = new BroadcastChannel("jazz-leader-election");
 
-    // Try to claim leadership
-    const myId = crypto.randomUUID();
-    const claim = { type: 'claim', id: myId, timestamp: Date.now() };
+  // Try to claim leadership
+  const myId = crypto.randomUUID();
+  const claim = { type: "claim", id: myId, timestamp: Date.now() };
 
-    // Listen for competing claims
-    let isLeader = true;
-    channel.onmessage = (e) => {
-        if (e.data.type === 'claim' && e.data.timestamp < claim.timestamp) {
-            isLeader = false; // Older claim wins
-        }
-        if (e.data.type === 'heartbeat' && e.data.id !== myId) {
-            isLeader = false; // Someone else is leader
-        }
-    };
-
-    channel.postMessage(claim);
-    await sleep(100); // Wait for competing claims
-
-    if (isLeader) {
-        // Start heartbeat
-        setInterval(() => {
-            channel.postMessage({ type: 'heartbeat', id: myId });
-        }, LEADER_HEARTBEAT_MS);
-
-        // Open OPFS
-        await openOpfsStorage();
+  // Listen for competing claims
+  let isLeader = true;
+  channel.onmessage = (e) => {
+    if (e.data.type === "claim" && e.data.timestamp < claim.timestamp) {
+      isLeader = false; // Older claim wins
     }
+    if (e.data.type === "heartbeat" && e.data.id !== myId) {
+      isLeader = false; // Someone else is leader
+    }
+  };
 
-    return isLeader;
+  channel.postMessage(claim);
+  await sleep(100); // Wait for competing claims
+
+  if (isLeader) {
+    // Start heartbeat
+    setInterval(() => {
+      channel.postMessage({ type: "heartbeat", id: myId });
+    }, LEADER_HEARTBEAT_MS);
+
+    // Open OPFS
+    await openOpfsStorage();
+  }
+
+  return isLeader;
 }
 ```
 
 **Failover on leader tab close:**
 
 When leader tab closes unexpectedly:
+
 1. Heartbeat stops
 2. After `LEADER_TIMEOUT_MS`, followers detect leader loss
 3. Remaining tabs run election
@@ -1277,9 +1475,23 @@ When leader tab closes unexpectedly:
 5. **In-flight writes from old leader may be lost** (fire-and-forget semantics)
 
 This is acceptable because:
+
 - Fire-and-forget is the default durability level
-- Users who need guarantees use `await write.persisted()`
+- Users who need guarantees use `_persisted` variants
 - Simplest possible failover - no WAL replay complexity
+
+### Expected test status after Phase 8
+
+| Test | Status | Notes |
+|------|--------|-------|
+| `examples/todo-ts-client` | **GREEN** | Full browser app: OPFS persistence, leader election, tab sync |
+| `jazz-ts::worker_bridge_*` (new) | **GREEN** | Main thread ↔ worker postMessage protocol |
+| `jazz-ts::persistence_across_reload` (new) | **GREEN** | Write data, "reload" (re-init), data survives via OPFS |
+| `jazz-ts::multi_tab_sync` (new) | **GREEN** | Leader broadcasts to follower, both see same data |
+| `jazz-ts::leader_failover` (new) | **GREEN** | Leader tab closes, follower takes over, OPFS still works |
+| `jazz-ts::persisted_variants` (new) | **GREEN** | `createPersisted()` resolves on worker ack |
+
+Only after Phase 8 does browser persistence work in a production-like setup (main thread ↔ worker bridge, OPFS, leader election). Phases 7a-7c prove each layer independently.
 
 ---
 
@@ -1311,6 +1523,7 @@ This is acceptable because:
 ### Code Deletion Checklist
 
 **groove crate - Async Storage Infrastructure:**
+
 - [ ] `IoHandler` trait and all implementations
 - [ ] `StorageRequest` / `StorageResponse` enums
 - [ ] `NullIoHandler`, `TestIoHandler`, `DelayedIoHandler`
@@ -1320,6 +1533,7 @@ This is acceptable because:
 - [ ] All `delayed_io_tests` module (Phases 0-4)
 
 **groove crate - Loading States:**
+
 - [ ] `ObjectState::Loading`
 - [ ] `BlobState::Loading`
 - [ ] `PageState` enum entirely
@@ -1329,6 +1543,7 @@ This is acceptable because:
 - [ ] `request_load()` method
 
 **groove crate - Our B-tree Implementation (replaced by bf-tree):**
+
 - [ ] `btree_index.rs` - entire file
 - [ ] `btree_page.rs` - entire file
 - [ ] `query_manager/index/mod.rs`
@@ -1341,6 +1556,7 @@ This is acceptable because:
 - [ ] `take_storage_requests()` method
 
 **groove crate - Query Graph Pending Machinery:**
+
 - [ ] `MaterializeNode.pending_ids`
 - [ ] `MaterializeNode.has_pending()`
 - [ ] `MaterializeNode.check_pending_tuples()`
@@ -1348,16 +1564,19 @@ This is acceptable because:
 - [ ] All "pending" checks in graph traversal
 
 **groove-wasm crate:**
+
 - [ ] Async storage callback pattern
 - [ ] `onStorageResponse()` method
 
 **jazz-ts:**
+
 - [ ] Current `JazzClient.connect()` async storage setup
 - [ ] Storage driver abstraction (replaced by worker)
 
 ### New Code Checklist
 
 **groove crate:**
+
 - [ ] New sync `IoHandler` trait (with index methods)
 - [ ] `MemoryIoHandler` implementation (for tests + main thread)
 - [ ] Key encoding functions (`encode_index_value`, etc.)
@@ -1367,33 +1586,35 @@ This is acceptable because:
 - [ ] `BfTreeIoHandler` implementation (Phase 7, for persistence)
 
 **groove-wasm crate:**
+
 - [ ] Worker entry point (`groove-worker.ts` or Rust-based)
 - [ ] OPFS initialization (async open, sync operations after)
 - [ ] Worker ↔ main thread postMessage protocol
 - [ ] Leader election implementation
 
 **jazz-ts:**
+
 - [ ] `WorkerBridge` class (main thread side)
 - [ ] Worker spawning and lifecycle management
 - [ ] Leader election via BroadcastChannel
-- [ ] `MutationResult` with `.persisted()` Promise API
+- [ ] `_persisted` mutation variants (`insertPersisted`, `createPersisted`, etc.)
 - [ ] `PersistenceTier` types and API
 
 ---
 
 ## Resolved Decisions
 
-| Question | Decision |
-|----------|----------|
-| bf-tree integration depth | Full key-value store with composite keys |
-| Tab coordination mechanism | Leader election with BroadcastChannel |
-| Native story | Single process with sync file I/O |
-| Durability default | Fire-and-forget, Promise-based `.persisted()` API |
-| Persistence API style | Promise-based |
-| Leader failover | Accept potential loss (fire-and-forget semantics) |
-| Index method branch param | Include branch in all index methods (supports multi-branch) |
-| Index value encoding | Methods take `Value`, not raw bytes - encoding inside IoHandler |
-| Thread safety | **Single-threaded only.** No `Send + Sync` on `IoHandler`, no `RwLock` in `MemoryIoHandler`. Each thread has its own instance; cross-thread uses message passing. |
+| Question                   | Decision                                                                                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| bf-tree integration depth  | Full key-value store with composite keys                                                                                                                          |
+| Tab coordination mechanism | Leader election with BroadcastChannel                                                                                                                             |
+| Native story               | Single process with sync file I/O                                                                                                                                 |
+| Durability default         | Fire-and-forget, `_persisted` variant API for explicit durability                                                                                                  |
+| Persistence API style      | Promise-based                                                                                                                                                     |
+| Leader failover            | Accept potential loss (fire-and-forget semantics)                                                                                                                 |
+| Index method branch param  | Include branch in all index methods (supports multi-branch)                                                                                                       |
+| Index value encoding       | Methods take `Value`, not raw bytes - encoding inside IoHandler                                                                                                   |
+| Thread safety              | **Single-threaded only.** No `Send + Sync` on `IoHandler`, no `RwLock` in `MemoryIoHandler`. Each thread has its own instance; cross-thread uses message passing. |
 
 ## Open Questions
 
@@ -1410,6 +1631,7 @@ This is acceptable because:
 ## Success Criteria
 
 ### Code Quality
+
 - [ ] No `Loading` states anywhere in codebase
 - [ ] No `pending` fields anywhere in codebase
 - [ ] No async storage patterns (fire-and-forget + callback)
@@ -1418,6 +1640,7 @@ This is acceptable because:
 - [ ] `grep -r "PageNotLoaded\|ObjectNotReady\|BranchNotLoaded" src/` returns nothing
 
 ### Tests
+
 - [ ] All groove unit tests pass
 - [ ] All groove integration tests pass
 - [ ] groove-wasm builds without errors
@@ -1425,6 +1648,7 @@ This is acceptable because:
 - [ ] jazz-ts tests pass
 
 ### Browser Functionality
+
 - [ ] Worker spawns and initializes
 - [ ] Worker opens OPFS with sync access
 - [ ] Main thread ↔ worker sync protocol works
@@ -1432,15 +1656,17 @@ This is acceptable because:
 - [ ] Data persists across page reloads
 - [ ] Leader election works across tabs
 - [ ] Leader failover works when leader tab closes
-- [ ] `.persisted()` Promise resolves on worker ACK
+- [ ] `_persisted` variants resolve on worker ACK
 
 ### Server Sync
+
 - [ ] Worker connects to upstream server
 - [ ] Writes propagate: main thread → worker → server
 - [ ] Updates propagate: server → worker → main thread
 - [ ] Multi-tier `.persisted('edge')` works
 
 ### Example Apps
+
 - [ ] todo-ts-client works end-to-end
 - [ ] Fresh start creates data correctly
 - [ ] Page reload preserves data
@@ -1449,6 +1675,7 @@ This is acceptable because:
 - [ ] Reconnection syncs correctly
 
 ### Performance (TBD benchmarks)
+
 - [ ] Insert latency < X ms (fire-and-forget)
 - [ ] Query latency < X ms
 - [ ] Cold start < X ms

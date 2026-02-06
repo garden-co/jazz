@@ -580,19 +580,10 @@ fn rebac_two_clients_different_sessions() {
     );
 }
 
-// =============================================================================
-// Failing tests for unimplemented features
-// =============================================================================
-// These tests document expected behavior that is not yet implemented.
-// They are marked #[ignore] until the features are complete.
-
 /// Test that EXISTS clause in INSERT policy correctly denies writes.
 ///
 /// Scenario: Insert policy requires EXISTS (SELECT FROM admins WHERE user_id = @session.user_id)
 /// A non-admin user tries to insert - should be denied.
-///
-/// CURRENT BUG: EXISTS clauses are not evaluated (always pass), so this incorrectly allows the insert.
-/// See: manager.rs:1398 - "TODO: Implement EXISTS clause evaluation"
 #[test]
 fn rebac_exists_clause_denies_non_matching_insert() {
     // Schema with EXISTS policy: only admins can insert

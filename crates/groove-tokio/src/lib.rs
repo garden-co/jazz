@@ -15,12 +15,10 @@
 //!
 //! ```ignore
 //! use groove_tokio::TokioRuntime;
-//! use groove_rocksdb::RocksDbDriver;
 //! use groove::schema_manager::{SchemaManager, AppId};
 //!
-//! let driver = RocksDbDriver::open("./data").unwrap();
 //! let schema_manager = SchemaManager::new(/* ... */);
-//! let runtime = TokioRuntime::new(schema_manager, driver, |msg| {
+//! let runtime = TokioRuntime::new(schema_manager, |msg| {
 //!     // Handle sync messages
 //! });
 //!
@@ -30,12 +28,15 @@
 //! let results = future.await?;
 //! ```
 
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use groove::driver::Driver;
-use groove::io_handler::IoHandler;
-use groove::object::ObjectId;
+use groove::commit::{Commit, CommitId};
+use groove::io_handler::{IoHandler, LoadedBranch, MemoryIoHandler};
+use groove::object::{BranchName, ObjectId};
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, Value};
@@ -44,8 +45,10 @@ use groove::runtime_core::{
     QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, SubscriptionDelta,
 };
 use groove::schema_manager::{QuerySchemaContext, SchemaManager};
-use groove::storage::StorageRequest;
-use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryId, ServerId};
+use groove::storage::{ContentHash, StorageError};
+use groove::sync_manager::{
+    ClientId, InboxEntry, OutboxEntry, PersistenceTier, QueryId, ServerId,
+};
 
 // ============================================================================
 // TokioIoHandler
@@ -53,36 +56,32 @@ use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryId, ServerId}
 
 /// IoHandler implementation for Tokio.
 ///
-/// - Storage requests are processed synchronously through the driver
-/// - Sync messages are emitted via callback
-/// - `schedule_batched_tick` spawns a tokio task (debounced)
+/// Wraps `MemoryIoHandler` for all synchronous storage/index operations.
+/// Adds a sync callback and tokio-based batched tick scheduling.
 pub struct TokioIoHandler {
-    /// Synchronous storage driver (e.g., RocksDB).
-    driver: Box<dyn Driver + Send>,
+    /// Delegate all storage/index ops to MemoryIoHandler.
+    inner: MemoryIoHandler,
     /// Callback for sync messages.
     sync_callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
     /// Debounce flag for scheduled ticks.
     scheduled: Arc<AtomicBool>,
     /// Weak reference back to RuntimeCore for spawned tasks.
     core_ref: Weak<Mutex<RuntimeCore<TokioIoHandler>>>,
-    /// Pending storage responses (from synchronous driver processing).
-    pending_responses: Vec<groove::storage::StorageResponse>,
 }
 
 impl TokioIoHandler {
     /// Create a new TokioIoHandler.
     ///
     /// Note: `core_ref` starts as empty and is set after RuntimeCore is created.
-    fn new<F>(driver: Box<dyn Driver + Send>, sync_callback: F) -> Self
+    fn new<F>(sync_callback: F) -> Self
     where
         F: Fn(OutboxEntry) + Send + Sync + 'static,
     {
         Self {
-            driver,
+            inner: MemoryIoHandler::new(),
             sync_callback: Arc::new(sync_callback),
             scheduled: Arc::new(AtomicBool::new(false)),
             core_ref: Weak::new(),
-            pending_responses: Vec::new(),
         }
     }
 
@@ -98,12 +97,121 @@ impl TokioIoHandler {
 }
 
 impl IoHandler for TokioIoHandler {
-    fn send_storage_request(&mut self, request: StorageRequest) {
-        // Process synchronously through driver
-        let responses = self.driver.process(vec![request]);
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.create_object(id, metadata)
+    }
 
-        // Store responses locally - they'll be drained by batched_tick
-        self.pending_responses.extend(responses);
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_object_metadata(id)
+    }
+
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.inner.load_branch(object_id, branch)
+    }
+
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit: Commit,
+    ) -> Result<(), StorageError> {
+        self.inner.append_commit(object_id, branch, commit)
+    }
+
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        commit_id: CommitId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_commit(object_id, branch, commit_id)
+    }
+
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        tails: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        self.inner.set_branch_tails(object_id, branch, tails)
+    }
+
+    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
+        self.inner.store_blob(hash, data)
+    }
+
+    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.load_blob(hash)
+    }
+
+    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
+        self.inner.delete_blob(hash)
+    }
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: CommitId,
+        tier: PersistenceTier,
+    ) -> Result<(), StorageError> {
+        self.inner.store_ack_tier(commit_id, tier)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner.index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
     }
 
     fn send_sync_message(&mut self, message: OutboxEntry) {
@@ -128,10 +236,6 @@ impl IoHandler for TokioIoHandler {
                 flag.store(false, Ordering::SeqCst);
             });
         }
-    }
-
-    fn take_pending_responses(&mut self) -> Vec<groove::storage::StorageResponse> {
-        std::mem::take(&mut self.pending_responses)
     }
 }
 
@@ -190,15 +294,13 @@ impl TokioRuntime {
     ///
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
-    /// - `driver` - Storage driver (must be Send)
     /// - `sync_callback` - Called when sync messages need to be sent
-    pub fn new<D, F>(schema_manager: SchemaManager, driver: D, sync_callback: F) -> Self
+    pub fn new<F>(schema_manager: SchemaManager, sync_callback: F) -> Self
     where
-        D: Driver + Send + 'static,
         F: Fn(OutboxEntry) + Send + Sync + 'static,
     {
         // Create IoHandler (without core_ref initially)
-        let io_handler = TokioIoHandler::new(Box::new(driver), sync_callback);
+        let io_handler = TokioIoHandler::new(sync_callback);
 
         // Create RuntimeCore
         let core = RuntimeCore::new(schema_manager, io_handler);
@@ -217,25 +319,10 @@ impl TokioRuntime {
         Self { core: core_arc }
     }
 
-    /// Load indices from storage (cold start).
-    ///
-    /// Call this after construction to initialize indices from RocksDB.
-    /// This synchronously loads all index pages.
-    /// Load indices from storage (cold start).
-    ///
-    /// This triggers index loading through the normal storage request flow.
-    /// For TokioIoHandler with synchronous storage, this completes before returning.
-    pub fn load_indices(&self) -> Result<(), RuntimeError> {
+    /// Persist the current schema to the catalogue for server sync.
+    pub fn persist_schema(&self) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        // Reset indices to trigger loading
-        core.schema_manager_mut()
-            .query_manager_mut()
-            .reset_indices_for_cold_start();
-        // Process storage in a loop until indices are loaded
-        for _ in 0..10 {
-            core.batched_tick();
-        }
-        Ok(())
+        Ok(core.persist_schema())
     }
 
     // =========================================================================
@@ -519,15 +606,12 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let driver = groove::driver::TestDriver::new();
         let sync_count = Arc::new(AtomicUsize::new(0));
         let sync_count_clone = sync_count.clone();
 
-        let runtime = TokioRuntime::new(schema_manager, driver, move |_msg| {
+        let runtime = TokioRuntime::new(schema_manager, move |_msg| {
             sync_count_clone.fetch_add(1, Ordering::SeqCst);
         });
-
-        runtime.load_indices().unwrap();
 
         // Insert a row
         let values = vec![
@@ -553,9 +637,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let driver = groove::driver::TestDriver::new();
-        let runtime = TokioRuntime::new(schema_manager, driver, |_| {});
-        runtime.load_indices().unwrap();
+        let runtime = TokioRuntime::new(schema_manager, |_| {});
 
         // Insert
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
@@ -591,9 +673,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let driver = groove::driver::TestDriver::new();
-        let runtime = TokioRuntime::new(schema_manager, driver, |_| {});
-        runtime.load_indices().unwrap();
+        let runtime = TokioRuntime::new(schema_manager, |_| {});
 
         // Track callback invocations
         let updates: Arc<Mutex<Vec<SubscriptionDelta>>> = Arc::new(Mutex::new(Vec::new()));

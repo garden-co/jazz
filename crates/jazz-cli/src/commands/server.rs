@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::sync_manager::{ClientId, Destination, SyncManager, SyncPayload};
-use groove_rocksdb::RocksDbDriver;
 use groove_tokio::TokioRuntime;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
@@ -48,10 +47,6 @@ pub async fn run(
     // Create data directory if it doesn't exist
     std::fs::create_dir_all(data_dir)?;
 
-    // Open RocksDB
-    let rocksdb_path = format!("{}/rocksdb", data_dir);
-    let driver = RocksDbDriver::open(&rocksdb_path)?;
-
     // Create managers (server mode - no fixed current schema)
     let sync_manager = SyncManager::new();
     let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
@@ -61,7 +56,7 @@ pub async fn run(
     let sync_tx_clone = sync_tx.clone();
 
     // Create runtime with sync callback that routes to SSE clients
-    let runtime = TokioRuntime::new(schema_manager, driver, move |entry| {
+    let runtime = TokioRuntime::new(schema_manager, move |entry| {
         // Route to appropriate client via broadcast
         if let Destination::Client(client_id) = entry.destination {
             eprintln!(
@@ -73,9 +68,6 @@ pub async fn run(
         }
         // Server destinations would be handled differently (e.g., HTTP push)
     });
-
-    // Load indices
-    runtime.load_indices()?;
 
     // Log auth configuration (without revealing secrets)
     if auth_config.is_configured() {

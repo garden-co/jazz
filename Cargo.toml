@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "crates/groove",
-  "crates/groove-rocksdb",
   "crates/groove-tokio",
   "crates/groove-wasm",
   "crates/jazz-transport",

@@ -1,14 +1,10 @@
-import { createDb, IndexedDBDriver } from "jazz-ts";
+import { createDb } from "jazz-ts";
 import { app, type Todo } from "../schema/app.js";
 
 async function main() {
-  // Open IndexedDB driver
-  const driver = await IndexedDBDriver.open("todo-app");
-
-  // Create Db (pre-loads WASM)
+  // Create Db (pre-loads WASM, uses in-memory storage)
   const db = await createDb({
     appId: "todo-client-example",
-    driver,
     env: "dev",
     userBranch: "main",
   });
