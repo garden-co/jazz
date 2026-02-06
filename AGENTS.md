@@ -177,3 +177,4 @@ Examples:
 
 - Official docs: [jazz.tools](https://jazz.tools)
 - Documentation site source: `homepage/` (Next.js)
+- Markdown docs are available after the docs site is built: `homepage/homepage/public/docs`
