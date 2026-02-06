@@ -99,9 +99,9 @@ Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making i
 
 ### Phase 5: TypeScript Integration
 
-26. [ ] Create `packages/cojson/src/storage/native/` directory
-27. [ ] Implement `NativeStorageWrapper` implementing `StorageAPI`
-28. [ ] Add factory function `createNativeStorage(options)` with platform detection
+26. [x] Create `packages/cojson/src/storage/native/` directory
+27. [x] Implement `NativeStorageWrapper` implementing `StorageAPI`
+28. [x] Add factory function `createNativeStorage(options)` with platform detection
 29. [ ] Implement automatic fallback to SQLite if native unavailable
 30. [ ] Update `LocalNode` to support native storage via `setStorage()`
 

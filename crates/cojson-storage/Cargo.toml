@@ -55,3 +55,10 @@ web-sys = { version = "0.3", optional = true, features = [
 tokio = { version = "1.0", features = ["rt", "macros"] }
 serde_json = "1.0"
 tempfile = "3.10"
+criterion = { version = "0.5", features = ["html_reports"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+rand = "0.8"
+
+[[bench]]
+name = "storage_benchmark"
+harness = false
