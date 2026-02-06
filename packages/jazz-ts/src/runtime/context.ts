@@ -30,8 +30,8 @@ export interface AppContext {
   /** Optional server URL for sync */
   serverUrl?: string;
 
-  /** Storage driver implementation */
-  driver: StorageDriver;
+  /** Storage driver implementation (optional — storage is in-memory by default) */
+  driver?: StorageDriver;
 
   /** Environment (e.g., "dev", "prod") */
   env?: string;
@@ -58,4 +58,11 @@ export interface AppContext {
    * Required to sync catalogue objects.
    */
   adminSecret?: string;
+
+  /**
+   * Persistence tier for this node.
+   * Set for server nodes to enable ack emission.
+   * Clients typically leave this undefined.
+   */
+  tier?: "worker" | "edge" | "core";
 }

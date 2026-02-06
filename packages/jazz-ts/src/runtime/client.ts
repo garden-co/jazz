@@ -6,11 +6,20 @@
  */
 
 import type { AppContext, Session } from "./context.js";
-import type { Value, RowDelta, WasmSchema, StorageRequest } from "../drivers/types.js";
+import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import type { WasmRuntime as GrooveWasmRuntime } from "groove-wasm";
 
 // Re-type the WasmRuntime to work with our local types
 type WasmRuntime = GrooveWasmRuntime;
+
+/**
+ * Persistence tier for durability guarantees.
+ *
+ * - `worker`: Persisted in web worker / local storage
+ * - `edge`: Persisted at edge server
+ * - `core`: Persisted at core server
+ */
+export type PersistenceTier = "worker" | "edge" | "core";
 
 /**
  * Query row result.
@@ -159,35 +168,15 @@ export class JazzClient {
     // Load WASM module dynamically
     const wasmModule = await loadWasmModule();
 
-    // Create storage callback that bridges WASM requests to the JS driver
-    // With tsify, requests come as typed JS objects (not JSON strings)
-    const storageCallback = async (request: StorageRequest) => {
-      try {
-        // Driver expects an array of requests
-        const responses = await context.driver.process([request]);
-        // Return first response as object (not JSON string)
-        if (responses.length > 0) {
-          runtime.onStorageResponse(responses[0]);
-        }
-      } catch (e) {
-        console.error("Storage callback error:", e);
-      }
-    };
-
-    // Create WASM runtime with storage callback
+    // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = JSON.stringify(context.schema);
     const runtime = new wasmModule.WasmRuntime(
-      storageCallback,
       schemaJson,
       context.appId,
       context.env ?? "dev",
       context.userBranch ?? "main",
+      context.tier,
     );
-
-    // NOTE: loadIndices() is NOT called here because:
-    // 1. For fresh databases, there's nothing to load
-    // 2. For reopened databases, we need async support to wait for storage responses
-    // TODO: Add async waitForIndices() method for persistence support
 
     const client = new JazzClient(runtime, context);
 
@@ -210,37 +199,15 @@ export class JazzClient {
    * @returns Connected JazzClient instance (created synchronously)
    */
   static connectSync(wasmModule: WasmModule, context: AppContext): JazzClient {
-    // Create storage callback that bridges WASM requests to the JS driver
-    // With tsify, requests come as typed JS objects (not JSON strings)
-    // Note: runtime is accessed via closure after creation
-    let runtime: WasmRuntime;
-    const storageCallback = async (request: StorageRequest) => {
-      try {
-        // Driver expects an array of requests
-        const responses = await context.driver.process([request]);
-        // Return first response as object (not JSON string)
-        if (responses.length > 0) {
-          runtime.onStorageResponse(responses[0]);
-        }
-      } catch (e) {
-        console.error("Storage callback error:", e);
-      }
-    };
-
-    // Create WASM runtime with storage callback
+    // Create WASM runtime (storage is now synchronous in-memory)
     const schemaJson = JSON.stringify(context.schema);
-    runtime = new wasmModule.WasmRuntime(
-      storageCallback,
+    const runtime = new wasmModule.WasmRuntime(
       schemaJson,
       context.appId,
       context.env ?? "dev",
       context.userBranch ?? "main",
+      context.tier,
     );
-
-    // NOTE: loadIndices() is NOT called here because:
-    // 1. For fresh databases, there's nothing to load
-    // 2. For reopened databases, we need async support to wait for storage responses
-    // TODO: Add async waitForIndices() method for persistence support
 
     const client = new JazzClient(runtime, context);
 
@@ -280,7 +247,7 @@ export class JazzClient {
   }
 
   /**
-   * Insert a new row into a table.
+   * Insert a new row into a table (sync, fire-and-forget).
    *
    * @param table Table name
    * @param values Array of column values
@@ -291,27 +258,44 @@ export class JazzClient {
   }
 
   /**
-   * Execute a query and return all matching rows.
+   * Insert a row and wait for persistence at the specified tier.
    *
-   * @param queryJson JSON-encoded query specification
-   * @returns Array of matching rows
+   * @param table Table name
+   * @param values Array of column values
+   * @param tier Persistence tier to wait for
+   * @returns Promise resolving to the new row's ID when the tier acks
    */
-  async query(queryJson: string): Promise<Row[]> {
-    return this.queryInternal(queryJson, undefined);
+  async createPersisted(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
+    return this.runtime.insertPersisted(table, values, tier);
   }
 
   /**
-   * Internal query with optional session.
+   * Execute a query and return all matching rows.
+   *
+   * @param queryJson JSON-encoded query specification
+   * @param settledTier Optional tier to hold delivery until confirmed
+   * @returns Array of matching rows
+   */
+  async query(queryJson: string, settledTier?: PersistenceTier): Promise<Row[]> {
+    return this.queryInternal(queryJson, undefined, settledTier);
+  }
+
+  /**
+   * Internal query with optional session and settled tier.
    * @internal
    */
-  async queryInternal(queryJson: string, session?: Session): Promise<Row[]> {
+  async queryInternal(
+    queryJson: string,
+    session?: Session,
+    settledTier?: PersistenceTier,
+  ): Promise<Row[]> {
     const sessionJson = session ? JSON.stringify(session) : undefined;
-    const results = await this.runtime.query(queryJson, sessionJson);
+    const results = await this.runtime.query(queryJson, sessionJson, settledTier);
     return results as Row[];
   }
 
   /**
-   * Update a row by ID.
+   * Update a row by ID (sync, fire-and-forget).
    *
    * @param objectId Row ID (UUID string)
    * @param updates Object mapping column names to new values
@@ -321,7 +305,18 @@ export class JazzClient {
   }
 
   /**
-   * Delete a row by ID.
+   * Update a row and wait for persistence at the specified tier.
+   */
+  async updatePersisted(
+    objectId: string,
+    updates: Record<string, Value>,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    await this.runtime.updatePersisted(objectId, updates, tier);
+  }
+
+  /**
+   * Delete a row by ID (sync, fire-and-forget).
    *
    * @param objectId Row ID (UUID string)
    */
@@ -330,21 +325,38 @@ export class JazzClient {
   }
 
   /**
+   * Delete a row and wait for persistence at the specified tier.
+   */
+  async deletePersisted(objectId: string, tier: PersistenceTier): Promise<void> {
+    await this.runtime.deletePersisted(objectId, tier);
+  }
+
+  /**
    * Subscribe to a query and receive updates when results change.
    *
    * @param queryJson JSON-encoded query specification
    * @param callback Called with delta whenever results change
+   * @param settledTier Optional tier to hold initial delivery until confirmed
    * @returns Subscription ID for unsubscribing
    */
-  subscribe(queryJson: string, callback: SubscriptionCallback): number {
-    return this.subscribeInternal(queryJson, callback, undefined);
+  subscribe(
+    queryJson: string,
+    callback: SubscriptionCallback,
+    settledTier?: PersistenceTier,
+  ): number {
+    return this.subscribeInternal(queryJson, callback, undefined, settledTier);
   }
 
   /**
-   * Internal subscribe with optional session.
+   * Internal subscribe with optional session and settled tier.
    * @internal
    */
-  subscribeInternal(queryJson: string, callback: SubscriptionCallback, session?: Session): number {
+  subscribeInternal(
+    queryJson: string,
+    callback: SubscriptionCallback,
+    session?: Session,
+    settledTier?: PersistenceTier,
+  ): number {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const subId = this.runtime.subscribe(
       queryJson,
@@ -355,6 +367,7 @@ export class JazzClient {
         callback(delta);
       },
       sessionJson,
+      settledTier,
     );
     this.subscriptions.set(subId, callback);
     return subId;
@@ -440,7 +453,7 @@ export class JazzClient {
     }
 
     // Close driver if it supports it
-    if (this.context.driver.close) {
+    if (this.context.driver?.close) {
       await this.context.driver.close();
     }
   }

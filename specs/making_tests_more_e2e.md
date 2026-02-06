@@ -50,3 +50,27 @@ Row objects not in scope should still go to `pending_updates` for upper-layer ap
 ### Lesson
 
 If these tests ran at RuntimeCore level — creating a schema, inserting a row through the client API, observing what the server does — the metadata would be realistic by construction. The bypass would have been caught immediately because the test row would have `"table"` metadata, and the test would assert that unapproved writes don't get applied.
+
+---
+
+## Example 2: PersistenceAck Without a Consumer (Phase 6a)
+
+### The gap
+
+Phase 6a added `PersistenceAck` to the sync protocol — when a server persists data, it sends `PersistenceAck { commit_id, tier }` back through the tier chain. The implementation is correct: acks are emitted, relayed, and arrive at the originating client.
+
+But `RuntimeCore` — the public API layer — has zero references to `PersistenceAck`. There is no way for a caller to say "insert this row and tell me when it's persisted at tier X." The plumbing exists with no consumer.
+
+### Why tests didn't catch it
+
+The Phase 6a tests are surgical SyncManager-level tests: set up two or three connected `SyncManager` instances, pump messages, assert that `PersistenceAck` payloads arrive with the correct `commit_id` and `tier`. These tests pass — the sync protocol works.
+
+But no test ever asks the question a real user would ask: "I inserted a row — is it persisted yet?" Because the tests operate below RuntimeCore, the missing API surface was invisible. The plan felt complete because every sync message was verified, even though no application-level behavior was tested.
+
+### The fix
+
+Phase 6c adds `insert_persisted()` / `update_persisted()` / `delete_persisted()` to RuntimeCore, returning a `Receiver<()>` that resolves when the requested tier confirms. Tests at the RuntimeCore level exercise the full path: insert → sync → server persists → ack relayed → receiver fires.
+
+### Lesson
+
+If Phase 6a had been planned around RuntimeCore-level tests — "insert a row, wait for persistence, assert the wait resolves" — the missing consumer API would have been obvious from the start. Testing sync messages in isolation verified the mechanism but not the feature. The spirit of the plan (durability guarantees for users) wasn't complete; only the letter (correct ack messages) was.

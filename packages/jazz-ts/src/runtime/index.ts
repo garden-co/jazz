@@ -2,6 +2,7 @@ export {
   JazzClient,
   SessionClient,
   loadWasmModule,
+  type PersistenceTier,
   type Row,
   type SubscriptionCallback,
   type WasmModule,

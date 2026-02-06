@@ -937,7 +937,7 @@ impl QueryManager {
         io: &mut H,
         id: ObjectId,
         values: &[Value],
-    ) -> Result<(), QueryError> {
+    ) -> Result<CommitId, QueryError> {
         self.update_with_session(io, id, values, None)
     }
 
@@ -952,7 +952,7 @@ impl QueryManager {
         id: ObjectId,
         values: &[Value],
         session: Option<&Session>,
-    ) -> Result<(), QueryError> {
+    ) -> Result<CommitId, QueryError> {
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -1020,7 +1020,7 @@ impl QueryManager {
         let author = id;
 
         // Add commit with new data
-        let _commit_id = self
+        let commit_id = self
             .sync_manager
             .object_manager
             .add_commit(
@@ -1034,6 +1034,11 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
+        // Forward update to all connected servers
+        let branch = self.current_branch();
+        self.sync_manager
+            .forward_update_to_servers(id, branch.into());
+
         // Update indices and persist modified nodes
         self.update_indices_for_update(io, &table_name.0, id, &old_data, &new_data, &descriptor)?;
 
@@ -1041,7 +1046,7 @@ impl QueryManager {
         self.mark_subscriptions_dirty(&table_name.0);
         self.mark_row_updated_in_subscriptions(&table_name.0, id);
 
-        Ok(())
+        Ok(commit_id)
     }
 
     /// Evaluate a policy expression against an encoded row.
@@ -1234,6 +1239,13 @@ impl QueryManager {
                 Some(delete_metadata),
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        // Forward delete to all connected servers
+        {
+            let branch = self.current_branch();
+            self.sync_manager
+                .forward_update_to_servers(id, branch.into());
+        }
 
         // Update indices: remove from _id and column indices, add to _id_deleted
         self.update_indices_for_soft_delete(io, &table, id, &old_data, &descriptor)?;

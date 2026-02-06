@@ -10,7 +10,6 @@ use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
 use groove::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncManager};
-use groove_rocksdb::RocksDbDriver;
 use groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use jazz_transport::ServerEvent;
 use reqwest_eventsource::{Event, EventSource};
@@ -81,14 +80,9 @@ impl JazzClient {
             id
         };
 
-        // Open RocksDB
-        let rocksdb_path = context.data_dir.join("rocksdb");
-        let driver =
-            RocksDbDriver::open(&rocksdb_path).map_err(|e| JazzError::Storage(e.to_string()))?;
-
         // Create managers
         let sync_manager = SyncManager::new();
-        let mut schema_manager = SchemaManager::new(
+        let schema_manager = SchemaManager::new(
             sync_manager,
             context.schema.clone(),
             context.app_id,
@@ -96,9 +90,6 @@ impl JazzClient {
             "main",
         )
         .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
-
-        // Persist schema to catalogue for server sync
-        schema_manager.persist_schema();
 
         // Connect to server if URL provided (before creating runtime so we have the connection)
         let auth_config = AuthConfig::from_context(&context);
@@ -119,7 +110,7 @@ impl JazzClient {
         let client_id_for_sync = client_id;
 
         // Create runtime with sync callback
-        let runtime = TokioRuntime::new(schema_manager, driver, move |entry| {
+        let runtime = TokioRuntime::new(schema_manager, move |entry| {
             // Send to server if connected and destination is server
             if let Destination::Server(_) = entry.destination {
                 eprintln!(
@@ -141,9 +132,9 @@ impl JazzClient {
             }
         });
 
-        // Load indices
+        // Persist schema to catalogue for server sync
         runtime
-            .load_indices()
+            .persist_schema()
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         // Register server with sync manager if connected

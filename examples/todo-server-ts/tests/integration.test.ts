@@ -6,7 +6,6 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { SqliteNodeDriver } from "jazz-ts";
 import {
   createServer,
   startServer,
@@ -20,9 +19,8 @@ describe("Todo Server Integration", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    // Create server with in-memory database
-    const driver = await SqliteNodeDriver.open(":memory:");
-    const todoServer = await createServer(driver);
+    // Create server with in-memory storage
+    const todoServer = await createServer();
 
     // Start on random available port
     server = await startServer(todoServer, 0);

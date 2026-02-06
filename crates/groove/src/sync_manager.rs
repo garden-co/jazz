@@ -349,6 +349,9 @@ pub struct SyncManager {
     query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
     pending_query_settled: Vec<(QueryId, PersistenceTier)>,
+
+    /// Acks received during inbox processing, for RuntimeCore to consume.
+    received_acks: Vec<(CommitId, PersistenceTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -374,6 +377,7 @@ impl std::fmt::Debug for SyncManager {
             .field("commit_interest", &self.commit_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
+            .field("received_acks", &self.received_acks)
             .finish()
     }
 }
@@ -401,6 +405,7 @@ impl SyncManager {
             commit_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
+            received_acks: Vec::new(),
         }
     }
 
@@ -421,6 +426,7 @@ impl SyncManager {
             commit_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
+            received_acks: Vec::new(),
         }
     }
 
@@ -710,6 +716,12 @@ impl SyncManager {
     /// Take pending QuerySettled notifications for QueryManager to process.
     pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, PersistenceTier)> {
         std::mem::take(&mut self.pending_query_settled)
+    }
+
+    /// Take received persistence acks since last call.
+    /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
+    pub fn take_received_acks(&mut self) -> Vec<(CommitId, PersistenceTier)> {
+        std::mem::take(&mut self.received_acks)
     }
 
     /// Emit a QuerySettled notification to a client.
@@ -1234,6 +1246,8 @@ impl SyncManager {
                     {
                         commit.ack_state.confirmed_tiers.insert(tier);
                     }
+                    // Notify RuntimeCore of received ack
+                    self.received_acks.push((commit_id, tier));
                 }
                 // Relay to interested clients
                 let mut interested = HashSet::new();
@@ -1519,6 +1533,8 @@ impl SyncManager {
                     {
                         commit.ack_state.confirmed_tiers.insert(tier);
                     }
+                    // Notify RuntimeCore of received ack
+                    self.received_acks.push((commit_id, tier));
                 }
                 // Relay to interested clients (excluding the sender)
                 let mut interested = HashSet::new();

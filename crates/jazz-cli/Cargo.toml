@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 groove = { path = "../groove" }
-groove-rocksdb = { path = "../groove-rocksdb" }
 groove-tokio = { path = "../groove-tokio" }
 jazz-transport = { path = "../jazz-transport" }
 
