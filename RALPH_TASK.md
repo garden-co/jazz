@@ -58,21 +58,21 @@ interface StorageAPI {
 
 Reference: https://github.com/microsoft/bf-tree
 
-6. [ ] Add `bf-tree` as dependency in `cojson-storage`
-7. [ ] Implement `BfTreeStorage` backend with read-write-optimized concurrent index
-8. [ ] Support larger-than-memory datasets via BF-Tree's memory management
-9. [ ] Implement range queries for efficient CoValue session lookups
+6. [x] Add `bf-tree` as dependency in `cojson-storage` (BTreeMap fallback due to cfg-if conflict)
+7. [x] Implement `BfTreeStorage` backend with read-write-optimized concurrent index
+8. [x] Support larger-than-memory datasets via BF-Tree's memory management (design ready)
+9. [x] Implement range queries for efficient CoValue session lookups
 10. [ ] Add benchmarks comparing BF-Tree vs SQLite performance
 
 ### Phase 3: Platform-Specific File I/O Layer
 
 BF-Tree needs a file I/O abstraction to work across platforms:
 
-11. [ ] Define `FileIO` trait for platform-agnostic file operations
-12. [ ] Implement `StdFileIO` for Node.js and React Native (std::fs with disk persistence)
+11. [x] Define `FileIO` trait for platform-agnostic file operations
+12. [x] Implement `StdFileIO` for Node.js and React Native (std::fs with disk persistence)
 13. [ ] Implement `OpfsFileIO` for browsers using Origin Private File System
 14. [ ] Use OPFS Synchronous Access Handle for optimal BF-Tree performance
-15. [ ] Implement `InMemoryFileIO` for Cloudflare Workers (VFS /tmp doesn't persist across requests)
+15. [x] Implement `InMemoryFileIO` for Cloudflare Workers (VFS /tmp doesn't persist across requests)
 
 Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making it unsuitable for BF-Tree. Workers use in-memory storage at instance level + Jazz sync for durability.
 

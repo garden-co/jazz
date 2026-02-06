@@ -37,3 +37,30 @@ Files created:
 - `crates/cojson-storage/src/traits_async.rs` - Async versions of the traits
 
 Next: Phase 2 - BF-Tree Storage Engine (criteria 6-10)
+
+**Phase 2 & 3 partially completed** - BTree Storage & File I/O
+
+Accomplished:
+- Added bftree feature flag (actual bf-tree has cfg-if version conflict)
+- Implemented BTreeStorage backend using Rust's BTreeMap (fallback)
+- Implemented range queries for efficient session lookups
+- Defined FileIO trait for platform-agnostic file operations
+- Implemented StdFileIO for Node.js/React Native (std::fs)
+- Implemented InMemoryFileIO for Cloudflare Workers and testing
+- Added 7 new BTree storage tests (all passing)
+- Added 8 new file I/O tests (all passing)
+- Total: 34 tests passing
+
+Files created:
+- `crates/cojson-storage/src/file_io/mod.rs` - Module organization
+- `crates/cojson-storage/src/file_io/traits.rs` - FileIO and FileHandle traits
+- `crates/cojson-storage/src/file_io/memory.rs` - In-memory file system
+- `crates/cojson-storage/src/file_io/std_fs.rs` - Standard filesystem I/O
+- `crates/cojson-storage/src/bftree/mod.rs` - BTree storage module
+- `crates/cojson-storage/src/bftree/backend.rs` - BTreeStorage implementation
+
+Note: bf-tree crate requires `cfg-if = "=1.0.0"` exactly, which conflicts with
+cargo-tarpaulin's requirement for `cfg-if = "^1.0.1"`. Using BTreeMap fallback
+until upstream fixes this.
+
+Next: Phase 3 items 13-14 (OPFS for browsers) and Phase 4 (Platform Bindings)

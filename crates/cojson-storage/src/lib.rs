@@ -7,6 +7,7 @@
 //!
 //! - `async` - Enable async storage backend support via tokio
 //! - `serde` - Enable serde serialization for storage types
+//! - `bftree` - Enable BF-Tree storage backend (native platforms only)
 //!
 //! # Example
 //!
@@ -21,11 +22,15 @@
 //! ```
 
 pub mod error;
+pub mod file_io;
 pub mod traits;
 pub mod types;
 
 #[cfg(feature = "async")]
 pub mod traits_async;
+
+#[cfg(all(feature = "bftree", not(target_arch = "wasm32")))]
+pub mod bftree;
 
 pub use error::{StorageError, StorageResult};
 pub use traits::{StorageBackend, StorageTransaction};
