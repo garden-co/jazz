@@ -1,10 +1,11 @@
 import { Extension } from "@tiptap/core";
-import { CoRichText } from "jazz-tools";
+import type { Plugin } from "@tiptap/pm/state";
+import type { CoRichText } from "jazz-tools";
 import { createJazzPlugin } from "jazz-tools/prosemirror";
 
 export interface JazzSyncOptions {
   /** The CoRichText instance to synchronize with */
-  coRichText: CoRichText;
+  coRichText: CoRichText | null;
   /** Configuration options for the plugin */
   config?: Parameters<typeof createJazzPlugin>[1];
 }
@@ -14,15 +15,18 @@ export const JazzSyncExtension = Extension.create<JazzSyncOptions>({
 
   addOptions() {
     return {
-      coRichText: undefined as any,
+      coRichText: null,
       config: {},
     };
   },
 
-  addProseMirrorPlugins() {
-    if (!this.options.coRichText) {
+  addProseMirrorPlugins(): Plugin[] {
+    const { coRichText, config } = this.options;
+
+    if (!coRichText) {
       throw new Error("JazzSyncExtension requires a CoRichText value");
     }
-    return [createJazzPlugin(this.options.coRichText, this.options.config)];
+
+    return [createJazzPlugin(coRichText, config)];
   },
 });
