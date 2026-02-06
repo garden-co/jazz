@@ -12,5 +12,5 @@ pub fn app(name: Option<String>) {
         None => AppId::random(),
     };
 
-    println!("{}", app_id.to_string());
+    println!("{}", app_id);
 }

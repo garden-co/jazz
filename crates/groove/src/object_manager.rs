@@ -6,8 +6,8 @@ use smallvec::smallvec;
 use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
-use crate::io_handler::IoHandler;
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
+use crate::storage::Storage;
 use crate::storage::{ContentHash, StorageError};
 
 /// Unique identifier for a subscription.
@@ -164,8 +164,8 @@ impl ObjectManager {
     }
 
     /// Create a new object with optional metadata, returning its id.
-    /// Persists to storage via IoHandler synchronously.
-    pub fn create<H: IoHandler>(
+    /// Persists to storage via Storage synchronously.
+    pub fn create<H: Storage>(
         &mut self,
         io: &mut H,
         metadata: Option<HashMap<String, String>>,
@@ -184,8 +184,8 @@ impl ObjectManager {
     ///
     /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
     /// Used for index root nodes that have deterministic IDs based on table/column name.
-    /// Persists to storage via IoHandler synchronously.
-    pub fn create_with_id<H: IoHandler>(
+    /// Persists to storage via Storage synchronously.
+    pub fn create_with_id<H: Storage>(
         &mut self,
         io: &mut H,
         id: ObjectId,
@@ -236,9 +236,9 @@ impl ObjectManager {
     /// - Rejects if parents are specified but branch doesn't exist
     /// - Rejects if any parent doesn't exist in the branch
     /// - Updates tips: removes parents from tips, adds new commit as tip
-    /// - Persists to storage via IoHandler synchronously
+    /// - Persists to storage via Storage synchronously
     #[allow(clippy::too_many_arguments)]
-    pub fn add_commit<H: IoHandler>(
+    pub fn add_commit<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
@@ -361,7 +361,7 @@ impl ObjectManager {
     /// Unlike `add_commit`, this method:
     /// - Removes all existing commits from memory immediately
     /// - Creates a new commit with no parents
-    /// - Does NOT call IoHandler (caller should handle persistence if needed)
+    /// - Does NOT call Storage (caller should handle persistence if needed)
     ///
     /// Returns the new commit ID.
     pub fn replace_content(
@@ -479,8 +479,8 @@ impl ObjectManager {
     /// Associate a blob with a commit, storing the data if new.
     ///
     /// Deduplicates by content hash. Returns full BlobId for addressing.
-    /// Persists to storage via IoHandler synchronously.
-    pub fn associate_blob<H: IoHandler>(
+    /// Persists to storage via Storage synchronously.
+    pub fn associate_blob<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
@@ -525,8 +525,8 @@ impl ObjectManager {
 
     /// Load a blob by its identifier.
     ///
-    /// Returns the data synchronously from IoHandler, caching in memory.
-    pub fn load_blob<H: IoHandler>(&mut self, io: &H, blob_id: &BlobId) -> Result<Vec<u8>, Error> {
+    /// Returns the data synchronously from Storage, caching in memory.
+    pub fn load_blob<H: Storage>(&mut self, io: &H, blob_id: &BlobId) -> Result<Vec<u8>, Error> {
         let content_hash = blob_id.content_hash;
 
         // Check cache first
@@ -553,8 +553,8 @@ impl ObjectManager {
     ///
     /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
     /// Used by sync layer to receive objects from peers.
-    /// Persists to storage via IoHandler synchronously.
-    pub fn receive_object<H: IoHandler>(
+    /// Persists to storage via Storage synchronously.
+    pub fn receive_object<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
@@ -576,8 +576,8 @@ impl ObjectManager {
     ///
     /// Unlike `add_commit`, this accepts a pre-built Commit (with existing timestamp/id).
     /// Validates parent references but doesn't require parents to be tips.
-    /// Persists to storage via IoHandler synchronously.
-    pub fn receive_commit<H: IoHandler>(
+    /// Persists to storage via Storage synchronously.
+    pub fn receive_commit<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
@@ -664,8 +664,8 @@ impl ObjectManager {
     /// Store a blob directly, returning its content hash.
     ///
     /// Simpler interface than `associate_blob` for sync layer use.
-    /// Persists to storage via IoHandler synchronously.
-    pub fn put_blob<H: IoHandler>(
+    /// Persists to storage via Storage synchronously.
+    pub fn put_blob<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
@@ -845,8 +845,8 @@ impl ObjectManager {
     ///
     /// All tips must be descendants of (or equal to) some tail. Commits before the tails
     /// are deleted, their blob associations removed, and orphaned blobs deleted.
-    /// Operations are persisted synchronously via IoHandler.
-    pub fn truncate_branch<H: IoHandler>(
+    /// Operations are persisted synchronously via Storage.
+    pub fn truncate_branch<H: Storage>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
@@ -1144,11 +1144,11 @@ impl ObjectManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io_handler::MemoryIoHandler;
+    use crate::storage::MemoryStorage;
 
     #[test]
     fn create_object_without_metadata() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let id = manager.create(&mut io, None);
 
@@ -1160,7 +1160,7 @@ mod tests {
 
     #[test]
     fn create_object_with_metadata() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let mut metadata = HashMap::new();
         metadata.insert("name".to_string(), "test".to_string());
@@ -1183,7 +1183,7 @@ mod tests {
 
     #[test]
     fn add_commit_rejects_unknown_object() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let fake_object_id = ObjectId::new();
         let author = ObjectId::new();
@@ -1203,7 +1203,7 @@ mod tests {
 
     #[test]
     fn add_commit_creates_branch_for_parentless_commit() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1229,7 +1229,7 @@ mod tests {
 
     #[test]
     fn add_commit_rejects_unknown_branch_with_parents() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn add_commit_rejects_unknown_parent() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1287,7 +1287,7 @@ mod tests {
 
     #[test]
     fn add_commit_with_valid_parent_succeeds() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1325,7 +1325,7 @@ mod tests {
 
     #[test]
     fn parentless_commit_becomes_tip() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1349,7 +1349,7 @@ mod tests {
 
     #[test]
     fn child_commit_replaces_parent_in_tips() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1386,7 +1386,7 @@ mod tests {
 
     #[test]
     fn diverging_twigs_create_multiple_tips() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1435,7 +1435,7 @@ mod tests {
 
     #[test]
     fn merge_commit_consolidates_tips() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1496,7 +1496,7 @@ mod tests {
 
     #[test]
     fn multiple_roots_create_multiple_tips() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1544,7 +1544,7 @@ mod tests {
 
     #[test]
     fn get_tip_ids_rejects_unknown_branch() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
 
@@ -1557,7 +1557,7 @@ mod tests {
 
     #[test]
     fn get_tips_returns_commit_structs() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1582,7 +1582,7 @@ mod tests {
 
     #[test]
     fn get_commits_returns_all_commits() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1641,7 +1641,7 @@ mod tests {
 
     #[test]
     fn get_commits_rejects_unknown_branch() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
 
@@ -1655,7 +1655,7 @@ mod tests {
 
     #[test]
     fn subscribe_to_loaded_branch_gets_immediate_update_with_frontier() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1702,7 +1702,7 @@ mod tests {
 
     #[test]
     fn add_commit_notifies_subscriber() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1744,7 +1744,7 @@ mod tests {
 
     #[test]
     fn multiple_subscribers_each_get_updates() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1791,7 +1791,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_stops_updates() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1832,7 +1832,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_clears_pending_updates() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1860,7 +1860,7 @@ mod tests {
 
     #[test]
     fn subscribe_tips_only_gets_only_tips() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[test]
     fn frontier_evolves_through_diamond_graph() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -1973,7 +1973,7 @@ mod tests {
 
     #[test]
     fn subscription_ids_are_unique() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
 
@@ -1988,7 +1988,7 @@ mod tests {
 
     #[test]
     fn frontier_with_extended_divergence() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2103,7 +2103,7 @@ mod tests {
 
     #[test]
     fn frontier_with_three_way_divergence() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let mut manager = ObjectManager::new();
         let object_id = manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2238,7 +2238,7 @@ mod tests {
 
     // NOTE: blob tests and truncation tests deleted - they were testing the old async
     // request/response API (take_requests, push_response, StorageRequest, StorageResponse).
-    // With sync storage, these need to be rewritten to use IoHandler directly.
-    // TODO: Add new blob tests using MemoryIoHandler
-    // TODO: Add new truncation tests using MemoryIoHandler
+    // With sync storage, these need to be rewritten to use Storage directly.
+    // TODO: Add new blob tests using MemoryStorage
+    // TODO: Add new truncation tests using MemoryStorage
 }

@@ -65,7 +65,7 @@ impl JazzClient {
             let id_str = std::fs::read_to_string(&client_id_path)?;
             ClientId::parse(id_str.trim()).unwrap_or_else(|| {
                 // File corrupted - generate new ID and overwrite
-                let id = context.client_id.unwrap_or_else(ClientId::new);
+                let id = context.client_id.unwrap_or_default();
                 let _ = std::fs::write(&client_id_path, id.to_string());
                 id
             })
@@ -251,10 +251,10 @@ impl JazzClient {
                 move |delta| {
                     // Route delta to the subscription's channel
                     // Note: We need to use try_send since we're in a sync callback
-                    if let Ok(senders_guard) = senders.try_read() {
-                        if let Some(sender) = senders_guard.get(&delta.handle) {
-                            let _ = sender.try_send(delta.delta);
-                        }
+                    if let Ok(senders_guard) = senders.try_read()
+                        && let Some(sender) = senders_guard.get(&delta.handle)
+                    {
+                        let _ = sender.try_send(delta.delta);
                     }
                 },
                 session,
@@ -476,7 +476,7 @@ fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime) -> Result<()>
             // Push to local runtime inbox
             let entry = InboxEntry {
                 source: Source::Server(ServerId::default()),
-                payload,
+                payload: *payload,
             };
             runtime
                 .push_sync_inbox(entry)

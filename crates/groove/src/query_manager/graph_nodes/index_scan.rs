@@ -8,7 +8,7 @@ use crate::query_manager::types::{
 
 use super::{SourceContext, SourceNode};
 
-/// Source node that scans an index via IoHandler.
+/// Source node that scans an index via Storage.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
 #[derive(Debug)]
 pub struct IndexScanNode {
@@ -71,12 +71,12 @@ impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
         let new_ids: AHashSet<ObjectId> = match &self.condition {
             ScanCondition::All => ctx
-                .io
+                .storage
                 .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
                 .into_iter()
                 .collect(),
             ScanCondition::Eq(value) => ctx
-                .io
+                .storage
                 .index_lookup(
                     self.table.as_str(),
                     self.column.as_str(),
@@ -88,7 +88,7 @@ impl SourceNode for IndexScanNode {
             ScanCondition::Range { min, max } => {
                 let start = min.as_ref();
                 let end = max.as_ref();
-                ctx.io
+                ctx.storage
                     .index_range(
                         self.table.as_str(),
                         self.column.as_str(),
@@ -143,12 +143,12 @@ impl SourceNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io_handler::{IoHandler, MemoryIoHandler};
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
+    use crate::storage::{MemoryStorage, Storage};
     use std::ops::Bound;
 
-    fn make_ctx(io: &dyn crate::io_handler::IoHandler) -> SourceContext<'_> {
-        SourceContext { io }
+    fn make_ctx(storage: &dyn crate::storage::Storage) -> SourceContext<'_> {
+        SourceContext { storage }
     }
 
     fn test_descriptor() -> RowDescriptor {
@@ -165,20 +165,23 @@ mod tests {
 
     #[test]
     fn scan_all_returns_all_rows() {
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        io.index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
+        storage
+            .index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
             .unwrap();
-        io.index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
+        storage
+            .index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
             .unwrap();
-        io.index_insert("users", "_id", "main", &Value::Uuid(row3), row3)
+        storage
+            .index_insert("users", "_id", "main", &Value::Uuid(row3), row3)
             .unwrap();
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&io);
+        let ctx = make_ctx(&storage);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 3);
@@ -190,26 +193,28 @@ mod tests {
 
     #[test]
     fn scan_eq_returns_matching_rows() {
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        io.index_insert(
-            "users",
-            "email",
-            "main",
-            &Value::Text("alice@example.com".into()),
-            row1,
-        )
-        .unwrap();
-        io.index_insert(
-            "users",
-            "email",
-            "main",
-            &Value::Text("bob@example.com".into()),
-            row2,
-        )
-        .unwrap();
+        storage
+            .index_insert(
+                "users",
+                "email",
+                "main",
+                &Value::Text("alice@example.com".into()),
+                row1,
+            )
+            .unwrap();
+        storage
+            .index_insert(
+                "users",
+                "email",
+                "main",
+                &Value::Text("bob@example.com".into()),
+                row2,
+            )
+            .unwrap();
 
         let mut node = IndexScanNode::new(
             "users",
@@ -217,7 +222,7 @@ mod tests {
             ScanCondition::Eq(Value::Text("alice@example.com".into())),
             test_descriptor(),
         );
-        let ctx = make_ctx(&io);
+        let ctx = make_ctx(&storage);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
@@ -226,16 +231,19 @@ mod tests {
 
     #[test]
     fn scan_range_returns_rows_in_range() {
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        io.index_insert("users", "score", "main", &Value::Integer(10), row1)
+        storage
+            .index_insert("users", "score", "main", &Value::Integer(10), row1)
             .unwrap();
-        io.index_insert("users", "score", "main", &Value::Integer(20), row2)
+        storage
+            .index_insert("users", "score", "main", &Value::Integer(20), row2)
             .unwrap();
-        io.index_insert("users", "score", "main", &Value::Integer(30), row3)
+        storage
+            .index_insert("users", "score", "main", &Value::Integer(30), row3)
             .unwrap();
 
         let mut node = IndexScanNode::new(
@@ -247,7 +255,7 @@ mod tests {
             },
             test_descriptor(),
         );
-        let ctx = make_ctx(&io);
+        let ctx = make_ctx(&storage);
         let delta = node.scan(&ctx);
 
         assert_eq!(delta.added.len(), 1);
@@ -256,34 +264,37 @@ mod tests {
 
     #[test]
     fn rescan_detects_changes() {
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        io.index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
+        storage
+            .index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
             .unwrap();
 
         let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
-        let ctx = make_ctx(&io);
+        let ctx = make_ctx(&storage);
         let delta1 = node.scan(&ctx);
         assert_eq!(delta1.added.len(), 1);
         assert!(contains_id(&delta1.added, row1));
 
         // Add another row
-        io.index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
+        storage
+            .index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
             .unwrap();
 
-        let ctx = make_ctx(&io);
+        let ctx = make_ctx(&storage);
         let delta2 = node.scan(&ctx);
         assert_eq!(delta2.added.len(), 1);
         assert!(contains_id(&delta2.added, row2));
         assert!(delta2.removed.is_empty());
 
         // Remove first row
-        io.index_remove("users", "_id", "main", &Value::Uuid(row1), row1)
+        storage
+            .index_remove("users", "_id", "main", &Value::Uuid(row1), row1)
             .unwrap();
 
-        let ctx = make_ctx(&io);
+        let ctx = make_ctx(&storage);
         let delta3 = node.scan(&ctx);
         assert!(delta3.added.is_empty());
         assert_eq!(delta3.removed.len(), 1);

@@ -10,7 +10,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::schema_manager::{SchemaContext, translate_column_for_index};
 
-use crate::io_handler::IoHandler;
+use crate::storage::Storage;
 
 use super::graph_nodes::alias::AliasNode;
 use super::graph_nodes::array_subquery::ArraySubqueryNode;
@@ -1177,7 +1177,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(
         &mut self,
-        io: &dyn IoHandler,
+        storage: &dyn Storage,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> RowDelta
@@ -1187,7 +1187,7 @@ impl QueryGraph {
         let order = self.topo_sort_dirty();
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
 
-        let ctx = SourceContext { io };
+        let ctx = SourceContext { storage };
         let _ = om; // om is still passed to other nodes that need it
 
         for node_id in order {
@@ -1301,8 +1301,9 @@ impl QueryGraph {
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
-                            policy_node
-                                .process_with_context(input_delta, io, om, &mut |id| row_loader(id))
+                            policy_node.process_with_context(input_delta, storage, om, &mut |id| {
+                                row_loader(id)
+                            })
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
@@ -1345,7 +1346,7 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(io, om, &mut |id| row_loader(id))
+                            subquery_node.reevaluate_all(storage, om, &mut |id| row_loader(id))
                         } else {
                             TupleDelta::new()
                         };
@@ -1353,7 +1354,7 @@ impl QueryGraph {
                         // Process outer input changes
                         let outer_delta = subquery_node.process_with_context(
                             input_delta,
-                            io,
+                            storage,
                             om,
                             &mut row_loader,
                         );

@@ -1,27 +1,22 @@
 //! RuntimeCore - Unified synchronous runtime logic for both native and WASM.
 //!
 //! This module provides the shared core logic that both groove-tokio
-//! and groove-wasm wrap. RuntimeCore is generic over `IoHandler` which
-//! provides platform-specific I/O and scheduling.
+//! and groove-wasm wrap. RuntimeCore is generic over `Storage`, `Scheduler`,
+//! and `SyncSender` which provide platform-specific behavior.
 //!
 //! ## Design
 //!
 //! - `immediate_tick()` - processes managers synchronously, schedules batched_tick if needed
-//! - `batched_tick()` - sends I/O, applies parked responses/messages, calls immediate_tick
+//! - `batched_tick()` - sends sync messages, applies parked responses/messages, calls immediate_tick
 //! - Queries return `QueryFuture` for cross-platform awaiting
-//! - Storage/sync responses are "parked" and processed in batched_tick
+//! - Sync messages are "parked" and processed in batched_tick
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! // Create runtime with platform-specific IoHandler
-//! let runtime = RuntimeCore::new(schema_manager, io_handler);
-//!
-//! // Execute operations - they schedule batched_tick automatically
+//! let runtime = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
 //! runtime.insert("users", values)?;
 //! runtime.immediate_tick();
-//!
-//! // Query returns a future
 //! let future = runtime.query(query);
 //! let results = future.await?;
 //! ```
@@ -34,7 +29,6 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 
 use crate::commit::CommitId;
-use crate::io_handler::IoHandler;
 use crate::object::ObjectId;
 use crate::query_manager::QuerySubscriptionId;
 use crate::query_manager::encoding::decode_row;
@@ -43,7 +37,69 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{RowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
-use crate::sync_manager::{ClientId, InboxEntry, PersistenceTier, ServerId};
+use crate::storage::Storage;
+use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId};
+
+// ============================================================================
+// Scheduler and SyncSender traits
+// ============================================================================
+
+/// Schedules batched ticks on the platform's event loop.
+///
+/// No `Send` bound — WASM types (`Rc`, `Function`) are `!Send`.
+/// Tokio enforces `Send` at the point of use (`Arc<Mutex<...>>`).
+pub trait Scheduler {
+    fn schedule_batched_tick(&self);
+}
+
+/// Sends sync messages to the network.
+///
+/// No `Send` bound — WASM types are `!Send`. Send is enforced
+/// by the concrete wrapping type where needed.
+pub trait SyncSender {
+    fn send_sync_message(&self, message: OutboxEntry);
+}
+
+// ============================================================================
+// Test helpers
+// ============================================================================
+
+/// No-op scheduler for tests — tests call tick explicitly.
+pub struct NoopScheduler;
+
+impl Scheduler for NoopScheduler {
+    fn schedule_batched_tick(&self) {}
+}
+
+/// Collects sync messages for test inspection.
+pub struct VecSyncSender {
+    messages: std::sync::Mutex<Vec<OutboxEntry>>,
+}
+
+impl Default for VecSyncSender {
+    fn default() -> Self {
+        Self {
+            messages: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl VecSyncSender {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take all collected messages.
+    pub fn take(&self) -> Vec<OutboxEntry> {
+        std::mem::take(&mut self.messages.lock().unwrap())
+    }
+}
+
+impl SyncSender for VecSyncSender {
+    fn send_sync_message(&self, message: OutboxEntry) {
+        self.messages.lock().unwrap().push(message);
+    }
+}
 
 /// Handle to a subscription managed by RuntimeCore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -154,11 +210,14 @@ struct PendingOneShotQuery {
 
 /// Unified runtime core for both native and WASM platforms.
 ///
-/// Generic over `IoHandler` which provides platform-specific I/O and scheduling.
-/// All business logic is synchronous - IoHandler handles async dispatch.
-pub struct RuntimeCore<H: IoHandler> {
+/// Generic over `Storage` for data persistence, `Scheduler` for tick scheduling,
+/// and `SyncSender` for network message dispatch.
+/// All business logic is synchronous.
+pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     schema_manager: SchemaManager,
-    io_handler: H,
+    pub(crate) storage: S,
+    scheduler: Sch,
+    sync_sender: Sy,
 
     /// Parked sync messages (from network).
     parked_sync_messages: Vec<InboxEntry>,
@@ -177,12 +236,14 @@ pub struct RuntimeCore<H: IoHandler> {
     ack_watchers: HashMap<CommitId, Vec<(PersistenceTier, oneshot::Sender<()>)>>,
 }
 
-impl<H: IoHandler> RuntimeCore<H> {
-    /// Create a new RuntimeCore wrapping a SchemaManager.
-    pub fn new(schema_manager: SchemaManager, io_handler: H) -> Self {
+impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
+    /// Create a new RuntimeCore.
+    pub fn new(schema_manager: SchemaManager, storage: S, scheduler: Sch, sync_sender: Sy) -> Self {
         Self {
             schema_manager,
-            io_handler,
+            storage,
+            scheduler,
+            sync_sender,
             parked_sync_messages: Vec::new(),
             subscriptions: HashMap::new(),
             subscription_reverse: HashMap::new(),
@@ -192,25 +253,40 @@ impl<H: IoHandler> RuntimeCore<H> {
         }
     }
 
-    /// Get mutable reference to the IoHandler.
-    pub fn io_handler_mut(&mut self) -> &mut H {
-        &mut self.io_handler
+    /// Get mutable reference to the Storage.
+    pub fn storage_mut(&mut self) -> &mut S {
+        &mut self.storage
     }
 
-    /// Get reference to the IoHandler.
-    pub fn io_handler(&self) -> &H {
-        &self.io_handler
+    /// Get reference to the Storage.
+    pub fn storage(&self) -> &S {
+        &self.storage
     }
 
-    /// Consume RuntimeCore and return the IoHandler.
+    /// Consume RuntimeCore and return the Storage.
     /// Used for cold-start testing to transfer driver state.
-    pub fn into_io_handler(self) -> H {
-        self.io_handler
+    pub fn into_storage(self) -> S {
+        self.storage
+    }
+
+    /// Get reference to the SyncSender.
+    pub fn sync_sender(&self) -> &Sy {
+        &self.sync_sender
+    }
+
+    /// Get reference to the Scheduler.
+    pub fn scheduler(&self) -> &Sch {
+        &self.scheduler
+    }
+
+    /// Get mutable reference to the Scheduler.
+    pub fn scheduler_mut(&mut self) -> &mut Sch {
+        &mut self.scheduler
     }
 
     /// Persist the current schema to the catalogue for server sync.
     pub fn persist_schema(&mut self) -> ObjectId {
-        self.schema_manager.persist_schema(&mut self.io_handler)
+        self.schema_manager.persist_schema(&mut self.storage)
     }
 
     // =========================================================================
@@ -219,14 +295,13 @@ impl<H: IoHandler> RuntimeCore<H> {
 
     /// Synchronous tick - processes managers, fulfills completed queries.
     ///
-    /// Schedules batched_tick if there are outbound messages (storage requests
-    /// or sync messages to send).
+    /// Schedules batched_tick if there are outbound messages.
     ///
     /// Call this after any mutation operation (insert, update, delete, etc.)
     /// to process the change and schedule any required I/O.
     pub fn immediate_tick(&mut self) -> TickOutput {
         // 1. Process logical updates (sync, subscriptions)
-        self.schema_manager.process(&mut self.io_handler);
+        self.schema_manager.process(&mut self.storage);
 
         // 2. Collect subscription updates
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
@@ -303,7 +378,7 @@ impl<H: IoHandler> RuntimeCore<H> {
 
         // 4. Schedule batched_tick if outbound messages exist
         if self.has_outbound() {
-            self.io_handler.schedule_batched_tick();
+            self.scheduler.schedule_batched_tick();
         }
 
         TickOutput {
@@ -314,17 +389,11 @@ impl<H: IoHandler> RuntimeCore<H> {
     /// Batched tick - handles all I/O, then processes parked messages.
     ///
     /// Called by the platform when the scheduled tick fires. This:
-    /// 1. Sends all storage requests (fire-and-forget)
-    /// 2. Sends all outgoing sync messages
-    /// 3. Drains any pending responses from IoHandler (for sync drivers)
-    /// 4. Applies parked storage responses
-    /// 5. Applies parked sync messages
+    /// 1. Sends all outgoing sync messages via SyncSender
+    /// 2. Processes parked sync messages
     ///
     /// Each step is followed by an immediate_tick to process results.
     pub fn batched_tick(&mut self) {
-        // Storage is now synchronous - no requests to send or responses to process.
-        // Only sync messages (network) remain async.
-
         // 1. Send all outgoing sync messages
         let outbox = self
             .schema_manager
@@ -332,12 +401,10 @@ impl<H: IoHandler> RuntimeCore<H> {
             .sync_manager_mut()
             .take_outbox();
         for msg in outbox {
-            self.io_handler.send_sync_message(msg);
+            self.sync_sender.send_sync_message(msg);
         }
 
         // 2. Process parked sync messages
-        // (calls immediate_tick internally, which may generate new outbox entries
-        // and schedule another batched_tick to send them)
         self.handle_sync_messages();
     }
 
@@ -364,11 +431,9 @@ impl<H: IoHandler> RuntimeCore<H> {
     }
 
     /// Park a sync message for processing in next batched_tick.
-    ///
-    /// Called by the IoHandler when a sync message arrives from the network.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
         self.parked_sync_messages.push(message);
-        self.io_handler.schedule_batched_tick();
+        self.scheduler.schedule_batched_tick();
     }
 
     // =========================================================================
@@ -376,12 +441,6 @@ impl<H: IoHandler> RuntimeCore<H> {
     // =========================================================================
 
     /// Subscribe to a query with a callback.
-    ///
-    /// The callback is invoked during immediate_tick() when results change.
-    /// Returns a handle for later unsubscription.
-    ///
-    /// On native platforms, the callback must be `Send` for thread safety.
-    /// On WASM (single-threaded), `Send` is not required.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn subscribe<F>(
         &mut self,
@@ -409,10 +468,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         self.subscribe_impl(query, Box::new(callback), session, None)
     }
 
-    /// Subscribe to a query with a callback and optional settled tier.
-    ///
-    /// If `settled_tier` is provided, the initial callback is held until
-    /// the query data has been confirmed at that persistence tier.
+    /// Subscribe with optional settled tier.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn subscribe_with_settled_tier<F>(
         &mut self,
@@ -443,9 +499,6 @@ impl<H: IoHandler> RuntimeCore<H> {
     }
 
     /// Internal subscribe implementation.
-    ///
-    /// Uses `subscribe_with_sync` so that subscriptions flow through the outbox
-    /// and are sent to connected servers.
     fn subscribe_impl(
         &mut self,
         query: Query,
@@ -453,7 +506,6 @@ impl<H: IoHandler> RuntimeCore<H> {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> Result<SubscriptionHandle, RuntimeError> {
-        // Use subscribe_with_sync to ensure subscriptions flow through outbox
         let query_sub_id = self
             .schema_manager
             .query_manager_mut()
@@ -486,11 +538,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         }
     }
 
-    /// Subscribe to a query with explicit schema context (for server use).
-    ///
-    /// This is used by servers to create subscriptions on behalf of clients
-    /// that may be using different schema versions. Returns a QueryId for
-    /// server-side subscription tracking.
+    /// Subscribe with explicit schema context (for server use).
     pub fn subscribe_with_schema_context(
         &mut self,
         query: Query,
@@ -511,16 +559,11 @@ impl<H: IoHandler> RuntimeCore<H> {
     // =========================================================================
 
     /// Execute a one-shot query.
-    ///
-    /// Returns results once the local query graph settles.
     pub fn query(&mut self, query: Query, session: Option<Session>) -> QueryFuture {
         self.query_with_settled_tier(query, session, None)
     }
 
     /// Execute a one-shot query with optional settled tier.
-    ///
-    /// If `settled_tier` is provided, the query is held until the data has been
-    /// confirmed at that persistence tier (via QuerySettled from the server).
     pub fn query_with_settled_tier(
         &mut self,
         query: Query,
@@ -529,7 +572,6 @@ impl<H: IoHandler> RuntimeCore<H> {
     ) -> QueryFuture {
         let (sender, receiver) = oneshot::channel();
 
-        // Subscribe with sync - this triggers server to send matching data
         let sub_id = match self.schema_manager.query_manager_mut().subscribe_with_sync(
             query,
             session,
@@ -542,7 +584,6 @@ impl<H: IoHandler> RuntimeCore<H> {
             }
         };
 
-        // Store as pending one-shot query waiting for first callback
         let handle = SubscriptionHandle(self.next_subscription_handle);
         self.next_subscription_handle += 1;
 
@@ -572,7 +613,7 @@ impl<H: IoHandler> RuntimeCore<H> {
     ) -> Result<ObjectId, RuntimeError> {
         let result = self
             .schema_manager
-            .insert_with_session(&mut self.io_handler, table, &values, session)
+            .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
         self.immediate_tick();
         Ok(result.row_id)
@@ -610,7 +651,7 @@ impl<H: IoHandler> RuntimeCore<H> {
 
         self.schema_manager
             .query_manager_mut()
-            .update_with_session(&mut self.io_handler, object_id, &current_values, session)
+            .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         self.immediate_tick();
@@ -625,7 +666,7 @@ impl<H: IoHandler> RuntimeCore<H> {
     ) -> Result<(), RuntimeError> {
         self.schema_manager
             .query_manager_mut()
-            .delete_with_session(&mut self.io_handler, object_id, session)
+            .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
         self.immediate_tick();
         Ok(())
@@ -646,7 +687,7 @@ impl<H: IoHandler> RuntimeCore<H> {
     ) -> Result<(ObjectId, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
-            .insert_with_session(&mut self.io_handler, table, &values, session)
+            .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
@@ -694,7 +735,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         let commit_id = self
             .schema_manager
             .query_manager_mut()
-            .update_with_session(&mut self.io_handler, object_id, &current_values, session)
+            .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
@@ -718,7 +759,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         let handle = self
             .schema_manager
             .query_manager_mut()
-            .delete_with_session(&mut self.io_handler, object_id, session)
+            .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
 
         let (sender, receiver) = oneshot::channel();
@@ -771,24 +812,16 @@ impl<H: IoHandler> RuntimeCore<H> {
     }
 
     /// Ensure a client exists with the given session.
-    ///
-    /// If the client already exists with the same session, this is a no-op.
-    /// If the client exists with a different session, we currently panic with todo!()
-    /// as session migration is not yet implemented.
-    /// If the client doesn't exist, it's added with the given session.
     pub fn ensure_client_with_session(&mut self, client_id: ClientId, session: Option<Session>) {
         let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
         if let Some(existing) = sm.get_client(client_id) {
-            // Client exists - check session matches
             if existing.session != session {
                 todo!(
                     "Client {:?} exists with different session - handle session change",
                     client_id
                 );
             }
-            // Session matches, nothing to do
         } else {
-            // Client doesn't exist, add it
             sm.add_client(client_id);
             if let Some(s) = session {
                 sm.set_client_session(client_id, s);
@@ -838,11 +871,13 @@ impl<H: IoHandler> RuntimeCore<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io_handler::MemoryIoHandler;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
     use crate::schema_manager::AppId;
+    use crate::storage::MemoryStorage;
     use crate::sync_manager::SyncManager;
     use std::sync::{Arc, Mutex};
+
+    type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
 
     fn test_schema() -> Schema {
         SchemaBuilder::new()
@@ -854,31 +889,29 @@ mod tests {
             .build()
     }
 
-    fn create_test_runtime() -> RuntimeCore<MemoryIoHandler> {
+    fn create_test_runtime() -> TestCore {
         let schema = test_schema();
         let app_id = AppId::from_name("test-app");
         let sync_manager = SyncManager::new();
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
-        let handler = MemoryIoHandler::new();
-        let mut core = RuntimeCore::new(schema_manager, handler);
-        // MemoryIoHandler is synchronous - no cold start needed.
-        // BTreeIndex starts with meta_loaded=true, so inserts work immediately.
+        let mut core = RuntimeCore::new(
+            schema_manager,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
         core.immediate_tick();
         core
     }
 
     /// Helper to execute a query synchronously via subscribe/tick/unsubscribe.
-    fn execute_query(
-        core: &mut RuntimeCore<MemoryIoHandler>,
-        query: Query,
-    ) -> Vec<(ObjectId, Vec<Value>)> {
+    fn execute_query(core: &mut TestCore, query: Query) -> Vec<(ObjectId, Vec<Value>)> {
         let sub_id = core
             .schema_manager_mut()
             .query_manager_mut()
             .subscribe(query)
             .unwrap();
-        // Process via immediate_tick which calls schema_manager.process(&mut io_handler)
         core.immediate_tick();
         let results = core
             .schema_manager_mut()
@@ -901,7 +934,6 @@ mod tests {
     fn test_runtime_core_insert_query() {
         let mut core = create_test_runtime();
 
-        // Insert a row
         let values = vec![
             Value::Uuid(ObjectId::new()),
             Value::Text("Alice".to_string()),
@@ -909,11 +941,9 @@ mod tests {
         let object_id = core.insert("users", values.clone(), None).unwrap();
         assert!(!object_id.0.is_nil());
 
-        // Tick to process
         core.immediate_tick();
         core.batched_tick();
 
-        // Query for the row - using the sync execute_query helper for testing
         let query = Query::new("users");
         let results = execute_query(&mut core, query);
         assert_eq!(results.len(), 1);
@@ -924,11 +954,9 @@ mod tests {
     fn test_runtime_core_subscription() {
         let mut core = create_test_runtime();
 
-        // Track callback invocations
         let updates: Arc<Mutex<Vec<SubscriptionDelta>>> = Arc::new(Mutex::new(Vec::new()));
         let updates_clone = updates.clone();
 
-        // Subscribe
         let query = Query::new("users");
         let handle = core
             .subscribe(
@@ -940,15 +968,12 @@ mod tests {
             )
             .unwrap();
 
-        // Insert a row
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
         let _object_id = core.insert("users", values, None).unwrap();
 
-        // Tick to process - callbacks are invoked during immediate_tick
         core.immediate_tick();
         core.batched_tick();
 
-        // Should have received an update
         let updates_vec = updates.lock().unwrap();
         assert!(
             !updates_vec.is_empty(),
@@ -956,7 +981,6 @@ mod tests {
         );
         assert_eq!(updates_vec[0].handle, handle);
 
-        // Unsubscribe
         drop(updates_vec);
         core.unsubscribe(handle);
     }
@@ -965,31 +989,26 @@ mod tests {
     fn test_runtime_core_update_delete() {
         let mut core = create_test_runtime();
 
-        // Insert a row
         let id = ObjectId::new();
         let values = vec![Value::Uuid(id), Value::Text("Charlie".to_string())];
         let object_id = core.insert("users", values, None).unwrap();
         core.immediate_tick();
         core.batched_tick();
 
-        // Partial update
         let updates = vec![("name".to_string(), Value::Text("Dave".to_string()))];
         core.update(object_id, updates, None).unwrap();
         core.immediate_tick();
         core.batched_tick();
 
-        // Verify via query
         let query = Query::new("users");
         let results = execute_query(&mut core, query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[1], Value::Text("Dave".to_string()));
 
-        // Delete
         core.delete(object_id, None).unwrap();
         core.immediate_tick();
         core.batched_tick();
 
-        // Verify deleted
         let query = Query::new("users");
         let results = execute_query(&mut core, query);
         assert_eq!(results.len(), 0);
@@ -1002,7 +1021,6 @@ mod tests {
 
         let mut core = create_test_runtime();
 
-        // Park a message
         let message = InboxEntry {
             source: Source::Server(ServerId::new()),
             payload: SyncPayload::ObjectUpdated {
@@ -1014,7 +1032,6 @@ mod tests {
         };
         core.park_sync_message(message);
 
-        // Should have parked message
         assert_eq!(core.parked_sync_messages.len(), 1);
     }
 
@@ -1028,9 +1045,9 @@ mod tests {
 
     /// Three-tier RuntimeCore setup for durability tests.
     struct ThreeTierRC {
-        a: RuntimeCore<MemoryIoHandler>,
-        b: RuntimeCore<MemoryIoHandler>,
-        c: RuntimeCore<MemoryIoHandler>,
+        a: TestCore,
+        b: TestCore,
+        c: TestCore,
         a_client_of_b: ClientId,
         b_server_for_a: ServerId,
         b_client_of_c: ClientId,
@@ -1045,18 +1062,33 @@ mod tests {
         let sm_a = SyncManager::new();
         let mgr_a =
             SchemaManager::new(sm_a, schema.clone(), app_id.clone(), "dev", "main").unwrap();
-        let mut a = RuntimeCore::new(mgr_a, MemoryIoHandler::new());
+        let mut a = RuntimeCore::new(
+            mgr_a,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
 
         // B = Worker server
         let sm_b = SyncManager::new().with_tier(PersistenceTier::Worker);
         let mgr_b =
             SchemaManager::new(sm_b, schema.clone(), app_id.clone(), "dev", "main").unwrap();
-        let mut b = RuntimeCore::new(mgr_b, MemoryIoHandler::new());
+        let mut b = RuntimeCore::new(
+            mgr_b,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
 
         // C = EdgeServer
         let sm_c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
         let mgr_c = SchemaManager::new(sm_c, schema, app_id, "dev", "main").unwrap();
-        let mut c = RuntimeCore::new(mgr_c, MemoryIoHandler::new());
+        let mut c = RuntimeCore::new(
+            mgr_c,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
 
         let a_client_of_b = ClientId::new();
         let b_server_for_a = ServerId::new();
@@ -1089,9 +1121,9 @@ mod tests {
         a.batched_tick();
         b.batched_tick();
         c.batched_tick();
-        a.io_handler_mut().take_outbox();
-        b.io_handler_mut().take_outbox();
-        c.io_handler_mut().take_outbox();
+        a.sync_sender().take();
+        b.sync_sender().take();
+        c.sync_sender().take();
 
         ThreeTierRC {
             a,
@@ -1105,8 +1137,7 @@ mod tests {
     }
 
     /// Approve all pending updates on a RuntimeCore's SyncManager.
-    /// Uses direct field access to avoid double mutable borrow issues.
-    fn approve_all_pending_rc(core: &mut RuntimeCore<MemoryIoHandler>) {
+    fn approve_all_pending_rc(core: &mut TestCore) {
         let pending_ids: Vec<_> = core
             .schema_manager
             .query_manager_mut()
@@ -1116,7 +1147,7 @@ mod tests {
             core.schema_manager
                 .query_manager_mut()
                 .sync_manager_mut()
-                .approve_update(&mut core.io_handler, id);
+                .approve_update(&mut core.storage, id);
         }
     }
 
@@ -1127,7 +1158,7 @@ mod tests {
 
             // A outbox → B
             s.a.batched_tick();
-            let a_out = s.a.io_handler_mut().take_outbox();
+            let a_out = s.a.sync_sender().take();
             for entry in a_out {
                 if entry.destination == Destination::Server(s.b_server_for_a) {
                     any_messages = true;
@@ -1143,7 +1174,7 @@ mod tests {
             approve_all_pending_rc(&mut s.b);
             s.b.immediate_tick();
             s.b.batched_tick();
-            let b_out = s.b.io_handler_mut().take_outbox();
+            let b_out = s.b.sync_sender().take();
             for entry in b_out {
                 match &entry.destination {
                     Destination::Client(cid) if *cid == s.a_client_of_b => {
@@ -1169,7 +1200,7 @@ mod tests {
             approve_all_pending_rc(&mut s.c);
             s.c.immediate_tick();
             s.c.batched_tick();
-            let c_out = s.c.io_handler_mut().take_outbox();
+            let c_out = s.c.sync_sender().take();
             for entry in c_out {
                 if entry.destination == Destination::Client(s.b_client_of_c) {
                     any_messages = true;
@@ -1193,7 +1224,7 @@ mod tests {
     /// Pump only A → B (one hop, no C).
     fn pump_a_to_b(s: &mut ThreeTierRC) {
         s.a.batched_tick();
-        let a_out = s.a.io_handler_mut().take_outbox();
+        let a_out = s.a.sync_sender().take();
         for entry in a_out {
             if entry.destination == Destination::Server(s.b_server_for_a) {
                 s.b.park_sync_message(InboxEntry {
@@ -1210,7 +1241,7 @@ mod tests {
     /// Route B's outbox to both A and C as appropriate.
     fn route_b_outbox(s: &mut ThreeTierRC) {
         s.b.batched_tick();
-        let b_out = s.b.io_handler_mut().take_outbox();
+        let b_out = s.b.sync_sender().take();
         for entry in b_out {
             match &entry.destination {
                 Destination::Client(cid) if *cid == s.a_client_of_b => {
@@ -1230,14 +1261,14 @@ mod tests {
         }
     }
 
-    /// Pump B → A (acks back). Also routes B→C messages properly.
+    /// Pump B → A (acks back).
     fn pump_b_to_a(s: &mut ThreeTierRC) {
         route_b_outbox(s);
         s.a.batched_tick();
         s.a.immediate_tick();
     }
 
-    /// Pump B → C (forward to edge). Also routes B→A messages properly.
+    /// Pump B → C (forward to edge).
     fn pump_b_to_c(s: &mut ThreeTierRC) {
         route_b_outbox(s);
         s.c.batched_tick();
@@ -1249,7 +1280,7 @@ mod tests {
     fn pump_c_to_b_to_a(s: &mut ThreeTierRC) {
         // C → B
         s.c.batched_tick();
-        let c_out = s.c.io_handler_mut().take_outbox();
+        let c_out = s.c.sync_sender().take();
         for entry in c_out {
             if entry.destination == Destination::Client(s.b_client_of_c) {
                 s.b.park_sync_message(InboxEntry {
@@ -1265,8 +1296,6 @@ mod tests {
         pump_b_to_a(s);
     }
 
-    // --- Test 1: insert returns immediately ---
-
     #[test]
     fn rc_insert_returns_immediately() {
         let mut s = create_3tier_rc();
@@ -1274,14 +1303,11 @@ mod tests {
         let id = s.a.insert("users", values, None).unwrap();
         assert!(!id.0.is_nil());
 
-        // Query locally to verify row is present
         let query = Query::new("users");
         let results = execute_query(&mut s.a, query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, id);
     }
-
-    // --- Test 2: insert data syncs to server ---
 
     #[test]
     fn rc_insert_data_syncs_to_server() {
@@ -1289,17 +1315,13 @@ mod tests {
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
         let id = s.a.insert("users", values, None).unwrap();
 
-        // Pump A → B
         pump_a_to_b(&mut s);
 
-        // Query on B
         let query = Query::new("users");
         let results = execute_query(&mut s.b, query);
         assert_eq!(results.len(), 1, "Server B should have the synced row");
         assert_eq!(results[0].0, id);
     }
-
-    // --- Test 3: update syncs ---
 
     #[test]
     fn rc_update_sync() {
@@ -1308,19 +1330,15 @@ mod tests {
         let id = s.a.insert("users", values, None).unwrap();
         pump_a_to_b(&mut s);
 
-        // Update on A
         s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
             .unwrap();
         pump_a_to_b(&mut s);
 
-        // Verify on B
         let query = Query::new("users");
         let results = execute_query(&mut s.b, query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[1], Value::Text("Bob".into()));
     }
-
-    // --- Test 4: delete syncs ---
 
     #[test]
     fn rc_delete_sync() {
@@ -1337,8 +1355,6 @@ mod tests {
         assert_eq!(results.len(), 0, "Row should be deleted on B");
     }
 
-    // --- Test 6: insert_persisted resolves on Worker ack ---
-
     #[test]
     fn rc_insert_persisted_resolves_on_worker_ack() {
         let mut s = create_3tier_rc();
@@ -1348,29 +1364,20 @@ mod tests {
                 .unwrap();
         assert!(!id.0.is_nil());
 
-        // Receiver should NOT be ready yet
         assert!(
             receiver.try_recv().is_err() || receiver.try_recv() == Ok(None),
             "Receiver should not be resolved before ack"
         );
 
-        // Pump A → B (B persists and emits Worker ack) → A
         pump_a_to_b(&mut s);
         pump_b_to_a(&mut s);
 
-        // Now receiver should be resolved
-        // We can't use try_recv after the first check since oneshot is consumed,
-        // so let's restructure: use a fresh test flow
-        // Actually, oneshot::Receiver::try_recv() returns Ok(None) if not ready, Ok(Some(T)) if ready
-        // Let's just check the final state
         match receiver.try_recv() {
-            Ok(Some(())) => {} // Success
+            Ok(Some(())) => {}
             Ok(None) => panic!("Receiver should be resolved after Worker ack"),
             Err(_) => panic!("Receiver was cancelled"),
         }
     }
-
-    // --- Test 7: insert_persisted holds until correct tier ---
 
     #[test]
     fn rc_insert_persisted_holds_until_correct_tier() {
@@ -1380,30 +1387,24 @@ mod tests {
             s.a.insert_persisted("users", values, None, PersistenceTier::EdgeServer)
                 .unwrap();
 
-        // Pump A → B (Worker ack) → A
         pump_a_to_b(&mut s);
         pump_b_to_a(&mut s);
 
-        // Worker ack should NOT satisfy EdgeServer request
         assert_eq!(
             receiver.try_recv(),
             Ok(None),
             "Worker ack should not satisfy EdgeServer request"
         );
 
-        // Pump B → C (forward to edge) → C acks → back through B → A
         pump_b_to_c(&mut s);
         pump_c_to_b_to_a(&mut s);
 
-        // Now EdgeServer ack should satisfy
         match receiver.try_recv() {
-            Ok(Some(())) => {} // Success
+            Ok(Some(())) => {}
             Ok(None) => panic!("Receiver should be resolved after EdgeServer ack"),
             Err(_) => panic!("Receiver was cancelled"),
         }
     }
-
-    // --- Test 8: higher tier satisfies lower ---
 
     #[test]
     fn rc_insert_persisted_higher_tier_satisfies_lower() {
@@ -1413,18 +1414,14 @@ mod tests {
             s.a.insert_persisted("users", values, None, PersistenceTier::Worker)
                 .unwrap();
 
-        // Pump all the way to EdgeServer and back
         pump_3tier(&mut s);
 
-        // EdgeServer ack >= Worker, should resolve
         match receiver.try_recv() {
             Ok(Some(())) => {}
             Ok(None) => panic!("EdgeServer ack should satisfy Worker request"),
             Err(_) => panic!("Receiver was cancelled"),
         }
     }
-
-    // --- Test 9: update_persisted resolves on ack ---
 
     #[test]
     fn rc_update_persisted_resolves_on_ack() {
@@ -1451,13 +1448,10 @@ mod tests {
             Err(_) => panic!("Receiver was cancelled"),
         }
 
-        // Verify updated values on B
         let query = Query::new("users");
         let results = execute_query(&mut s.b, query);
         assert_eq!(results[0].1[1], Value::Text("Bob".into()));
     }
-
-    // --- Test 10: delete_persisted resolves on ack ---
 
     #[test]
     fn rc_delete_persisted_resolves_on_ack() {
@@ -1479,13 +1473,10 @@ mod tests {
             Err(_) => panic!("Receiver was cancelled"),
         }
 
-        // Verify deleted on B
         let query = Query::new("users");
         let results = execute_query(&mut s.b, query);
         assert_eq!(results.len(), 0);
     }
-
-    // --- Test 11: multiple persisted inserts are independent ---
 
     #[test]
     fn rc_multiple_persisted_inserts_independent() {
@@ -1501,10 +1492,8 @@ mod tests {
             s.a.insert_persisted("users", values2, None, PersistenceTier::Worker)
                 .unwrap();
 
-        // Pump everything through
         pump_3tier(&mut s);
 
-        // Both should resolve
         match receiver1.try_recv() {
             Ok(Some(())) => {}
             Ok(None) => panic!("receiver1 should be resolved"),
@@ -1517,20 +1506,15 @@ mod tests {
         }
     }
 
-    // --- Test 12: query with no settled tier resolves immediately ---
-
     #[test]
     fn rc_query_no_settled_tier_immediate() {
         let mut s = create_3tier_rc();
 
-        // Insert data first
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
         let id = s.a.insert("users", values, None).unwrap();
 
-        // query_with_settled_tier(None) should resolve during its own immediate_tick
         let mut future = s.a.query_with_settled_tier(Query::new("users"), None, None);
 
-        // Poll the future — it should be Ready immediately
         let waker = noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
         match Pin::new(&mut future).poll(&mut cx) {
@@ -1543,17 +1527,13 @@ mod tests {
         }
     }
 
-    // --- Test 13: query with settled_tier holds until tier confirms ---
-
     #[test]
     fn rc_query_settled_tier_holds() {
         let mut s = create_3tier_rc();
 
-        // Insert data locally
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
         let id = s.a.insert("users", values, None).unwrap();
 
-        // Query with settled_tier=Worker — should NOT resolve yet
         let mut future =
             s.a.query_with_settled_tier(Query::new("users"), None, Some(PersistenceTier::Worker));
 
@@ -1564,12 +1544,9 @@ mod tests {
             "Query should be pending before Worker settlement"
         );
 
-        // Pump sync: A → B (subscription flows to server, B settles, sends QuerySettled)
         pump_a_to_b(&mut s);
-        // B should have settled and produced QuerySettled — pump back to A
         pump_b_to_a(&mut s);
 
-        // Now the query should resolve
         match Pin::new(&mut future).poll(&mut cx) {
             Poll::Ready(Ok(results)) => {
                 assert_eq!(results.len(), 1, "Should have one row after settlement");
@@ -1580,8 +1557,6 @@ mod tests {
         }
     }
 
-    // --- Test 14: subscribe with settled_tier holds callback ---
-
     #[test]
     fn rc_subscribe_settled_tier() {
         let mut s = create_3tier_rc();
@@ -1589,7 +1564,6 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
         let received_clone = received.clone();
 
-        // Subscribe with settled_tier=Worker
         let _handle =
             s.a.subscribe_with_settled_tier(
                 Query::new("users"),
@@ -1611,34 +1585,28 @@ mod tests {
             )
             .unwrap();
 
-        // Insert data on A
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
         let id = s.a.insert("users", values, None).unwrap();
         s.a.immediate_tick();
 
-        // Callback should NOT have fired yet (tier not satisfied)
         assert!(
             received.lock().unwrap().is_empty(),
             "Callback should not fire before Worker settlement"
         );
 
-        // Pump sync: subscription + data to B, B settles, QuerySettled back
         pump_a_to_b(&mut s);
         pump_b_to_a(&mut s);
 
-        // Callback should now fire with accumulated data
         let calls = received.lock().unwrap();
         assert!(
             !calls.is_empty(),
             "Callback should fire after Worker QuerySettled"
         );
-        // First delivery should contain the full accumulated state
         let first_delivery = &calls[0];
         assert_eq!(first_delivery.len(), 1, "Should have one row");
         assert_eq!(first_delivery[0].0, id);
     }
 
-    /// Helper to create a no-op waker for polling futures in tests.
     fn noop_waker() -> std::task::Waker {
         fn noop(_: *const ()) {}
         fn clone(_: *const ()) -> std::task::RawWaker {
@@ -1649,9 +1617,6 @@ mod tests {
         unsafe { std::task::Waker::from_raw(std::task::RawWaker::new(std::ptr::null(), &VTABLE)) }
     }
 
-    /// Sync edit fires callback synchronously (when index IS ready).
-    /// This documents the invariant that inserts are visible immediately
-    /// with a synchronous IoHandler.
     #[test]
     fn test_sync_edit_fires_callback_synchronously() {
         let mut core = create_test_runtime();
@@ -1672,11 +1637,9 @@ mod tests {
             )
             .unwrap();
 
-        // Initial tick
         core.immediate_tick();
         let initial_count = *callback_count.lock().unwrap();
 
-        // Insert - should fire callback synchronously
         let values = vec![
             Value::Uuid(ObjectId::new()),
             Value::Text("test@test.com".to_string()),

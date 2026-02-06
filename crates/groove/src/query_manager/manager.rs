@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::commit::{CommitId, StoredState};
-use crate::io_handler::IoHandler;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
+use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, PendingPermissionCheck, PendingUpdateId, PersistenceTier, QueryId, SyncManager,
 };
@@ -122,8 +122,8 @@ impl InsertHandle {
     /// Check if the row is indexed (appears in the _id index).
     ///
     /// After insert + process(), the row should be indexed.
-    pub fn is_indexed(&self, qm: &QueryManager, io: &dyn IoHandler, table: &str) -> bool {
-        qm.row_is_indexed(io, table, self.row_id)
+    pub fn is_indexed(&self, qm: &QueryManager, storage: &dyn Storage, table: &str) -> bool {
+        qm.row_is_indexed(storage, table, self.row_id)
     }
 }
 
@@ -452,7 +452,7 @@ impl QueryManager {
             .collect()
     }
 
-    /// No-op: IoHandler manages its own index storage.
+    /// No-op: Storage manages its own index storage.
     /// Kept as public API for SchemaManager compatibility.
     pub fn ensure_indices_for_branch(
         &mut self,
@@ -460,7 +460,7 @@ impl QueryManager {
         _branch: &str,
         _table_schema: &TableSchema,
     ) {
-        // No-op: IoHandler manages index storage directly
+        // No-op: Storage manages index storage directly
     }
 
     /// Get the underlying SyncManager.
@@ -534,35 +534,35 @@ impl QueryManager {
     /// Check if a row is indexed on a specific branch (appears in the _id index).
     pub fn row_is_indexed_on_branch(
         &self,
-        io: &dyn IoHandler,
+        storage: &dyn Storage,
         table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> bool {
-        let ids = io.index_lookup(table, "_id", branch, &Value::Uuid(row_id));
+        let ids = storage.index_lookup(table, "_id", branch, &Value::Uuid(row_id));
         ids.contains(&row_id)
     }
 
     /// Check if a row is indexed on the default branch (appears in the _id index).
-    pub fn row_is_indexed(&self, io: &dyn IoHandler, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_indexed_on_branch(io, table, &self.current_branch(), row_id)
+    pub fn row_is_indexed(&self, storage: &dyn Storage, table: &str, row_id: ObjectId) -> bool {
+        self.row_is_indexed_on_branch(storage, table, &self.current_branch(), row_id)
     }
 
     /// Check if a row is soft-deleted on a specific branch.
     pub fn row_is_deleted_on_branch(
         &self,
-        io: &dyn IoHandler,
+        storage: &dyn Storage,
         table: &str,
         branch: &str,
         row_id: ObjectId,
     ) -> bool {
-        let ids = io.index_lookup(table, "_id_deleted", branch, &Value::Uuid(row_id));
+        let ids = storage.index_lookup(table, "_id_deleted", branch, &Value::Uuid(row_id));
         ids.contains(&row_id)
     }
 
     /// Check if a row is soft-deleted (appears in _id_deleted but not _id).
-    pub fn row_is_deleted(&self, io: &dyn IoHandler, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_deleted_on_branch(io, table, &self.current_branch(), row_id)
+    pub fn row_is_deleted(&self, storage: &dyn Storage, table: &str, row_id: ObjectId) -> bool {
+        self.row_is_deleted_on_branch(storage, table, &self.current_branch(), row_id)
     }
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
@@ -632,13 +632,13 @@ impl QueryManager {
     ///
     /// Returns an `InsertHandle` that can be polled to check durability.
     /// Index updates happen immediately (creating sentinels if needed).
-    pub fn insert<H: IoHandler>(
+    pub fn insert<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         table: &str,
         values: &[Value],
     ) -> Result<InsertHandle, QueryError> {
-        self.insert_with_session(io, table, values, None)
+        self.insert_with_session(storage, table, values, None)
     }
 
     /// Insert a new row with session-based policy checking.
@@ -646,9 +646,9 @@ impl QueryManager {
     /// If the table has an INSERT WITH CHECK policy and a session is provided,
     /// the policy is evaluated against the new row values. If the policy
     /// denies the insert, `PolicyDenied` is returned.
-    pub fn insert_with_session<H: IoHandler>(
+    pub fn insert_with_session<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         table: &str,
         values: &[Value],
         session: Option<&Session>,
@@ -686,7 +686,10 @@ impl QueryManager {
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), table.to_string());
 
-        let object_id = self.sync_manager.object_manager.create(io, Some(metadata));
+        let object_id = self
+            .sync_manager
+            .object_manager
+            .create(storage, Some(metadata));
         let author = object_id; // Self-authored
 
         // Add commit with row data
@@ -694,7 +697,15 @@ impl QueryManager {
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(io, object_id, &branch, vec![], data.clone(), author, None)
+            .add_commit(
+                storage,
+                object_id,
+                &branch,
+                vec![],
+                data.clone(),
+                author,
+                None,
+            )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
@@ -702,7 +713,7 @@ impl QueryManager {
             .forward_update_to_servers(object_id, branch.into());
 
         // Update indices immediately and persist
-        self.update_indices_for_insert(io, table, object_id, &data, &descriptor)?;
+        self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
@@ -716,20 +727,20 @@ impl QueryManager {
     /// Insert a new row into a table on a specific branch.
     ///
     /// Used by SchemaManager for schema-aware inserts.
-    pub fn insert_on_branch<H: IoHandler>(
+    pub fn insert_on_branch<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         table: &str,
         branch: &str,
         values: &[Value],
     ) -> Result<InsertHandle, QueryError> {
-        self.insert_on_branch_with_session(io, table, branch, values, None)
+        self.insert_on_branch_with_session(storage, table, branch, values, None)
     }
 
     /// Insert a new row on a specific branch with session-based policy checking.
-    pub fn insert_on_branch_with_session<H: IoHandler>(
+    pub fn insert_on_branch_with_session<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         table: &str,
         branch: &str,
         values: &[Value],
@@ -768,14 +779,25 @@ impl QueryManager {
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), table.to_string());
 
-        let object_id = self.sync_manager.object_manager.create(io, Some(metadata));
+        let object_id = self
+            .sync_manager
+            .object_manager
+            .create(storage, Some(metadata));
         let author = object_id; // Self-authored
 
         // Add commit with row data to specified branch
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit(io, object_id, branch, vec![], data.clone(), author, None)
+            .add_commit(
+                storage,
+                object_id,
+                branch,
+                vec![],
+                data.clone(),
+                author,
+                None,
+            )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
@@ -784,7 +806,7 @@ impl QueryManager {
 
         // Update indices on specified branch
         Self::update_indices_for_insert_on_branch(
-            io,
+            storage,
             table,
             branch,
             object_id,
@@ -932,13 +954,13 @@ impl QueryManager {
     }
 
     /// Update a row.
-    pub fn update<H: IoHandler>(
+    pub fn update<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
         values: &[Value],
     ) -> Result<CommitId, QueryError> {
-        self.update_with_session(io, id, values, None)
+        self.update_with_session(storage, id, values, None)
     }
 
     /// Update a row with session-based policy checking.
@@ -946,9 +968,9 @@ impl QueryManager {
     /// If the table has policies and a session is provided:
     /// - USING policy is checked against the old row (if exists)
     /// - WITH CHECK policy is checked against the new values
-    pub fn update_with_session<H: IoHandler>(
+    pub fn update_with_session<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
         values: &[Value],
         session: Option<&Session>,
@@ -1024,7 +1046,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
-                io,
+                storage,
                 id,
                 self.current_branch(),
                 parents,
@@ -1040,7 +1062,14 @@ impl QueryManager {
             .forward_update_to_servers(id, branch.into());
 
         // Update indices and persist modified nodes
-        self.update_indices_for_update(io, &table_name.0, id, &old_data, &new_data, &descriptor)?;
+        self.update_indices_for_update(
+            storage,
+            &table_name.0,
+            id,
+            &old_data,
+            &new_data,
+            &descriptor,
+        )?;
 
         // Mark subscriptions dirty and notify about content update
         self.mark_subscriptions_dirty(&table_name.0);
@@ -1076,9 +1105,9 @@ impl QueryManager {
     /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
     /// This preserves the row data for queries with `include_deleted`.
     /// Removes from `_id` and all column indices, adds to `_id_deleted` index.
-    pub fn delete<H: IoHandler>(
+    pub fn delete<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check for hard delete first
@@ -1097,7 +1126,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(io, &table, id) {
+        if self.row_is_deleted(storage, &table, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -1133,7 +1162,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
-                io,
+                storage,
                 id,
                 self.current_branch(),
                 parents,
@@ -1144,7 +1173,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(io, &table, id, &old_data, &descriptor)?;
+        self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1160,9 +1189,9 @@ impl QueryManager {
     ///
     /// Checks DELETE USING policy against the existing row before allowing deletion.
     /// Falls back to UPDATE's USING policy if no DELETE policy is defined.
-    pub fn delete_with_session<H: IoHandler>(
+    pub fn delete_with_session<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
@@ -1182,7 +1211,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(io, &table, id) {
+        if self.row_is_deleted(storage, &table, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -1230,7 +1259,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
-                io,
+                storage,
                 id,
                 self.current_branch(),
                 parents,
@@ -1248,7 +1277,7 @@ impl QueryManager {
         }
 
         // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(io, &table, id, &old_data, &descriptor)?;
+        self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty(&table);
@@ -1263,9 +1292,9 @@ impl QueryManager {
     /// Soft delete a row on a specific branch.
     ///
     /// Used by SchemaManager for schema-aware deletes.
-    pub fn delete_on_branch<H: IoHandler>(
+    pub fn delete_on_branch<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         table: &str,
         branch: &str,
         id: ObjectId,
@@ -1278,7 +1307,7 @@ impl QueryManager {
         let table_name = TableName::new(table);
 
         // Check if already soft-deleted on this branch
-        if self.row_is_deleted_on_branch(io, table, branch, id) {
+        if self.row_is_deleted_on_branch(storage, table, branch, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
@@ -1313,7 +1342,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
-                io,
+                storage,
                 id,
                 branch,
                 parents,
@@ -1325,7 +1354,7 @@ impl QueryManager {
 
         // Update indices on this branch
         Self::update_indices_for_soft_delete_on_branch(
-            io,
+            storage,
             table,
             branch,
             id,
@@ -1347,9 +1376,9 @@ impl QueryManager {
     ///
     /// Restores a row from the `_id_deleted` index back to the `_id` and column indices.
     /// Creates a new commit with the provided values (no `delete` metadata).
-    pub fn undelete<H: IoHandler>(
+    pub fn undelete<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
         values: &[Value],
     ) -> Result<InsertHandle, QueryError> {
@@ -1369,7 +1398,7 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(io, &table, id) {
+        if !self.row_is_deleted(storage, &table, id) {
             return Err(QueryError::RowNotDeleted(id));
         }
 
@@ -1406,7 +1435,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
-                io,
+                storage,
                 id,
                 self.current_branch(),
                 parents,
@@ -1417,7 +1446,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from _id_deleted, add to _id and column indices
-        self.update_indices_for_undelete(io, &table, id, &new_data, &descriptor)?;
+        self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
 
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(&table);
@@ -1434,9 +1463,9 @@ impl QueryManager {
     /// Removes from ALL indices including `_id_deleted`.
     /// Truncates history: only the hard delete tombstone remains.
     /// Hard deletes are authoritative and override any concurrent or subsequent commits.
-    pub fn hard_delete<H: IoHandler>(
+    pub fn hard_delete<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check if already hard-deleted
@@ -1487,7 +1516,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .add_commit(
-                io,
+                storage,
                 id,
                 self.current_branch(),
                 parents,
@@ -1498,7 +1527,7 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Update indices: remove from ALL indices including _id_deleted
-        self.update_indices_for_hard_delete(io, &table, id, old_data.as_deref(), &descriptor)?;
+        self.update_indices_for_hard_delete(storage, &table, id, old_data.as_deref(), &descriptor)?;
 
         // Truncate branch: set tails = [delete_commit_id], removing all history
         // (In ObjectManager, this would be done via set_tails or similar)
@@ -1506,7 +1535,7 @@ impl QueryManager {
         let mut tail_ids = std::collections::HashSet::new();
         tail_ids.insert(delete_commit_id);
         let _ = self.sync_manager.object_manager.truncate_branch(
-            io,
+            storage,
             id,
             self.current_branch(),
             tail_ids,
@@ -1526,9 +1555,9 @@ impl QueryManager {
     ///
     /// Can only be called on rows that are already soft-deleted.
     /// Removes the row from `_id_deleted` and truncates history.
-    pub fn truncate<H: IoHandler>(
+    pub fn truncate<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check for hard delete first
@@ -1545,12 +1574,12 @@ impl QueryManager {
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(io, &table, id) {
+        if !self.row_is_deleted(storage, &table, id) {
             return Err(QueryError::RowNotDeleted(id));
         }
 
         // Upgrade to hard delete
-        self.hard_delete(io, id)
+        self.hard_delete(storage, id)
     }
 
     /// Get a row by ID if loaded in ObjectManager.
@@ -1788,10 +1817,10 @@ impl QueryManager {
     /// Call this after activating new schemas (via try_activate_pending_schemas)
     /// and updating the schema context (via sync_context). Rows that arrived
     /// before their schema was known will be reprocessed.
-    pub fn retry_pending_row_updates(&mut self, io: &mut dyn IoHandler) {
+    pub fn retry_pending_row_updates(&mut self, storage: &mut dyn Storage) {
         let pending = std::mem::take(&mut self.pending_row_updates);
         for update in pending {
-            self.handle_object_update(io, update);
+            self.handle_object_update(storage, update);
         }
     }
 
@@ -1875,33 +1904,33 @@ impl QueryManager {
     /// - Flushes pending index updates when indices become ready
     /// - Marks subscriptions with pending IDs dirty when objects become available
     /// - Settles all subscription graphs (row data loaded on-demand from ObjectManager)
-    pub fn process<H: IoHandler>(&mut self, io: &mut H) {
+    pub fn process<H: Storage>(&mut self, storage: &mut H) {
         // 1. Process SyncManager inbox (receives client writes)
-        self.sync_manager.process_inbox(io);
+        self.sync_manager.process_inbox(storage);
 
         // 2. Process object updates from SyncManager FIRST
         // This ensures indices are updated before query subscriptions are processed,
         // so new subscriptions can find data that arrived in the same batch.
         let updates = self.sync_manager.object_manager.take_all_object_updates();
         for update in updates {
-            self.handle_object_update(io, update);
+            self.handle_object_update(storage, update);
         }
 
         // 3. Process pending query subscriptions from downstream clients
         // (after indices are updated, so initial settle finds existing data)
-        self.process_pending_query_subscriptions(io);
+        self.process_pending_query_subscriptions(storage);
 
         // 3b. Process pending query unsubscriptions from downstream clients
         self.process_pending_query_unsubscriptions();
 
         // 4. Pick up new permission check intents from SyncManager
-        self.pick_up_pending_permission_checks(io);
+        self.pick_up_pending_permission_checks(storage);
 
         // 4b. Settle policy graphs and finalize completed checks
-        self.settle_policy_checks(io);
+        self.settle_policy_checks(storage);
 
-        // 5. Index storage is handled by IoHandler via batched_tick() - not here.
-        // Tests/benchmarks that don't need real storage use NullIoHandler.
+        // 5. Index storage is handled by Storage via batched_tick() - not here.
+        // Tests/benchmarks that don't need real storage use NullStorage.
 
         // 6. Recompile any subscriptions marked as stale due to schema changes
         self.recompile_stale_subscriptions();
@@ -1918,7 +1947,7 @@ impl QueryManager {
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
         let om = &self.sync_manager.object_manager;
-        let io_ref: &dyn IoHandler = io;
+        let storage_ref: &dyn Storage = storage;
         let schema_context = &self.schema_context;
         let branch_schema_map = &self.branch_schema_map;
 
@@ -1990,7 +2019,7 @@ impl QueryManager {
                 Some((content, commit_id))
             };
 
-            let delta = subscription.graph.settle(io_ref, om, row_loader);
+            let delta = subscription.graph.settle(storage_ref, om, row_loader);
 
             let tier_satisfied = match &subscription.settled_tier {
                 None => true, // No tier requirement → immediate (current behavior)
@@ -2029,15 +2058,15 @@ impl QueryManager {
         // async loads - objects are available when we query for them.
 
         // 8. Settle server-side subscriptions and update scopes
-        self.settle_server_subscriptions(io_ref);
+        self.settle_server_subscriptions(storage_ref);
     }
 
     /// Pick up pending permission checks from SyncManager and evaluate them.
-    fn pick_up_pending_permission_checks<H: IoHandler>(&mut self, io: &mut H) {
+    fn pick_up_pending_permission_checks<H: Storage>(&mut self, storage: &mut H) {
         let pending = self.sync_manager.take_pending_permission_checks();
 
         for check in pending {
-            self.evaluate_write_permission(io, check);
+            self.evaluate_write_permission(storage, check);
         }
     }
 
@@ -2047,7 +2076,7 @@ impl QueryManager {
     /// 1. Build a QueryGraph with the client's session
     /// 2. Settle the graph to get contributing ObjectIds
     /// 3. Set the scope in SyncManager (which triggers initial sync)
-    fn process_pending_query_subscriptions<H: IoHandler>(&mut self, io: &mut H) {
+    fn process_pending_query_subscriptions<H: Storage>(&mut self, storage: &mut H) {
         let pending = self.sync_manager.take_pending_query_subscriptions();
 
         for sub in pending {
@@ -2089,7 +2118,7 @@ impl QueryManager {
 
             // Initial settle to populate the graph
             let om = &self.sync_manager.object_manager;
-            let io_ref: &dyn IoHandler = io;
+            let storage_ref: &dyn Storage = storage;
 
             // Resolve branches: use explicit branches or fall back to schema context
             let branches: Vec<String> = if sub.query.branches.is_empty() {
@@ -2135,7 +2164,7 @@ impl QueryManager {
                     .map(|(_, content, commit_id)| (content, commit_id))
             };
 
-            let _delta = graph.settle(io_ref, om, row_loader);
+            let _delta = graph.settle(storage_ref, om, row_loader);
 
             // Get contributing ObjectIds
             let scope = graph.contributing_object_ids();
@@ -2196,7 +2225,7 @@ impl QueryManager {
     /// Called after local data changes to detect when new objects match
     /// a client's query subscription.
     #[allow(clippy::type_complexity)]
-    fn settle_server_subscriptions(&mut self, io: &dyn IoHandler) {
+    fn settle_server_subscriptions(&mut self, storage: &dyn Storage) {
         // Collect updates to avoid borrow issues
         let mut scope_updates: Vec<(
             ClientId,
@@ -2245,7 +2274,7 @@ impl QueryManager {
             };
 
             // Settle the graph
-            let _delta = sub.graph.settle(io, om, row_loader);
+            let _delta = sub.graph.settle(storage, om, row_loader);
 
             // Emit QuerySettled on first settlement
             if !sub.settled_once {
@@ -2287,9 +2316,9 @@ impl QueryManager {
     /// For UPDATE operations, we evaluate two policies:
     /// - USING against old_content (can the session see the old row?)
     /// - WITH CHECK against new_content (is the new row valid?)
-    fn evaluate_write_permission<H: IoHandler>(
+    fn evaluate_write_permission<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         check: PendingPermissionCheck,
     ) {
         // Get table name from metadata
@@ -2297,7 +2326,7 @@ impl QueryManager {
             Some(t) => TableName::new(t),
             None => {
                 // Not a row object, allow
-                self.sync_manager.approve_permission_check(io, check);
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
@@ -2307,14 +2336,14 @@ impl QueryManager {
             Some(s) => s,
             None => {
                 // Unknown table, allow
-                self.sync_manager.approve_permission_check(io, check);
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
 
         // Handle UPDATE specially - needs both USING and WITH CHECK
         if check.operation == Operation::Update {
-            self.evaluate_update_permission(io, check, table_name, table_schema);
+            self.evaluate_update_permission(storage, check, table_name, table_schema);
             return;
         }
 
@@ -2325,7 +2354,7 @@ impl QueryManager {
             Operation::Delete => table_schema.policies.effective_delete_using(),
             Operation::Select => {
                 // SELECT not checked via write permission
-                self.sync_manager.approve_permission_check(io, check);
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
@@ -2334,7 +2363,7 @@ impl QueryManager {
         let policy = match policy {
             Some(p) => p.clone(),
             None => {
-                self.sync_manager.approve_permission_check(io, check);
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
@@ -2345,7 +2374,7 @@ impl QueryManager {
             Operation::Update => unreachable!(), // Handled above
             Operation::Delete => check.old_content.as_ref(),
             Operation::Select => {
-                self.sync_manager.approve_permission_check(io, check);
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
@@ -2354,7 +2383,7 @@ impl QueryManager {
             Some(c) => c,
             None => {
                 // No content to evaluate - allow
-                self.sync_manager.approve_permission_check(io, check);
+                self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
@@ -2375,7 +2404,7 @@ impl QueryManager {
 
         if result.complex_clauses.is_empty() {
             // All simple parts passed and no complex clauses - approve immediately
-            self.sync_manager.approve_permission_check(io, check);
+            self.sync_manager.approve_permission_check(storage, check);
             return;
         }
 
@@ -2390,7 +2419,7 @@ impl QueryManager {
 
         if graphs.is_empty() {
             // No graphs created (maybe missing tables) - allow
-            self.sync_manager.approve_permission_check(io, check);
+            self.sync_manager.approve_permission_check(storage, check);
             return;
         }
 
@@ -2413,9 +2442,9 @@ impl QueryManager {
     /// 2. WITH CHECK policy against new_content - is the resulting row valid?
     ///
     /// Both must pass for the update to be allowed.
-    fn evaluate_update_permission<H: IoHandler>(
+    fn evaluate_update_permission<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         check: PendingPermissionCheck,
         table_name: TableName,
         table_schema: TableSchema,
@@ -2425,7 +2454,7 @@ impl QueryManager {
 
         // If no policies defined, allow
         if using_policy.is_none() && check_policy.is_none() {
-            self.sync_manager.approve_permission_check(io, check);
+            self.sync_manager.approve_permission_check(storage, check);
             return;
         }
 
@@ -2472,7 +2501,7 @@ impl QueryManager {
                 Some(c) => c,
                 None => {
                     // No new content - allow (shouldn't happen for UPDATE)
-                    self.sync_manager.approve_permission_check(io, check);
+                    self.sync_manager.approve_permission_check(storage, check);
                     return;
                 }
             };
@@ -2502,7 +2531,7 @@ impl QueryManager {
 
         // If no complex clauses, both simple checks passed - approve
         if all_complex_clauses.is_empty() {
-            self.sync_manager.approve_permission_check(io, check);
+            self.sync_manager.approve_permission_check(storage, check);
             return;
         }
 
@@ -2521,7 +2550,7 @@ impl QueryManager {
 
         if graphs.is_empty() {
             // No graphs created (maybe missing tables) - allow
-            self.sync_manager.approve_permission_check(io, check);
+            self.sync_manager.approve_permission_check(storage, check);
             return;
         }
 
@@ -2631,14 +2660,14 @@ impl QueryManager {
     }
 
     /// Settle active policy checks and finalize completed ones.
-    fn settle_policy_checks<H: IoHandler>(&mut self, io: &mut H) {
+    fn settle_policy_checks<H: Storage>(&mut self, storage: &mut H) {
         // Collect IDs to finalize
         let mut to_approve = Vec::new();
         let mut to_reject = Vec::new();
 
         // Create row loader for settling
         let om = &self.sync_manager.object_manager;
-        let io_ref: &dyn IoHandler = io;
+        let storage_ref: &dyn Storage = storage;
         let current_branch = self.current_branch();
 
         // Settle each active policy check
@@ -2658,7 +2687,7 @@ impl QueryManager {
             let all_complete = state
                 .graphs
                 .iter_mut()
-                .all(|g| g.settle(io_ref, om, &mut row_loader));
+                .all(|g| g.settle(storage_ref, om, &mut row_loader));
 
             if all_complete {
                 // All graphs settled - check results
@@ -2680,7 +2709,7 @@ impl QueryManager {
         for id in to_approve {
             if let Some(state) = self.active_policy_checks.remove(&id) {
                 self.sync_manager
-                    .approve_permission_check(io, state.pending_check);
+                    .approve_permission_check(storage, state.pending_check);
             }
         }
 
@@ -2805,7 +2834,7 @@ impl QueryManager {
     }
 
     /// Handle an object update from the global subscription.
-    fn handle_object_update(&mut self, io: &mut dyn IoHandler, update: AllObjectUpdate) {
+    fn handle_object_update(&mut self, storage: &mut dyn Storage, update: AllObjectUpdate) {
         // Check if this is a catalogue object (schema or lens)
         if let Some(type_str) = update.metadata.get("type")
             && (type_str == "catalogue_schema" || type_str == "catalogue_lens")
@@ -2894,7 +2923,7 @@ impl QueryManager {
             // Apply hard delete unconditionally
             let old_data = update.old_content.as_deref();
             let _ = Self::update_indices_for_hard_delete_on_branch(
-                io,
+                storage,
                 &table,
                 branch,
                 update.object_id,
@@ -2911,7 +2940,7 @@ impl QueryManager {
             // Apply soft delete - remove from _id and column indices, add to _id_deleted
             if let Some(old_data) = &update.old_content {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
-                    io,
+                    storage,
                     &table,
                     branch,
                     update.object_id,
@@ -2920,14 +2949,14 @@ impl QueryManager {
                 );
             } else {
                 // No old content - just remove from _id and add to _id_deleted
-                let _ = io.index_remove(
+                let _ = storage.index_remove(
                     &table,
                     "_id",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 );
-                let _ = io.index_insert(
+                let _ = storage.index_insert(
                     &table,
                     "_id_deleted",
                     branch,
@@ -2941,7 +2970,8 @@ impl QueryManager {
         }
 
         // Check if this is an undelete (non-empty content for previously soft-deleted row)
-        let was_soft_deleted = self.row_is_deleted_on_branch(io, &table, branch, update.object_id);
+        let was_soft_deleted =
+            self.row_is_deleted_on_branch(storage, &table, branch, update.object_id);
 
         // Extract current (new) data from the object on this branch
         let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
@@ -2952,7 +2982,7 @@ impl QueryManager {
         if was_soft_deleted {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
             let _ = Self::update_indices_for_undelete_on_branch(
-                io,
+                storage,
                 &table,
                 branch,
                 update.object_id,
@@ -2967,7 +2997,7 @@ impl QueryManager {
         if update.is_new_object || update.previous_commit_ids.is_empty() {
             // First commit on branch (new object or synced first commit) - insert into all indices
             let _ = Self::update_indices_for_insert_on_branch(
-                io,
+                storage,
                 &table,
                 branch,
                 update.object_id,
@@ -2978,7 +3008,7 @@ impl QueryManager {
             // Synced update - compute index delta using old_content
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
             let _ = Self::update_indices_for_update_on_branch(
-                io,
+                storage,
                 &table,
                 branch,
                 update.object_id,
@@ -3019,7 +3049,7 @@ impl QueryManager {
 
     /// Update indices when a row is inserted on a specific branch.
     fn update_indices_for_insert_on_branch(
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3027,7 +3057,8 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Update "_id" index
-        io.index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
+        storage
+            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
             .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
 
         // Update column indices
@@ -3035,7 +3066,8 @@ impl QueryManager {
             if let Ok(value) = decode_column(descriptor, data, col_idx)
                 && value != Value::Null
             {
-                io.index_insert(table, col.name.as_str(), branch, &value, object_id)
+                storage
+                    .index_insert(table, col.name.as_str(), branch, &value, object_id)
                     .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
             }
         }
@@ -3046,14 +3078,14 @@ impl QueryManager {
     /// Update indices when a row is inserted (on the default branch).
     fn update_indices_for_insert(
         &self,
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         Self::update_indices_for_insert_on_branch(
-            io,
+            storage,
             table,
             &self.current_branch(),
             object_id,
@@ -3064,7 +3096,7 @@ impl QueryManager {
 
     /// Update indices when a row is updated on a specific branch.
     fn update_indices_for_update_on_branch(
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3080,13 +3112,15 @@ impl QueryManager {
             if let Ok(old_value) = decode_column(descriptor, old_data, col_idx)
                 && old_value != Value::Null
             {
-                let _ = io.index_remove(table, col.name.as_str(), branch, &old_value, object_id);
+                let _ =
+                    storage.index_remove(table, col.name.as_str(), branch, &old_value, object_id);
             }
             // Add new value
             if let Ok(new_value) = decode_column(descriptor, new_data, col_idx)
                 && new_value != Value::Null
             {
-                let _ = io.index_insert(table, col.name.as_str(), branch, &new_value, object_id);
+                let _ =
+                    storage.index_insert(table, col.name.as_str(), branch, &new_value, object_id);
             }
         }
 
@@ -3096,7 +3130,7 @@ impl QueryManager {
     /// Update indices when a row is updated (on the default branch).
     fn update_indices_for_update(
         &self,
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         object_id: ObjectId,
         old_data: &[u8],
@@ -3104,7 +3138,7 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         Self::update_indices_for_update_on_branch(
-            io,
+            storage,
             table,
             &self.current_branch(),
             object_id,
@@ -3116,7 +3150,7 @@ impl QueryManager {
 
     /// Update indices for soft delete on a specific branch.
     fn update_indices_for_soft_delete_on_branch(
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3124,26 +3158,27 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id" index
-        let _ = io.index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id);
+        let _ = storage.index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id);
 
         // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, old_data, col_idx)
                 && value != Value::Null
             {
-                let _ = io.index_remove(table, col.name.as_str(), branch, &value, object_id);
+                let _ = storage.index_remove(table, col.name.as_str(), branch, &value, object_id);
             }
         }
 
         // Add to "_id_deleted" index
-        io.index_insert(
-            table,
-            "_id_deleted",
-            branch,
-            &Value::Uuid(object_id),
-            object_id,
-        )
-        .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
+        storage
+            .index_insert(
+                table,
+                "_id_deleted",
+                branch,
+                &Value::Uuid(object_id),
+                object_id,
+            )
+            .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
 
         Ok(())
     }
@@ -3151,14 +3186,14 @@ impl QueryManager {
     /// Update indices for soft delete (on the default branch).
     fn update_indices_for_soft_delete(
         &self,
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         object_id: ObjectId,
         old_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         Self::update_indices_for_soft_delete_on_branch(
-            io,
+            storage,
             table,
             &self.current_branch(),
             object_id,
@@ -3169,7 +3204,7 @@ impl QueryManager {
 
     /// Update indices for hard delete on a specific branch.
     fn update_indices_for_hard_delete_on_branch(
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3177,7 +3212,7 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id" index (may not be present if already soft-deleted)
-        let _ = io.index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id);
+        let _ = storage.index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id);
 
         // Remove from all column indices (if we have old data)
         if let Some(data) = old_data {
@@ -3185,13 +3220,14 @@ impl QueryManager {
                 if let Ok(value) = decode_column(descriptor, data, col_idx)
                     && value != Value::Null
                 {
-                    let _ = io.index_remove(table, col.name.as_str(), branch, &value, object_id);
+                    let _ =
+                        storage.index_remove(table, col.name.as_str(), branch, &value, object_id);
                 }
             }
         }
 
         // Remove from "_id_deleted" index (handles soft→hard upgrade)
-        let _ = io.index_remove(
+        let _ = storage.index_remove(
             table,
             "_id_deleted",
             branch,
@@ -3205,14 +3241,14 @@ impl QueryManager {
     /// Update indices for hard delete (on the default branch).
     fn update_indices_for_hard_delete(
         &self,
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         object_id: ObjectId,
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         Self::update_indices_for_hard_delete_on_branch(
-            io,
+            storage,
             table,
             &self.current_branch(),
             object_id,
@@ -3223,7 +3259,7 @@ impl QueryManager {
 
     /// Update indices for undelete on a specific branch.
     fn update_indices_for_undelete_on_branch(
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         branch: &str,
         object_id: ObjectId,
@@ -3231,7 +3267,7 @@ impl QueryManager {
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         // Remove from "_id_deleted" index
-        let _ = io.index_remove(
+        let _ = storage.index_remove(
             table,
             "_id_deleted",
             branch,
@@ -3240,7 +3276,8 @@ impl QueryManager {
         );
 
         // Add to "_id" index
-        io.index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
+        storage
+            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
             .map_err(|e| QueryError::IndexError(format!("{:?}", e)))?;
 
         // Add to all column indices
@@ -3248,7 +3285,7 @@ impl QueryManager {
             if let Ok(value) = decode_column(descriptor, new_data, col_idx)
                 && value != Value::Null
             {
-                let _ = io.index_insert(table, col.name.as_str(), branch, &value, object_id);
+                let _ = storage.index_insert(table, col.name.as_str(), branch, &value, object_id);
             }
         }
 
@@ -3258,14 +3295,14 @@ impl QueryManager {
     /// Update indices for undelete (on the default branch).
     fn update_indices_for_undelete(
         &self,
-        io: &mut dyn IoHandler,
+        storage: &mut dyn Storage,
         table: &str,
         object_id: ObjectId,
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
         Self::update_indices_for_undelete_on_branch(
-            io,
+            storage,
             table,
             &self.current_branch(),
             object_id,
@@ -3345,9 +3382,9 @@ impl QueryManager {
     /// Calculate memory usage breakdown for profiling.
     ///
     /// Returns a tuple: (indices, subscriptions, policy_checks, total)
-    /// Note: indices are managed by IoHandler, so index memory is reported as 0.
+    /// Note: indices are managed by Storage, so index memory is reported as 0.
     pub fn memory_size(&self) -> (usize, usize, usize, usize) {
-        let indices = 0usize; // Indices managed by IoHandler
+        let indices = 0usize; // Indices managed by Storage
 
         // Subscriptions (QueryGraph can be large)
         let mut subscriptions = 0usize;

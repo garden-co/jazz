@@ -1,6 +1,6 @@
 //! Bridge between Rust and JavaScript for sync message transport.
 //!
-//! Storage is now synchronous (in-memory via MemoryIoHandler).
+//! Storage is now synchronous (in-memory via MemoryStorage).
 //! This module is retained for the JsStorageDriver extern type
 //! which may be used by downstream consumers, but the async
 //! storage bridge is no longer needed.

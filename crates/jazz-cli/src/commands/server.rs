@@ -28,7 +28,7 @@ pub struct ServerState {
 
 /// State for a single SSE connection.
 pub struct ConnectionState {
-    pub client_id: ClientId,
+    pub _client_id: ClientId,
 }
 
 /// Run the Jazz server.

@@ -101,14 +101,14 @@ pub fn run(schema_dir: &str, ts: bool) -> Result<(), Box<dyn std::error::Error>>
     }
 
     // Validate versions start at 1 and have no gaps
-    if let Some(&first) = versions_seen.first() {
-        if first != 1 {
-            return Err(format!(
-                "Schema versions must start at v1. Found v{} instead.",
-                first
-            )
-            .into());
-        }
+    if let Some(&first) = versions_seen.first()
+        && first != 1
+    {
+        return Err(format!(
+            "Schema versions must start at v1. Found v{} instead.",
+            first
+        )
+        .into());
     }
 
     let versions_vec: Vec<u32> = versions_seen.iter().copied().collect();

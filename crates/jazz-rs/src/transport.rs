@@ -104,10 +104,10 @@ impl ServerConnection {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        if let Some(secret) = &self.auth.admin_secret {
-            if let Ok(secret_value) = HeaderValue::from_str(secret) {
-                headers.insert("X-Jazz-Admin-Secret", secret_value);
-            }
+        if let Some(secret) = &self.auth.admin_secret
+            && let Ok(secret_value) = HeaderValue::from_str(secret)
+        {
+            headers.insert("X-Jazz-Admin-Secret", secret_value);
         }
 
         headers
@@ -158,10 +158,10 @@ impl ServerConnection {
 fn is_catalogue_payload(payload: &SyncPayload) -> bool {
     match payload {
         SyncPayload::ObjectUpdated { metadata, .. } => {
-            if let Some(meta) = metadata {
-                if let Some(type_str) = meta.metadata.get("type") {
-                    return type_str == "catalogue_schema" || type_str == "catalogue_lens";
-                }
+            if let Some(meta) = metadata
+                && let Some(type_str) = meta.metadata.get("type")
+            {
+                return type_str == "catalogue_schema" || type_str == "catalogue_lens";
             }
             false
         }
