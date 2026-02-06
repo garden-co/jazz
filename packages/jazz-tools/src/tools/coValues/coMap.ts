@@ -1006,11 +1006,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
 
     if (!descriptor) return false;
 
-    if (typeof key === "string") {
-      throw Error("Cannot update a CoMap directly. Use `$jazz.set` instead.");
-    } else {
-      return Reflect.set(target, key, value, receiver);
-    }
+    throw Error("Cannot update a CoMap directly. Use `$jazz.set` instead.");
   },
   defineProperty(target, key, attributes) {
     if (
