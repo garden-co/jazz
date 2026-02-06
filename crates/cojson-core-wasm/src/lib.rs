@@ -24,6 +24,8 @@ pub mod crypto {
     pub use xsalsa20::*;
 }
 
+pub mod storage;
+
 #[derive(Error, Debug)]
 pub enum CojsonCoreWasmError {
     #[error(transparent)]

@@ -35,6 +35,7 @@ function JazzAndAuth({
       sync={{
         peer: syncUrl as `ws://${string}` | `wss://${string}`,
       }}
+      storage="experimental_bftree"
       AccountSchema={AppAccount}
     >
       {children}
