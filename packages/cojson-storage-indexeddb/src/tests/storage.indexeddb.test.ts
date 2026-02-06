@@ -1,8 +1,6 @@
 import {
   LocalNode,
   RawCoMap,
-  SessionID,
-  StorageAPI,
   StorageApiAsync,
   StorageReconciliationAcquireResult,
   cojsonInternals,
@@ -945,7 +943,7 @@ describe("full storage reconciliation", () => {
     }
 
     test("full storage reconciliation is run when adding a new persistent server peer", async () => {
-      const client = createTestNode();
+      const client = createTestNode({ enableFullStorageReconciliation: true });
       const storage = await getIndexedDBStorage();
       client.setStorage(storage);
 
@@ -955,7 +953,9 @@ describe("full storage reconciliation", () => {
 
       await map.core.waitForSync();
 
-      const anotherClient = createTestNode();
+      const anotherClient = createTestNode({
+        enableFullStorageReconciliation: true,
+      });
       anotherClient.setStorage(storage);
 
       const syncServer = createTestNode();
@@ -969,7 +969,7 @@ describe("full storage reconciliation", () => {
       cojsonInternals.setStorageReconciliationInterval(100);
 
       const syncServer = createTestNode();
-      const client = createTestNode();
+      const client = createTestNode({ enableFullStorageReconciliation: true });
       const storage = await getIndexedDBStorage();
       client.setStorage(storage);
 
@@ -996,7 +996,7 @@ describe("full storage reconciliation", () => {
       cojsonInternals.setStorageReconciliationLockTTL(100);
 
       const syncServer = createTestNode();
-      let client = createTestNode();
+      let client = createTestNode({ enableFullStorageReconciliation: true });
       const storage = await getIndexedDBStorage();
       client.setStorage(storage);
 

@@ -183,9 +183,18 @@ export function getAgentAndSessionID(
   return [new ControlledAgent(secret, Crypto), sessionID];
 }
 
-export function createTestNode(opts?: { secret?: AgentSecret }) {
+export function createTestNode(opts?: {
+  secret?: AgentSecret;
+  enableFullStorageReconciliation?: boolean;
+}) {
   const [admin, session] = getAgentAndSessionID(opts?.secret);
-  return new LocalNode(admin.agentSecret, session, Crypto);
+  return new LocalNode(
+    admin.agentSecret,
+    session,
+    Crypto,
+    undefined,
+    opts?.enableFullStorageReconciliation,
+  );
 }
 
 export function connectToSyncServer(
