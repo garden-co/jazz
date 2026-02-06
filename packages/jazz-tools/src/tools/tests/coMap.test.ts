@@ -2321,15 +2321,11 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
   test("empty map created time", () => {
     const emptyMap = co.map({}).create({});
 
-    // createdAt returns earliestTxMadeAt (earliest by timestamp, not array order)
-    expect(emptyMap.$jazz.createdAt).toEqual(
-      new Date(emptyMap.$jazz.raw.core.verified.header.createdAt!).getTime(),
-    );
+    const firstTx = emptyMap.$jazz.raw.core.verifiedTransactions.at(0);
+    expect(emptyMap.$jazz.createdAt).toEqual(firstTx!.madeAt);
 
-    // lastUpdatedAt returns latestTxMadeAt (latest by timestamp, not array order)
-    expect(emptyMap.$jazz.lastUpdatedAt).toEqual(
-      emptyMap.$jazz.raw.core.latestTxMadeAt,
-    );
+    const lastTx = emptyMap.$jazz.raw.core.verifiedTransactions.at(-1);
+    expect(emptyMap.$jazz.lastUpdatedAt).toEqual(lastTx!.madeAt);
   });
 
   test("empty map created by", () => {
