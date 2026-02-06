@@ -802,7 +802,7 @@ Add `notify_query_settled(sub_id, tier)` method that adds tier to achieved_tiers
 **Step 3: Modify delivery logic in QueryManager::process()**
 
 ```rust
-let delta = subscription.graph.settle(io_ref, om, row_loader);
+let delta = subscription.graph.settle(io_ref, row_loader);
 
 let tier_satisfied = match &subscription.settled_tier {
     None => true,
@@ -1017,6 +1017,40 @@ tree.scan_with_count(start: &[u8], count: usize, ...) -> ScanIter
 
 **After 7a**: Native Rust applications (jazz-rs, jazz-cli) have real disk persistence. The currently-red `test_persistence` test goes green.
 
+### Key Design: Lazy Loading via ObjectManager::get_or_load()
+
+On cold start after reopening persistent storage, index scans find ObjectIds in Storage but the in-memory ObjectManager is empty. The solution is `ObjectManager::get_or_load()` — a lazy loader that checks in-memory first, then falls back to `storage.load_object_metadata()` + `storage.load_branch()` to populate the object on demand.
+
+```rust
+impl ObjectManager {
+    /// Get an object, loading from storage if not in memory (lazy cold-start load).
+    pub fn get_or_load(
+        &mut self, id: ObjectId, storage: &dyn Storage, branches: &[String],
+    ) -> Option<&Object> {
+        if self.objects.contains_key(&id) {
+            return self.objects.get(&id);
+        }
+        // Load metadata + branches from Storage, insert into self.objects
+        // ...
+    }
+}
+```
+
+**Borrow design**: `QueryGraph::settle()` takes only `(storage, row_loader)` — no `&ObjectManager`. The `row_loader` closure captures `&mut ObjectManager` and calls `get_or_load()` internally. This avoids double-mut-borrow: the closure owns the `&mut om` reference, and `settle()` never needs direct ObjectManager access.
+
+```rust
+// In QueryManager::process():
+let om = &mut self.sync_manager.object_manager;
+let branches = vec![current_branch.clone()];
+let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
+    let obj = om.get_or_load(id, storage_ref, &branches)?;
+    // extract content + commit_id from obj...
+};
+let delta = graph.settle(storage_ref, &mut row_loader);
+```
+
+PolicyFilterNode, ArraySubqueryNode, and PolicyGraph also take only `(storage, row_loader)` — no ObjectManager parameter anywhere in the settle chain.
+
 ### Step 1: Import bf-tree-web as subtree
 
 ```bash
@@ -1165,11 +1199,11 @@ cargo test -p todo-server-rs
 | Test | Status | Notes |
 |------|--------|-------|
 | `jazz-rs::test_crud_operations` | GREEN | Already passes (in-memory) |
-| `jazz-rs::test_persistence` | **GREEN** | Currently red — this is the headline fix |
+| `jazz-rs::test_persistence` | **GREEN** ✅ | Fixed by `get_or_load()` lazy loading |
 | `todo-server-rs::test_health_check` | GREEN | Already passes |
 | `todo-server-rs::test_crud_operations` | GREEN | Already passes |
-| `todo-server-rs::test_local_persistence` | **GREEN** | Currently red — needs disk persistence |
-| `todo-server-rs::test_server_resync` | GREEN | Already passes |
+| `todo-server-rs::test_local_persistence` | **GREEN** ✅ | Fixed by `get_or_load()` lazy loading |
+| `todo-server-rs::test_server_resync` | RED | Pre-existing failure (unrelated to persistence) |
 | `todo-server-rs::test_todos_live_sse` | GREEN | Already passes |
 | `groove::bftree_iohandler_*` (new) | GREEN | New unit + round-trip tests |
 

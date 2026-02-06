@@ -9,6 +9,7 @@ use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
+use groove::storage::BfTreeStorage;
 use groove::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncManager};
 use groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use jazz_transport::ServerEvent;
@@ -23,7 +24,7 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 /// Combines local persistence with server sync.
 pub struct JazzClient {
     /// Handle to the local runtime.
-    runtime: TokioRuntime,
+    runtime: TokioRuntime<BfTreeStorage>,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
     /// Client configuration.
@@ -105,12 +106,17 @@ impl JazzClient {
             None
         };
 
+        // Create persistent storage
+        let db_path = context.data_dir.join("groove.bftree");
+        let storage = BfTreeStorage::open(&db_path, 64 * 1024 * 1024)
+            .map_err(|e| JazzError::Storage(format!("{:?}", e)))?;
+
         // Clone server connection for sync callback
         let server_conn_for_sync = server_connection.clone();
         let client_id_for_sync = client_id;
 
         // Create runtime with sync callback
-        let runtime = TokioRuntime::new(schema_manager, move |entry| {
+        let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             // Send to server if connected and destination is server
             if let Destination::Server(_) = entry.destination {
                 eprintln!(
@@ -370,7 +376,7 @@ impl JazzClient {
 
     /// Shutdown the client and release resources.
     ///
-    /// Aborts background tasks and flushes the runtime.
+    /// Aborts background tasks, flushes the runtime, and snapshots storage to disk.
     pub async fn shutdown(mut self) -> Result<()> {
         // Abort SSE listener first (it holds TokioRuntime clone)
         if let Some(handle) = self.sse_listener_task.take() {
@@ -384,6 +390,11 @@ impl JazzClient {
             .flush()
             .await
             .map_err(|e| JazzError::Connection(e.to_string()))?;
+
+        // Snapshot bf-tree storage to disk for persistence
+        self.runtime
+            .with_storage(|storage| storage.flush())
+            .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         Ok(())
     }
@@ -459,7 +470,7 @@ impl<'a> SessionClient<'a> {
 }
 
 /// Handle incoming server events.
-fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime) -> Result<()> {
+fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<BfTreeStorage>) -> Result<()> {
     match event {
         ServerEvent::Connected {
             connection_id,

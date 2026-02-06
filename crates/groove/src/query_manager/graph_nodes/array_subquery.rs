@@ -9,7 +9,6 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::object_manager::ObjectManager;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, Tuple, TupleDelta, TupleDescriptor,
@@ -141,7 +140,6 @@ impl ArraySubqueryNode {
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
-        om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
     where
@@ -167,7 +165,7 @@ impl ArraySubqueryNode {
                 if let Some(correlation_value) = self.extract_correlation_value(&tuple) {
                     // Evaluate subgraph for this correlation value
                     let array_result =
-                        self.evaluate_subgraph(&correlation_value, io, om, &mut row_loader);
+                        self.evaluate_subgraph(&correlation_value, io, &mut row_loader);
 
                     // Store instance state
                     self.instances
@@ -193,7 +191,7 @@ impl ArraySubqueryNode {
 
                 let array_result = if needs_reevaluate {
                     if let Some(ref new_corr) = new_correlation {
-                        self.evaluate_subgraph(new_corr, io, om, &mut row_loader)
+                        self.evaluate_subgraph(new_corr, io, &mut row_loader)
                     } else {
                         Value::Array(vec![])
                     }
@@ -248,7 +246,6 @@ impl ArraySubqueryNode {
         &self,
         correlation_value: &Value,
         io: &dyn Storage,
-        om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> Value {
         // Create subgraph instance
@@ -262,7 +259,7 @@ impl ArraySubqueryNode {
         };
 
         // Settle the subgraph
-        let row_delta = instance.graph.settle(io, om, row_loader);
+        let row_delta = instance.graph.settle(io, row_loader);
 
         // Convert result rows to array of Row values
         let array_elements: Vec<Value> = row_delta
@@ -305,12 +302,7 @@ impl ArraySubqueryNode {
 
     /// Re-evaluate all instances when inner data changes.
     /// Returns deltas for any arrays that changed.
-    pub fn reevaluate_all<F>(
-        &mut self,
-        io: &dyn Storage,
-        om: &ObjectManager,
-        row_loader: &mut F,
-    ) -> TupleDelta
+    pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
@@ -328,7 +320,7 @@ impl ArraySubqueryNode {
 
         for (outer_id, correlation_value, old_array) in instances_snapshot {
             // Re-evaluate subgraph
-            let new_array = self.evaluate_subgraph(&correlation_value, io, om, row_loader);
+            let new_array = self.evaluate_subgraph(&correlation_value, io, row_loader);
 
             // Check if array changed
             if old_array != new_array {

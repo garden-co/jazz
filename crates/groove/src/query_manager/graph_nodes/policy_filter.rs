@@ -8,7 +8,6 @@ use std::collections::HashSet;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::object_manager::ObjectManager;
 use crate::query_manager::encoding::{column_is_null, decode_column};
 use crate::query_manager::policy::{Operation, PolicyExpr, evaluate_expr_recursive};
 use crate::query_manager::policy_graph::PolicyGraph;
@@ -107,7 +106,6 @@ impl PolicyFilterNode {
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
-        om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
     where
@@ -116,7 +114,7 @@ impl PolicyFilterNode {
         // If inherits tables changed, we need to reevaluate all current tuples
         if self.inherits_dirty {
             self.inherits_dirty = false;
-            return self.reevaluate_all_with_context(io, om, &mut row_loader);
+            return self.reevaluate_all_with_context(io, &mut row_loader);
         }
 
         if !self.dirty
@@ -132,7 +130,7 @@ impl PolicyFilterNode {
         // Process added tuples
         for tuple in input.added {
             if let Some(row) = tuple_to_row(&tuple)
-                && self.evaluate_with_context(&row, io, om, &mut row_loader)
+                && self.evaluate_with_context(&row, io, &mut row_loader)
             {
                 self.current_tuples.insert(tuple.clone());
                 result.added.push(tuple);
@@ -152,10 +150,10 @@ impl PolicyFilterNode {
             let new_row = tuple_to_row(&new_tuple);
 
             let old_passes = old_row
-                .map(|r| self.evaluate_with_context(&r, io, om, &mut row_loader))
+                .map(|r| self.evaluate_with_context(&r, io, &mut row_loader))
                 .unwrap_or(false);
             let new_passes = new_row
-                .map(|r| self.evaluate_with_context(&r, io, om, &mut row_loader))
+                .map(|r| self.evaluate_with_context(&r, io, &mut row_loader))
                 .unwrap_or(false);
 
             match (old_passes, new_passes) {
@@ -181,12 +179,7 @@ impl PolicyFilterNode {
     }
 
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
-    fn reevaluate_all_with_context<F>(
-        &mut self,
-        io: &dyn Storage,
-        om: &ObjectManager,
-        row_loader: &mut F,
-    ) -> TupleDelta
+    fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
     where
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
@@ -195,7 +188,7 @@ impl PolicyFilterNode {
 
         for tuple in old_tuples {
             if let Some(row) = tuple_to_row(&tuple) {
-                let still_passes = self.evaluate_with_context(&row, io, om, row_loader);
+                let still_passes = self.evaluate_with_context(&row, io, row_loader);
                 if !still_passes {
                     self.current_tuples.remove(&tuple);
                     result.removed.push(tuple);
@@ -212,10 +205,9 @@ impl PolicyFilterNode {
         &self,
         row: &Row,
         io: &dyn Storage,
-        om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
-        self.evaluate_expr_with_context(&self.policy, row, io, om, row_loader, 0)
+        self.evaluate_expr_with_context(&self.policy, row, io, row_loader, 0)
     }
 
     /// Evaluate a policy expression with context for INHERITS.
@@ -225,7 +217,6 @@ impl PolicyFilterNode {
         expr: &PolicyExpr,
         row: &Row,
         io: &dyn Storage,
-        om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
     ) -> bool {
@@ -237,17 +228,16 @@ impl PolicyFilterNode {
             PolicyExpr::Inherits {
                 operation,
                 via_column,
-            } => self.evaluate_inherits_with_context(
-                *operation, via_column, row, io, om, row_loader, depth,
-            ),
+            } => self
+                .evaluate_inherits_with_context(*operation, via_column, row, io, row_loader, depth),
             PolicyExpr::And(exprs) => exprs
                 .iter()
-                .all(|e| self.evaluate_expr_with_context(e, row, io, om, row_loader, depth)),
+                .all(|e| self.evaluate_expr_with_context(e, row, io, row_loader, depth)),
             PolicyExpr::Or(exprs) => exprs
                 .iter()
-                .any(|e| self.evaluate_expr_with_context(e, row, io, om, row_loader, depth)),
+                .any(|e| self.evaluate_expr_with_context(e, row, io, row_loader, depth)),
             PolicyExpr::Not(inner) => {
-                !self.evaluate_expr_with_context(inner, row, io, om, row_loader, depth)
+                !self.evaluate_expr_with_context(inner, row, io, row_loader, depth)
             }
             // All other expressions delegate to shared evaluation
             _ => evaluate_expr_recursive(expr, &row.data, &self.descriptor, &self.session, depth),
@@ -263,7 +253,6 @@ impl PolicyFilterNode {
         via_column: &str,
         row: &Row,
         io: &dyn Storage,
-        om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
     ) -> bool {
@@ -339,7 +328,7 @@ impl PolicyFilterNode {
         // Settle the graph until complete
         for _ in 0..100 {
             // Max iterations to prevent infinite loop
-            if graph.settle(io, om, row_loader) {
+            if graph.settle(io, row_loader) {
                 break;
             }
         }

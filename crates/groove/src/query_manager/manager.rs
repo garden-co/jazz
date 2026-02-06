@@ -1946,7 +1946,7 @@ impl QueryManager {
 
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
-        let om = &self.sync_manager.object_manager;
+        let om = &mut self.sync_manager.object_manager;
         let storage_ref: &dyn Storage = storage;
         let schema_context = &self.schema_context;
         let branch_schema_map = &self.branch_schema_map;
@@ -1961,7 +1961,7 @@ impl QueryManager {
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj = om.get(id)?;
+                let obj = om.get_or_load(id, storage_ref, branches)?;
                 // Find the newest commit across all subscription branches (LWW)
                 // Also track which branch it came from for schema transformation
                 let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
@@ -2019,7 +2019,7 @@ impl QueryManager {
                 Some((content, commit_id))
             };
 
-            let delta = subscription.graph.settle(storage_ref, om, row_loader);
+            let delta = subscription.graph.settle(storage_ref, row_loader);
 
             let tier_satisfied = match &subscription.settled_tier {
                 None => true, // No tier requirement → immediate (current behavior)
@@ -2117,7 +2117,7 @@ impl QueryManager {
             };
 
             // Initial settle to populate the graph
-            let om = &self.sync_manager.object_manager;
+            let om = &mut self.sync_manager.object_manager;
             let storage_ref: &dyn Storage = storage;
 
             // Resolve branches: use explicit branches or fall back to schema context
@@ -2133,7 +2133,7 @@ impl QueryManager {
 
             // Simple row loader for server-side graphs (no schema transform needed)
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj = om.get(id)?;
+                let obj = om.get_or_load(id, storage_ref, &branches)?;
                 let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
                 for branch_name in &branches {
                     if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
@@ -2164,7 +2164,7 @@ impl QueryManager {
                     .map(|(_, content, commit_id)| (content, commit_id))
             };
 
-            let _delta = graph.settle(storage_ref, om, row_loader);
+            let _delta = graph.settle(storage_ref, row_loader);
 
             // Get contributing ObjectIds
             let scope = graph.contributing_object_ids();
@@ -2235,14 +2235,14 @@ impl QueryManager {
         )> = Vec::new();
         let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
 
-        let om = &self.sync_manager.object_manager;
+        let om = &mut self.sync_manager.object_manager;
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let branches = &sub.branches;
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj = om.get(id)?;
+                let obj = om.get_or_load(id, storage, branches)?;
                 let mut best: Option<(u64, Vec<u8>, CommitId)> = None;
                 for branch_name in branches {
                     if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
@@ -2274,7 +2274,7 @@ impl QueryManager {
             };
 
             // Settle the graph
-            let _delta = sub.graph.settle(storage, om, row_loader);
+            let _delta = sub.graph.settle(storage, row_loader);
 
             // Emit QuerySettled on first settlement
             if !sub.settled_once {
@@ -2666,14 +2666,15 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Create row loader for settling
-        let om = &self.sync_manager.object_manager;
-        let storage_ref: &dyn Storage = storage;
         let current_branch = self.current_branch();
+        let branches = vec![current_branch.clone()];
+        let om = &mut self.sync_manager.object_manager;
+        let storage_ref: &dyn Storage = storage;
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let mut row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj = om.get(id)?;
+                let obj = om.get_or_load(id, storage_ref, &branches)?;
                 let branch = obj.branches.get(&BranchName::new(&current_branch))?;
                 let tip_id = branch.tips.iter().next()?;
                 let commit = branch.commits.get(tip_id)?;
@@ -2687,7 +2688,7 @@ impl QueryManager {
             let all_complete = state
                 .graphs
                 .iter_mut()
-                .all(|g| g.settle(storage_ref, om, &mut row_loader));
+                .all(|g| g.settle(storage_ref, &mut row_loader));
 
             if all_complete {
                 // All graphs settled - check results

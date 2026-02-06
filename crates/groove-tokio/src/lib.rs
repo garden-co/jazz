@@ -1,15 +1,15 @@
 //! Tokio runtime adapter for Groove.
 //!
-//! Provides `TokioRuntime` - a thin wrapper around
-//! `RuntimeCore<MemoryStorage, TokioScheduler, CallbackSyncSender>`
+//! Provides `TokioRuntime<S>` - a thin wrapper around
+//! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
 //!
-//! - `MemoryStorage` provides synchronous storage (from groove::storage)
-//! - `TokioScheduler` implements `Scheduler` using tokio::spawn for batched ticks
+//! - `S: Storage + Send + 'static` provides synchronous storage
+//! - `TokioScheduler<S>` implements `Scheduler` using tokio::spawn for batched ticks
 //! - `CallbackSyncSender` implements `SyncSender` with a user-provided callback
-//! - `TokioRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
+//! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,7 @@ use groove::runtime_core::{
     SyncSender,
 };
 use groove::schema_manager::{QuerySchemaContext, SchemaManager};
-use groove::storage::MemoryStorage;
+use groove::storage::Storage;
 use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, ServerId};
 
 // ============================================================================
@@ -33,20 +33,20 @@ use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, ServerId};
 // ============================================================================
 
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
-type TokioCoreType = RuntimeCore<MemoryStorage, TokioScheduler, CallbackSyncSender>;
+type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
 
 /// Scheduler implementation for Tokio.
 ///
 /// Spawns a tokio task to call `batched_tick()` on the RuntimeCore.
 /// Debounced: only one task is scheduled at a time.
-pub struct TokioScheduler {
+pub struct TokioScheduler<S: Storage + Send + 'static> {
     /// Debounce flag for scheduled ticks.
     scheduled: Arc<AtomicBool>,
     /// Weak reference back to RuntimeCore for spawned tasks.
-    core_ref: Weak<Mutex<TokioCoreType>>,
+    core_ref: Weak<Mutex<TokioCoreType<S>>>,
 }
 
-impl TokioScheduler {
+impl<S: Storage + Send + 'static> TokioScheduler<S> {
     /// Create a new TokioScheduler.
     ///
     /// Note: `core_ref` starts as empty and is set after RuntimeCore is created.
@@ -58,7 +58,7 @@ impl TokioScheduler {
     }
 
     /// Set the core reference (called after RuntimeCore is wrapped in Arc<Mutex>).
-    fn set_core_ref(&mut self, core_ref: Weak<Mutex<TokioCoreType>>) {
+    fn set_core_ref(&mut self, core_ref: Weak<Mutex<TokioCoreType<S>>>) {
         self.core_ref = core_ref;
     }
 
@@ -68,7 +68,7 @@ impl TokioScheduler {
     }
 }
 
-impl Scheduler for TokioScheduler {
+impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
     fn schedule_batched_tick(&self) {
         // Debounce: only schedule if not already scheduled
         if !self.scheduled.swap(true, Ordering::SeqCst) {
@@ -156,27 +156,35 @@ impl From<CoreRuntimeError> for RuntimeError {
 // TokioRuntime
 // ============================================================================
 
-/// Tokio runtime for Groove.
+/// Tokio runtime for Groove, generic over storage backend.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<MemoryStorage, TokioScheduler, CallbackSyncSender>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
 /// Async scheduling happens via TokioScheduler.schedule_batched_tick().
-#[derive(Clone)]
-pub struct TokioRuntime {
-    core: Arc<Mutex<TokioCoreType>>,
+pub struct TokioRuntime<S: Storage + Send + 'static> {
+    core: Arc<Mutex<TokioCoreType<S>>>,
 }
 
-impl TokioRuntime {
-    /// Create a new TokioRuntime.
+// Manual Clone impl — only needs Arc::clone, not S: Clone
+impl<S: Storage + Send + 'static> Clone for TokioRuntime<S> {
+    fn clone(&self) -> Self {
+        Self {
+            core: Arc::clone(&self.core),
+        }
+    }
+}
+
+impl<S: Storage + Send + 'static> TokioRuntime<S> {
+    /// Create a new TokioRuntime with the given storage backend.
     ///
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
+    /// - `storage` - The storage backend (e.g., MemoryStorage, BfTreeStorage)
     /// - `sync_callback` - Called when sync messages need to be sent
-    pub fn new<F>(schema_manager: SchemaManager, sync_callback: F) -> Self
+    pub fn new<F>(schema_manager: SchemaManager, storage: S, sync_callback: F) -> Self
     where
         F: Fn(OutboxEntry) + Send + Sync + 'static,
     {
-        let storage = MemoryStorage::new();
         let scheduler = TokioScheduler::new();
         let sync_sender = CallbackSyncSender::new(sync_callback);
 
@@ -404,6 +412,14 @@ impl TokioRuntime {
         Ok(core.current_schema().clone())
     }
 
+    /// Access the underlying storage (for flushing, etc).
+    ///
+    /// The callback receives `&S` while holding the core lock.
+    pub fn with_storage<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(f(core.storage()))
+    }
+
     /// Subscribe to a query with explicit schema context (for server use).
     pub fn subscribe_with_schema_context(
         &self,
@@ -424,6 +440,7 @@ mod tests {
     use super::*;
     use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
     use groove::schema_manager::AppId;
+    use groove::storage::MemoryStorage;
     use groove::sync_manager::SyncManager;
     use std::sync::atomic::AtomicUsize;
 
@@ -448,7 +465,7 @@ mod tests {
         let sync_count = Arc::new(AtomicUsize::new(0));
         let sync_count_clone = sync_count.clone();
 
-        let runtime = TokioRuntime::new(schema_manager, move |_msg| {
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), move |_msg| {
             sync_count_clone.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -476,7 +493,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let runtime = TokioRuntime::new(schema_manager, |_| {});
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
 
         // Insert
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
@@ -512,7 +529,7 @@ mod tests {
         let schema_manager =
             SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
 
-        let runtime = TokioRuntime::new(schema_manager, |_| {});
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
 
         // Track callback invocations
         let updates: Arc<Mutex<Vec<SubscriptionDelta>>> = Arc::new(Mutex::new(Vec::new()));
