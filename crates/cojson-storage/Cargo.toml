@@ -62,3 +62,4 @@ rand = "0.8"
 [[bench]]
 name = "storage_benchmark"
 harness = false
+required-features = ["bftree"]

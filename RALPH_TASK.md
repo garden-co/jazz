@@ -102,12 +102,12 @@ Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making i
 26. [x] Create `packages/cojson/src/storage/native/` directory
 27. [x] Implement `NativeStorageWrapper` implementing `StorageAPI`
 28. [x] Add factory function `createNativeStorage(options)` with platform detection
-29. [ ] Implement automatic fallback to SQLite if native unavailable
-30. [ ] Update `LocalNode` to support native storage via `setStorage()`
+29. [x] Implement automatic fallback to SQLite if native unavailable
+30. [x] Update `LocalNode` to support native storage via `setStorage()`
 
 ### Phase 6: Testing & Documentation
 
-31. [ ] Port existing storage tests to work with native storage
+31. [x] Port existing storage tests to work with native storage
 32. [ ] Add integration tests for each platform
 33. [ ] Add cross-platform sync tests (native ↔ SQLite interop)
 34. [ ] Document storage backend selection and configuration

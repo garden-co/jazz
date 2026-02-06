@@ -2,11 +2,12 @@
 //!
 //! These benchmarks measure the performance of key storage operations
 //! to validate the 2x+ performance improvement target over SQLite.
+//!
+//! Run with: cargo bench --features bftree
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::Rng;
-use rusqlite::{params, Connection, Result as SqliteResult};
-use std::collections::HashMap;
+use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use tempfile::tempdir;
 
 use cojson_storage::bftree::{BTreeConfig, BTreeStorage};
@@ -85,7 +86,7 @@ impl SqliteStorage {
                 params![covalue_id],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
 
         if let Some(id) = existing {
             Ok(id)
@@ -120,7 +121,12 @@ impl SqliteStorage {
         rows.collect()
     }
 
-    fn get_transactions(&self, session_id: i64, from_idx: i64, to_idx: i64) -> SqliteResult<Vec<(i64, String)>> {
+    fn get_transactions(
+        &self,
+        session_id: i64,
+        from_idx: i64,
+        to_idx: i64,
+    ) -> SqliteResult<Vec<(i64, String)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT idx, tx FROM transactions WHERE ses = ? AND idx >= ? AND idx < ?")?;
@@ -159,10 +165,6 @@ impl SqliteStorage {
 
 fn generate_covalue_id(idx: usize) -> String {
     format!("co_benchmark_{:08}", idx)
-}
-
-fn generate_session_id(idx: usize) -> String {
-    format!("session_{:04}", idx)
 }
 
 fn generate_transaction_json(idx: usize) -> String {
@@ -230,7 +232,7 @@ fn bench_bulk_write(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("btree", size), &size, |b, &size| {
             b.iter_with_setup(
                 || BTreeStorage::new(BTreeConfig::default()),
-                |storage| {
+                |storage: BTreeStorage| {
                     let header = generate_header();
                     for i in 0..size {
                         let id = generate_covalue_id(i);
@@ -244,7 +246,7 @@ fn bench_bulk_write(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("sqlite", size), &size, |b, &size| {
             b.iter_with_setup(
                 || SqliteStorage::in_memory().unwrap(),
-                |storage| {
+                |storage: SqliteStorage| {
                     let header_json = r#"{"type":"comap"}"#;
                     for i in 0..size {
                         let id = generate_covalue_id(i);
@@ -319,9 +321,9 @@ fn bench_transaction_write(c: &mut Criterion) {
                         let row_id = storage.upsert_covalue("co_test", Some(&header)).unwrap();
                         (storage, row_id)
                     },
-                    |(storage, covalue_row_id)| {
+                    |(storage, covalue_row_id): (BTreeStorage, u64)| {
                         storage
-                            .transaction(|tx| {
+                            .transaction(|tx: &dyn StorageTransaction| {
                                 let session_update = SessionUpdate {
                                     session_update: SessionRow {
                                         covalue: covalue_row_id,
@@ -364,9 +366,14 @@ fn bench_transaction_write(c: &mut Criterion) {
                             .unwrap();
                         (storage, row_id)
                     },
-                    |(storage, covalue_row_id)| {
+                    |(storage, covalue_row_id): (SqliteStorage, i64)| {
                         let session_row_id = storage
-                            .add_session(covalue_row_id, "session_bench", tx_count as i64 - 1, "sig_bench")
+                            .add_session(
+                                covalue_row_id,
+                                "session_bench",
+                                tx_count as i64 - 1,
+                                "sig_bench",
+                            )
                             .unwrap();
 
                         for i in 0..tx_count {
@@ -391,10 +398,12 @@ fn bench_range_query(c: &mut Criterion) {
     // Setup BTreeStorage with data
     let btree_storage = BTreeStorage::new(BTreeConfig::default());
     let header = generate_header();
-    let covalue_row_id = btree_storage.upsert_covalue("co_test", Some(&header)).unwrap();
+    let covalue_row_id = btree_storage
+        .upsert_covalue("co_test", Some(&header))
+        .unwrap();
 
     btree_storage
-        .transaction(|tx| {
+        .transaction(|tx: &dyn StorageTransaction| {
             let session_update = SessionUpdate {
                 session_update: SessionRow {
                     covalue: covalue_row_id,
@@ -426,7 +435,12 @@ fn bench_range_query(c: &mut Criterion) {
         .upsert_covalue("co_test", Some(r#"{"type":"comap"}"#))
         .unwrap();
     let sqlite_session_id = sqlite_storage
-        .add_session(sqlite_covalue_id, "session_range", total_txs as i64 - 1, "sig")
+        .add_session(
+            sqlite_covalue_id,
+            "session_range",
+            total_txs as i64 - 1,
+            "sig",
+        )
         .unwrap();
 
     for i in 0..total_txs {
@@ -503,7 +517,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                     let id = generate_covalue_id(i);
                     let row_id = storage.upsert_covalue(&id, Some(&header)).unwrap();
                     storage
-                        .transaction(|tx| {
+                        .transaction(|tx: &dyn StorageTransaction| {
                             let session_update = SessionUpdate {
                                 session_update: SessionRow {
                                     covalue: row_id,
@@ -530,7 +544,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                 }
                 storage
             },
-            |storage| {
+            |storage: BTreeStorage| {
                 let mut rng = rand::thread_rng();
                 for _ in 0..num_ops {
                     let idx = rng.gen_range(0..100);
@@ -572,7 +586,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                 }
                 storage
             },
-            |storage| {
+            |storage: SqliteStorage| {
                 let mut rng = rand::thread_rng();
                 for _ in 0..num_ops {
                     let idx = rng.gen_range(0..100);
@@ -610,7 +624,7 @@ fn bench_disk_write(c: &mut Criterion) {
     group.bench_function("btree_memory", |b| {
         b.iter_with_setup(
             || BTreeStorage::new(BTreeConfig::default()),
-            |storage| {
+            |storage: BTreeStorage| {
                 let header = generate_header();
                 for i in 0..num_covalues {
                     let id = generate_covalue_id(i);
@@ -628,7 +642,7 @@ fn bench_disk_write(c: &mut Criterion) {
                 let db_path = dir.path().join("bench.db");
                 SqliteStorage::new(db_path.to_str().unwrap()).unwrap()
             },
-            |storage| {
+            |storage: SqliteStorage| {
                 let header_json = r#"{"type":"comap"}"#;
                 for i in 0..num_covalues {
                     let id = generate_covalue_id(i);
@@ -642,7 +656,7 @@ fn bench_disk_write(c: &mut Criterion) {
     group.bench_function("sqlite_memory", |b| {
         b.iter_with_setup(
             || SqliteStorage::in_memory().unwrap(),
-            |storage| {
+            |storage: SqliteStorage| {
                 let header_json = r#"{"type":"comap"}"#;
                 for i in 0..num_covalues {
                     let id = generate_covalue_id(i);

@@ -134,3 +134,45 @@ export function isInWorker(): boolean {
   // @ts-ignore - WorkerGlobalScope is a worker global
   return typeof self.WorkerGlobalScope !== "undefined";
 }
+
+/**
+ * Try to create native storage, falling back to a provided factory if unavailable.
+ *
+ * This is a convenience function that attempts to use native storage first
+ * and falls back to SQLite or another storage implementation if native
+ * storage is not available or fails to initialize.
+ *
+ * @param nativeStorageFactory - Factory function to create native storage
+ * @param fallbackStorageFactory - Factory function to create fallback storage (e.g., SQLite)
+ * @returns StorageAPI instance (native or fallback)
+ *
+ * @example
+ * ```typescript
+ * import { tryNativeStorageWithFallback } from "cojson/storage/native";
+ * import { getSqliteStorage } from "cojson/storage";
+ *
+ * const storage = await tryNativeStorageWithFallback(
+ *   async () => {
+ *     const { NativeStorage } = await import("cojson-core-napi");
+ *     const native = NativeStorage.withPath("./jazz-data");
+ *     return getNativeStorage(native);
+ *   },
+ *   () => getSqliteStorage(sqliteDb)
+ * );
+ * ```
+ */
+export async function tryNativeStorageWithFallback<T>(
+  nativeStorageFactory: () => T | Promise<T>,
+  fallbackStorageFactory: () => T | Promise<T>,
+): Promise<T> {
+  if (!isNativeStorageAvailable()) {
+    return fallbackStorageFactory();
+  }
+
+  try {
+    return await nativeStorageFactory();
+  } catch {
+    // Native storage failed, fall back
+    return fallbackStorageFactory();
+  }
+}
