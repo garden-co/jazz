@@ -1268,4 +1268,71 @@ describe("groupSealer migration for legacy groups", () => {
       "Written by non-member after migration",
     );
   });
+
+  test("legacy fallback: parent without groupSealer uses writeOnly key for non-member extension", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Create a legacy parent group (without groupSealer) on node1
+    const legacyParent = createLegacyGroup(node1.node);
+    expect(legacyParent.get("groupSealer")).toBeUndefined();
+
+    await legacyParent.core.waitForSync();
+
+    // Node2 (NOT a member of parent) creates child and extends legacy parent
+    const legacyParentOnNode2 = await loadCoValueOrFail(
+      node2.node,
+      legacyParent.id,
+    );
+    const childGroup = node2.node.createGroup();
+    childGroup.extend(legacyParentOnNode2);
+
+    await childGroup.core.waitForSync();
+
+    // Verify the legacy fallback was used: a writeKeyFor_ entry should exist
+    // in the parent group for the extending account
+    const legacyParentUpdated = await loadCoValueOrFail(
+      node1.node,
+      legacyParent.id,
+    );
+
+    const writeKeyForNode2 = legacyParentUpdated.get(
+      `writeKeyFor_${node2.node.getCurrentAgent().id}` as any,
+    );
+    expect(writeKeyForNode2).toBeDefined();
+
+    // Verify NO _sealedFor_ entries exist (groupSealer path was NOT used)
+    const sealedForKeys = legacyParentUpdated
+      .keys()
+      .filter((key) => key.includes("_sealedFor_"));
+    expect(sealedForKeys).toHaveLength(0);
+
+    // Node3 is added as writeOnly to child by node2
+    const account3OnNode2 = await loadCoValueOrFail(
+      node2.node,
+      node3.accountID,
+    );
+    childGroup.addMember(account3OnNode2, "writeOnly");
+
+    await childGroup.core.waitForSync();
+
+    // Node3 writes content
+    const childGroupOnNode3 = await loadCoValueOrFail(
+      node3.node,
+      childGroup.id,
+    );
+    const map = childGroupOnNode3.createMap();
+    map.set("test", "Written via legacy writeOnly fallback");
+
+    await map.core.waitForSync();
+
+    // Node1 (parent admin) should be able to read via the writeOnly key
+    const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+    expect(mapOnNode1.get("test")).toEqual(
+      "Written via legacy writeOnly fallback",
+    );
+  });
 });
