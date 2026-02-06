@@ -1,5 +1,4 @@
 pub mod commit;
-pub mod io_handler;
 pub mod object;
 pub mod object_manager;
 pub mod query_manager;

@@ -17,7 +17,7 @@ use crate::query_manager::types::{
     Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement, Value,
 };
 
-use crate::io_handler::IoHandler;
+use crate::storage::Storage;
 
 use super::RowNode;
 
@@ -106,7 +106,7 @@ impl PolicyFilterNode {
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -183,7 +183,7 @@ impl PolicyFilterNode {
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
     fn reevaluate_all_with_context<F>(
         &mut self,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta
@@ -211,7 +211,7 @@ impl PolicyFilterNode {
     fn evaluate_with_context(
         &self,
         row: &Row,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -224,7 +224,7 @@ impl PolicyFilterNode {
         &self,
         expr: &PolicyExpr,
         row: &Row,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,
@@ -262,7 +262,7 @@ impl PolicyFilterNode {
         operation: Operation,
         via_column: &str,
         row: &Row,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
         depth: usize,

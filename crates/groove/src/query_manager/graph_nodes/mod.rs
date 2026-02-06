@@ -16,7 +16,7 @@ pub mod union;
 use ahash::AHashSet;
 
 use super::types::{RowDescriptor, Tuple, TupleDelta};
-use crate::io_handler::IoHandler;
+use crate::storage::Storage;
 
 /// Unique identifier for a node in the query graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,7 +24,7 @@ pub struct NodeId(pub u64);
 
 /// Context for source nodes that need external data.
 pub struct SourceContext<'a> {
-    pub io: &'a dyn IoHandler,
+    pub storage: &'a dyn Storage,
 }
 
 // ============================================================================

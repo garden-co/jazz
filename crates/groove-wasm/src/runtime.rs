@@ -7,31 +7,31 @@
 //!
 //! # Architecture
 //!
-//! - `WasmIoHandler` wraps `MemoryIoHandler`, delegating all sync storage ops
-//! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<WasmIoHandler>>>`
-//! - `schedule_batched_tick` uses `wasm_bindgen_futures::spawn_local` (debounced)
-//! - No explicit tick loops - scheduling emerges from IoHandler
+//! - `MemoryStorage` provides synchronous storage (from groove::storage)
+//! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
+//! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
+//! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use js_sys::Function;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use groove::commit::{Commit, CommitId};
-use groove::io_handler::{IoHandler, LoadedBranch, MemoryIoHandler};
-use groove::object::{BranchName, ObjectId};
+use groove::object::ObjectId;
+#[cfg(target_arch = "wasm32")]
 use groove::query_manager::encoding::decode_row;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{Row, RowDescriptor, Schema, Value};
-use groove::runtime_core::RuntimeCore;
+#[cfg(target_arch = "wasm32")]
+use groove::query_manager::types::{Row, RowDescriptor};
+use groove::query_manager::types::{Schema, Value};
+use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::{ContentHash, StorageError};
+use groove::storage::MemoryStorage;
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -53,194 +53,41 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 }
 
 // ============================================================================
-// WasmIoHandler
+// Type alias
 // ============================================================================
 
-/// IoHandler implementation for WASM.
+/// Concrete RuntimeCore type for WASM.
+type WasmCoreType = RuntimeCore<MemoryStorage, WasmScheduler, JsSyncSender>;
+
+// ============================================================================
+// WasmScheduler
+// ============================================================================
+
+/// Scheduler implementation for WASM.
 ///
-/// Wraps `MemoryIoHandler` for all synchronous storage/index operations.
-/// Adds JS callbacks for sync messages and batched tick scheduling.
-pub struct WasmIoHandler {
-    /// Delegate all storage/index ops to MemoryIoHandler.
-    inner: MemoryIoHandler,
-    /// JS callback for sync messages.
-    sync_callback: Option<Function>,
+/// Uses `wasm_bindgen_futures::spawn_local` to schedule a batched tick.
+/// Debounced: only one task is scheduled at a time.
+pub struct WasmScheduler {
     /// Debounce flag for scheduled ticks.
     scheduled: Rc<RefCell<bool>>,
     /// Weak reference back to RuntimeCore for spawned tasks.
-    core_ref: Weak<RefCell<RuntimeCore<WasmIoHandler>>>,
+    core_ref: Weak<RefCell<WasmCoreType>>,
 }
 
-impl WasmIoHandler {
+impl WasmScheduler {
     fn new() -> Self {
         Self {
-            inner: MemoryIoHandler::new(),
-            sync_callback: None,
             scheduled: Rc::new(RefCell::new(false)),
             core_ref: Weak::new(),
         }
     }
 
-    fn set_core_ref(&mut self, core_ref: Weak<RefCell<RuntimeCore<WasmIoHandler>>>) {
+    fn set_core_ref(&mut self, core_ref: Weak<RefCell<WasmCoreType>>) {
         self.core_ref = core_ref;
-    }
-
-    fn set_sync_callback(&mut self, callback: Function) {
-        self.sync_callback = Some(callback);
     }
 }
 
-impl IoHandler for WasmIoHandler {
-    // ================================================================
-    // Object storage — delegate to inner
-    // ================================================================
-
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.inner.create_object(id, metadata)
-    }
-
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_object_metadata(id)
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.inner.load_branch(object_id, branch)
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.inner.append_commit(object_id, branch, commit)
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.inner.delete_commit(object_id, branch, commit_id)
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.inner.set_branch_tails(object_id, branch, tails)
-    }
-
-    // ================================================================
-    // Blob storage — delegate to inner
-    // ================================================================
-
-    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
-        self.inner.store_blob(hash, data)
-    }
-
-    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_blob(hash)
-    }
-
-    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
-        self.inner.delete_blob(hash)
-    }
-
-    // ================================================================
-    // Persistence ack storage — delegate to inner
-    // ================================================================
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: PersistenceTier,
-    ) -> Result<(), StorageError> {
-        self.inner.store_ack_tier(commit_id, tier)
-    }
-
-    // ================================================================
-    // Index operations — delegate to inner
-    // ================================================================
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.inner.index_insert(table, column, branch, value, row_id)
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.inner.index_remove(table, column, branch, value, row_id)
-    }
-
-    fn index_lookup(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        self.inner.index_lookup(table, column, branch, value)
-    }
-
-    fn index_range(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        self.inner.index_range(table, column, branch, start, end)
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        self.inner.index_scan_all(table, column, branch)
-    }
-
-    // ================================================================
-    // Sync messages — bridge to JS
-    // ================================================================
-
-    fn send_sync_message(&mut self, message: OutboxEntry) {
-        if let Some(ref callback) = self.sync_callback {
-            if let Ok(json) = serde_json::to_string(&message.payload) {
-                let js_value = JsValue::from_str(&json);
-                let _ = callback.call1(&JsValue::NULL, &js_value);
-            }
-        }
-    }
-
-    // ================================================================
-    // Scheduling — spawn_local with debounce
-    // ================================================================
-
+impl Scheduler for WasmScheduler {
     fn schedule_batched_tick(&self) {
         let mut scheduled = self.scheduled.borrow_mut();
         if !*scheduled {
@@ -260,24 +107,58 @@ impl IoHandler for WasmIoHandler {
 }
 
 // ============================================================================
+// JsSyncSender
+// ============================================================================
+
+/// SyncSender implementation bridging to a JS callback.
+///
+/// The callback is set lazily via `on_sync_message_to_send()`.
+pub struct JsSyncSender {
+    callback: RefCell<Option<Function>>,
+}
+
+impl JsSyncSender {
+    fn new() -> Self {
+        Self {
+            callback: RefCell::new(None),
+        }
+    }
+
+    fn set_callback(&self, callback: Function) {
+        *self.callback.borrow_mut() = Some(callback);
+    }
+}
+
+impl SyncSender for JsSyncSender {
+    fn send_sync_message(&self, message: OutboxEntry) {
+        if let Some(ref callback) = *self.callback.borrow() {
+            if let Ok(json) = serde_json::to_string(&message.payload) {
+                let js_value = JsValue::from_str(&json);
+                let _ = callback.call1(&JsValue::NULL, &js_value);
+            }
+        }
+    }
+}
+
+// ============================================================================
 // WasmRuntime
 // ============================================================================
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps `Rc<RefCell<RuntimeCore<WasmIoHandler>>>`.
+/// Wraps `Rc<RefCell<RuntimeCore<MemoryStorage, WasmScheduler, JsSyncSender>>>`.
 /// All methods borrow the core, call RuntimeCore, and return.
-/// Async scheduling happens via IoHandler.schedule_batched_tick().
+/// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
 pub struct WasmRuntime {
-    core: Rc<RefCell<RuntimeCore<WasmIoHandler>>>,
+    core: Rc<RefCell<WasmCoreType>>,
 }
 
 #[wasm_bindgen]
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
-    /// Storage is synchronous (in-memory via MemoryIoHandler).
+    /// Storage is synchronous (in-memory via MemoryStorage).
     ///
     /// # Arguments
     /// * `schema_json` - JSON-encoded schema definition
@@ -306,10 +187,7 @@ impl WasmRuntime {
             .map_err(|e: String| JsError::new(&e))?;
 
         // Parse optional tier
-        let persistence_tier = tier
-            .as_deref()
-            .map(parse_tier)
-            .transpose()?;
+        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
 
         // Create sync manager
         let mut sync_manager = SyncManager::new();
@@ -327,20 +205,22 @@ impl WasmRuntime {
         )
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
-        // Create IoHandler (synchronous in-memory storage)
-        let io_handler = WasmIoHandler::new();
+        // Create components
+        let storage = MemoryStorage::new();
+        let scheduler = WasmScheduler::new();
+        let sync_sender = JsSyncSender::new();
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, io_handler);
+        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
 
-        // Set the core_ref on the IoHandler
+        // Set the core_ref on the Scheduler
         {
             let mut core_guard = core_rc.borrow_mut();
             core_guard
-                .io_handler_mut()
+                .scheduler_mut()
                 .set_core_ref(Rc::downgrade(&core_rc));
         }
 
@@ -368,10 +248,7 @@ impl WasmRuntime {
     /// Register a callback for outgoing sync messages.
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
-        self.core
-            .borrow_mut()
-            .io_handler_mut()
-            .set_sync_callback(callback);
+        self.core.borrow().sync_sender().set_callback(callback);
     }
 
     // =========================================================================
@@ -420,10 +297,7 @@ impl WasmRuntime {
             None
         };
 
-        let tier = settled_tier
-            .as_deref()
-            .map(parse_tier)
-            .transpose()?;
+        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let future = {
             let mut core = self.core.borrow_mut();
@@ -625,10 +499,7 @@ impl WasmRuntime {
             None
         };
 
-        let tier = settled_tier
-            .as_deref()
-            .map(parse_tier)
-            .transpose()?;
+        let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let callback = move |delta: SubscriptionDelta| {
             let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {

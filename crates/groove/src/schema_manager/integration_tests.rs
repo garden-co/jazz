@@ -5,7 +5,6 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::commit::CommitId;
-    use crate::io_handler::{IoHandler, MemoryIoHandler};
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::types::{
@@ -16,6 +15,7 @@ mod tests {
         AppId, CopyOnWriteWriter, Lens, LensOp, LensTransform, SchemaContext, SchemaManager,
         generate_lens,
     };
+    use crate::storage::{MemoryStorage, Storage};
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
@@ -369,12 +369,12 @@ mod tests {
     /// Helper to execute a query synchronously via subscribe/process/unsubscribe on SchemaManager.
     fn execute_query(
         manager: &mut SchemaManager,
-        io: &mut MemoryIoHandler,
+        storage: &mut MemoryStorage,
         query: Query,
     ) -> Vec<(ObjectId, Vec<Value>)> {
         let qm = manager.query_manager_mut();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process(io);
+        qm.process(storage);
         let results = qm.get_subscription_results(sub_id);
         qm.unsubscribe_with_sync(sub_id);
         results
@@ -545,7 +545,7 @@ mod tests {
         qm.set_current_schema(v2.clone(), "dev", "main");
         qm.add_live_schema(v1.clone());
         qm.register_lens(lens);
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
 
         // Get branch names
         let v1_branch = format!("dev-{}-main", v1_hash.short());
@@ -561,14 +561,14 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
         qm.sync_manager_mut().object_manager.create_with_id(
-            &mut io,
+            &mut storage,
             old_row_id,
             Some(metadata.clone()),
         );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 old_row_id,
                 &v1_branch,
                 vec![],
@@ -580,14 +580,15 @@ mod tests {
 
         // Manually update indices for the old branch
         // (In real usage, this would happen via handle_object_update)
-        io.index_insert(
-            "users",
-            "_id",
-            &v1_branch,
-            &Value::Uuid(old_row_id),
-            old_row_id,
-        )
-        .unwrap();
+        storage
+            .index_insert(
+                "users",
+                "_id",
+                &v1_branch,
+                &Value::Uuid(old_row_id),
+                old_row_id,
+            )
+            .unwrap();
 
         // --- Insert a row on the NEW schema branch (v2 format: id, name, email) ---
         let v2_table = v2.get(&TableName::new("users")).unwrap();
@@ -599,13 +600,15 @@ mod tests {
         ];
         let new_row_data = encode_row(&v2_table.descriptor, &new_row_values).unwrap();
 
-        qm.sync_manager_mut()
-            .object_manager
-            .create_with_id(&mut io, new_row_id, Some(metadata));
+        qm.sync_manager_mut().object_manager.create_with_id(
+            &mut storage,
+            new_row_id,
+            Some(metadata),
+        );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 new_row_id,
                 &v2_branch,
                 vec![],
@@ -616,14 +619,15 @@ mod tests {
             .unwrap();
 
         // Update indices for new branch
-        io.index_insert(
-            "users",
-            "_id",
-            &v2_branch,
-            &Value::Uuid(new_row_id),
-            new_row_id,
-        )
-        .unwrap();
+        storage
+            .index_insert(
+                "users",
+                "_id",
+                &v2_branch,
+                &Value::Uuid(new_row_id),
+                new_row_id,
+            )
+            .unwrap();
 
         // --- Query across both branches ---
         let query = QueryBuilder::new("users")
@@ -631,9 +635,9 @@ mod tests {
             .build();
 
         // Subscribe and process to settle the graph
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process(&mut io);
+        qm.process(&mut storage);
 
         // Get results
         let results = qm.get_subscription_results(sub_id);
@@ -749,18 +753,18 @@ mod tests {
         let row1_values = vec![Value::Uuid(row1_id), Value::Text("Alice".to_string())];
         let row1_data = encode_row(&v1_table.descriptor, &row1_values).unwrap();
 
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
         qm.sync_manager_mut().object_manager.create_with_id(
-            &mut io,
+            &mut storage,
             row1_id,
             Some(metadata.clone()),
         );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 row1_id,
                 &v1_branch,
                 vec![],
@@ -771,7 +775,8 @@ mod tests {
             .unwrap();
 
         // Update v1 branch index
-        io.index_insert("users", "_id", &v1_branch, &Value::Uuid(row1_id), row1_id)
+        storage
+            .index_insert("users", "_id", &v1_branch, &Value::Uuid(row1_id), row1_id)
             .unwrap();
 
         // --- Insert row on v2 branch (middle schema) ---
@@ -785,14 +790,14 @@ mod tests {
         let row2_data = encode_row(&v2_table.descriptor, &row2_values).unwrap();
 
         qm.sync_manager_mut().object_manager.create_with_id(
-            &mut io,
+            &mut storage,
             row2_id,
             Some(metadata.clone()),
         );
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 row2_id,
                 &v2_branch,
                 vec![],
@@ -803,7 +808,8 @@ mod tests {
             .unwrap();
 
         // Update v2 branch index
-        io.index_insert("users", "_id", &v2_branch, &Value::Uuid(row2_id), row2_id)
+        storage
+            .index_insert("users", "_id", &v2_branch, &Value::Uuid(row2_id), row2_id)
             .unwrap();
 
         // --- Insert row on v3 branch (current schema) ---
@@ -819,11 +825,11 @@ mod tests {
 
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(&mut io, row3_id, Some(metadata));
+            .create_with_id(&mut storage, row3_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 row3_id,
                 &v3_branch,
                 vec![],
@@ -834,7 +840,8 @@ mod tests {
             .unwrap();
 
         // Update v3 branch index
-        io.index_insert("users", "_id", &v3_branch, &Value::Uuid(row3_id), row3_id)
+        storage
+            .index_insert("users", "_id", &v3_branch, &Value::Uuid(row3_id), row3_id)
             .unwrap();
 
         // --- Query across all three branches ---
@@ -842,9 +849,9 @@ mod tests {
             .branches(&[&v1_branch, &v2_branch, &v3_branch])
             .build();
 
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process(&mut io);
+        qm.process(&mut storage);
 
         let results = qm.get_subscription_results(sub_id);
 
@@ -981,16 +988,16 @@ mod tests {
         ];
         let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
 
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(&mut io, row_id, Some(metadata));
+            .create_with_id(&mut storage, row_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 row_id,
                 &v1_branch,
                 vec![],
@@ -1001,13 +1008,14 @@ mod tests {
             .unwrap();
 
         // Update v1 branch index
-        io.index_insert("users", "_id", &v1_branch, &Value::Uuid(row_id), row_id)
+        storage
+            .index_insert("users", "_id", &v1_branch, &Value::Uuid(row_id), row_id)
             .unwrap();
 
         // Query
         let query = QueryBuilder::new("users").branches(&[&v1_branch]).build();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process(&mut io);
+        qm.process(&mut storage);
 
         let results = qm.get_subscription_results(sub_id);
 
@@ -1065,7 +1073,7 @@ mod tests {
         qm.set_current_schema(v2.clone(), "dev", "main");
         qm.add_live_schema(v1.clone());
         qm.register_lens(lens);
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
 
         // Get branch names
         let v1_branch = format!("dev-{}-main", v1_hash.short());
@@ -1084,11 +1092,11 @@ mod tests {
         metadata.insert("table".to_string(), "users".to_string());
         qm.sync_manager_mut()
             .object_manager
-            .create_with_id(&mut io, row_id, Some(metadata));
+            .create_with_id(&mut storage, row_id, Some(metadata));
         qm.sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 row_id,
                 &v1_branch,
                 vec![],
@@ -1099,7 +1107,8 @@ mod tests {
             .unwrap();
 
         // Update _id index for v1 branch
-        io.index_insert("users", "_id", &v1_branch, &Value::Uuid(row_id), row_id)
+        storage
+            .index_insert("users", "_id", &v1_branch, &Value::Uuid(row_id), row_id)
             .unwrap();
 
         // --- Query using NEW column name (email_address) ---
@@ -1107,7 +1116,7 @@ mod tests {
             .branches(&[&v1_branch, &v2_branch])
             .build();
         let sub_id = qm.subscribe(query).unwrap();
-        qm.process(&mut io);
+        qm.process(&mut storage);
 
         let results = qm.get_subscription_results(sub_id);
 
@@ -1147,8 +1156,8 @@ mod tests {
                 .unwrap();
 
         // Persist schema
-        let mut io = MemoryIoHandler::new();
-        let object_id = manager.persist_schema(&mut io);
+        let mut storage = MemoryStorage::new();
+        let object_id = manager.persist_schema(&mut storage);
 
         // Verify ObjectId is deterministic (based on schema hash)
         let schema_hash = SchemaHash::compute(&v2);
@@ -1189,8 +1198,8 @@ mod tests {
         let lens = manager.add_live_schema(v1).unwrap().clone();
 
         // Persist lens
-        let mut io = MemoryIoHandler::new();
-        let object_id = manager.persist_lens(&mut io, &lens);
+        let mut storage = MemoryStorage::new();
+        let object_id = manager.persist_lens(&mut storage, &lens);
 
         // Verify ObjectId is deterministic
         assert_eq!(object_id, lens.object_id());
@@ -1377,7 +1386,7 @@ mod tests {
         // add_live_schema now automatically updates QueryManager
 
         // === Client A persists schema and lens to catalogue ===
-        let mut io_a = MemoryIoHandler::new();
+        let mut io_a = MemoryStorage::new();
         let schema_object_id = client_a.persist_schema(&mut io_a);
         let lens_object_id = client_a.persist_lens(&mut io_a, &lens);
 
@@ -1644,10 +1653,10 @@ mod tests {
     };
 
     /// Approve all pending updates on a SyncManager (test helper).
-    fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryIoHandler) {
+    fn approve_all_pending(sm: &mut SyncManager, storage: &mut MemoryStorage) {
         let ids = sm.pending_update_ids();
         for id in ids {
-            sm.approve_update(io, id);
+            sm.approve_update(storage, id);
         }
     }
 
@@ -1702,8 +1711,8 @@ mod tests {
 
         // === Client A persists schema to catalogue BEFORE connecting to server ===
         // This way, when the server is added, the catalogue object will sync
-        let mut io_a = MemoryIoHandler::new();
-        let mut io_server = MemoryIoHandler::new();
+        let mut io_a = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
         let schema_obj_id = client_a.persist_schema(&mut io_a);
         assert_eq!(schema_obj_id, schema_hash.to_object_id());
 
@@ -1959,9 +1968,9 @@ mod tests {
             .take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
 
-        let mut io_a = MemoryIoHandler::new();
-        let mut io_b = MemoryIoHandler::new();
-        let mut io_server = MemoryIoHandler::new();
+        let mut io_a = MemoryStorage::new();
+        let mut io_b = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
 
         // === Create documents on server ===
         // Alice's document
@@ -2268,8 +2277,8 @@ mod tests {
         client.query_manager_mut().sync_manager_mut().take_outbox();
         server.query_manager_mut().sync_manager_mut().take_outbox();
 
-        let mut io_client = MemoryIoHandler::new();
-        let mut io_server = MemoryIoHandler::new();
+        let mut io_client = MemoryStorage::new();
+        let mut io_server = MemoryStorage::new();
 
         // === Client persists schema to catalogue ===
         let schema_obj_id = client.persist_schema(&mut io_client);
@@ -2443,7 +2452,7 @@ mod tests {
         let mut client =
             SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
                 .unwrap();
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
 
         // Get branch names
         let v1_branch = format!("dev-{}-main", v1_hash.short());
@@ -2481,13 +2490,13 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
-            .create_with_id(&mut io, row_id, Some(metadata));
+            .create_with_id(&mut storage, row_id, Some(metadata));
         client
             .query_manager_mut()
             .sync_manager_mut()
             .object_manager
             .add_commit(
-                &mut io,
+                &mut storage,
                 row_id,
                 &v2_branch,
                 vec![],
@@ -2499,11 +2508,11 @@ mod tests {
 
         // Process - this should trigger handle_object_update for the v2 row
         // Since v2 schema is unknown, it should be buffered
-        client.process(&mut io);
+        client.process(&mut storage);
 
         // Query on v1 branch should not find the row (it's on v2 branch)
         let query = QueryBuilder::new("users").branch(&v1_branch).build();
-        let results = execute_query(&mut client, &mut io, query);
+        let results = execute_query(&mut client, &mut storage, query);
         assert_eq!(
             results.len(),
             0,
@@ -2543,7 +2552,7 @@ mod tests {
         // 1. Activate v2 schema (now has lens path)
         // 2. Call sync_context()
         // 3. Retry pending row updates
-        client.process(&mut io);
+        client.process(&mut storage);
 
         // v2 should now be live
         assert!(
@@ -2557,7 +2566,7 @@ mod tests {
             .branches(&[&v1_branch, &v2_branch])
             .build();
         let sub_id = client.query_manager_mut().subscribe(multi_query).unwrap();
-        client.process(&mut io);
+        client.process(&mut storage);
 
         let results = client.query_manager().get_subscription_results(sub_id);
 
@@ -2620,13 +2629,13 @@ mod tests {
             "main",
         )
         .unwrap();
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
 
         // Insert a row
         let row_id = ObjectId::new();
         let values = vec![Value::Uuid(row_id), Value::Text("hello".into())];
-        manager.insert(&mut io, "items", &values).unwrap();
-        manager.process(&mut io);
+        manager.insert(&mut storage, "items", &values).unwrap();
+        manager.process(&mut storage);
 
         // Subscribe with settled_tier=None
         let query = QueryBuilder::new("items").build();
@@ -2634,7 +2643,7 @@ mod tests {
             .query_manager_mut()
             .subscribe_with_session(query, None, None)
             .unwrap();
-        manager.process(&mut io);
+        manager.process(&mut storage);
 
         // Should get immediate callback on first process
         let updates = manager.query_manager_mut().take_updates();
@@ -2671,7 +2680,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        let mut io_a = MemoryIoHandler::new();
+        let mut io_a = MemoryStorage::new();
 
         // === Setup Server B (Worker tier) ===
         let mut server_b = SchemaManager::new(
@@ -2682,7 +2691,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        let mut io_b = MemoryIoHandler::new();
+        let mut io_b = MemoryStorage::new();
 
         // === Network topology ===
         let client_a_id = ClientId::new();
@@ -2814,7 +2823,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        let mut io_a = MemoryIoHandler::new();
+        let mut io_a = MemoryStorage::new();
 
         // Subscribe with settled_tier=EdgeServer
         let query = QueryBuilder::new("items")
@@ -2913,7 +2922,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
 
         // Subscribe with settled_tier=Worker
         let query = QueryBuilder::new("items")
@@ -2923,14 +2932,14 @@ mod tests {
             .query_manager_mut()
             .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
             .unwrap();
-        client.process(&mut io);
+        client.process(&mut storage);
 
         // Insert 3 rows before tier is satisfied
         for i in 0..3 {
             let row_id = ObjectId::new();
             let values = vec![Value::Uuid(row_id), Value::Text(format!("item_{}", i))];
-            client.insert(&mut io, "items", &values).unwrap();
-            client.process(&mut io);
+            client.insert(&mut storage, "items", &values).unwrap();
+            client.process(&mut storage);
         }
 
         // No delivery yet
@@ -2957,7 +2966,7 @@ mod tests {
                     tier: PersistenceTier::Worker,
                 },
             });
-        client.process(&mut io);
+        client.process(&mut storage);
 
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
@@ -2995,13 +3004,13 @@ mod tests {
             "main",
         )
         .unwrap();
-        let mut io = MemoryIoHandler::new();
+        let mut storage = MemoryStorage::new();
 
         // Insert a row first
         let row_id = ObjectId::new();
         let values = vec![Value::Uuid(row_id), Value::Text("one-shot".into())];
-        client.insert(&mut io, "items", &values).unwrap();
-        client.process(&mut io);
+        client.insert(&mut storage, "items", &values).unwrap();
+        client.process(&mut storage);
 
         // Subscribe with settled_tier=Worker (simulating one-shot behavior)
         let query = QueryBuilder::new("items")
@@ -3011,7 +3020,7 @@ mod tests {
             .query_manager_mut()
             .subscribe_with_sync(query, None, Some(PersistenceTier::Worker))
             .unwrap();
-        client.process(&mut io);
+        client.process(&mut storage);
 
         // First process: no delivery (waiting for Worker tier)
         let updates = client.query_manager_mut().take_updates();
@@ -3037,7 +3046,7 @@ mod tests {
                     tier: PersistenceTier::Worker,
                 },
             });
-        client.process(&mut io);
+        client.process(&mut storage);
 
         // Now should resolve with correct data
         let updates = client.query_manager_mut().take_updates();

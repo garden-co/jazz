@@ -1,22 +1,38 @@
-//! Synchronous IoHandler trait and implementations.
+//! Synchronous Storage trait and implementations.
 //!
 //! This is the foundation of the sync storage architecture. All storage
 //! and index operations are synchronous - they return immediately with results.
 //!
 //! # Design: Single-threaded
 //!
-//! No `Send + Sync` bounds. Each thread (main, worker) has its own IoHandler
-//! instance. Cross-thread communication uses the sync protocol over postMessage,
-//! not shared mutable state.
+//! No `Send + Sync` bounds on Storage. Each thread (main, worker) has its own
+//! Storage instance. Cross-thread communication uses the sync protocol over
+//! postMessage, not shared mutable state.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
+use serde::{Deserialize, Serialize};
+
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
-use crate::storage::{ContentHash, StorageError};
-use crate::sync_manager::{OutboxEntry, PersistenceTier};
+use crate::sync_manager::PersistenceTier;
+
+// ============================================================================
+// Storage Types
+// ============================================================================
+
+/// BLAKE3 hash of blob content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContentHash(pub [u8; 32]);
+
+/// Errors from storage operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageError {
+    NotFound,
+    IoError(String),
+}
 
 // ============================================================================
 // LoadedBranch - Branch data returned from storage
@@ -30,20 +46,20 @@ pub struct LoadedBranch {
 }
 
 // ============================================================================
-// IoHandler Trait
+// Storage Trait
 // ============================================================================
 
-/// Synchronous I/O handler for storage, indices, and sync messages.
+/// Synchronous storage for objects, blobs, and indices.
 ///
-/// All storage and index operations are **synchronous** - they return
-/// immediately with results. This eliminates the async response/callback
-/// pattern that permeated the old architecture.
+/// All operations are **synchronous** - they return immediately with results.
+/// This eliminates the async response/callback pattern that permeated the
+/// old architecture.
 ///
 /// # Single-threaded
 ///
-/// No `Send + Sync` bounds. Each thread has its own IoHandler instance.
+/// No `Send + Sync` bounds. Each thread has its own Storage instance.
 /// Cross-thread communication uses the sync protocol, not shared state.
-pub trait IoHandler {
+pub trait Storage {
     // ================================================================
     // Object storage (sync - returns immediately with result)
     // ================================================================
@@ -117,17 +133,17 @@ pub trait IoHandler {
     ) -> Result<(), StorageError>;
 
     // ================================================================
-    // Index operations (sync - THE KEY INNOVATION)
+    // Index operations (sync)
     // ================================================================
     //
     // These replace our entire BTreeIndex implementation.
-    // MemoryIoHandler uses BTreeMaps. BfTreeIoHandler (Phase 7) uses bf-tree.
+    // MemoryStorage uses BTreeMaps. BfTreeStorage (Phase 7) uses bf-tree.
     //
     // NOTE: Branch is included in all index methods to support multi-branch
     // scenarios (e.g., user branch vs main branch).
     //
     // NOTE: Methods take `Value` not raw bytes - each implementation handles
-    // encoding internally. This keeps encoding concerns inside IoHandler.
+    // encoding internally. This keeps encoding concerns inside Storage.
 
     /// Insert an index entry.
     fn index_insert(
@@ -165,24 +181,10 @@ pub trait IoHandler {
 
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
-
-    // ================================================================
-    // Sync messages (already sync in current design)
-    // ================================================================
-
-    /// Send a sync message to the network.
-    fn send_sync_message(&mut self, message: OutboxEntry);
-
-    // ================================================================
-    // Scheduling (may still be needed for subscription batching)
-    // ================================================================
-
-    /// Schedule a batched tick. May be a no-op in some implementations.
-    fn schedule_batched_tick(&self);
 }
 
 // ============================================================================
-// MemoryIoHandler - In-memory implementation for testing and main thread
+// MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
 
 /// Index key: (table, column, branch).
@@ -191,7 +193,7 @@ type IndexKey = (String, String, String);
 /// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
 type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 
-/// In-memory IoHandler for testing and main-thread use.
+/// In-memory Storage for testing and main-thread use.
 ///
 /// Stores objects, blobs, and indices in HashMaps/BTreeMaps. No persistence.
 /// This is sufficient for:
@@ -199,7 +201,7 @@ type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 /// - All groove integration tests
 /// - Main thread in browser (acts as cache of worker state)
 #[derive(Default)]
-pub struct MemoryIoHandler {
+pub struct MemoryStorage {
     /// Object storage: object_id -> ObjectData
     objects: HashMap<ObjectId, ObjectData>,
 
@@ -208,9 +210,6 @@ pub struct MemoryIoHandler {
 
     /// Index storage: key -> (encoded_value -> row_ids)
     indices: HashMap<IndexKey, IndexEntries>,
-
-    /// Sync message outbox (taken by caller)
-    outbox: Vec<OutboxEntry>,
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<PersistenceTier>>,
@@ -230,20 +229,10 @@ struct BranchData {
     tails: HashSet<CommitId>,
 }
 
-impl MemoryIoHandler {
-    /// Create a new empty MemoryIoHandler.
+impl MemoryStorage {
+    /// Create a new empty MemoryStorage.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Take all pending outbox messages.
-    pub fn take_outbox(&mut self) -> Vec<OutboxEntry> {
-        std::mem::take(&mut self.outbox)
-    }
-
-    /// Check if there are pending outbox messages.
-    pub fn has_outbox_messages(&self) -> bool {
-        !self.outbox.is_empty()
     }
 }
 
@@ -318,7 +307,7 @@ fn encode_value(value: &Value) -> Vec<u8> {
     }
 }
 
-impl IoHandler for MemoryIoHandler {
+impl Storage for MemoryStorage {
     // ================================================================
     // Object storage
     // ================================================================
@@ -550,22 +539,6 @@ impl IoHandler for MemoryIoHandler {
         };
         index.values().flat_map(|ids| ids.iter().copied()).collect()
     }
-
-    // ================================================================
-    // Sync messages
-    // ================================================================
-
-    fn send_sync_message(&mut self, message: OutboxEntry) {
-        self.outbox.push(message);
-    }
-
-    // ================================================================
-    // Scheduling
-    // ================================================================
-
-    fn schedule_batched_tick(&self) {
-        // No-op for memory handler - tests call tick explicitly
-    }
 }
 
 // ============================================================================
@@ -590,136 +563,145 @@ mod tests {
     }
 
     #[test]
-    fn memory_io_handler_object_lifecycle() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_object_lifecycle() {
+        let mut storage = MemoryStorage::new();
 
         let id = ObjectId::new();
         let mut metadata = HashMap::new();
         metadata.insert("table".to_string(), "users".to_string());
 
         // Create object
-        io.create_object(id, metadata.clone()).unwrap();
+        storage.create_object(id, metadata.clone()).unwrap();
 
         // Load metadata
-        let loaded = io.load_object_metadata(id).unwrap();
+        let loaded = storage.load_object_metadata(id).unwrap();
         assert_eq!(loaded, Some(metadata));
 
         // Non-existent object
         let other_id = ObjectId::new();
-        assert_eq!(io.load_object_metadata(other_id).unwrap(), None);
+        assert_eq!(storage.load_object_metadata(other_id).unwrap(), None);
     }
 
     #[test]
-    fn memory_io_handler_branch_and_commits() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_branch_and_commits() {
+        let mut storage = MemoryStorage::new();
 
         let id = ObjectId::new();
         let branch = BranchName::new("main");
 
-        io.create_object(id, HashMap::new()).unwrap();
+        storage.create_object(id, HashMap::new()).unwrap();
 
         // Initially no branch
-        assert_eq!(io.load_branch(id, &branch).unwrap(), None);
+        assert_eq!(storage.load_branch(id, &branch).unwrap(), None);
 
         // Append commit creates branch
         let commit = make_commit(b"first");
         let commit_id = commit.id();
-        io.append_commit(id, &branch, commit).unwrap();
+        storage.append_commit(id, &branch, commit).unwrap();
 
-        let loaded = io.load_branch(id, &branch).unwrap().unwrap();
+        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
         assert!(loaded.tails.contains(&commit_id));
 
         // Delete commit
-        io.delete_commit(id, &branch, commit_id).unwrap();
-        let loaded = io.load_branch(id, &branch).unwrap().unwrap();
+        storage.delete_commit(id, &branch, commit_id).unwrap();
+        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 0);
     }
 
     #[test]
-    fn memory_io_handler_blob_storage() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_blob_storage() {
+        let mut storage = MemoryStorage::new();
 
         let hash = ContentHash([42u8; 32]);
         let data = b"hello world";
 
         // Store
-        io.store_blob(hash, data).unwrap();
+        storage.store_blob(hash, data).unwrap();
 
         // Load
-        let loaded = io.load_blob(hash).unwrap();
+        let loaded = storage.load_blob(hash).unwrap();
         assert_eq!(loaded, Some(data.to_vec()));
 
         // Delete
-        io.delete_blob(hash).unwrap();
-        assert_eq!(io.load_blob(hash).unwrap(), None);
+        storage.delete_blob(hash).unwrap();
+        assert_eq!(storage.load_blob(hash).unwrap(), None);
     }
 
     #[test]
-    fn memory_io_handler_index_insert_lookup() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_index_insert_lookup() {
+        let mut storage = MemoryStorage::new();
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
         // Insert two rows with same value
-        io.index_insert("users", "age", "main", &Value::Integer(25), row1)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row1)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(25), row2)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row2)
             .unwrap();
 
         // Lookup should return both
-        let results = io.index_lookup("users", "age", "main", &Value::Integer(25));
+        let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&row1));
         assert!(results.contains(&row2));
 
         // Different value returns empty
-        let results = io.index_lookup("users", "age", "main", &Value::Integer(30));
+        let results = storage.index_lookup("users", "age", "main", &Value::Integer(30));
         assert!(results.is_empty());
     }
 
     #[test]
-    fn memory_io_handler_index_remove() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_index_remove() {
+        let mut storage = MemoryStorage::new();
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        io.index_insert("users", "age", "main", &Value::Integer(25), row1)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row1)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(25), row2)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row2)
             .unwrap();
 
         // Remove one
-        io.index_remove("users", "age", "main", &Value::Integer(25), row1)
+        storage
+            .index_remove("users", "age", "main", &Value::Integer(25), row1)
             .unwrap();
 
-        let results = io.index_lookup("users", "age", "main", &Value::Integer(25));
+        let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&row2));
     }
 
     #[test]
-    fn memory_io_handler_index_range() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_index_range() {
+        let mut storage = MemoryStorage::new();
 
         let row20 = ObjectId::new();
         let row25 = ObjectId::new();
         let row30 = ObjectId::new();
         let row35 = ObjectId::new();
 
-        io.index_insert("users", "age", "main", &Value::Integer(20), row20)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(20), row20)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(25), row25)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row25)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(30), row30)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(30), row30)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(35), row35)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(35), row35)
             .unwrap();
 
         // Range [25, 35) should return 25 and 30
-        let results = io.index_range(
+        let results = storage.index_range(
             "users",
             "age",
             "main",
@@ -731,7 +713,7 @@ mod tests {
         assert!(results.contains(&row30));
 
         // Unbounded start, exclusive end
-        let results = io.index_range(
+        let results = storage.index_range(
             "users",
             "age",
             "main",
@@ -743,7 +725,7 @@ mod tests {
         assert!(results.contains(&row25));
 
         // Inclusive start, unbounded end
-        let results = io.index_range(
+        let results = storage.index_range(
             "users",
             "age",
             "main",
@@ -756,69 +738,49 @@ mod tests {
     }
 
     #[test]
-    fn memory_io_handler_index_scan_all() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_index_scan_all() {
+        let mut storage = MemoryStorage::new();
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
 
-        io.index_insert("users", "age", "main", &Value::Integer(20), row1)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(20), row1)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(25), row2)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row2)
             .unwrap();
-        io.index_insert("users", "age", "main", &Value::Integer(30), row3)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(30), row3)
             .unwrap();
 
-        let results = io.index_scan_all("users", "age", "main");
+        let results = storage.index_scan_all("users", "age", "main");
         assert_eq!(results.len(), 3);
     }
 
     #[test]
-    fn memory_io_handler_index_branch_isolation() {
-        let mut io = MemoryIoHandler::new();
+    fn memory_storage_index_branch_isolation() {
+        let mut storage = MemoryStorage::new();
 
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
 
-        io.index_insert("users", "age", "main", &Value::Integer(25), row1)
+        storage
+            .index_insert("users", "age", "main", &Value::Integer(25), row1)
             .unwrap();
-        io.index_insert("users", "age", "feature", &Value::Integer(25), row2)
+        storage
+            .index_insert("users", "age", "feature", &Value::Integer(25), row2)
             .unwrap();
 
         // Each branch sees only its own data
-        let main_results = io.index_lookup("users", "age", "main", &Value::Integer(25));
+        let main_results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
         assert_eq!(main_results.len(), 1);
         assert!(main_results.contains(&row1));
 
-        let feature_results = io.index_lookup("users", "age", "feature", &Value::Integer(25));
+        let feature_results = storage.index_lookup("users", "age", "feature", &Value::Integer(25));
         assert_eq!(feature_results.len(), 1);
         assert!(feature_results.contains(&row2));
-    }
-
-    #[test]
-    fn memory_io_handler_outbox() {
-        use crate::sync_manager::{Destination, ServerId, SyncPayload};
-
-        let mut io = MemoryIoHandler::new();
-
-        assert!(!io.has_outbox_messages());
-
-        io.send_sync_message(OutboxEntry {
-            destination: Destination::Server(ServerId::new()),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: ObjectId::new(),
-                metadata: None,
-                branch_name: BranchName::new("main"),
-                commits: vec![],
-            },
-        });
-
-        assert!(io.has_outbox_messages());
-
-        let messages = io.take_outbox();
-        assert_eq!(messages.len(), 1);
-        assert!(!io.has_outbox_messages());
     }
 
     #[test]

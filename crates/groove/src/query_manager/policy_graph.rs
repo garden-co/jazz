@@ -7,7 +7,7 @@ use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::object_manager::ObjectManager;
 
-use crate::io_handler::IoHandler;
+use crate::storage::Storage;
 
 use super::graph::{GraphNode, QueryGraph};
 use super::graph_nodes::NodeId;
@@ -183,14 +183,14 @@ impl PolicyGraph {
         })
     }
 
-    /// Settle the graph. With synchronous IoHandler, always completes in one pass.
+    /// Settle the graph. With synchronous Storage, always completes in one pass.
     ///
     /// The row_loader trait object is used to fetch row content by ObjectId.
     /// Using trait object instead of generic to avoid recursion limit when
     /// INHERITS evaluation calls this method.
     pub fn settle(
         &mut self,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> bool {
@@ -329,13 +329,13 @@ mod tests {
 
         // With no actual data in the io/om, the scan will return no rows
         let om = ObjectManager::new();
-        let io = crate::io_handler::MemoryIoHandler::new();
+        let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
         let mut row_loader = |_id: ObjectId| -> Option<(Vec<u8>, CommitId)> { None };
 
         // Settle the graph
-        pg.settle(&io, &om, &mut row_loader);
+        pg.settle(&storage, &om, &mut row_loader);
 
         // No rows found (object doesn't exist in empty OM), so result is false
         assert!(!pg.result());

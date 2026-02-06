@@ -1,92 +1,64 @@
 //! Tokio runtime adapter for Groove.
 //!
-//! Provides `TokioRuntime` - a thin wrapper around `RuntimeCore<TokioIoHandler>`
+//! Provides `TokioRuntime` - a thin wrapper around
+//! `RuntimeCore<MemoryStorage, TokioScheduler, CallbackSyncSender>`
 //! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
 //!
-//! - `TokioIoHandler` implements `IoHandler` using tokio::spawn for scheduling
-//! - `TokioRuntime` wraps `Arc<Mutex<RuntimeCore<TokioIoHandler>>>`
+//! - `MemoryStorage` provides synchronous storage (from groove::storage)
+//! - `TokioScheduler` implements `Scheduler` using tokio::spawn for batched ticks
+//! - `CallbackSyncSender` implements `SyncSender` with a user-provided callback
+//! - `TokioRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
-//! - `schedule_batched_tick` spawns a task that calls `batched_tick`
-//! - No event loop - scheduling emerges from the IoHandler
-//!
-//! # Example
-//!
-//! ```ignore
-//! use groove_tokio::TokioRuntime;
-//! use groove::schema_manager::{SchemaManager, AppId};
-//!
-//! let schema_manager = SchemaManager::new(/* ... */);
-//! let runtime = TokioRuntime::new(schema_manager, |msg| {
-//!     // Handle sync messages
-//! });
-//!
-//! // Direct method calls - no spawning needed
-//! runtime.insert("users", values)?;
-//! let future = runtime.query(query);
-//! let results = future.await?;
-//! ```
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use groove::commit::{Commit, CommitId};
-use groove::io_handler::{IoHandler, LoadedBranch, MemoryIoHandler};
-use groove::object::{BranchName, ObjectId};
+use groove::object::ObjectId;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{Schema, Value};
 pub use groove::runtime_core::SubscriptionHandle;
 use groove::runtime_core::{
-    QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, SubscriptionDelta,
+    QueryFuture, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler, SubscriptionDelta,
+    SyncSender,
 };
 use groove::schema_manager::{QuerySchemaContext, SchemaManager};
-use groove::storage::{ContentHash, StorageError};
-use groove::sync_manager::{
-    ClientId, InboxEntry, OutboxEntry, PersistenceTier, QueryId, ServerId,
-};
+use groove::storage::MemoryStorage;
+use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, ServerId};
 
 // ============================================================================
-// TokioIoHandler
+// TokioScheduler
 // ============================================================================
 
-/// IoHandler implementation for Tokio.
+/// Type alias for the concrete RuntimeCore used by TokioRuntime.
+type TokioCoreType = RuntimeCore<MemoryStorage, TokioScheduler, CallbackSyncSender>;
+
+/// Scheduler implementation for Tokio.
 ///
-/// Wraps `MemoryIoHandler` for all synchronous storage/index operations.
-/// Adds a sync callback and tokio-based batched tick scheduling.
-pub struct TokioIoHandler {
-    /// Delegate all storage/index ops to MemoryIoHandler.
-    inner: MemoryIoHandler,
-    /// Callback for sync messages.
-    sync_callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
+/// Spawns a tokio task to call `batched_tick()` on the RuntimeCore.
+/// Debounced: only one task is scheduled at a time.
+pub struct TokioScheduler {
     /// Debounce flag for scheduled ticks.
     scheduled: Arc<AtomicBool>,
     /// Weak reference back to RuntimeCore for spawned tasks.
-    core_ref: Weak<Mutex<RuntimeCore<TokioIoHandler>>>,
+    core_ref: Weak<Mutex<TokioCoreType>>,
 }
 
-impl TokioIoHandler {
-    /// Create a new TokioIoHandler.
+impl TokioScheduler {
+    /// Create a new TokioScheduler.
     ///
     /// Note: `core_ref` starts as empty and is set after RuntimeCore is created.
-    fn new<F>(sync_callback: F) -> Self
-    where
-        F: Fn(OutboxEntry) + Send + Sync + 'static,
-    {
+    fn new() -> Self {
         Self {
-            inner: MemoryIoHandler::new(),
-            sync_callback: Arc::new(sync_callback),
             scheduled: Arc::new(AtomicBool::new(false)),
             core_ref: Weak::new(),
         }
     }
 
     /// Set the core reference (called after RuntimeCore is wrapped in Arc<Mutex>).
-    fn set_core_ref(&mut self, core_ref: Weak<Mutex<RuntimeCore<TokioIoHandler>>>) {
+    fn set_core_ref(&mut self, core_ref: Weak<Mutex<TokioCoreType>>) {
         self.core_ref = core_ref;
     }
 
@@ -96,128 +68,7 @@ impl TokioIoHandler {
     }
 }
 
-impl IoHandler for TokioIoHandler {
-    fn create_object(
-        &mut self,
-        id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) -> Result<(), StorageError> {
-        self.inner.create_object(id, metadata)
-    }
-
-    fn load_object_metadata(
-        &self,
-        id: ObjectId,
-    ) -> Result<Option<HashMap<String, String>>, StorageError> {
-        self.inner.load_object_metadata(id)
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.inner.load_branch(object_id, branch)
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.inner.append_commit(object_id, branch, commit)
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.inner.delete_commit(object_id, branch, commit_id)
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.inner.set_branch_tails(object_id, branch, tails)
-    }
-
-    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
-        self.inner.store_blob(hash, data)
-    }
-
-    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_blob(hash)
-    }
-
-    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
-        self.inner.delete_blob(hash)
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: PersistenceTier,
-    ) -> Result<(), StorageError> {
-        self.inner.store_ack_tier(commit_id, tier)
-    }
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.inner.index_insert(table, column, branch, value, row_id)
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.inner.index_remove(table, column, branch, value, row_id)
-    }
-
-    fn index_lookup(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        self.inner.index_lookup(table, column, branch, value)
-    }
-
-    fn index_range(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        self.inner.index_range(table, column, branch, start, end)
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        self.inner.index_scan_all(table, column, branch)
-    }
-
-    fn send_sync_message(&mut self, message: OutboxEntry) {
-        (self.sync_callback)(message);
-    }
-
+impl Scheduler for TokioScheduler {
     fn schedule_batched_tick(&self) {
         // Debounce: only schedule if not already scheduled
         if !self.scheduled.swap(true, Ordering::SeqCst) {
@@ -226,16 +77,42 @@ impl IoHandler for TokioIoHandler {
 
             tokio::spawn(async move {
                 // Call batched_tick on the core
-                if let Some(core_arc) = core_ref.upgrade() {
-                    if let Ok(mut core) = core_arc.lock() {
-                        core.batched_tick();
-                    }
+                if let Some(core_arc) = core_ref.upgrade()
+                    && let Ok(mut core) = core_arc.lock()
+                {
+                    core.batched_tick();
                 }
 
                 // Clear the scheduled flag AFTER tick completes
                 flag.store(false, Ordering::SeqCst);
             });
         }
+    }
+}
+
+// ============================================================================
+// CallbackSyncSender
+// ============================================================================
+
+/// SyncSender implementation using a callback.
+pub struct CallbackSyncSender {
+    callback: Arc<dyn Fn(OutboxEntry) + Send + Sync>,
+}
+
+impl CallbackSyncSender {
+    fn new<F>(callback: F) -> Self
+    where
+        F: Fn(OutboxEntry) + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+}
+
+impl SyncSender for CallbackSyncSender {
+    fn send_sync_message(&self, message: OutboxEntry) {
+        (self.callback)(message);
     }
 }
 
@@ -281,12 +158,12 @@ impl From<CoreRuntimeError> for RuntimeError {
 
 /// Tokio runtime for Groove.
 ///
-/// Thin wrapper around `Arc<Mutex<RuntimeCore<TokioIoHandler>>>`.
+/// Thin wrapper around `Arc<Mutex<RuntimeCore<MemoryStorage, TokioScheduler, CallbackSyncSender>>>`.
 /// All methods grab the lock, call RuntimeCore, and return.
-/// Async scheduling happens via IoHandler.schedule_batched_tick().
+/// Async scheduling happens via TokioScheduler.schedule_batched_tick().
 #[derive(Clone)]
 pub struct TokioRuntime {
-    core: Arc<Mutex<RuntimeCore<TokioIoHandler>>>,
+    core: Arc<Mutex<TokioCoreType>>,
 }
 
 impl TokioRuntime {
@@ -299,20 +176,21 @@ impl TokioRuntime {
     where
         F: Fn(OutboxEntry) + Send + Sync + 'static,
     {
-        // Create IoHandler (without core_ref initially)
-        let io_handler = TokioIoHandler::new(sync_callback);
+        let storage = MemoryStorage::new();
+        let scheduler = TokioScheduler::new();
+        let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, io_handler);
+        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));
 
-        // Set the core_ref on the IoHandler
+        // Set the core_ref on the Scheduler
         {
             let mut core_guard = core_arc.lock().unwrap();
             core_guard
-                .io_handler_mut()
+                .scheduler_mut()
                 .set_core_ref(Arc::downgrade(&core_arc));
         }
 
@@ -330,10 +208,6 @@ impl TokioRuntime {
     // =========================================================================
 
     /// Insert a row into a table.
-    ///
-    /// This is fire-and-forget - the insert is queued and persistence happens
-    /// via IoHandler scheduling. Callers who need synchronous persistence
-    /// should call `flush()` after this method.
     pub fn insert(
         &self,
         table: &str,
@@ -342,15 +216,10 @@ impl TokioRuntime {
     ) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core.insert(table, values, session)?;
-        // immediate_tick is called by RuntimeCore::insert
         Ok(result)
     }
 
     /// Update a row (partial update by column name).
-    ///
-    /// This is fire-and-forget - the update is queued and persistence happens
-    /// via IoHandler scheduling. Callers who need synchronous persistence
-    /// should call `flush()` after this method.
     pub fn update(
         &self,
         object_id: ObjectId,
@@ -359,15 +228,10 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.update(object_id, values, session)?;
-        // immediate_tick is called by RuntimeCore::update
         Ok(())
     }
 
     /// Delete a row.
-    ///
-    /// This is fire-and-forget - the delete is queued and persistence happens
-    /// via IoHandler scheduling. Callers who need synchronous persistence
-    /// should call `flush()` after this method.
     pub fn delete(
         &self,
         object_id: ObjectId,
@@ -375,51 +239,41 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.delete(object_id, session)?;
-        // immediate_tick is called by RuntimeCore::delete
         Ok(())
     }
 
     /// Flush pending operations to storage.
     ///
     /// Call this after CRUD operations if you need to ensure data is persisted
-    /// before continuing. This waits for any scheduled batched_tick to complete
+    /// before continuing. Waits for any scheduled batched_tick to complete
     /// and then runs additional ticks until all storage is flushed.
-    ///
-    /// For most use cases, relying on IoHandler scheduling via
-    /// `schedule_batched_tick()` is sufficient.
     pub async fn flush(&self) -> Result<(), RuntimeError> {
-        // Keep flushing until everything is stable:
-        // - No scheduled tasks pending
-        // - No outbound messages after our final tick
         let mut attempts = 0;
         loop {
-            // First, wait for any scheduled batched_tick to complete
+            // Wait for any scheduled batched_tick to complete
             loop {
                 let is_scheduled = {
                     let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-                    core.io_handler().is_scheduled()
+                    core.scheduler().is_scheduled()
                 };
 
                 if !is_scheduled {
                     break;
                 }
 
-                // Sleep briefly to allow the scheduled task to run
                 tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
                 attempts += 1;
                 if attempts > 200 {
-                    // Safety valve
                     break;
                 }
             }
 
-            // Now do a synchronous tick and check if more work was generated
+            // Synchronous tick and check if more work was generated
             let has_more_work = {
                 let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
                 core.batched_tick();
-                // Check if processing created more outbound work
-                core.has_outbound() || core.io_handler().is_scheduled()
+                core.has_outbound() || core.scheduler().is_scheduled()
             };
 
             if !has_more_work {
@@ -440,8 +294,6 @@ impl TokioRuntime {
     // =========================================================================
 
     /// Execute a one-shot query.
-    ///
-    /// Returns a future that resolves when the query completes.
     pub fn query(
         &self,
         query: Query,
@@ -456,8 +308,6 @@ impl TokioRuntime {
     // =========================================================================
 
     /// Subscribe to a query with a callback.
-    ///
-    /// The callback is invoked when results change.
     pub fn subscribe<F>(
         &self,
         query: Query,
@@ -494,7 +344,6 @@ impl TokioRuntime {
     pub fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.add_server(server_id);
-        // immediate_tick is called by RuntimeCore::add_server
         Ok(())
     }
 
@@ -513,16 +362,10 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.add_client(client_id, session);
-        // immediate_tick is called by RuntimeCore::add_client
         Ok(())
     }
 
     /// Ensure a client exists with the given session.
-    ///
-    /// If the client already exists with the same session, this is a no-op.
-    /// If the client exists with a different session, we currently panic with todo!()
-    /// as session migration is not yet implemented.
-    /// If the client doesn't exist, it's added with the given session.
     pub fn ensure_client_with_session(
         &self,
         client_id: ClientId,
@@ -541,7 +384,6 @@ impl TokioRuntime {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.add_client_with_full_sync(client_id, session);
-        // immediate_tick is called by RuntimeCore::add_client_with_full_sync
         Ok(())
     }
 
@@ -563,15 +405,12 @@ impl TokioRuntime {
     }
 
     /// Subscribe to a query with explicit schema context (for server use).
-    ///
-    /// This is used by servers to create subscriptions on behalf of clients
-    /// that may be using different schema versions.
     pub fn subscribe_with_schema_context(
         &self,
         query: Query,
         schema_context: &QuerySchemaContext,
         session: Option<Session>,
-    ) -> Result<QueryId, RuntimeError> {
+    ) -> Result<groove::sync_manager::QueryId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core
             .subscribe_with_schema_context(query, schema_context, session)

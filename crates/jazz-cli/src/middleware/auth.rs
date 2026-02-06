@@ -296,22 +296,22 @@ pub fn extract_session(
     }
 
     // Priority 2: JWT auth
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(token) = auth_value.strip_prefix("Bearer ") {
-            match validate_jwt(token, config) {
-                Ok(session) => return Ok(Some(session)),
-                Err(JwtError::NoKeyConfigured) => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "JWT validation not configured",
-                    ));
-                }
-                Err(JwtError::Invalid(_)) => {
-                    return Err((StatusCode::UNAUTHORIZED, "Invalid JWT"));
-                }
-                Err(JwtError::Expired) => {
-                    return Err((StatusCode::UNAUTHORIZED, "JWT has expired"));
-                }
+    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())
+        && let Some(token) = auth_value.strip_prefix("Bearer ")
+    {
+        match validate_jwt(token, config) {
+            Ok(session) => return Ok(Some(session)),
+            Err(JwtError::NoKeyConfigured) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "JWT validation not configured",
+                ));
+            }
+            Err(JwtError::Invalid(_)) => {
+                return Err((StatusCode::UNAUTHORIZED, "Invalid JWT"));
+            }
+            Err(JwtError::Expired) => {
+                return Err((StatusCode::UNAUTHORIZED, "JWT has expired"));
             }
         }
     }

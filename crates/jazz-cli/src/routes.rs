@@ -84,7 +84,12 @@ async fn events_handler(
     // Store connection state
     {
         let mut connections = state.connections.write().await;
-        connections.insert(connection_id, ConnectionState { client_id });
+        connections.insert(
+            connection_id,
+            ConnectionState {
+                _client_id: client_id,
+            },
+        );
     }
 
     // Clone state for cleanup on drop
@@ -115,7 +120,7 @@ async fn events_handler(
                         Ok((target_client_id, payload)) => {
                             // Only emit if this is for our client
                             if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate { payload };
+                                let event = ServerEvent::SyncUpdate { payload: Box::new(payload) };
                                 yield Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default()));
                             }
                         }
@@ -153,10 +158,10 @@ async fn events_handler(
 fn is_catalogue_payload(payload: &SyncPayload) -> bool {
     match payload {
         SyncPayload::ObjectUpdated { metadata, .. } => {
-            if let Some(meta) = metadata {
-                if let Some(type_str) = meta.metadata.get("type") {
-                    return type_str == "catalogue_schema" || type_str == "catalogue_lens";
-                }
+            if let Some(meta) = metadata
+                && let Some(type_str) = meta.metadata.get("type")
+            {
+                return type_str == "catalogue_schema" || type_str == "catalogue_lens";
             }
             false
         }

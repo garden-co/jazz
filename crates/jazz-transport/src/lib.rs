@@ -64,7 +64,7 @@ pub enum ServerEvent {
     Subscribed { query_id: QueryId },
 
     /// Sync update - object data changed.
-    SyncUpdate { payload: SyncPayload },
+    SyncUpdate { payload: Box<SyncPayload> },
 
     /// Error response.
     Error { message: String, code: ErrorCode },

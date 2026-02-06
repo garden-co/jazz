@@ -16,7 +16,7 @@ use crate::query_manager::types::{
     TupleElement, Value,
 };
 
-use crate::io_handler::IoHandler;
+use crate::storage::Storage;
 
 use super::RowNode;
 use super::subgraph::SubgraphTemplate;
@@ -136,11 +136,11 @@ impl ArraySubqueryNode {
         self.inner_dirty
     }
 
-    /// Process outer deltas with access to IoHandler and object manager for subgraph settling.
+    /// Process outer deltas with access to Storage and object manager for subgraph settling.
     pub fn process_with_context<F>(
         &mut self,
         input: TupleDelta,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         mut row_loader: F,
     ) -> TupleDelta
@@ -247,7 +247,7 @@ impl ArraySubqueryNode {
     fn evaluate_subgraph(
         &self,
         correlation_value: &Value,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     ) -> Value {
@@ -307,7 +307,7 @@ impl ArraySubqueryNode {
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(
         &mut self,
-        io: &dyn IoHandler,
+        io: &dyn Storage,
         om: &ObjectManager,
         row_loader: &mut F,
     ) -> TupleDelta

@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
-use crate::io_handler::IoHandler;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{BlobId, ObjectManager};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::storage::Storage;
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -517,10 +517,10 @@ impl SyncManager {
     }
 
     /// Process all inbox entries.
-    pub fn process_inbox<H: IoHandler>(&mut self, io: &mut H) {
+    pub fn process_inbox<H: Storage>(&mut self, storage: &mut H) {
         let entries = std::mem::take(&mut self.inbox);
         for entry in entries {
-            self.process_inbox_entry(io, entry);
+            self.process_inbox_entry(storage, entry);
         }
     }
 
@@ -534,9 +534,9 @@ impl SyncManager {
     /// The content is stored as a commit on the "main" branch.
     ///
     /// Used for storing schemas and lenses in the catalogue.
-    pub fn create_object_with_content<H: IoHandler>(
+    pub fn create_object_with_content<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
@@ -544,12 +544,12 @@ impl SyncManager {
         // Create the object if it doesn't exist
         if self.object_manager.get(object_id).is_none() {
             self.object_manager
-                .create_with_id(io, object_id, Some(metadata));
+                .create_with_id(storage, object_id, Some(metadata));
         }
 
         // Add content as a commit on the "main" branch
         let _ = self.object_manager.add_commit(
-            io,
+            storage,
             object_id,
             "main",
             Vec::new(), // No parents - root commit
@@ -574,11 +574,11 @@ impl SyncManager {
     }
 
     /// Approve a pending update, applying it.
-    pub fn approve_update<H: IoHandler>(&mut self, io: &mut H, pending_id: PendingUpdateId) {
+    pub fn approve_update<H: Storage>(&mut self, storage: &mut H, pending_id: PendingUpdateId) {
         // Find and remove the pending update
         if let Some(pos) = self.pending_updates.iter().position(|p| p.id == pending_id) {
             let pending = self.pending_updates.remove(pos);
-            self.apply_payload_from_client(io, pending.client_id, pending.payload, true);
+            self.apply_payload_from_client(storage, pending.client_id, pending.payload, true);
         }
     }
 
@@ -751,12 +751,12 @@ impl SyncManager {
     ///
     /// This takes the full PendingPermissionCheck since it was already taken
     /// from the queue by take_pending_permission_checks().
-    pub fn approve_permission_check<H: IoHandler>(
+    pub fn approve_permission_check<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         check: PendingPermissionCheck,
     ) {
-        self.apply_payload_from_client(io, check.client_id, check.payload, true);
+        self.apply_payload_from_client(storage, check.client_id, check.payload, true);
     }
 
     /// Reject a pending permission check, sending error back to client.
@@ -1176,17 +1176,21 @@ impl SyncManager {
     }
 
     /// Process a single inbox entry.
-    fn process_inbox_entry<H: IoHandler>(&mut self, io: &mut H, entry: InboxEntry) {
+    fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         match entry.source {
-            Source::Server(server_id) => self.process_from_server(io, server_id, entry.payload),
-            Source::Client(client_id) => self.process_from_client(io, client_id, entry.payload),
+            Source::Server(server_id) => {
+                self.process_from_server(storage, server_id, entry.payload)
+            }
+            Source::Client(client_id) => {
+                self.process_from_client(storage, client_id, entry.payload)
+            }
         }
     }
 
     /// Process a payload from a server.
-    fn process_from_server<H: IoHandler>(
+    fn process_from_server<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         server_id: ServerId,
         payload: SyncPayload,
     ) {
@@ -1198,7 +1202,7 @@ impl SyncManager {
                 commits,
             } => {
                 let persisted =
-                    self.apply_object_updated(io, object_id, metadata, branch_name, commits);
+                    self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
                 // Emit ack back to server if we have a tier
                 if let Some(tier) = self.my_tier
@@ -1224,9 +1228,12 @@ impl SyncManager {
                 tails,
             } => {
                 // Apply truncation locally
-                let _ =
-                    self.object_manager
-                        .truncate_branch(io, object_id, branch_name, tails.clone());
+                let _ = self.object_manager.truncate_branch(
+                    storage,
+                    object_id,
+                    branch_name,
+                    tails.clone(),
+                );
 
                 // Forward to clients
                 self.forward_truncation_to_clients(object_id, branch_name, tails);
@@ -1239,7 +1246,7 @@ impl SyncManager {
             } => {
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
-                    let _ = io.store_ack_tier(commit_id, tier);
+                    let _ = storage.store_ack_tier(commit_id, tier);
                     if let Some(commit) =
                         self.object_manager
                             .get_commit_mut(object_id, &branch_name, commit_id)
@@ -1270,7 +1277,7 @@ impl SyncManager {
             }
             SyncPayload::BlobResponse { blob_id, data } => {
                 let _ = self.object_manager.put_blob(
-                    io,
+                    storage,
                     blob_id.object_id,
                     blob_id.branch_name,
                     blob_id.commit_id,
@@ -1303,9 +1310,9 @@ impl SyncManager {
     }
 
     /// Process a payload from a client.
-    fn process_from_client<H: IoHandler>(
+    fn process_from_client<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         client_id: ClientId,
         payload: SyncPayload,
     ) {
@@ -1379,7 +1386,7 @@ impl SyncManager {
                     );
                 } else {
                     // No session - allow (permissive mode)
-                    self.apply_payload_from_client(io, client_id, payload, false);
+                    self.apply_payload_from_client(storage, client_id, payload, false);
                 }
             }
             SyncPayload::ObjectTruncated {
@@ -1434,7 +1441,7 @@ impl SyncManager {
                     );
                 } else {
                     // No session - allow (permissive mode)
-                    self.apply_payload_from_client(io, client_id, payload, false);
+                    self.apply_payload_from_client(storage, client_id, payload, false);
                 }
             }
             SyncPayload::BlobRequest { blob_id } => {
@@ -1526,7 +1533,7 @@ impl SyncManager {
                 // A client relaying an ack (e.g. from a further-upstream tier)
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
-                    let _ = io.store_ack_tier(commit_id, tier);
+                    let _ = storage.store_ack_tier(commit_id, tier);
                     if let Some(commit) =
                         self.object_manager
                             .get_commit_mut(object_id, &branch_name, commit_id)
@@ -1566,9 +1573,9 @@ impl SyncManager {
     }
 
     /// Apply a payload from a client (either directly or after approval).
-    fn apply_payload_from_client<H: IoHandler>(
+    fn apply_payload_from_client<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         client_id: ClientId,
         payload: SyncPayload,
         _was_pending: bool,
@@ -1589,7 +1596,7 @@ impl SyncManager {
                 }
 
                 let persisted =
-                    self.apply_object_updated(io, object_id, metadata, branch_name, commits);
+                    self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
                 // Emit ack back to client if we have a tier
                 if let Some(tier) = self.my_tier
@@ -1617,9 +1624,12 @@ impl SyncManager {
                 branch_name,
                 tails,
             } => {
-                let _ =
-                    self.object_manager
-                        .truncate_branch(io, object_id, branch_name, tails.clone());
+                let _ = self.object_manager.truncate_branch(
+                    storage,
+                    object_id,
+                    branch_name,
+                    tails.clone(),
+                );
 
                 // Forward to servers
                 self.forward_truncation_to_servers(object_id, branch_name, tails.clone());
@@ -1633,9 +1643,9 @@ impl SyncManager {
 
     /// Apply an ObjectUpdated payload to the local ObjectManager.
     /// Returns the set of newly persisted commit IDs (excludes duplicates).
-    fn apply_object_updated<H: IoHandler>(
+    fn apply_object_updated<H: Storage>(
         &mut self,
-        io: &mut H,
+        storage: &mut H,
         object_id: ObjectId,
         metadata: Option<ObjectMetadata>,
         branch_name: BranchName,
@@ -1645,7 +1655,7 @@ impl SyncManager {
         if self.object_manager.get(object_id).is_none() {
             if let Some(meta) = metadata {
                 self.object_manager
-                    .receive_object(io, object_id, meta.metadata);
+                    .receive_object(storage, object_id, meta.metadata);
             } else {
                 return HashSet::new();
             }
@@ -1663,7 +1673,7 @@ impl SyncManager {
 
             if self
                 .object_manager
-                .receive_commit(io, object_id, branch_name, commit)
+                .receive_commit(storage, object_id, branch_name, commit)
                 .is_ok()
                 && !already_exists
             {
@@ -1835,7 +1845,7 @@ impl SyncManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io_handler::MemoryIoHandler;
+    use crate::storage::MemoryStorage;
     use smallvec::smallvec;
 
     // ========================================================================
@@ -1856,7 +1866,7 @@ mod tests {
     #[test]
     fn add_server_receives_existing_objects() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create an object with a commit
         let obj_id = sm.object_manager.create(&mut io, None);
@@ -1898,7 +1908,7 @@ mod tests {
     #[test]
     fn local_commit_syncs_to_server() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let server_id = ServerId::new();
         sm.add_server(server_id);
 
@@ -1939,7 +1949,7 @@ mod tests {
     #[test]
     fn remove_server_stops_sync() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let server_id = ServerId::new();
         sm.add_server(server_id);
         sm.take_outbox();
@@ -1968,7 +1978,7 @@ mod tests {
     #[test]
     fn commits_sent_in_causal_order() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
 
@@ -2036,7 +2046,7 @@ mod tests {
     #[test]
     fn client_with_query_receives_matching_objects() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object
         let obj_id = sm.object_manager.create(&mut io, None);
@@ -2077,7 +2087,7 @@ mod tests {
     #[test]
     fn client_without_query_receives_nothing() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object
         let obj_id = sm.object_manager.create(&mut io, None);
@@ -2103,7 +2113,7 @@ mod tests {
     #[test]
     fn local_commit_in_scope_syncs_to_client() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Setup client with query
         let client_id = ClientId::new();
@@ -2147,7 +2157,7 @@ mod tests {
     #[test]
     fn local_commit_out_of_scope_not_sent_to_client() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2181,7 +2191,7 @@ mod tests {
     #[test]
     fn query_update_adds_scope_triggers_initial_sync() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create two objects
         let obj1 = sm.object_manager.create(&mut io, None);
@@ -2235,7 +2245,7 @@ mod tests {
     #[test]
     fn query_removal_stops_future_updates() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2280,7 +2290,7 @@ mod tests {
     fn no_callback_allows_all_writes() {
         // When no permission callback is set, all writes in scope are allowed
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2336,7 +2346,7 @@ mod tests {
     #[test]
     fn write_with_session_goes_to_pending_permission_checks() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2405,7 +2415,7 @@ mod tests {
     #[test]
     fn approve_permission_check_applies_write() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2473,7 +2483,7 @@ mod tests {
     #[test]
     fn reject_permission_check_sends_error() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2552,7 +2562,7 @@ mod tests {
     #[test]
     fn no_session_allows_write_immediately() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = sm.object_manager.create(&mut io, None);
         let author = ObjectId::new();
@@ -2617,7 +2627,7 @@ mod tests {
     #[test]
     fn out_of_scope_update_goes_to_pending() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2660,7 +2670,7 @@ mod tests {
         // A row object (metadata has "table") that isn't in any query scope
         // should still be queued for approval, not silently applied.
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2715,7 +2725,7 @@ mod tests {
     #[test]
     fn approved_pending_update_is_applied() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2763,7 +2773,7 @@ mod tests {
     #[test]
     fn rejected_pending_update_sends_error() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
@@ -2824,7 +2834,7 @@ mod tests {
     #[test]
     fn server_update_forwarded_to_matching_clients() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Setup server
         let server_id = ServerId::new();
@@ -2891,7 +2901,7 @@ mod tests {
     #[test]
     fn blob_request_with_permission_returns_data() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object with blob
         let obj_id = sm.object_manager.create(&mut io, None);
@@ -2958,7 +2968,7 @@ mod tests {
     #[test]
     fn blob_request_without_permission_returns_error() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object with blob
         let obj_id = sm.object_manager.create(&mut io, None);
@@ -3022,7 +3032,7 @@ mod tests {
     #[test]
     fn client_update_forwarded_to_server_and_other_clients() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Setup server
         let server_id = ServerId::new();
@@ -3095,7 +3105,7 @@ mod tests {
     #[test]
     fn metadata_sent_only_once_per_destination() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object BEFORE adding server
         let obj_id = sm.object_manager.create(
@@ -3166,7 +3176,7 @@ mod tests {
     #[test]
     fn nosync_object_not_synced_to_server() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object with nosync: "true" metadata
         let obj_id = sm.object_manager.create(
@@ -3204,7 +3214,7 @@ mod tests {
     #[test]
     fn nosync_object_not_synced_to_client() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object with nosync: "true" metadata
         let obj_id = sm.object_manager.create(
@@ -3245,7 +3255,7 @@ mod tests {
     #[test]
     fn nosync_object_update_not_forwarded_to_server() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create nosync object
         let obj_id = sm.object_manager.create(
@@ -3301,7 +3311,7 @@ mod tests {
     #[test]
     fn nosync_object_truncation_not_forwarded_to_server() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create nosync object with some history
         let obj_id = sm.object_manager.create(
@@ -3357,7 +3367,7 @@ mod tests {
     #[test]
     fn nosync_object_truncation_not_forwarded_to_client() {
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create nosync object with some history
         let obj_id = sm.object_manager.create(
@@ -3417,7 +3427,7 @@ mod tests {
     fn regular_object_still_syncs_to_server() {
         // Ensure regular objects without nosync still sync properly
         let mut sm = SyncManager::new();
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         // Create object WITHOUT nosync metadata
         let obj_id = sm.object_manager.create(
@@ -3535,7 +3545,7 @@ mod tests {
     // ========================================================================
 
     /// Approve all pending updates on a SyncManager (test helper).
-    fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryIoHandler) {
+    fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryStorage) {
         let ids = sm.pending_update_ids();
         for id in ids {
             sm.approve_update(io, id);
@@ -3551,9 +3561,9 @@ mod tests {
         a: &mut SyncManager,
         b: &mut SyncManager,
         c: &mut SyncManager,
-        a_io: &mut MemoryIoHandler,
-        b_io: &mut MemoryIoHandler,
-        c_io: &mut MemoryIoHandler,
+        a_io: &mut MemoryStorage,
+        b_io: &mut MemoryStorage,
+        c_io: &mut MemoryStorage,
         a_client_of_b: ClientId,
         b_server_for_a: ServerId,
         b_client_of_c: ClientId,
@@ -3625,9 +3635,9 @@ mod tests {
         a: SyncManager,
         b: SyncManager,
         c: SyncManager,
-        a_io: MemoryIoHandler,
-        b_io: MemoryIoHandler,
-        c_io: MemoryIoHandler,
+        a_io: MemoryStorage,
+        b_io: MemoryStorage,
+        c_io: MemoryStorage,
         a_client_of_b: ClientId,
         b_server_for_a: ServerId,
         b_client_of_c: ClientId,
@@ -3657,9 +3667,9 @@ mod tests {
             a,
             b,
             c,
-            a_io: MemoryIoHandler::new(),
-            b_io: MemoryIoHandler::new(),
-            c_io: MemoryIoHandler::new(),
+            a_io: MemoryStorage::new(),
+            b_io: MemoryStorage::new(),
+            c_io: MemoryStorage::new(),
             a_client_of_b,
             b_server_for_a,
             b_client_of_c,
@@ -3939,7 +3949,7 @@ mod tests {
 
     #[test]
     fn persistence_ack_survives_reload() {
-        let mut io = MemoryIoHandler::new();
+        let mut io = MemoryStorage::new();
 
         let obj_id = ObjectId::new();
         io.create_object(obj_id, HashMap::new()).unwrap();

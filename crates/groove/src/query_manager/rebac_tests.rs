@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use smallvec::smallvec;
 
 use crate::commit::Commit;
-use crate::io_handler::MemoryIoHandler;
 use crate::object::ObjectId;
+use crate::storage::MemoryStorage;
 use crate::sync_manager::{
     ClientId, Destination, InboxEntry, ObjectMetadata, QueryId, Source, SyncError, SyncManager,
     SyncPayload,
@@ -107,7 +107,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -119,7 +119,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(document_metadata()));
+        .create(&mut storage, Some(document_metadata()));
 
     // Register a query scope so the update is in-scope
     let mut scope = HashSet::new();
@@ -156,7 +156,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     });
 
     // Process - should evaluate policy and approve
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Commit should be applied (owner matches session user)
     let tips = qm
@@ -176,7 +176,7 @@ fn rebac_insert_denied_by_simple_policy() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -188,7 +188,7 @@ fn rebac_insert_denied_by_simple_policy() {
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(document_metadata()));
+        .create(&mut storage, Some(document_metadata()));
 
     // Register a query scope
     let mut scope = HashSet::new();
@@ -225,7 +225,7 @@ fn rebac_insert_denied_by_simple_policy() {
     });
 
     // Process - should evaluate policy and reject
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Should get permission denied error
     let outbox = qm.sync_manager_mut().take_outbox();
@@ -262,7 +262,7 @@ fn rebac_no_session_allows_all_writes() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add a client WITHOUT session
     let client_id = ClientId::new();
@@ -273,7 +273,7 @@ fn rebac_no_session_allows_all_writes() {
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(document_metadata()));
+        .create(&mut storage, Some(document_metadata()));
 
     // Register a query scope
     let mut scope = HashSet::new();
@@ -310,7 +310,7 @@ fn rebac_no_session_allows_all_writes() {
     });
 
     // Process - without session, should be allowed immediately
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Commit should be applied (no session = permissive mode)
     let tips = qm
@@ -335,7 +335,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -349,7 +349,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(metadata.clone()));
+        .create(&mut storage, Some(metadata.clone()));
 
     // Register a query scope
     let mut scope = HashSet::new();
@@ -387,7 +387,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     });
 
     // Process - table without policy should allow
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Commit should be applied
     let tips = qm
@@ -407,7 +407,7 @@ fn rebac_non_row_object_allowed() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add a client with session
     let client_id = ClientId::new();
@@ -416,7 +416,10 @@ fn rebac_non_row_object_allowed() {
         .set_client_session(client_id, Session::new("alice"));
 
     // Create an object WITHOUT table metadata (not a row)
-    let obj_id = qm.sync_manager_mut().object_manager.create(&mut io, None);
+    let obj_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, None);
 
     // Register a query scope
     let mut scope = HashSet::new();
@@ -447,7 +450,7 @@ fn rebac_non_row_object_allowed() {
     });
 
     // Process - non-row objects should be allowed
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Commit should be applied
     let tips = qm
@@ -467,7 +470,7 @@ fn rebac_two_clients_different_sessions() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Client 1: alice
     let client1 = ClientId::new();
@@ -485,11 +488,11 @@ fn rebac_two_clients_different_sessions() {
     let obj1 = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(document_metadata()));
+        .create(&mut storage, Some(document_metadata()));
     let obj2 = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(document_metadata()));
+        .create(&mut storage, Some(document_metadata()));
 
     // Register query scopes
     let mut scope1 = HashSet::new();
@@ -556,7 +559,7 @@ fn rebac_two_clients_different_sessions() {
     });
 
     // Process
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Both commits should be applied (each owner matches their session)
     let tips1 = qm
@@ -611,7 +614,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add a client with session for non-admin user
     let client_id = ClientId::new();
@@ -627,7 +630,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(metadata.clone()));
+        .create(&mut storage, Some(metadata.clone()));
 
     // Register query scope
     let mut scope = HashSet::new();
@@ -665,7 +668,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     });
 
     // Process
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Should get permission denied (non-admin cannot insert)
     let outbox = qm.sync_manager_mut().take_outbox();
@@ -730,7 +733,7 @@ fn rebac_update_denied_by_using_policy() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Create Alice's document first (as server/no session)
     let mut metadata = std::collections::HashMap::new();
@@ -738,7 +741,7 @@ fn rebac_update_denied_by_using_policy() {
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(metadata.clone()));
+        .create(&mut storage, Some(metadata.clone()));
 
     let alice_content = encode_row(
         &docs_descriptor,
@@ -752,7 +755,15 @@ fn rebac_update_denied_by_using_policy() {
     let initial_commit = qm
         .sync_manager_mut()
         .object_manager
-        .add_commit(&mut io, obj_id, "main", vec![], alice_content, author, None)
+        .add_commit(
+            &mut storage,
+            obj_id,
+            "main",
+            vec![],
+            alice_content,
+            author,
+            None,
+        )
         .unwrap();
 
     // Now Bob connects and tries to update Alice's document
@@ -803,7 +814,7 @@ fn rebac_update_denied_by_using_policy() {
     });
 
     // Process
-    qm.process(&mut io);
+    qm.process(&mut storage);
 
     // Should get permission denied (Bob cannot see Alice's row via USING)
     let outbox = qm.sync_manager_mut().take_outbox();
@@ -897,7 +908,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Create Alice's folder
     let mut folder_meta = std::collections::HashMap::new();
@@ -905,7 +916,7 @@ fn rebac_inherits_filters_select_query_results() {
     let folder_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(folder_meta));
+        .create(&mut storage, Some(folder_meta));
 
     let folder_content = encode_row(
         &folders_descriptor,
@@ -919,7 +930,7 @@ fn rebac_inherits_filters_select_query_results() {
     qm.sync_manager_mut()
         .object_manager
         .add_commit(
-            &mut io,
+            &mut storage,
             folder_id,
             "main",
             vec![],
@@ -935,7 +946,7 @@ fn rebac_inherits_filters_select_query_results() {
     let doc_id = qm
         .sync_manager_mut()
         .object_manager
-        .create(&mut io, Some(doc_meta));
+        .create(&mut storage, Some(doc_meta));
 
     let doc_content = encode_row(
         &docs_descriptor,
@@ -948,7 +959,15 @@ fn rebac_inherits_filters_select_query_results() {
     .unwrap();
     qm.sync_manager_mut()
         .object_manager
-        .add_commit(&mut io, doc_id, "main", vec![], doc_content, author, None)
+        .add_commit(
+            &mut storage,
+            doc_id,
+            "main",
+            vec![],
+            doc_content,
+            author,
+            None,
+        )
         .unwrap();
 
     // Charlie subscribes to documents query with his session
@@ -960,7 +979,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     // Process to settle the query
     for _ in 0..10 {
-        qm.process(&mut io);
+        qm.process(&mut storage);
     }
 
     // Get Charlie's query results via take_updates
@@ -1018,16 +1037,20 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
-    let mut io = MemoryIoHandler::new();
+    let mut storage = MemoryStorage::new();
 
     // Add Alice as admin (using insert to properly index the row)
     let _alice_admin = qm
-        .insert(&mut io, "admins", &[Value::Text("alice".into())])
+        .insert(&mut storage, "admins", &[Value::Text("alice".into())])
         .unwrap();
 
     // Create a protected row (as server, no session) - also using insert for proper indexing
     let protected_handle = qm
-        .insert(&mut io, "protected", &[Value::Text("original data".into())])
+        .insert(
+            &mut storage,
+            "protected",
+            &[Value::Text("original data".into())],
+        )
         .unwrap();
     let protected_obj = protected_handle.row_id;
     let initial_commit = protected_handle.row_commit_id;
@@ -1085,7 +1108,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // Process - may need multiple iterations for EXISTS to settle
     for _ in 0..10 {
-        qm.process(&mut io);
+        qm.process(&mut storage);
     }
 
     // Bob should get permission denied
@@ -1160,7 +1183,7 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     // Process - may need multiple iterations for EXISTS to settle
     for _ in 0..10 {
-        qm.process(&mut io);
+        qm.process(&mut storage);
     }
 
     // Alice should NOT get permission denied
