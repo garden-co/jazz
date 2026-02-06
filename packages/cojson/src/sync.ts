@@ -152,6 +152,8 @@ export class SyncManager {
     this._ignoreUnknownCoValuesFromServers = true;
   }
 
+  fullStorageReconciliationEnabled = false;
+
   peersCounter = metrics.getMeter("cojson").createUpDownCounter("jazz.peers", {
     description: "Amount of connected peers",
     valueType: ValueType.INT,
@@ -436,6 +438,7 @@ export class SyncManager {
   }
 
   private maybeStartStorageReconciliationForPeer(peer: PeerState): void {
+    if (!this.fullStorageReconciliationEnabled) return;
     if (!this.local.storage) return;
 
     const sessionId = this.local.currentSessionID;

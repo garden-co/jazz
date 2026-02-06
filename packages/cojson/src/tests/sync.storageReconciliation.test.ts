@@ -409,8 +409,33 @@ describe("full storage reconciliation", () => {
   });
 
   describe("scheduling", () => {
-    test("full storage reconciliation is run when adding a new persistent server peer", async () => {
+    test("full storage reconciliation is not run if not enabled", async () => {
       const client = setupTestNode();
+      const { storage } = client.addStorage();
+      client.connectToSyncServer({ persistent: true });
+
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      map.set("hello", "world", "trusting");
+
+      await map.core.waitForSync();
+      SyncMessagesLog.clear();
+
+      const anotherClient = setupTestNode();
+      anotherClient.addStorage({ storage });
+      anotherClient.connectToSyncServer({ persistent: true });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const messages = SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      });
+      expect(messages).toMatchInlineSnapshot(`[]`);
+    });
+
+    test("full storage reconciliation is run when adding a new persistent server peer", async () => {
+      const client = setupTestNode({ enableFullStorageReconciliation: true });
       const { storage } = client.addStorage();
 
       const group = client.node.createGroup();
@@ -419,7 +444,9 @@ describe("full storage reconciliation", () => {
 
       await map.core.waitForSync();
 
-      const anotherClient = setupTestNode();
+      const anotherClient = setupTestNode({
+        enableFullStorageReconciliation: true,
+      });
       anotherClient.addStorage({ storage });
 
       SyncMessagesLog.clear();
@@ -462,7 +489,7 @@ describe("full storage reconciliation", () => {
     });
 
     test("reconciliation is not run again until the reconciliation interval passed", async () => {
-      const client = setupTestNode();
+      const client = setupTestNode({ enableFullStorageReconciliation: true });
       const { storage } = client.addStorage();
       // Connecting to the sync server triggers full storage reconciliation
       const { peer } = client.connectToSyncServer({ persistent: true });
@@ -483,7 +510,9 @@ describe("full storage reconciliation", () => {
         expect(storageReconciliationLock.reason).toBe("not_due");
       }
 
-      const anotherClient = setupTestNode();
+      const anotherClient = setupTestNode({
+        enableFullStorageReconciliation: true,
+      });
       anotherClient.addStorage({ storage });
 
       SyncMessagesLog.clear();
@@ -502,7 +531,7 @@ describe("full storage reconciliation", () => {
     test("reconciliation is run for the same peer after reconciliation interval passes", async () => {
       cojsonInternals.setStorageReconciliationInterval(100);
 
-      const client = setupTestNode();
+      const client = setupTestNode({ enableFullStorageReconciliation: true });
       const { storage } = client.addStorage();
       // Connecting to the sync server triggers full storage reconciliation
       client.connectToSyncServer({ persistent: true });
@@ -513,7 +542,9 @@ describe("full storage reconciliation", () => {
       // Wait for the next reconciliation window to start
       await new Promise((resolve) => setTimeout(resolve, 200));
 
-      const anotherClient = setupTestNode();
+      const anotherClient = setupTestNode({
+        enableFullStorageReconciliation: true,
+      });
       anotherClient.addStorage({ storage });
 
       SyncMessagesLog.clear();
@@ -543,7 +574,7 @@ describe("full storage reconciliation", () => {
       cojsonInternals.setStorageReconciliationInterval(0);
       cojsonInternals.setStorageReconciliationLockTTL(100);
 
-      let client = setupTestNode();
+      let client = setupTestNode({ enableFullStorageReconciliation: true });
       const { storage } = client.addStorage();
       client.connectToSyncServer({ persistent: true });
 
@@ -551,7 +582,7 @@ describe("full storage reconciliation", () => {
       await group.core.waitForSync();
       await client.node.gracefulShutdown();
 
-      client = setupTestNode();
+      client = setupTestNode({ enableFullStorageReconciliation: true });
       client.addStorage({ storage });
 
       // Connecting to the sync server triggers full storage reconciliation
@@ -577,7 +608,7 @@ describe("full storage reconciliation", () => {
       // Wait for the lock to expire
       await new Promise((resolve) => setTimeout(resolve, 200));
 
-      client = setupTestNode();
+      client = setupTestNode({ enableFullStorageReconciliation: true });
       client.addStorage({ storage });
 
       SyncMessagesLog.clear();
@@ -609,7 +640,7 @@ describe("full storage reconciliation", () => {
       setStorageReconciliationLockTTL(100);
       setStorageReconciliationInterval(200);
 
-      const client = setupTestNode();
+      const client = setupTestNode({ enableFullStorageReconciliation: true });
       const { storage } = client.addStorage();
       const { peer } = client.connectToSyncServer({ persistent: true });
 
@@ -623,7 +654,9 @@ describe("full storage reconciliation", () => {
       await new Promise((resolve) => setTimeout(resolve, 200));
 
       SyncMessagesLog.clear();
-      const anotherClient = setupTestNode();
+      const anotherClient = setupTestNode({
+        enableFullStorageReconciliation: true,
+      });
       anotherClient.addStorage({ storage });
       anotherClient.connectToSyncServer({ persistent: true });
 
@@ -662,7 +695,7 @@ describe("full storage reconciliation", () => {
     test("after successful completion, next due run starts from the beginning", async () => {
       setStorageReconciliationInterval(100);
 
-      const client = setupTestNode();
+      const client = setupTestNode({ enableFullStorageReconciliation: true });
       const { storage } = client.addStorage();
       client.connectToSyncServer({ persistent: true });
 
@@ -672,7 +705,9 @@ describe("full storage reconciliation", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 500));
 
-      const anotherClient = setupTestNode();
+      const anotherClient = setupTestNode({
+        enableFullStorageReconciliation: true,
+      });
       anotherClient.addStorage({ storage });
       const { peer } = anotherClient.connectToSyncServer({
         persistent: true,
