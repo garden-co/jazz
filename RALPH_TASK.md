@@ -48,11 +48,11 @@ interface StorageAPI {
 
 ### Phase 1: Core Rust Storage Traits
 
-1. [ ] Create `crates/cojson-storage` crate with core storage traits
-2. [ ] Define `StorageBackend` trait matching TypeScript `DBClientInterfaceSync`
-3. [ ] Define `StorageBackendAsync` trait matching TypeScript `DBClientInterfaceAsync`
-4. [ ] Implement serialization for CoValue headers, transactions, and signatures
-5. [ ] Add comprehensive unit tests for storage trait implementations
+1. [x] Create `crates/cojson-storage` crate with core storage traits
+2. [x] Define `StorageBackend` trait matching TypeScript `DBClientInterfaceSync`
+3. [x] Define `StorageBackendAsync` trait matching TypeScript `DBClientInterfaceAsync`
+4. [x] Implement serialization for CoValue headers, transactions, and signatures
+5. [x] Add comprehensive unit tests for storage trait implementations
 
 ### Phase 2: BF-Tree Storage Engine
 
