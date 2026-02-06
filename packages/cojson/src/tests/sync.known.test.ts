@@ -48,9 +48,9 @@ describe("sending known coValues", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: empty",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 2",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/2",
       ]
     `);

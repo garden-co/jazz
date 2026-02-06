@@ -10,9 +10,11 @@ import {
   newEd25519SigningKey,
   newX25519PrivateKey,
   seal,
+  sealForGroup,
   shortHash,
   sign,
   unseal,
+  unsealForGroup,
   verify,
 } from "cojson-core-napi";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
@@ -25,6 +27,7 @@ import {
   Encrypted,
   KeySecret,
   Sealed,
+  SealedForGroup,
   SealerID,
   SealerSecret,
   SessionMapImpl,
@@ -173,6 +176,46 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
       return JSON.parse(plaintext) as T;
     } catch (e) {
       logger.error("Failed to decrypt/parse sealed message", { err: e });
+      return undefined;
+    }
+  }
+
+  sealForGroup<T extends JsonValue>({
+    message,
+    to,
+    nOnceMaterial,
+  }: {
+    message: T;
+    to: SealerID;
+    nOnceMaterial: { in: RawCoID; tx: TransactionID };
+  }): SealedForGroup<T> {
+    return `sealedForGroup_U${bytesToBase64url(
+      sealForGroup(
+        textEncoder.encode(stableStringify(message)),
+        to,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      ),
+    )}` as SealedForGroup<T>;
+  }
+
+  unsealForGroup<T extends JsonValue>(
+    sealed: SealedForGroup<T>,
+    groupSealerSecret: SealerSecret,
+    nOnceMaterial: { in: RawCoID; tx: TransactionID },
+  ): T | undefined {
+    try {
+      const plaintext = textDecoder.decode(
+        unsealForGroup(
+          base64URLtoBytes(sealed.substring("sealedForGroup_U".length)),
+          groupSealerSecret,
+          textEncoder.encode(stableStringify(nOnceMaterial)),
+        ),
+      );
+      return JSON.parse(plaintext) as T;
+    } catch (e) {
+      logger.error("Failed to decrypt/parse sealed for group message", {
+        err: e,
+      });
       return undefined;
     }
   }

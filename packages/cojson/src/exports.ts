@@ -233,6 +233,8 @@ export namespace CojsonInternalTypes {
   export type RawCoID = import("./ids.js").RawCoID;
   export type ProfileShape = import("./coValues/account.js").ProfileShape;
   export type SealerSecret = import("./crypto/crypto.js").SealerSecret;
+  export type SealerID = import("./crypto/crypto.js").SealerID;
+  export type SealedForGroup<T> = import("./crypto/crypto.js").SealedForGroup<T>;
   export type SignerID = import("./crypto/crypto.js").SignerID;
   export type SignerSecret = import("./crypto/crypto.js").SignerSecret;
   export type JsonObject = import("./jsonValue.js").JsonObject;

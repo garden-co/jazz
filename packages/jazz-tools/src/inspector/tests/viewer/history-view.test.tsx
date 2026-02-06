@@ -427,6 +427,7 @@ describe("HistoryView", async () => {
         `${account.$jazz.id} has been promoted to admin`,
         expect.stringContaining(` has been revealed to `), // key revelation
         expect.stringContaining('Property "readKey" has been set to'),
+        expect.stringContaining('Property "groupSealer" has been set to'),
         `Group ${group2.$jazz.id} has been promoted to writer`,
         expect.stringContaining(" has been revealed to"),
         `${account2.$jazz.id} has been promoted to reader`,
@@ -435,6 +436,7 @@ describe("HistoryView", async () => {
         expect.stringContaining(" has been revealed to"),
         expect.stringContaining(" has been revealed to"),
         expect.stringContaining('Property "readKey" has been set to'),
+        expect.stringContaining('Property "groupSealer" has been set to'),
         expect.stringContaining(" has been revealed to"),
         `${account2.$jazz.id} has been revoked`,
 

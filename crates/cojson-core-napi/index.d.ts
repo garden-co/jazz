@@ -228,6 +228,16 @@ export declare function newX25519PrivateKey(): Uint8Array
 export declare function seal(message: Uint8Array, senderSecret: string, recipientId: string, nonceMaterial: Uint8Array): Uint8Array
 
 /**
+ * NAPI-exposed function for sealing a message for a group (anonymous box pattern).
+ * Uses an ephemeral key pair, so no sender authentication is provided.
+ * - `message`: Raw bytes to seal
+ * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix (the group's sealer)
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns ephemeral_public_key (32 bytes) || ciphertext, or throws error if sealing fails.
+ */
+export declare function sealForGroup(message: Uint8Array, recipientId: string, nonceMaterial: Uint8Array): Uint8Array
+
+/**
  * Compute a short hash of a stable-stringified JSON value.
  * The input should already be serialized using stableStringify on the JS side.
  * Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
@@ -252,6 +262,16 @@ export declare function sign(message: Uint8Array, secret: Uint8Array): string
  * Returns unsealed bytes or throws JsError if unsealing fails.
  */
 export declare function unseal(sealedMessage: Uint8Array, recipientSecret: string, senderId: string, nonceMaterial: Uint8Array): Uint8Array
+
+/**
+ * NAPI-exposed function for unsealing a message sealed for a group (anonymous box pattern).
+ * Extracts the ephemeral public key and decrypts the message.
+ * - `sealed_message`: ephemeral_public_key (32 bytes) || ciphertext
+ * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+ * Returns unsealed bytes or throws error if unsealing fails.
+ */
+export declare function unsealForGroup(sealedMessage: Uint8Array, recipientSecret: string, nonceMaterial: Uint8Array): Uint8Array
 
 /**
  * NAPI-exposed function to verify an Ed25519 signature.

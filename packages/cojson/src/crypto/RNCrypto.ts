@@ -13,6 +13,7 @@ import { Transaction } from "../coValueCore/verifiedState.js";
 import {
   CryptoProvider,
   Sealed,
+  SealedForGroup,
   SealerID,
   SealerSecret,
   SessionMapImpl,
@@ -35,7 +36,9 @@ import {
   shortHash,
   sign,
   seal,
+  sealForGroup,
   unseal,
+  unsealForGroup,
   Blake3Hasher,
   bytesToBase64url as nativeBytesToBase64url,
   base64urlToBytes as nativeBase64urlToBytes,
@@ -137,6 +140,57 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
       return undefined;
     }
   }
+
+  sealForGroup<T extends JsonValue>({
+    message,
+    to,
+    nOnceMaterial,
+  }: {
+    message: T;
+    to: SealerID;
+    nOnceMaterial: { in: RawCoID; tx: TransactionID };
+  }): SealedForGroup<T> {
+    const messageBuffer = toArrayBuffer(
+      textEncoder.encode(stableStringify(message)),
+    );
+    const nOnceBuffer = toArrayBuffer(
+      textEncoder.encode(stableStringify(nOnceMaterial)),
+    );
+
+    return `sealedForGroup_U${bytesToBase64url(
+      new Uint8Array(sealForGroup(messageBuffer, to, nOnceBuffer)),
+    )}` as SealedForGroup<T>;
+  }
+
+  unsealForGroup<T extends JsonValue>(
+    sealed: SealedForGroup<T>,
+    groupSealerSecret: SealerSecret,
+    nOnceMaterial: { in: RawCoID; tx: TransactionID },
+  ): T | undefined {
+    try {
+      const sealedBytes = base64URLtoBytes(
+        sealed.substring("sealedForGroup_U".length),
+      );
+      const nonceBuffer = toArrayBuffer(
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      );
+
+      const plaintext = textDecoder.decode(
+        unsealForGroup(
+          toArrayBuffer(sealedBytes),
+          groupSealerSecret,
+          nonceBuffer,
+        ),
+      );
+      return JSON.parse(plaintext) as T;
+    } catch (e) {
+      logger.error("Failed to decrypt/parse sealed for group message", {
+        err: e,
+      });
+      return undefined;
+    }
+  }
+
   createSessionMap(
     coID: RawCoID,
     headerJson: string,

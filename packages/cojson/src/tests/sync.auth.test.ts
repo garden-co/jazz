@@ -54,11 +54,11 @@ describe("LocalNode auth sync", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | CONTENT Account header: true new: After: 0 New: 3",
-        "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "client -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "client -> server | CONTENT Account header: false new: After: 3 New: 1",
         "server -> client | KNOWN Account sessions: header/3",
-        "server -> client | KNOWN ProfileGroup sessions: header/5",
+        "server -> client | KNOWN ProfileGroup sessions: header/6",
         "server -> client | KNOWN Profile sessions: header/1",
         "server -> client | KNOWN Account sessions: header/4",
       ]
@@ -177,20 +177,20 @@ describe("LocalNode auth sync", () => {
     ).toMatchInlineSnapshot(`
       [
         "creation-node -> server | CONTENT Account header: true new: After: 0 New: 3",
-        "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "creation-node -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "creation-node -> server | CONTENT Account header: false new: After: 3 New: 1",
         "auth-node -> server | LOAD Account sessions: empty",
         "server -> creation-node | KNOWN Account sessions: header/3",
-        "server -> creation-node | KNOWN ProfileGroup sessions: header/5",
+        "server -> creation-node | KNOWN ProfileGroup sessions: header/6",
         "server -> creation-node | KNOWN Profile sessions: header/1",
         "server -> creation-node | KNOWN Account sessions: header/4",
         "server -> auth-node | CONTENT Account header: true new: After: 0 New: 4",
         "auth-node -> server | KNOWN Account sessions: header/4",
         "auth-node -> server | LOAD Profile sessions: empty",
-        "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "server -> auth-node | CONTENT Profile header: true new: After: 0 New: 1",
-        "auth-node -> server | KNOWN ProfileGroup sessions: header/5",
+        "auth-node -> server | KNOWN ProfileGroup sessions: header/6",
         "auth-node -> server | KNOWN Profile sessions: header/1",
       ]
     `);
@@ -247,20 +247,20 @@ describe("LocalNode auth sync", () => {
     ).toMatchInlineSnapshot(`
       [
         "creation-node -> server | CONTENT Account header: true new: After: 0 New: 3",
-        "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "creation-node -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "creation-node -> server | CONTENT Account header: false new: After: 3 New: 1",
         "server -> creation-node | KNOWN Account sessions: header/3",
-        "server -> creation-node | KNOWN ProfileGroup sessions: header/5",
+        "server -> creation-node | KNOWN ProfileGroup sessions: header/6",
         "server -> creation-node | KNOWN Profile sessions: header/1",
         "server -> creation-node | KNOWN Account sessions: header/4",
         "auth-node -> server | LOAD Account sessions: empty",
         "server -> auth-node | CONTENT Account header: true new: After: 0 New: 4",
         "auth-node -> server | KNOWN Account sessions: header/4",
         "auth-node -> server | LOAD Profile sessions: empty",
-        "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 6",
         "server -> auth-node | CONTENT Profile header: true new: After: 0 New: 1",
-        "auth-node -> server | KNOWN ProfileGroup sessions: header/5",
+        "auth-node -> server | KNOWN ProfileGroup sessions: header/6",
         "auth-node -> server | KNOWN Profile sessions: header/1",
       ]
     `);
