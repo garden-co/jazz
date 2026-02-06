@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { assert, beforeEach, describe, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
@@ -260,10 +260,9 @@ describe("groups created with groupSealer", () => {
     expect(groupSealerValue).toBeDefined();
 
     // Verify the secret corresponds to the SealerID embedded in the composite value
-    if (groupSealerSecret) {
-      const derivedID = crypto.getSealerID(groupSealerSecret);
-      expect(groupSealerValue).toContain(derivedID);
-    }
+    assert(groupSealerSecret, "Expected groupSealerSecret");
+    const derivedID = crypto.getSealerID(groupSealerSecret);
+    expect(groupSealerValue).toContain(derivedID);
   });
 });
 
@@ -1245,18 +1244,30 @@ describe("groupSealer migration for legacy groups", () => {
 
     // Node2 loads and migrates
     const groupOnNode2 = await loadCoValueOrFail(node2.node, legacyGroup.id);
+    await groupOnNode2.core.waitForSync();
+
     const sealerFromNode2 = groupOnNode2.get("groupSealer");
     expect(sealerFromNode2).toBeDefined();
 
-    await groupOnNode2.core.waitForSync();
+    // Record transaction count after node2's migration has synced
+    const transactionsAfterNode2 =
+      groupOnNode2.core.getValidSortedTransactions();
 
-    // Node3 loads - migration should be idempotent (groupSealer already set via sync or re-derived)
+    // Node3 loads - groupSealer is already set via sync from node2,
+    // so no new migration should be applied
     const groupOnNode3 = await loadCoValueOrFail(node3.node, legacyGroup.id);
+    await groupOnNode3.core.waitForSync();
+
     const sealerFromNode3 = groupOnNode3.get("groupSealer");
     expect(sealerFromNode3).toBeDefined();
 
-    // Both should produce the same groupSealer (deterministic from readKey)
+    // Both should have the same groupSealer (deterministic from readKey)
     expect(sealerFromNode3).toEqual(sealerFromNode2);
+
+    // Verify no redundant migration was applied — transaction count should be unchanged
+    expect(groupOnNode3.core.getValidSortedTransactions()).toHaveLength(
+      transactionsAfterNode2.length,
+    );
   });
 
   test("parallel migrations from different accounts produce same groupSealer", async () => {
