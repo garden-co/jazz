@@ -6,7 +6,6 @@ import {
   StorageReconciliationAcquireResult,
 } from "../exports";
 import {
-  loadCoValueOrFail,
   SyncMessagesLog,
   TEST_NODE_CONFIG,
   setupTestNode,
@@ -72,7 +71,7 @@ describe("full storage reconciliation", () => {
     expect(messages).toMatchInlineSnapshot(`
       [
         "client -> storage | GET_KNOWN_STATE Group",
-        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
         "client -> storage | GET_KNOWN_STATE Map",
         "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/1",
         "client -> server | RECONCILE",
@@ -80,12 +79,12 @@ describe("full storage reconciliation", () => {
         "server -> client | KNOWN Map sessions: empty",
         "server -> client | RECONCILE_ACK",
         "client -> storage | LOAD Group sessions: empty",
-        "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -125,18 +124,18 @@ describe("full storage reconciliation", () => {
     expect(messages).toMatchInlineSnapshot(`
       [
         "client -> storage | GET_KNOWN_STATE Group",
-        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
         "client -> storage | GET_KNOWN_STATE Map",
         "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/2",
         "client -> server | RECONCILE",
         "server -> client | KNOWN Map sessions: header/1",
         "server -> client | RECONCILE_ACK",
         "client -> storage | LOAD Map sessions: empty",
-        "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | LOAD Group sessions: header/3",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | LOAD Group sessions: header/4",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 2",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/2",
       ]
     `);
@@ -213,7 +212,7 @@ describe("full storage reconciliation", () => {
     expect(messages).toMatchInlineSnapshot(`
       [
         "client -> storage | GET_KNOWN_STATE Group",
-        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
         "client -> storage | GET_KNOWN_STATE Map",
         "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/1",
         "client -> server | RECONCILE",
@@ -221,12 +220,12 @@ describe("full storage reconciliation", () => {
         "server -> client | KNOWN Map sessions: empty",
         "server -> client | RECONCILE_ACK",
         "client -> storage | LOAD Group sessions: empty",
-        "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -389,7 +388,7 @@ describe("full storage reconciliation", () => {
     expect(messages).toMatchInlineSnapshot(`
       [
         "client -> storage | GET_KNOWN_STATE Group",
-        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+        "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
         "client -> storage | GET_KNOWN_STATE Map0",
         "storage -> client | GET_KNOWN_STATE_RESULT Map0 sessions: header/1",
         "client -> server | RECONCILE",
@@ -465,11 +464,11 @@ describe("full storage reconciliation", () => {
       expect(messages).toMatchInlineSnapshot(`
         [
           "client -> storage | GET_KNOWN_STATE Group",
-          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
           "client -> storage | GET_KNOWN_STATE Map",
           "storage -> client | GET_KNOWN_STATE_RESULT Map sessions: header/1",
           "client -> server | RECONCILE",
-          "client -> server | LOAD Group sessions: header/3",
+          "client -> server | LOAD Group sessions: header/4",
           "client -> server | LOAD Map sessions: header/1",
           "server -> client | KNOWN Group sessions: empty",
           "server -> client | KNOWN Map sessions: empty",
@@ -477,12 +476,12 @@ describe("full storage reconciliation", () => {
           "server -> client | KNOWN Group sessions: empty",
           "server -> client | KNOWN Map sessions: empty",
           "client -> storage | LOAD Group sessions: empty",
-          "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-          "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+          "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
+          "client -> server | CONTENT Group header: true new: After: 0 New: 4",
           "client -> storage | LOAD Map sessions: empty",
           "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
           "client -> server | CONTENT Map header: true new: After: 0 New: 1",
-          "server -> client | KNOWN Group sessions: header/3",
+          "server -> client | KNOWN Group sessions: header/4",
           "server -> client | KNOWN Map sessions: header/1",
         ]
       `);
@@ -559,13 +558,13 @@ describe("full storage reconciliation", () => {
       expect(messages).toMatchInlineSnapshot(`
         [
           "client -> storage | GET_KNOWN_STATE Group",
-          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
           "client -> server | RECONCILE",
-          "client -> server | LOAD Group sessions: header/3",
+          "client -> server | LOAD Group sessions: header/4",
           "server -> client | RECONCILE_ACK",
-          "server -> client | KNOWN Group sessions: header/3",
+          "server -> client | KNOWN Group sessions: header/4",
           "client -> storage | LOAD Group sessions: empty",
-          "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
+          "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
         ]
       `);
     });
@@ -624,13 +623,13 @@ describe("full storage reconciliation", () => {
       expect(messages).toMatchInlineSnapshot(`
         [
           "client -> storage | GET_KNOWN_STATE Group",
-          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+          "storage -> client | GET_KNOWN_STATE_RESULT Group sessions: header/4",
           "client -> server | RECONCILE",
-          "client -> server | LOAD Group sessions: header/3",
+          "client -> server | LOAD Group sessions: header/4",
           "server -> client | RECONCILE_ACK",
-          "server -> client | KNOWN Group sessions: header/3",
+          "server -> client | KNOWN Group sessions: header/4",
           "client -> storage | LOAD Group sessions: empty",
-          "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
+          "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
         ]
       `);
     });
