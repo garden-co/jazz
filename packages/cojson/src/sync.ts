@@ -383,9 +383,11 @@ export class SyncManager {
 
     const processStorageBatch = (offset: number) => {
       this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
-        // Skip in-memory CoValues
+        // Process only CoValues that are not in memory
         const coValues = batch.map(({ id }) => this.local.getCoValue(id));
-        const pending = coValues.filter((coValue) => !coValue.isAvailable());
+        const pending = coValues.filter(
+          (coValue) => coValue.loadingState === "unknown",
+        );
         let done = 0;
         const entries: [RawCoID, string][] = [];
         const sendReconcileMessageWhenDone = () => {
