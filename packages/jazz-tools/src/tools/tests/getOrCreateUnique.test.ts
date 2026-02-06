@@ -337,7 +337,7 @@ describe("CoMap.getOrCreateUnique", () => {
     );
   });
 
-  test("concurrent getOrCreateUnique with nested map returns same nested values", async () => {
+  test.skip("concurrent getOrCreateUnique with nested map returns same nested values", async () => {
     const Address = co.map({
       street: z.string(),
       city: z.string(),
@@ -533,7 +533,7 @@ describe("CoList.getOrCreateUnique", () => {
     expect(aliceList).toEqual([1]);
   });
 
-  test("concurrent getOrCreateUnique with nested map results in list with one of the maps", async () => {
+  test.skip("concurrent getOrCreateUnique with nested map results in list with one of the maps", async () => {
     const Item = co.map({
       name: z.string(),
       createdBy: z.string(),

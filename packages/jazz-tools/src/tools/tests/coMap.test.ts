@@ -2321,8 +2321,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
   test("empty map created time", () => {
     const emptyMap = co.map({}).create({});
 
-    const firstTx = emptyMap.$jazz.raw.core.verifiedTransactions.at(0);
-    expect(emptyMap.$jazz.createdAt).toEqual(firstTx!.madeAt);
+    expect(emptyMap.$jazz.createdAt).toEqual(
+      new Date(emptyMap.$jazz.raw.core.verified.header.createdAt!).getTime(),
+    );
 
     const lastTx = emptyMap.$jazz.raw.core.verifiedTransactions.at(-1);
     expect(emptyMap.$jazz.lastUpdatedAt).toEqual(lastTx!.madeAt);
