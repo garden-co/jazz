@@ -93,7 +93,7 @@ test("deleted account shows error in other logged-in session", async ({
 
   // Delete the account from the first context
   await marioHome.navigateToSettings();
-  await marioHome.deleteAccountWithoutWaitingForRedirect();
+  await marioHome.deleteAccount();
 
   await sleep(4000); // Wait for the sync to complete
 
