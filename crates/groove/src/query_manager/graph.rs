@@ -1430,6 +1430,38 @@ impl QueryGraph {
         }
     }
 
+    /// Returns all current output rows as a RowDelta with everything in `added`.
+    /// Used for first delivery after tier-gated settlement.
+    pub fn current_result_as_delta(&self) -> RowDelta {
+        let output_tuples: Vec<Tuple> = self
+            .get_node(self.output_node)
+            .and_then(|node| {
+                if let GraphNode::Output(output) = node {
+                    Some(output.current_tuples().iter().cloned().collect())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        if output_tuples.is_empty() {
+            return RowDelta::default();
+        }
+
+        let td = TupleDelta {
+            added: output_tuples,
+            removed: vec![],
+            updated: vec![],
+        };
+
+        if self.table_descriptors.len() == 1 {
+            td.to_row_delta().unwrap_or_default()
+        } else {
+            td.flatten_to_row_delta(&self.table_descriptors, &self.combined_descriptor)
+                .unwrap_or_default()
+        }
+    }
+
     // ========================================================================
     // Memory profiling
     // ========================================================================

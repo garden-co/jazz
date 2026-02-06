@@ -393,7 +393,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         let query_sub_id = self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync(query, session)
+            .subscribe_with_sync(query, session, None)
             .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
 
         let handle = SubscriptionHandle(self.next_subscription_handle);
@@ -461,7 +461,7 @@ impl<H: IoHandler> RuntimeCore<H> {
         let sub_id = match self
             .schema_manager
             .query_manager_mut()
-            .subscribe_with_sync(query, session)
+            .subscribe_with_sync(query, session, None)
         {
             Ok(id) => id,
             Err(e) => {

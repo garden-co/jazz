@@ -4141,7 +4141,7 @@ fn policy_filters_select_results() {
 
     let query = qm.query("documents").build();
     let sub_id = qm
-        .subscribe_with_session(query, Some(alice_session))
+        .subscribe_with_session(query, Some(alice_session), None)
         .unwrap();
 
     qm.process(&mut io);
@@ -4162,7 +4162,7 @@ fn policy_filters_select_results() {
 
     let query2 = qm.query("documents").build();
     let sub_id2 = qm
-        .subscribe_with_session(query2, Some(bob_session))
+        .subscribe_with_session(query2, Some(bob_session), None)
         .unwrap();
 
     qm.process(&mut io);
@@ -4248,7 +4248,9 @@ fn table_without_policy_returns_all_rows() {
     // Even with session, table without policy returns all rows
     let session = PolicySession::new("some_user");
     let query = qm.query("users").build();
-    let sub_id = qm.subscribe_with_session(query, Some(session)).unwrap();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(session), None)
+        .unwrap();
 
     qm.process(&mut io);
     let updates = qm.take_updates();
@@ -4869,7 +4871,7 @@ fn subscribe_with_sync_sends_to_servers() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
-    let _sub_id = client_qm.subscribe_with_sync(query, None).unwrap();
+    let _sub_id = client_qm.subscribe_with_sync(query, None, None).unwrap();
 
     // Check outbox for QuerySubscription
     let outbox = client_qm.sync_manager_mut().take_outbox();
@@ -4906,7 +4908,7 @@ fn unsubscribe_with_sync_sends_to_servers() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
-    let sub_id = client_qm.subscribe_with_sync(query, None).unwrap();
+    let sub_id = client_qm.subscribe_with_sync(query, None, None).unwrap();
 
     // Clear outbox
     let _ = client_qm.sync_manager_mut().take_outbox();
@@ -5280,7 +5282,7 @@ fn e2e_client_receives_server_data_via_subscription() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
-    let sub_id = client.subscribe_with_sync(query, None).unwrap();
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
 
     // Exchange messages between client and server
     pump_messages(
@@ -5343,7 +5345,7 @@ fn e2e_client_receives_new_matching_row() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
-    let sub_id = client.subscribe_with_sync(query, None).unwrap();
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
 
     // Initial sync (empty)
     pump_messages(
@@ -5415,7 +5417,7 @@ fn e2e_client_does_not_receive_non_matching_row() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
-    let sub_id = client.subscribe_with_sync(query, None).unwrap();
+    let sub_id = client.subscribe_with_sync(query, None, None).unwrap();
     pump_messages(
         &mut client,
         &mut server,
@@ -5515,7 +5517,7 @@ fn e2e_permissions_prevent_sync() {
     let query = client.query("documents").build();
 
     let sub_id = client
-        .subscribe_with_sync(query, Some(alice_session))
+        .subscribe_with_sync(query, Some(alice_session), None)
         .unwrap();
 
     // Exchange messages
@@ -5583,7 +5585,7 @@ fn e2e_permissions_prevent_new_row_sync() {
     let query = client.query("documents").build();
 
     let sub_id = client
-        .subscribe_with_sync(query, Some(alice_session))
+        .subscribe_with_sync(query, Some(alice_session), None)
         .unwrap();
     pump_messages(
         &mut client,

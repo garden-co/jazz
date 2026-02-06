@@ -964,7 +964,7 @@ fn rebac_inherits_filters_select_query_results() {
     let charlie_session = Session::new("charlie");
     let query = QueryBuilder::new("documents").branch("main").build();
     let sub_id = qm
-        .subscribe_with_session(query, Some(charlie_session))
+        .subscribe_with_session(query, Some(charlie_session), None)
         .unwrap();
 
     // Process to settle the query
