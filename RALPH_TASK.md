@@ -93,9 +93,9 @@ Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making i
 
 #### React Native
 
-23. [ ] Export `NativeStorage` from `cojson-core-rn`
-24. [ ] Use file-based BF-Tree storage in app documents directory
-25. [ ] Handle platform-specific paths (iOS vs Android)
+23. [x] Export `NativeStorage` from `cojson-core-rn`
+24. [x] Use file-based BF-Tree storage in app documents directory
+25. [x] Handle platform-specific paths (iOS vs Android)
 
 ### Phase 5: TypeScript Integration
 

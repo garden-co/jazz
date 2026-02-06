@@ -114,3 +114,20 @@ Files created/modified:
 - `crates/cojson-core-wasm/src/lib.rs` - Re-export storage module
 
 Next: Phase 4 items 23-25 (React Native exports) and Phase 5 (TypeScript integration)
+
+**Phase 4 - React Native UniFFI Bindings completed**
+
+Accomplished:
+- Added cojson-storage dependency to cojson-core-rn
+- Created NativeStorage class with UniFFI bindings
+- Implemented all StorageBackend methods as UniFFI exports
+- Added UniFFI records for data interchange (StoredCoValue, StoredSession, etc.)
+- Support for in-memory and file-based storage
+- JSON-based header serialization for complex types
+
+Files created/modified:
+- `crates/cojson-core-rn/rust/Cargo.toml` - Added cojson-storage dependency
+- `crates/cojson-core-rn/rust/src/storage.rs` - NativeStorage UniFFI class
+- `crates/cojson-core-rn/rust/src/lib.rs` - Re-export storage module
+
+Next: Phase 5 (TypeScript integration) and Phase 6 (Testing & Documentation)

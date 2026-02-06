@@ -129,3 +129,56 @@ EOF
 [11:36:59] 🔴 TOKENS: 78340 / 80000 (97%) - rotation imminent [read:299KB write:0KB assist:3KB shell:0KB]
 [11:37:39] 🔴 SHELL cd crates && cargo test --all-features 2>&1 | tail -40 → exit 0
 [11:37:39] 🔴 TOKENS: 78362 / 80000 (97%) - rotation imminent [read:299KB write:0KB assist:3KB shell:0KB]
+[11:37:58] 🔴 SHELL git add -A && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+feat(cojson-core-wasm): add NativeStorage WASM bindings
+
+Phase 4 - WASM platform bindings for native storage:
+
+- Add cojson-storage and js-sys dependencies
+- Create NativeStorage class with WASM bindings
+- Implement all StorageBackend methods as exports:
+  - CoValue CRUD (get, upsert, sessions, transactions)
+  - Sync state tracking (track, get unsynced, stop tracking)
+  - Deletion queue (mark deleted, erase but keep tombstone)
+  - Transaction operations (add session, add tx, add signature)
+- Add runtime detection helpers:
+  - supportsOpfs() - check for OPFS availability
+  - isInWorker() - check for Web Worker context
+- In-memory storage mode for Cloudflare Workers
+- JSON-based API for JavaScript interop
+EOF
+)" → exit 0
+[11:38:04] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-rn/rust/Cargo.toml (22 lines, ~2.1KB)
+[11:38:06] 🔴 SHELL git push origin feat/building-native-storage 2>&1 → exit 0
+[11:38:09] 🔴 TOKENS: 78937 / 80000 (98%) - rotation imminent [read:301KB write:0KB assist:3KB shell:0KB]
+[11:38:11] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-rn/rust/src/lib.rs (27 lines, ~2.6KB)
+[11:38:14] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-rn/rust/src/session_map.rs (341 lines, ~33.3KB)
+[11:38:14] 🔴 ROTATE: Token threshold reached (88137 >= 80000)
+[11:38:26] 🔴 ROTATE: Token threshold reached (88151 >= 80000)
+[11:39:23] 🔴 TOKENS: 88151 / 80000 (110%) - rotation imminent [read:337KB write:0KB assist:3KB shell:0KB]
+[11:39:23] 🔴 ROTATE: Token threshold reached (88151 >= 80000)
+[11:39:27] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-rn/rust/src/lib.rs (27 lines, ~2.6KB)
+[11:39:27] 🔴 ROTATE: Token threshold reached (88842 >= 80000)
+[11:39:30] 🔴 ROTATE: Token threshold reached (88842 >= 80000)
+[11:39:34] 🔴 ROTATE: Token threshold reached (88865 >= 80000)
+[11:39:37] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-storage/src/bftree/backend.rs (686 lines, ~66.9KB)
+[11:39:37] 🔴 ROTATE: Token threshold reached (106015 >= 80000)
+[11:39:41] 🔴 ROTATE: Token threshold reached (106015 >= 80000)
+[11:39:44] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-storage/src/traits.rs (571 lines, ~55.7KB)
+[11:39:44] 🔴 ROTATE: Token threshold reached (120290 >= 80000)
+[11:39:48] 🔴 SHELL cd /Users/antonio.musolino/Workspace/github/jazz && cargo build -p cojson-core-rn 2>&1 → exit 0
+[11:39:48] 🔴 ROTATE: Token threshold reached (120302 >= 80000)
+[11:39:52] 🔴 ROTATE: Token threshold reached (120302 >= 80000)
+[11:39:54] 🔴 TOKENS: 120302 / 80000 (150%) - rotation imminent [read:463KB write:0KB assist:3KB shell:0KB]
+[11:40:02] 🔴 SHELL cd /Users/antonio.musolino/Workspace/github/jazz/crates && cargo build -p cojson-core-rn 2>&1 → exit 0
+[11:40:02] 🔴 ROTATE: Token threshold reached (120302 >= 80000)
+[11:40:09] 🔴 SHELL cd /Users/antonio.musolino/Workspace/github/jazz/crates && cargo test -p cojson-core-rn 2>&1 → exit 0
+[11:40:09] 🔴 ROTATE: Token threshold reached (120332 >= 80000)
+[11:40:13] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/.ralph/progress.md (117 lines, ~11.4KB)
+[11:40:13] 🔴 ROTATE: Token threshold reached (123274 >= 80000)
+[11:40:19] 🔴 ROTATE: Token threshold reached (123274 >= 80000)
+[11:40:23] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/RALPH_TASK.md (481 lines, ~46.9KB)
+[11:40:23] 🔴 ROTATE: Token threshold reached (135299 >= 80000)
+[11:40:25] 🔴 TOKENS: 135299 / 80000 (169%) - rotation imminent [read:521KB write:0KB assist:3KB shell:0KB]
+[11:40:28] 🔴 ROTATE: Token threshold reached (135299 >= 80000)
+[11:40:34] 🔴 ROTATE: Token threshold reached (135299 >= 80000)
