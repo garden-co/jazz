@@ -210,7 +210,7 @@ export abstract class CryptoProvider<Blake3State = any> {
   // Derive group sealer deterministically from read key
   // This ensures concurrent migrations by different admins produce the same result
   groupSealerFromReadKey(readKeySecret: KeySecret): {
-    id: SealerID;
+    publicKey: SealerID;
     secret: SealerSecret;
   } {
     const sealerBytes = this.blake3HashOnceWithContext(
@@ -226,7 +226,7 @@ export abstract class CryptoProvider<Blake3State = any> {
     const secret: SealerSecret = `sealerSecret_z${base58.encode(sealerBytes)}`;
     return {
       secret,
-      id: this.getSealerID(secret),
+      publicKey: this.getSealerID(secret),
     };
   }
 

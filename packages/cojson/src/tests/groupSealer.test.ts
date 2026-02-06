@@ -167,7 +167,7 @@ describe("sealForGroup / unsealForGroup crypto operations", () => {
     const sealer1 = crypto.groupSealerFromReadKey(readKey.secret);
     const sealer2 = crypto.groupSealerFromReadKey(readKey.secret);
 
-    expect(sealer1.id).toEqual(sealer2.id);
+    expect(sealer1.publicKey).toEqual(sealer2.publicKey);
     expect(sealer1.secret).toEqual(sealer2.secret);
   });
 
@@ -178,7 +178,7 @@ describe("sealForGroup / unsealForGroup crypto operations", () => {
     const sealer1 = crypto.groupSealerFromReadKey(readKey1.secret);
     const sealer2 = crypto.groupSealerFromReadKey(readKey2.secret);
 
-    expect(sealer1.id).not.toEqual(sealer2.id);
+    expect(sealer1.publicKey).not.toEqual(sealer2.publicKey);
     expect(sealer1.secret).not.toEqual(sealer2.secret);
   });
 
@@ -194,7 +194,7 @@ describe("sealForGroup / unsealForGroup crypto operations", () => {
 
     const sealed = crypto.sealForGroup({
       message: data,
-      to: sealer.id,
+      to: sealer.publicKey,
       nOnceMaterial,
     });
 
@@ -243,7 +243,7 @@ describe("groups created with groupSealer", () => {
     }
 
     const derivedSealer = crypto.groupSealerFromReadKey(readKey.secret);
-    expect(groupSealer).toEqual(derivedSealer.id);
+    expect(groupSealer).toEqual(derivedSealer.publicKey);
   });
 
   test("getGroupSealerSecret derives the correct secret", async () => {
@@ -996,7 +996,7 @@ describe("key rotation updates groupSealer", () => {
     }
 
     const derivedSealer = crypto.groupSealerFromReadKey(newReadKey.secret);
-    expect(newGroupSealer).toEqual(derivedSealer.id);
+    expect(newGroupSealer).toEqual(derivedSealer.publicKey);
   });
 });
 
@@ -1014,7 +1014,7 @@ describe("concurrent group sealer initialization", () => {
     // All results should be identical
     const firstResult = results[0];
     for (const result of results) {
-      expect(result.id).toEqual(firstResult!.id);
+      expect(result.publicKey).toEqual(firstResult!.publicKey);
       expect(result.secret).toEqual(firstResult!.secret);
     }
   });
@@ -1095,7 +1095,7 @@ describe("groupSealer migration for legacy groups", () => {
     const readKey = groupOnNode2.getCurrentReadKey();
     expect(readKey.secret).toBeDefined();
     const expectedSealer = crypto.groupSealerFromReadKey(readKey.secret!);
-    expect(groupOnNode2.get("groupSealer")).toEqual(expectedSealer.id);
+    expect(groupOnNode2.get("groupSealer")).toEqual(expectedSealer.publicKey);
   });
 
   test("migration is idempotent - loading on two admin nodes produces same groupSealer", async () => {

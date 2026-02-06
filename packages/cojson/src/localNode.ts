@@ -867,7 +867,7 @@ export class LocalNode {
 
     // Initialize the group sealer (derived deterministically from the read key)
     const groupSealer = this.crypto.groupSealerFromReadKey(readKey.secret);
-    group.set("groupSealer", groupSealer.id, "trusting");
+    group.set("groupSealer", groupSealer.publicKey, "trusting");
 
     return group;
   }

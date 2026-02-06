@@ -165,7 +165,7 @@ function healMissingGroupSealer(group: RawGroup) {
 
   const groupSealer =
     group.core.node.crypto.groupSealerFromReadKey(readKeySecret);
-  group.set("groupSealer", groupSealer.id, "trusting");
+  group.set("groupSealer", groupSealer.publicKey, "trusting");
 }
 
 function needsKeyRotation(group: RawGroup) {
@@ -1157,7 +1157,7 @@ export class RawGroup<
     const newGroupSealer = this.crypto.groupSealerFromReadKey(
       newReadKey.secret,
     );
-    this.set("groupSealer", newGroupSealer.id, "trusting");
+    this.set("groupSealer", newGroupSealer.publicKey, "trusting");
 
     /**
      * The new read key needs to be revealed to the parent groups
