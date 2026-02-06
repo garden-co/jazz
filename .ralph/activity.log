@@ -103,3 +103,29 @@ EOF
 [11:34:26] 🔴 WARN: Approaching token limit (70608 >= 70000)
 [11:34:40] 🔴 SHELL cd crates && cargo check -p cojson_core_napi 2>&1 → exit 0
 [11:34:40] 🔴 TOKENS: 70608 / 80000 (88%) - approaching limit [read:269KB write:0KB assist:3KB shell:0KB]
+[11:35:06] 🔴 SHELL git add -A && git commit --trailer "Co-authored-by: Cursor <cursoragent@cursor.com>" -m "$(cat <<'EOF'
+feat(cojson-core-napi): add NativeStorage NAPI bindings
+
+Phase 4 - Node.js platform bindings for native storage:
+
+- Add cojson-storage dependency to cojson-core-napi
+- Create NativeStorage class with full NAPI bindings
+- Implement all StorageBackend methods as exports:
+  - CoValue CRUD (get, upsert, sessions, transactions)
+  - Sync state tracking (track, get unsynced, stop tracking)
+  - Deletion queue (mark deleted, erase but keep tombstone)
+  - Transaction operations (add session, add tx, add signature)
+- Add JavaScript-friendly type conversions:
+  - JsCoValueHeader, JsRuleset, JsStoredCoValueRow
+  - JsStoredSessionRow, JsTransactionRow, JsSignatureAfterRow
+  - JsCoValueKnownState, JsSyncStateUpdate
+EOF
+)" → exit 0
+[11:35:10] 🔴 TOKENS: 70651 / 80000 (88%) - approaching limit [read:269KB write:0KB assist:3KB shell:0KB]
+[11:35:11] 🔴 READ /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-wasm/src/lib.rs (307 lines, ~29.9KB)
+[11:36:29] 🔴 TOKENS: 78340 / 80000 (97%) - rotation imminent [read:299KB write:0KB assist:3KB shell:0KB]
+[11:36:47] 🔴 SHELL cd crates && cargo check -p cojson-core-wasm 2>&1 | head -50 → exit 0
+[11:36:56] 🔴 SHELL cd crates && cargo check -p cojson-core-wasm 2>&1 → exit 0
+[11:36:59] 🔴 TOKENS: 78340 / 80000 (97%) - rotation imminent [read:299KB write:0KB assist:3KB shell:0KB]
+[11:37:39] 🔴 SHELL cd crates && cargo test --all-features 2>&1 | tail -40 → exit 0
+[11:37:39] 🔴 TOKENS: 78362 / 80000 (97%) - rotation imminent [read:299KB write:0KB assist:3KB shell:0KB]

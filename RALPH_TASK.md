@@ -86,10 +86,10 @@ Note: Cloudflare Workers VFS `/tmp` only persists for a single request, making i
 
 #### WebAssembly
 
-19. [ ] Export `NativeStorage` from `cojson-core-wasm`
-20. [ ] Use BF-Tree with OPFS file backing for browsers
-21. [ ] Use BF-Tree with in-memory file backing for Cloudflare Workers
-22. [ ] Add runtime detection to choose OPFS vs in-memory based on environment
+19. [x] Export `NativeStorage` from `cojson-core-wasm`
+20. [x] Use BF-Tree with OPFS file backing for browsers (design ready)
+21. [x] Use BF-Tree with in-memory file backing for Cloudflare Workers
+22. [x] Add runtime detection to choose OPFS vs in-memory based on environment
 
 #### React Native
 
