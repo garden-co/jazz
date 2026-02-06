@@ -226,7 +226,8 @@ describe("groups created with groupSealer", () => {
 
     const groupSealer = group.get("groupSealer");
     expect(groupSealer).toBeDefined();
-    expect(groupSealer).toMatch(/^sealer_z/);
+    // New composite format: "key_z...@sealer_z..."
+    expect(groupSealer).toMatch(/^key_z.+@sealer_z/);
   });
 
   test("groupSealer is derived from readKey deterministically (Task 28)", async () => {
@@ -234,7 +235,7 @@ describe("groups created with groupSealer", () => {
 
     const group = node1.node.createGroup();
 
-    const groupSealer = group.get("groupSealer");
+    const groupSealer = group.get("groupSealer") as string;
     const readKey = group.getCurrentReadKey();
 
     expect(readKey.secret).toBeDefined();
@@ -243,7 +244,8 @@ describe("groups created with groupSealer", () => {
     }
 
     const derivedSealer = crypto.groupSealerFromReadKey(readKey.secret);
-    expect(groupSealer).toEqual(derivedSealer.publicKey);
+    // Composite format: "readKeyID@sealerID"
+    expect(groupSealer).toEqual(`${readKey.id}@${derivedSealer.publicKey}`);
   });
 
   test("getGroupSealerSecret derives the correct secret", async () => {
@@ -254,13 +256,13 @@ describe("groups created with groupSealer", () => {
     const groupSealerSecret = group.getGroupSealerSecret();
     expect(groupSealerSecret).toBeDefined();
 
-    const groupSealerID = group.get("groupSealer");
-    expect(groupSealerID).toBeDefined();
+    const groupSealerValue = group.get("groupSealer") as string;
+    expect(groupSealerValue).toBeDefined();
 
-    // Verify the secret corresponds to the public ID
+    // Verify the secret corresponds to the SealerID embedded in the composite value
     if (groupSealerSecret) {
       const derivedID = crypto.getSealerID(groupSealerSecret);
-      expect(derivedID).toEqual(groupSealerID);
+      expect(groupSealerValue).toContain(derivedID);
     }
   });
 });
@@ -306,7 +308,8 @@ describe("non-member extending child to parent via groupSealer", () => {
     );
     const childGroupSealer = childGroupOnNode1.get("groupSealer");
     expect(childGroupSealer).toBeDefined();
-    expect(childGroupSealer).toMatch(/^sealer_z/);
+    // New composite format: "key_z...@sealer_z..."
+    expect(childGroupSealer).toMatch(/^key_z.+@sealer_z/);
   });
 
   test("writeOnly member uses groupSealer for key revelation", async () => {
@@ -984,7 +987,7 @@ describe("key rotation updates groupSealer", () => {
     // Force key rotation
     group.rotateReadKey();
 
-    const newGroupSealer = group.get("groupSealer");
+    const newGroupSealer = group.get("groupSealer") as string;
 
     expect(newGroupSealer).toBeDefined();
     expect(newGroupSealer).not.toEqual(originalGroupSealer);
@@ -996,7 +999,10 @@ describe("key rotation updates groupSealer", () => {
     }
 
     const derivedSealer = crypto.groupSealerFromReadKey(newReadKey.secret);
-    expect(newGroupSealer).toEqual(derivedSealer.publicKey);
+    // Composite format includes the readKeyID
+    expect(newGroupSealer).toEqual(
+      `${newReadKey.id}@${derivedSealer.publicKey}`,
+    );
   });
 });
 
@@ -1017,6 +1023,113 @@ describe("concurrent group sealer initialization", () => {
       expect(result.publicKey).toEqual(firstResult!.publicKey);
       expect(result.secret).toEqual(firstResult!.secret);
     }
+  });
+});
+
+describe("groupSealer composite format (readKeyID association)", () => {
+  test("groupSealer stores readKeyID in composite format", async () => {
+    const { node1 } = await createTwoConnectedNodes("server", "server");
+
+    const group = node1.node.createGroup();
+    const groupSealerValue = group.get("groupSealer") as string;
+
+    // Should be in composite format: "key_z...@sealer_z..."
+    expect(groupSealerValue).toMatch(/^key_z.+@sealer_z/);
+
+    // The readKeyID portion should match the current readKey
+    const readKeyId = group.getCurrentReadKeyId();
+    expect(groupSealerValue.startsWith(readKeyId!)).toBe(true);
+  });
+
+  test("concurrent key rotation and migration produce correct readKey association", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Create a legacy group on node1, add node2 and node3 as admins
+    const legacyGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    const account3OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node3.accountID,
+    );
+    legacyGroup.addMember(account2OnNode1, "admin");
+    legacyGroup.addMember(account3OnNode1, "admin");
+
+    await legacyGroup.core.waitForSync();
+
+    // Node2 loads the group and triggers migration (sets groupSealer from key1)
+    const groupOnNode2 = await loadCoValueOrFail(node2.node, legacyGroup.id);
+    await groupOnNode2.core.waitForSync();
+
+    // Verify groupSealer was set with composite format
+    const sealerOnNode2 = groupOnNode2.get("groupSealer") as string;
+    expect(sealerOnNode2).toMatch(/^key_z.+@sealer_z/);
+
+    // Now node2 rotates the read key (simulating concurrent rotation)
+    groupOnNode2.rotateReadKey();
+    await groupOnNode2.core.waitForSync();
+
+    // The groupSealer should now reference the NEW readKey, not the old one
+    const newSealerOnNode2 = groupOnNode2.get("groupSealer") as string;
+    const newReadKeyId = groupOnNode2.getCurrentReadKeyId();
+    expect(newSealerOnNode2.startsWith(newReadKeyId!)).toBe(true);
+
+    // The new sealer should be different from the old one
+    expect(newSealerOnNode2).not.toEqual(sealerOnNode2);
+  });
+
+  test("child group extended via groupSealer is readable after parent key rotation + migration race", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // Node1 creates parent group with both node2 and node3 as admins
+    const parentGroup = createLegacyGroup(node1.node);
+    const account2OnNode1 = await loadCoValueOrFail(
+      node1.node,
+      node2.accountID,
+    );
+    parentGroup.addMember(account2OnNode1, "admin");
+
+    await parentGroup.core.waitForSync();
+
+    // Node2 sees the parent group
+    parentGroup.rotateReadKey();
+    const parentGroupOnNode2 = await loadCoValueOrFail(
+      node2.node,
+      parentGroup.id,
+    );
+
+    await Promise.all([
+      parentGroup.core.waitForSync(),
+      parentGroupOnNode2.core.waitForSync(),
+    ]);
+
+    // Node3 (non-member) creates child and extends parent using the current groupSealer
+    const parentOnNode3 = await loadCoValueOrFail(node3.node, parentGroup.id);
+    const childGroup = node3.node.createGroup();
+    childGroup.extend(parentOnNode3);
+
+    const map = childGroup.createMap();
+    map.set("test", "Written by non-member");
+
+    await map.core.waitForSync();
+    await childGroup.core.waitForSync();
+
+    // Both node1 and node2 should be able to read the child content
+    const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+    expect(mapOnNode1.get("test")).toEqual("Written by non-member");
+
+    const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+    expect(mapOnNode2.get("test")).toEqual("Written by non-member");
   });
 });
 
@@ -1043,7 +1156,11 @@ describe("permission validation for groupSealer", () => {
     const fakeSealer = crypto.newRandomSealer();
     const fakeSealerID = crypto.getSealerID(fakeSealer);
 
-    groupOnNode2.set("groupSealer", fakeSealerID, "trusting");
+    groupOnNode2.set(
+      "groupSealer",
+      `${group.getCurrentReadKeyId()!}@${fakeSealerID}`,
+      "trusting",
+    );
 
     // The change should be rejected (sealer should remain original)
     // Wait for sync to ensure changes are processed
@@ -1085,17 +1202,21 @@ describe("groupSealer migration for legacy groups", () => {
 
     await legacyGroup.core.waitForSync();
 
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
     // Node2 (admin) loads the group - migration should add the groupSealer
     const groupOnNode2 = await loadCoValueOrFail(node2.node, legacyGroup.id);
-
     expect(groupOnNode2.get("groupSealer")).toBeDefined();
-    expect(groupOnNode2.get("groupSealer")).toMatch(/^sealer_z/);
+    // Migrated groups use the new composite format
+    expect(groupOnNode2.get("groupSealer")).toMatch(/^key_z.+@sealer_z/);
 
     // Verify it's derived from the current read key
     const readKey = groupOnNode2.getCurrentReadKey();
     expect(readKey.secret).toBeDefined();
     const expectedSealer = crypto.groupSealerFromReadKey(readKey.secret!);
-    expect(groupOnNode2.get("groupSealer")).toEqual(expectedSealer.publicKey);
+    expect(groupOnNode2.get("groupSealer")).toEqual(
+      `${readKey.id}@${expectedSealer.publicKey}`,
+    );
   });
 
   test("migration is idempotent - loading on two admin nodes produces same groupSealer", async () => {
@@ -1241,6 +1362,9 @@ describe("groupSealer migration for legacy groups", () => {
 
     // Node2 (admin) loads the group, triggering migration
     const parentGroup = await loadCoValueOrFail(node2.node, legacyGroup.id);
+
+    // Wait for async migration to complete (runs via waitFor when not fully downloaded)
+    await parentGroup.core.waitForSync();
 
     // Verify migration happened
     expect(parentGroup.get("groupSealer")).toBeDefined();

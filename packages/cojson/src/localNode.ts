@@ -27,6 +27,7 @@ import {
 import {
   type InviteSecret,
   type RawGroup,
+  formatGroupSealerValue,
   secretSeedFromInviteSecret,
 } from "./coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "./config.js";
@@ -866,8 +867,13 @@ export class LocalNode {
     group.set("readKey", readKey.id, "trusting");
 
     // Initialize the group sealer (derived deterministically from the read key)
+    // Store composite value with readKeyID for deterministic readKey association
     const groupSealer = this.crypto.groupSealerFromReadKey(readKey.secret);
-    group.set("groupSealer", groupSealer.publicKey, "trusting");
+    group.set(
+      "groupSealer",
+      formatGroupSealerValue(readKey.id, groupSealer.publicKey),
+      "trusting",
+    );
 
     return group;
   }

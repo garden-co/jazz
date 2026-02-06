@@ -49,6 +49,46 @@ import { RawCoStream } from "./coStream.js";
 export const EVERYONE = "everyone" as const;
 export type Everyone = "everyone";
 
+/**
+ * Format a composite groupSealer value that includes the readKeyID.
+ * New format: "readKeyID@sealerID" - explicitly associates the sealer with
+ * the readKey it was derived from. This prevents inconsistency when different
+ * admins concurrently rotate keys and migrate the groupSealer.
+ *
+ * @internal
+ */
+export function formatGroupSealerValue(readKeyID: KeyID, sealerID: SealerID) {
+  return `${readKeyID}@${sealerID}` as const;
+}
+
+/**
+ * Extract the SealerID from a groupSealer field value.
+ * Handles both new format ("readKeyID@sealerID") and legacy format ("sealer_z...").
+ *
+ * @internal
+ */
+function extractSealerID(groupSealerValue: string): SealerID {
+  const idx = groupSealerValue.indexOf("@");
+  if (idx > 0) {
+    return groupSealerValue.substring(idx + 1) as SealerID;
+  }
+  return groupSealerValue as SealerID;
+}
+
+/**
+ * Extract the readKeyID from a groupSealer field value.
+ * Returns undefined for legacy format values that don't include the readKeyID.
+ *
+ * @internal
+ */
+function extractReadKeyID(groupSealerValue: string): KeyID | undefined {
+  const idx = groupSealerValue.indexOf("@");
+  if (idx > 0) {
+    return groupSealerValue.substring(0, idx) as KeyID;
+  }
+  return undefined;
+}
+
 export type ParentGroupReferenceRole =
   | "revoked"
   | "extend"
@@ -65,7 +105,7 @@ export type GroupShape = {
   readKey?: KeyID;
   // Group-level asymmetric encryption key (public portion only)
   // Private key is derived from readKey, not stored
-  groupSealer?: SealerID;
+  groupSealer?: `${KeyID}@${SealerID}`;
   [writeKeyFor: `writeKeyFor_${RawAccountID | AgentID}`]: KeyID;
   [revelationFor: `${KeyID}_for_${RawAccountID | AgentID}`]: Sealed<KeySecret>;
   [revelationFor: `${KeyID}_for_${Everyone}`]: KeySecret;
@@ -165,7 +205,11 @@ function healMissingGroupSealer(group: RawGroup) {
 
   const groupSealer =
     group.core.node.crypto.groupSealerFromReadKey(readKeySecret);
-  group.set("groupSealer", groupSealer.publicKey, "trusting");
+  group.set(
+    "groupSealer",
+    formatGroupSealerValue(readKeyId, groupSealer.publicKey),
+    "trusting",
+  );
 }
 
 function needsKeyRotation(group: RawGroup) {
@@ -953,6 +997,10 @@ export class RawGroup<
    * Try to decrypt a key that was revealed via a parent group's sealer.
    * Walks the parent group's groupSealer history backwards (newest first)
    * and tries to unseal the key revelation for each historical sealer value.
+   *
+   * New format groupSealer values embed the readKeyID directly (e.g., "key_z..._sealer_z...")
+   * so we can deterministically find the correct readKey without time-based correlation.
+   * Legacy format values (just "sealer_z...") fall back to time-based readKey lookup.
    */
   private tryDecryptWithGroupSealer(
     keyID: KeyID,
@@ -961,31 +1009,21 @@ export class RawGroup<
     const sealerEntries = parentGroup.ops["groupSealer"];
     if (!sealerEntries) return undefined;
 
-    const readKeyEntries = parentGroup.ops["readKey"];
-    if (!readKeyEntries) return undefined;
-
     // Iterate backwards (newest sealer first) to try the most recent one first
     for (let i = sealerEntries.length - 1; i >= 0; i--) {
       const sealerEntry = sealerEntries[i]!;
       if (sealerEntry.change.op !== "set") continue;
-      const sealerID = sealerEntry.change.value as SealerID | undefined;
-      if (!sealerID) continue;
+      const groupSealerValue = sealerEntry.change.value as string | undefined;
+      if (!groupSealerValue) continue;
+
+      // Extract the SealerID (handles both new composite and legacy formats)
+      const sealerID = extractSealerID(groupSealerValue);
 
       const sealedKeyEdit = this.lastEditAt(`${keyID}_sealedFor_${sealerID}`);
       if (!sealedKeyEdit?.value) continue;
 
-      // Find the readKey that was active when this groupSealer was set
-      // readKey entries are sorted by madeAt, so we find the last one <= sealerEntry.madeAt
-      const sealerTime = sealerEntry.madeAt;
-      let readKeyID: KeyID | undefined;
-      for (let j = readKeyEntries.length - 1; j >= 0; j--) {
-        const readKeyEntry = readKeyEntries[j]!;
-        if (readKeyEntry.change.op !== "set") continue;
-        if (readKeyEntry.madeAt <= sealerTime) {
-          readKeyID = readKeyEntry.change.value as KeyID;
-          break;
-        }
-      }
+      // Try to get the readKeyID directly from the composite value (new format)
+      const readKeyID = extractReadKeyID(groupSealerValue);
       if (!readKeyID) continue;
 
       const readKeySecret = parentGroup.getReadKey(readKeyID);
@@ -1154,10 +1192,16 @@ export class RawGroup<
     this.set("readKey", newReadKey.id, "trusting");
 
     // Update the group sealer (derived deterministically from the new read key)
+    // Store composite value with readKeyID to prevent race conditions between
+    // concurrent key rotations and groupSealer migrations
     const newGroupSealer = this.crypto.groupSealerFromReadKey(
       newReadKey.secret,
     );
-    this.set("groupSealer", newGroupSealer.publicKey, "trusting");
+    this.set(
+      "groupSealer",
+      formatGroupSealerValue(newReadKey.id, newGroupSealer.publicKey),
+      "trusting",
+    );
 
     /**
      * The new read key needs to be revealed to the parent groups
@@ -1226,11 +1270,20 @@ export class RawGroup<
   }
 
   /**
-   * Get the group sealer secret by deriving it from the current read key.
+   * Get the group sealer secret by deriving it from the associated read key.
+   * Uses the readKeyID embedded in the composite groupSealer value (new format),
+   * or falls back to the current read key (legacy format).
    * Returns undefined if we don't have access to the read key.
    */
   getGroupSealerSecret(): SealerSecret | undefined {
-    const { secret: readKeySecret } = this.getCurrentReadKey();
+    const groupSealerValue = this.get("groupSealer");
+    if (!groupSealerValue) return undefined;
+
+    const readKeyID = extractReadKeyID(groupSealerValue as string);
+    const readKeySecret = readKeyID
+      ? this.getReadKey(readKeyID)
+      : this.getCurrentReadKey().secret;
+
     if (!readKeySecret) return undefined;
 
     return this.crypto.groupSealerFromReadKey(readKeySecret).secret;
@@ -1274,14 +1327,19 @@ export class RawGroup<
     readKeySecret: KeySecret,
     { revealAllWriteOnlyKeys }: { revealAllWriteOnlyKeys: boolean },
   ) {
-    const parentGroupSealer = parent.get("groupSealer");
+    const parentGroupSealerValue = parent.get("groupSealer");
 
     // If we're not a member of the parent group, we need to use an alternative mechanism
     if (!isAccountRole(parent.myRole())) {
-      if (parentGroupSealer) {
+      if (parentGroupSealerValue) {
+        // Extract the pure SealerID from the composite value (or legacy format)
+        const parentSealerID = extractSealerID(
+          parentGroupSealerValue as string,
+        );
+
         // NEW PATH: Use group sealer (anonymous box) instead of writeOnly key
         this.storeKeyRevelationForGroupSealer(
-          parentGroupSealer,
+          parentSealerID,
           readKeyId,
           readKeySecret,
         );
@@ -1295,7 +1353,7 @@ export class RawGroup<
               continue;
             }
             this.storeKeyRevelationForGroupSealer(
-              parentGroupSealer,
+              parentSealerID,
               keyID,
               secret,
             );
