@@ -1,73 +1,73 @@
-# React + TypeScript + Vite
+# Chat example with Jazz and React
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Live version: [https://chat.jazz.tools](https://chat.jazz.tools)
 
-Currently, two official plugins are available:
+## Getting started
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+You can either
+1. Clone the jazz repository, and run the app within the monorepo.
+2. Or create a new Jazz project using this example as a template.
 
-## React Compiler
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Using the example as a template
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(["dist"]),
-  {
-    files: ["**/*.{ts,tsx}"],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-]);
+Create a new Jazz project, and use this example as a template.
+```bash
+npx create-jazz-app@latest chat-app --example chat
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from "eslint-plugin-react-x";
-import reactDom from "eslint-plugin-react-dom";
-
-export default defineConfig([
-  globalIgnores(["dist"]),
-  {
-    files: ["**/*.{ts,tsx}"],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs["recommended-typescript"],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ["./tsconfig.node.json", "./tsconfig.app.json"],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-]);
+Go to the new project directory.
+```bash
+cd chat-app
 ```
+
+Create a `.env` file and add an API key (available for free from https://dashboard.jazz.tools)
+```
+VITE_JAZZ_API_KEY=<your key>
+```
+
+Run the dev server.
+```bash
+npm run dev
+```
+
+### Using the monorepo
+
+This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation).
+
+Clone the jazz repository.
+```bash
+git clone https://github.com/garden-co/jazz.git
+```
+
+Install and build dependencies.
+```bash
+pnpm i && npx turbo build
+```
+
+Go to the example directory.
+```bash
+cd jazz/examples/chat/
+```
+
+Create a `.env` file and add an API key (available for free from https://dashboard.jazz.tools)
+```
+VITE_JAZZ_API_KEY=<your key>
+```
+
+Start the dev server.
+```bash
+pnpm dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) with your browser to see the result.
+
+## Questions / problems / feedback
+
+If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or open an issue or PR to fix something that seems wrong.
+
+## Configuration: sync server
+
+By default, the example app uses [Jazz Cloud](https://dashboard.jazz.tools) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
+
+You can also run a local sync server by running `npx jazz-run sync`, and setting the `sync` parameter of `JazzReactProvider` in [./src/app.tsx](./src/app.tsx) to `{ peer: "ws://localhost:4200" }`.

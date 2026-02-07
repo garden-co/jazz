@@ -50,7 +50,7 @@ export function Editor({ message, onEnter }: EditorProps) {
     editorView.focus();
 
     return () => editorView.destroy();
-  }, [message, onEnter]);
+  }, [message.current, onEnter]);
 
   return (
     <div className="relative flex-1 min-w-0">
@@ -59,6 +59,8 @@ export function Editor({ message, onEnter }: EditorProps) {
         className="w-full max-w-full rounded-md border bg-background p-2 [&_.ProseMirror]:outline-none [&_.ProseMirror]:prose-sm [&_.ProseMirror]:whitespace-pre-wrap [&_.ProseMirror]:wrap-break-word [&_.ProseMirror]:max-w-full"
         id="messageEditor"
       />
+      <br />
+      {message.current.text}
       <FloatingToolbar view={view} menuState={menuState} />
     </div>
   );
