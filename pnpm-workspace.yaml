@@ -3,6 +3,7 @@ packages:
   - examples/*
   - crates
   - crates/groove-wasm/pkg
+  - crates/groove-napi
 
 ignoredBuiltDependencies:
   - blake3

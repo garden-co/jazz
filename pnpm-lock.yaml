@@ -23,6 +23,12 @@ importers:
 
   crates: {}
 
+  crates/groove-napi:
+    devDependencies:
+      '@napi-rs/cli':
+        specifier: ^2
+        version: 2.18.4
+
   crates/groove-wasm/pkg: {}
 
   examples/todo-server-ts:
@@ -30,6 +36,9 @@ importers:
       express:
         specifier: ^4.18.2
         version: 4.22.1
+      jazz-napi:
+        specifier: workspace:*
+        version: link:../../crates/groove-napi
       jazz-ts:
         specifier: workspace:*
         version: link:../../packages/jazz-ts
@@ -546,6 +555,11 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+
+  '@napi-rs/cli@2.18.4':
+    resolution: {integrity: sha512-SgJeA4df9DE2iAEpr3M2H0OKl/yjtg1BnRI5/JyowS71tUWhrfSu2LT0V3vlHET+g1hBVlrO60PmEXwUEKp8Mg==}
+    engines: {node: '>= 10'}
+    hasBin: true
 
   '@oxfmt/darwin-arm64@0.27.0':
     resolution: {integrity: sha512-3vwqyzNlVTVFVzHMlrqxb4tgVgHp6FYS0uIxsIZ/SeEDG0azaqiOw/2t8LlJ9f72PKRLWSey+Ak99tiKgpbsnQ==}
@@ -1933,6 +1947,8 @@ snapshots:
       '@sinclair/typebox': 0.27.8
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
+
+  '@napi-rs/cli@2.18.4': {}
 
   '@oxfmt/darwin-arm64@0.27.0':
     optional: true

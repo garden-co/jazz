@@ -7,10 +7,39 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
-import type { WasmRuntime as GrooveWasmRuntime } from "groove-wasm";
 
-// Re-type the WasmRuntime to work with our local types
-type WasmRuntime = GrooveWasmRuntime;
+/**
+ * Common interface for WASM and NAPI runtimes.
+ *
+ * Both `WasmRuntime` (from groove-wasm) and `NapiRuntime` (from jazz-napi)
+ * satisfy this interface, allowing `JazzClient` to work with either backend.
+ */
+export interface Runtime {
+  insert(table: string, values: any): string;
+  update(object_id: string, values: any): void;
+  delete(object_id: string): void;
+  query(
+    query_json: string,
+    session_json?: string | null,
+    settled_tier?: string | null,
+  ): Promise<any>;
+  subscribe(
+    query_json: string,
+    on_update: Function,
+    session_json?: string | null,
+    settled_tier?: string | null,
+  ): number;
+  unsubscribe(handle: number): void;
+  insertPersisted(table: string, values: any, tier: string): Promise<string>;
+  updatePersisted(object_id: string, values: any, tier: string): Promise<void>;
+  deletePersisted(object_id: string, tier: string): Promise<void>;
+  onSyncMessageReceived(message_json: string): void;
+  onSyncMessageToSend(callback: Function): void;
+  addServer(): void;
+  addClient(): string;
+  addClientWithFullSync(): string;
+  getSchema(): any;
+}
 
 /**
  * Persistence tier for durability guarantees.
@@ -148,12 +177,12 @@ export class SessionClient {
  * High-level Jazz client.
  */
 export class JazzClient {
-  private runtime: WasmRuntime;
+  private runtime: Runtime;
   private sseConnection: EventSource | null = null;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
 
-  private constructor(runtime: WasmRuntime, context: AppContext) {
+  private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
   }
@@ -209,6 +238,27 @@ export class JazzClient {
       context.tier,
     );
 
+    const client = new JazzClient(runtime, context);
+
+    // Set up sync if server URL provided
+    if (context.serverUrl) {
+      client.setupSync(context.serverUrl);
+    }
+
+    return client;
+  }
+
+  /**
+   * Create client from a pre-constructed runtime (e.g., NapiRuntime).
+   *
+   * This allows server-side apps to use the native NAPI backend directly
+   * without WASM loading.
+   *
+   * @param runtime A runtime implementing the Runtime interface
+   * @param context Application context
+   * @returns Connected JazzClient instance
+   */
+  static connectWithRuntime(runtime: Runtime, context: AppContext): JazzClient {
     const client = new JazzClient(runtime, context);
 
     // Set up sync if server URL provided
