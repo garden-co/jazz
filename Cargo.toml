@@ -8,5 +8,6 @@ members = [
   "crates/jazz-transport",
   "crates/jazz-cli",
   "crates/jazz-rs",
+  "crates/groove-napi",
   "examples/todo-server-rs",
 ]

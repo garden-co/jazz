@@ -237,20 +237,20 @@ pub trait IoHandler {
 
 ### Implementations
 
-| Implementation    | Use Case              | Index Backing                                                               |
-| ----------------- | --------------------- | --------------------------------------------------------------------------- |
-| `MemoryIoHandler` | Tests, main thread    | `HashMap<(table, col, branch), BTreeMap<encoded_value, HashSet<ObjectId>>>` |
-| `BfTreeIoHandler` | Worker (OPFS), Native | bf-tree with composite keys                                                 |
+| Implementation  | Use Case              | Index Backing                                                               |
+| --------------- | --------------------- | --------------------------------------------------------------------------- |
+| `MemoryStorage` | Tests, main thread    | `HashMap<(table, col, branch), BTreeMap<encoded_value, HashSet<ObjectId>>>` |
+| `BfTreeStorage` | Worker (OPFS), Native | bf-tree with composite keys                                                 |
 
-**`MemoryIoHandler`** is simple and sufficient for:
+**`MemoryStorage`** is simple and sufficient for:
 
 - All groove unit tests
 - All groove integration tests
 - Main thread in browser (it's just a cache)
 
-**Implementation note**: `MemoryIoHandler` uses simple `HashMap`/`BTreeMap` with `&mut self` for mutations. No `RwLock` needed since we're single-threaded. The `&self` methods (`load_*`, `index_lookup`, etc.) only need shared references.
+**Implementation note**: `MemoryStorage` uses simple `HashMap`/`BTreeMap` with `&mut self` for mutations. No `RwLock` needed since we're single-threaded. The `&self` methods (`load_*`, `index_lookup`, etc.) only need shared references.
 
-**`BfTreeIoHandler`** adds persistence and is only needed for:
+**`BfTreeStorage`** adds persistence and is only needed for:
 
 - Worker with OPFS
 - Native with filesystem
@@ -966,22 +966,22 @@ The original Phase 6c spec described `MutationResult.persisted()` chaining. This
 
 **Goal**: Persistent `IoHandler` backed by [bf-tree-web](https://github.com/garden-co/bf-tree-web) (garden-co fork of Microsoft Research's bf-tree). Split into three sub-phases:
 
-- **7a**: Subtree import + `BfTreeIoHandler` + native integration (jazz-rs, jazz-cli)
-- **7b**: `groove-napi` crate — NAPI addon for server-side TypeScript persistence
+- **7a**: Subtree import + `BfTreeStorage` + native integration (jazz-rs, jazz-cli) ✅
+- **7b**: `groove-napi` crate — NAPI addon for server-side TypeScript persistence ✅
 - **7c**: OPFS persistence in WASM worker (wasm-pack test with headless browser)
 
-> All prior phases (1-6) work with `MemoryIoHandler`. bf-tree is only needed for actual persistence.
+> All prior phases (1-6) work with `MemoryStorage`. bf-tree is only needed for actual persistence.
 
 ### Key Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| **Monorepo integration** | git subtree into `crates/bf-tree` | Self-contained, no auth issues for CI (private repo). Treated as a workspace member. |
-| **Storage model** | BfTree as primary store | All reads/writes go through bf-tree directly. No MemoryIoHandler cache layer. bf-tree has its own in-memory cache. Simpler architecture. |
-| **IoHandler mutability** | Keep `&mut self` | BfTree takes `&self` (handles concurrency internally), but `&mut self` on IoHandler is a harmless superset. Avoids touching the trait. |
-| **Native constructor** | External construction | jazz-rs creates `BfTreeIoHandler`, passes it to `TokioRuntime::new()`. TokioRuntime stays generic over `H: IoHandler`. |
-| **Server-side TS** | NAPI addon (Phase 7b) | `groove-napi` wraps `RuntimeCore<BfTreeIoHandler>` via napi-rs. BfTree uses StdVfs natively. |
-| **OPFS tests** | wasm-pack test + headless browser | Reuse bf-tree-web's proven test pattern from `tests/wasm/`. |
+| Decision                 | Choice                            | Rationale                                                                                                                                   |
+| ------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Monorepo integration** | git subtree into `crates/bf-tree` | Self-contained, no auth issues for CI (private repo). Treated as a workspace member.                                                        |
+| **Storage model**        | BfTree as primary store           | All reads/writes go through bf-tree directly. No separate in-memory cache layer. bf-tree has its own in-memory cache. Simpler architecture. |
+| **Storage mutability**   | Keep `&mut self`                  | BfTree takes `&self` (handles concurrency internally), but `&mut self` on Storage is a harmless superset. Avoids touching the trait.        |
+| **Native constructor**   | External construction             | jazz-rs creates `BfTreeStorage`, passes it to `TokioRuntime::new()`. TokioRuntime stays generic over `S: Storage`.                          |
+| **Server-side TS**       | NAPI addon (Phase 7b)             | `groove-napi` wraps `RuntimeCore<BfTreeStorage>` via napi-rs. BfTree uses StdVfs natively.                                                  |
+| **OPFS tests**           | wasm-pack test + headless browser | Reuse bf-tree-web's proven test pattern from `tests/wasm/`.                                                                                 |
 
 ### Why bf-tree-web?
 
@@ -1009,11 +1009,11 @@ tree.scan_with_count(start: &[u8], count: usize, ...) -> ScanIter
 
 ---
 
-## Phase 7a: BfTreeIoHandler + Native Integration
+## Phase 7a: BfTreeStorage + Native Integration
 
-**Goal**: Import bf-tree-web, implement `BfTreeIoHandler`, make `jazz-rs::test_persistence` pass.
+**Goal**: Import bf-tree-web, implement `BfTreeStorage`, make `jazz-rs::test_persistence` pass.
 
-**Depends on**: Phase 6c (IoHandler trait is stable).
+**Depends on**: Phase 6c (Storage trait is stable).
 
 **After 7a**: Native Rust applications (jazz-rs, jazz-cli) have real disk persistence. The currently-red `test_persistence` test goes green.
 
@@ -1059,6 +1059,7 @@ git subtree add --prefix=crates/bf-tree \
 ```
 
 Add to workspace `Cargo.toml`:
+
 ```toml
 members = [
   "crates/bf-tree",
@@ -1111,17 +1112,17 @@ fn encode_index_value(value: &Value) -> Vec<u8> {
 }
 ```
 
-### Step 3: BfTreeIoHandler
+### Step 3: BfTreeStorage
 
 New file: `crates/groove/src/io_handler/bftree.rs` (behind a `bftree` feature flag, since bf-tree has heavy dependencies).
 
 ```rust
-pub struct BfTreeIoHandler {
+pub struct BfTreeStorage {
     tree: BfTree,
     outbox: Vec<OutboxEntry>,
 }
 
-impl BfTreeIoHandler {
+impl BfTreeStorage {
     /// Open or create a persistent store at the given path.
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, ...> {
         let tree = BfTree::new(path, cache_size_bytes)?;
@@ -1136,9 +1137,10 @@ impl BfTreeIoHandler {
 }
 ```
 
-All IoHandler methods go directly to bf-tree. No MemoryIoHandler cache layer.
+All Storage methods go directly to bf-tree. No MemoryStorage cache layer.
 
 Key implementation notes:
+
 - `create_object` → `tree.insert("obj:{id}:meta", &serde_json::to_vec(&metadata))`
 - `load_object_metadata` → `tree.read("obj:{id}:meta", &mut buf)` → deserialize
 - `append_commit` → insert commit + read-modify-write tips
@@ -1146,21 +1148,18 @@ Key implementation notes:
 - `index_insert` → `tree.insert("idx:...:encoded_value:row_id", &[])`
 - `index_range` → `tree.scan_with_end_key(start, end)` → parse ObjectIds from keys
 - `index_scan_all` → `tree.scan_with_end_key("idx:{table}:{col}:{branch}:", "idx:{table}:{col}:{branch}:~")`
-- `send_sync_message` → push to outbox (same as MemoryIoHandler)
-- `schedule_batched_tick` → no-op (same as MemoryIoHandler)
+- `send_sync_message` → push to outbox (same as MemoryStorage)
+- `schedule_batched_tick` → no-op (same as MemoryStorage)
 
 ### Step 4: Integration with jazz-rs
 
 Update `crates/jazz-rs/src/client.rs`:
-- Create `BfTreeIoHandler::open(data_dir, cache_size)`
-- Pass to `TokioRuntime::new(schema_manager, io_handler, sync_callback)`
-- (TokioRuntime must become generic over `H: IoHandler` — currently hardcodes `MemoryIoHandler` in `TokioIoHandler`)
 
-**TokioRuntime change**: `TokioIoHandler` currently wraps `MemoryIoHandler`. It needs to either:
-- Become generic: `TokioIoHandler<H: IoHandler>` wrapping any `H`
-- Or: jazz-rs constructs `BfTreeIoHandler` directly and passes it + a sync callback to `RuntimeCore::new()`, bypassing `TokioRuntime` (TokioRuntime is just a thin Mutex wrapper)
+- Create `BfTreeStorage::open(data_dir, cache_size)`
+- Pass to `TokioRuntime::new(schema_manager, storage, sync_callback)`
+- (TokioRuntime is generic over `S: Storage + Send`)
 
-The simpler path: make `TokioRuntime::new()` accept any `H: IoHandler + Send` and wrap it.
+**Completed**: `RuntimeCore` is generic over `<S: Storage, Sched: Scheduler, Sync: SyncSender>`. `TokioRuntime` wraps `RuntimeCore<S, TokioScheduler, CallbackSyncSender>` for any `S: Storage + Send`.
 
 ### Step 5: Tests
 
@@ -1168,22 +1167,22 @@ The simpler path: make `TokioRuntime::new()` accept any `H: IoHandler + Send` an
 2. **`bftree_iohandler_crud`** — unit test in `io_handler/bftree.rs`. Insert object + commit, load it back, verify round-trip.
 3. **`bftree_iohandler_index_ops`** — insert index entries, verify `index_lookup`, `index_range`, `index_scan_all` return correct results.
 4. **`bftree_iohandler_persistence`** — open store, insert data, drop, reopen from same path, verify data survives.
-5. **`bftree_iohandler_with_runtime_core`** — create `RuntimeCore<BfTreeIoHandler>`, insert/query/update/delete, verify end-to-end.
+5. **`bftree_iohandler_with_runtime_core`** — create `RuntimeCore<BfTreeStorage>`, insert/query/update/delete, verify end-to-end.
 
 ### Files to Modify/Create
 
-| File | Change |
-|------|--------|
-| `Cargo.toml` (workspace) | Add `crates/bf-tree` to members |
-| `crates/groove/Cargo.toml` | Add `bf-tree` optional dependency behind `bftree` feature |
-| `crates/groove/src/io_handler/encoding.rs` | New: key encoding functions |
-| `crates/groove/src/io_handler/bftree.rs` | New: `BfTreeIoHandler` |
-| `crates/groove/src/io_handler.rs` | Re-export `BfTreeIoHandler` (behind feature) |
-| `crates/groove-tokio/src/lib.rs` | Make `TokioRuntime` generic over `H: IoHandler + Send` |
-| `crates/jazz-rs/Cargo.toml` | Add `groove/bftree` feature dependency |
-| `crates/jazz-rs/src/client.rs` | Use `BfTreeIoHandler::open()` |
-| `crates/jazz-cli/Cargo.toml` | Add `groove/bftree` feature dependency |
-| `crates/jazz-cli/src/commands/server.rs` | Use `BfTreeIoHandler::open()` |
+| File                                     | Change                                                    |
+| ---------------------------------------- | --------------------------------------------------------- |
+| `Cargo.toml` (workspace)                 | Add `crates/bf-tree` to members                           |
+| `crates/groove/Cargo.toml`               | Add `bf-tree` optional dependency behind `bftree` feature |
+| `crates/groove/src/storage/encoding.rs`  | New: key encoding functions                               |
+| `crates/groove/src/storage/bftree.rs`    | New: `BfTreeStorage`                                      |
+| `crates/groove/src/storage/mod.rs`       | Re-export `BfTreeStorage` (behind feature)                |
+| `crates/groove-tokio/src/lib.rs`         | `TokioRuntime` generic over `S: Storage + Send`           |
+| `crates/jazz-rs/Cargo.toml`              | Add `groove/bftree` feature dependency                    |
+| `crates/jazz-rs/src/client.rs`           | Use `BfTreeStorage::open()`                               |
+| `crates/jazz-cli/Cargo.toml`             | Add `groove/bftree` feature dependency                    |
+| `crates/jazz-cli/src/commands/server.rs` | Use `BfTreeStorage::open()`                               |
 
 ### Verification
 
@@ -1196,91 +1195,117 @@ cargo test -p todo-server-rs
 
 ### Expected test status after 7a
 
-| Test | Status | Notes |
-|------|--------|-------|
-| `jazz-rs::test_crud_operations` | GREEN | Already passes (in-memory) |
-| `jazz-rs::test_persistence` | **GREEN** ✅ | Fixed by `get_or_load()` lazy loading |
-| `todo-server-rs::test_health_check` | GREEN | Already passes |
-| `todo-server-rs::test_crud_operations` | GREEN | Already passes |
-| `todo-server-rs::test_local_persistence` | **GREEN** ✅ | Fixed by `get_or_load()` lazy loading |
-| `todo-server-rs::test_server_resync` | RED | Pre-existing failure (unrelated to persistence) |
-| `todo-server-rs::test_todos_live_sse` | GREEN | Already passes |
-| `groove::bftree_iohandler_*` (new) | GREEN | New unit + round-trip tests |
+| Test                                     | Status       | Notes                                           |
+| ---------------------------------------- | ------------ | ----------------------------------------------- |
+| `jazz-rs::test_crud_operations`          | GREEN        | Already passes (in-memory)                      |
+| `jazz-rs::test_persistence`              | **GREEN** ✅ | Fixed by `get_or_load()` lazy loading           |
+| `todo-server-rs::test_health_check`      | GREEN        | Already passes                                  |
+| `todo-server-rs::test_crud_operations`   | GREEN        | Already passes                                  |
+| `todo-server-rs::test_local_persistence` | **GREEN** ✅ | Fixed by `get_or_load()` lazy loading           |
+| `todo-server-rs::test_server_resync`     | RED          | Pre-existing failure (unrelated to persistence) |
+| `todo-server-rs::test_todos_live_sse`    | GREEN        | Already passes                                  |
+| `groove::bftree_iohandler_*` (new)       | GREEN        | New unit + round-trip tests                     |
 
 ---
 
-## Phase 7b: groove-napi (Server-side TypeScript)
+## Phase 7b: groove-napi (Server-side TypeScript) ✅
 
-**Goal**: NAPI addon wrapping `RuntimeCore<BfTreeIoHandler>` for Node.js. Replaces groove-wasm for server-side TS.
+**Goal**: NAPI addon wrapping `RuntimeCore<BfTreeStorage>` for Node.js. Replaces groove-wasm for server-side TS.
 
-**Depends on**: Phase 7a (BfTreeIoHandler exists).
+**Depends on**: Phase 7a (BfTreeStorage exists).
 
-**After 7b**: `jazz-ts` server applications (like `todo-server-ts`) can use real disk persistence via a native Node.js addon instead of WASM + in-memory storage.
+**After 7b**: `jazz-ts` server applications (like `todo-server-ts`) use real disk persistence via a native Node.js addon instead of WASM + in-memory storage.
 
 ### Architecture
 
 ```
-packages/jazz-ts/
-  └── src/runtime/client.ts     ← detects environment, loads NAPI or WASM
-
 crates/groove-napi/
-  ├── Cargo.toml                ← napi-rs dependency
-  ├── src/lib.rs                ← #[napi] exports wrapping RuntimeCore
-  └── npm/                      ← generated npm package
+  ├── Cargo.toml                ← napi-rs + groove(bftree) + serde_json
+  ├── build.rs                  ← napi-build script
+  ├── src/lib.rs                ← #[napi] exports: NapiRuntime class + utilities
+  ├── package.json              ← npm package "jazz-napi"
+  ├── index.js                  ← CJS loader for .node binary
+  └── index.d.ts                ← TypeScript types (auto-generated by napi-rs)
+
+packages/jazz-ts/
+  └── src/runtime/client.ts     ← Runtime interface, connectWithRuntime() factory
 ```
 
 ### Key Design
 
-- `groove-napi` wraps `RuntimeCore<BfTreeIoHandler>` using [napi-rs](https://napi.rs)
+- `groove-napi` wraps `RuntimeCore<BfTreeStorage, NapiScheduler, NapiSyncSender>` using [napi-rs](https://napi.rs)
+- `NapiScheduler`: `ThreadsafeFunction` + `Arc<AtomicBool>` debounce schedules `batched_tick()` on Node.js event loop
+- `NapiSyncSender`: `ThreadsafeFunction<String>` bridges outbox to JS callback
 - BfTree uses `StdVfs` natively (no WASM, no OPFS)
-- Exposes same API surface as `WasmRuntime`: `insert`, `update`, `delete`, `query`, `subscribe`, persisted variants
-- `jazz-ts` detects environment: Node.js → NAPI addon, browser → WASM
+- Exposes same API surface as `WasmRuntime`: `insert`, `update`, `delete`, `query`, `subscribe`, persisted variants, sync bridge, `flush`
+- `jazz-ts` provides `Runtime` interface + `JazzClient.connectWithRuntime()` — consumer chooses NAPI or WASM explicitly
+- Subscribe callbacks pass native JS objects (not JSON strings) via `serde_json::Value` through TSFN
+- Query returns `Promise<any>` via `napi::Deferred` + spawned thread blocking on `QueryFuture`
 
-### Steps
+### Steps (all completed)
 
-1. Create `crates/groove-napi` with napi-rs boilerplate
-2. Wrap `RuntimeCore<BfTreeIoHandler>` with `#[napi]` class
-3. Expose: `insert`, `update`, `delete`, `query`, `subscribe`, `insertPersisted`, etc.
-4. Build system: `napi build` produces `.node` binary
-5. Update `jazz-ts` to conditionally load NAPI vs WASM
-6. Tests: run `todo-server-ts` integration tests against NAPI backend
+1. Created `crates/groove-napi` with napi-rs boilerplate (Cargo.toml, build.rs, package.json)
+2. Wrapped `RuntimeCore<BfTreeStorage>` with `#[napi]` class (`NapiRuntime`)
+3. Exposed: `insert`, `update`, `delete`, `query`, `subscribe`, `unsubscribe`, `insertPersisted`, `updatePersisted`, `deletePersisted`, `onSyncMessageReceived`, `onSyncMessageToSend`, `addServer`, `addClient`, `addClientWithFullSync`, `getSchema`, `flush`
+4. Module-level: `generateId()`, `currentTimestamp()`, `parseSchema()`
+5. Build system: `npx napi build --release` produces `.node` binary + `index.d.ts`
+6. Added `Runtime` interface to `jazz-ts` + `JazzClient.connectWithRuntime()` factory
+7. Updated `todo-server-ts` to use `NapiRuntime` + `connectWithRuntime()`
+8. Added persistence/cold-start test (shutdown + reopen, data survives)
+9. Added `pnpm-workspace.yaml` entry for `crates/groove-napi`
 
-### Files to Create/Modify
+### Files Created
 
-| File | Change |
-|------|--------|
-| `crates/groove-napi/Cargo.toml` | New: napi-rs + groove dependencies |
-| `crates/groove-napi/src/lib.rs` | New: #[napi] wrapper around RuntimeCore |
-| `Cargo.toml` (workspace) | Add `crates/groove-napi` |
-| `packages/jazz-ts/src/runtime/client.ts` | Environment detection: NAPI vs WASM |
+| File                              | Purpose                                              |
+| --------------------------------- | ---------------------------------------------------- |
+| `crates/groove-napi/Cargo.toml`   | napi-rs + groove(bftree) + serde_json deps           |
+| `crates/groove-napi/build.rs`     | napi-build script                                    |
+| `crates/groove-napi/src/lib.rs`   | NapiRuntime class + all #[napi] exports (~950 lines) |
+| `crates/groove-napi/package.json` | npm package "jazz-napi"                              |
+| `crates/groove-napi/index.js`     | CJS loader for .node binary                          |
+
+### Files Modified
+
+| File                                                | Change                                                                    |
+| --------------------------------------------------- | ------------------------------------------------------------------------- |
+| `Cargo.toml` (workspace)                            | Added `crates/groove-napi` to members                                     |
+| `pnpm-workspace.yaml`                               | Added `crates/groove-napi` workspace entry                                |
+| `packages/jazz-ts/src/runtime/client.ts`            | Added `Runtime` interface, `connectWithRuntime()`, changed `runtime` type |
+| `packages/jazz-ts/src/runtime/index.ts`             | Exported `Runtime` type                                                   |
+| `examples/todo-server-ts/package.json`              | Added `jazz-napi` dependency                                              |
+| `examples/todo-server-ts/src/main.ts`               | Uses `NapiRuntime` + `connectWithRuntime()`, optional `dataPath` param    |
+| `examples/todo-server-ts/tests/integration.test.ts` | Added persistence/cold-start test                                         |
 
 ### Verification
 
 ```bash
-cargo build -p groove-napi
-pnpm test --filter todo-server-ts  # runs against NAPI backend
+cargo build -p groove-napi                          # Rust build
+cd crates/groove-napi && npx napi build --release   # native .node + index.d.ts
+cargo clippy -p groove-napi --no-deps -- -D warnings # clean
+cargo test -p groove --features bftree              # 577 pass
+pnpm test --filter jazz-ts                          # 129 pass
+pnpm test --filter todo-server-ts                   # 10 pass
 ```
 
-### Expected test status after 7b
+### Test status after 7b
 
-| Test | Status | Notes |
-|------|--------|-------|
-| `todo-server-ts::Health Check` | GREEN | Already passes (in-memory) |
-| `todo-server-ts::CRUD Operations` (5 tests) | GREEN | Already passes |
-| `todo-server-ts::Error Handling` (2 tests) | GREEN | Already passes |
-| `todo-server-ts::SSE Live Endpoint` | GREEN | Already passes |
-| `jazz-ts::*` unit tests | GREEN | Already pass (pure logic, no persistence) |
-| New: `todo-server-ts` persistence test | **GREEN** | Shutdown + reopen, data survives (needs NAPI) |
-
-All the above currently pass with in-memory WASM. After 7b they run against the NAPI backend with real disk persistence, and a new persistence-specific test is added.
+| Test                                        | Status | Notes                                    |
+| ------------------------------------------- | ------ | ---------------------------------------- |
+| `todo-server-ts::Health Check`              | GREEN  | Via NapiRuntime                          |
+| `todo-server-ts::CRUD Operations` (5 tests) | GREEN  | insert/query/update/delete via NAPI      |
+| `todo-server-ts::Error Handling` (2 tests)  | GREEN  |                                          |
+| `todo-server-ts::Persistence / Cold Start`  | GREEN  | Shutdown + reopen, 2 todos survive       |
+| `todo-server-ts::SSE Live Endpoint`         | GREEN  | Subscriptions via NAPI                   |
+| `jazz-ts::*` unit tests (129)               | GREEN  | Runtime interface is backward-compatible |
+| `groove` tests (577)                        | GREEN  | Unchanged                                |
 
 ---
 
 ## Phase 7c: OPFS Persistence (WASM Worker)
 
-**Goal**: Make `BfTreeIoHandler` work with OPFS in a Web Worker. Verify with wasm-pack tests in headless browser.
+**Goal**: Make `BfTreeStorage` work with OPFS in a Web Worker. Verify with wasm-pack tests in headless browser.
 
-**Depends on**: Phase 7a (BfTreeIoHandler and key encoding exist).
+**Depends on**: Phase 7a (BfTreeStorage and key encoding exist).
 
 **After 7c**: groove-wasm can persist data via OPFS when running in a Dedicated Web Worker. This is the storage layer for Phase 8's worker architecture, but we don't build the worker bridge yet — just prove persistence works.
 
@@ -1292,22 +1317,22 @@ groove-wasm (already exists)
         └── wraps MemoryIoHandler (current)
 
 After 7c:
-  └── WasmBfTreeIoHandler
-        └── wraps BfTreeIoHandler
+  └── WasmBfTreeStorage
+        └── wraps BfTreeStorage
               └── wraps BfTree::with_opfs_vfs(opfs_vfs)
 ```
 
 ### Key Design
 
 - `BfTree::with_opfs_vfs()` is async (OPFS init requires async APIs) but the resulting `BfTree` is fully synchronous
-- `WasmRuntime` gains an async constructor: `WasmRuntime::open_persistent(db_name, cache_size)` → initializes OPFS, creates `BfTreeIoHandler`, wraps in `RuntimeCore`
+- `WasmRuntime` gains an async constructor: `WasmRuntime::open_persistent(db_name, cache_size)` → initializes OPFS, creates `BfTreeStorage`, wraps in `RuntimeCore`
 - Existing `WasmRuntime::new()` (in-memory) stays unchanged for main-thread use
 - Must run in a Dedicated Web Worker (OPFS sync API is Worker-only)
 
 ### Steps
 
 1. Add `bf-tree` dependency to `groove-wasm/Cargo.toml` (WASM target)
-2. Create `WasmBfTreeIoHandler` that wraps `BfTreeIoHandler` + adds JS sync callback bridge
+2. Create `WasmBfTreeStorage` that wraps `BfTreeStorage` + adds JS sync callback bridge
 3. Add `WasmRuntime::open_persistent()` async constructor
 4. WASM build: `RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' cargo build -p groove-wasm --target wasm32-unknown-unknown`
 5. Tests: wasm-pack test + headless browser (reuse bf-tree-web pattern from `tests/wasm/`)
@@ -1319,16 +1344,16 @@ Using wasm-pack test with headless Chrome:
 1. **`opfs_crud_round_trip`** — Open persistent store in worker, insert data, read back, verify.
 2. **`opfs_persistence_across_reopen`** — Open store, insert data, drop, reopen same db_name, verify data survives.
 3. **`opfs_index_operations`** — Insert index entries via IoHandler, scan ranges, verify correct results.
-4. **`opfs_runtime_core_e2e`** — Full RuntimeCore with OPFS-backed BfTreeIoHandler: insert, query, update, delete.
+4. **`opfs_runtime_core_e2e`** — Full RuntimeCore with OPFS-backed BfTreeStorage: insert, query, update, delete.
 
 ### Files to Create/Modify
 
-| File | Change |
-|------|--------|
-| `crates/groove-wasm/Cargo.toml` | Add `bf-tree` dependency |
-| `crates/groove-wasm/src/runtime.rs` | Add `open_persistent()` constructor |
-| `crates/groove-wasm/src/bftree_io.rs` | New: `WasmBfTreeIoHandler` |
-| `crates/groove-wasm/tests/` | New: wasm-pack browser tests |
+| File                                  | Change                              |
+| ------------------------------------- | ----------------------------------- |
+| `crates/groove-wasm/Cargo.toml`       | Add `bf-tree` dependency            |
+| `crates/groove-wasm/src/runtime.rs`   | Add `open_persistent()` constructor |
+| `crates/groove-wasm/src/bftree_io.rs` | New: `WasmBfTreeStorage`            |
+| `crates/groove-wasm/tests/`           | New: wasm-pack browser tests        |
 
 ### Verification
 
@@ -1339,12 +1364,12 @@ RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' \
 
 ### Expected test status after 7c
 
-| Test | Status | Notes |
-|------|--------|-------|
-| `groove-wasm::opfs_crud_round_trip` (new) | **GREEN** | wasm-pack test, headless Chrome, Worker context |
-| `groove-wasm::opfs_persistence_across_reopen` (new) | **GREEN** | Drop + reopen in Worker, data survives |
-| `groove-wasm::opfs_index_operations` (new) | **GREEN** | Index insert/scan via OPFS-backed IoHandler |
-| `groove-wasm::opfs_runtime_core_e2e` (new) | **GREEN** | Full RuntimeCore lifecycle in Worker |
+| Test                                                | Status    | Notes                                           |
+| --------------------------------------------------- | --------- | ----------------------------------------------- |
+| `groove-wasm::opfs_crud_round_trip` (new)           | **GREEN** | wasm-pack test, headless Chrome, Worker context |
+| `groove-wasm::opfs_persistence_across_reopen` (new) | **GREEN** | Drop + reopen in Worker, data survives          |
+| `groove-wasm::opfs_index_operations` (new)          | **GREEN** | Index insert/scan via OPFS-backed IoHandler     |
+| `groove-wasm::opfs_runtime_core_e2e` (new)          | **GREEN** | Full RuntimeCore lifecycle in Worker            |
 
 These run in a **special test Worker** (spawned by wasm-pack test harness). They prove OPFS persistence works at the Rust/WASM level but don't exercise the JS worker bridge or main-thread coordination.
 
@@ -1516,14 +1541,14 @@ This is acceptable because:
 
 ### Expected test status after Phase 8
 
-| Test | Status | Notes |
-|------|--------|-------|
-| `examples/todo-ts-client` | **GREEN** | Full browser app: OPFS persistence, leader election, tab sync |
-| `jazz-ts::worker_bridge_*` (new) | **GREEN** | Main thread ↔ worker postMessage protocol |
-| `jazz-ts::persistence_across_reload` (new) | **GREEN** | Write data, "reload" (re-init), data survives via OPFS |
-| `jazz-ts::multi_tab_sync` (new) | **GREEN** | Leader broadcasts to follower, both see same data |
-| `jazz-ts::leader_failover` (new) | **GREEN** | Leader tab closes, follower takes over, OPFS still works |
-| `jazz-ts::persisted_variants` (new) | **GREEN** | `createPersisted()` resolves on worker ack |
+| Test                                       | Status    | Notes                                                         |
+| ------------------------------------------ | --------- | ------------------------------------------------------------- |
+| `examples/todo-ts-client`                  | **GREEN** | Full browser app: OPFS persistence, leader election, tab sync |
+| `jazz-ts::worker_bridge_*` (new)           | **GREEN** | Main thread ↔ worker postMessage protocol                     |
+| `jazz-ts::persistence_across_reload` (new) | **GREEN** | Write data, "reload" (re-init), data survives via OPFS        |
+| `jazz-ts::multi_tab_sync` (new)            | **GREEN** | Leader broadcasts to follower, both see same data             |
+| `jazz-ts::leader_failover` (new)           | **GREEN** | Leader tab closes, follower takes over, OPFS still works      |
+| `jazz-ts::persisted_variants` (new)        | **GREEN** | `createPersisted()` resolves on worker ack                    |
 
 Only after Phase 8 does browser persistence work in a production-like setup (main thread ↔ worker bridge, OPFS, leader election). Phases 7a-7c prove each layer independently.
 
@@ -1617,7 +1642,7 @@ Only after Phase 8 does browser persistence work in a production-like setup (mai
 - [ ] `PersistenceAck` sync payload variant + `CommitAckState` (Phase 6a)
 - [ ] `QuerySettled` sync payload variant + `settled_tier` on subscriptions (Phase 6b)
 - [ ] `PersistenceTier` enum (Phase 6a)
-- [ ] `BfTreeIoHandler` implementation (Phase 7, for persistence)
+- [ ] `BfTreeStorage` implementation (Phase 7, for persistence)
 
 **groove-wasm crate:**
 
@@ -1643,7 +1668,7 @@ Only after Phase 8 does browser persistence work in a production-like setup (mai
 | bf-tree integration depth  | Full key-value store with composite keys                                                                                                                          |
 | Tab coordination mechanism | Leader election with BroadcastChannel                                                                                                                             |
 | Native story               | Single process with sync file I/O                                                                                                                                 |
-| Durability default         | Fire-and-forget, `_persisted` variant API for explicit durability                                                                                                  |
+| Durability default         | Fire-and-forget, `_persisted` variant API for explicit durability                                                                                                 |
 | Persistence API style      | Promise-based                                                                                                                                                     |
 | Leader failover            | Accept potential loss (fire-and-forget semantics)                                                                                                                 |
 | Index method branch param  | Include branch in all index methods (supports multi-branch)                                                                                                       |

@@ -1,11 +1,14 @@
 /**
  * Integration tests for the todo server.
  *
- * These tests start the server programmatically with an in-memory database,
+ * These tests start the server programmatically with BfTree-backed storage,
  * exercise the full HTTP API, and clean up afterwards.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { tmpdir } from "node:os";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
 import {
   createServer,
   startServer,
@@ -19,7 +22,7 @@ describe("Todo Server Integration", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
-    // Create server with in-memory storage
+    // Create server with BfTree-backed storage (temp directory)
     const todoServer = await createServer();
 
     // Start on random available port
@@ -126,6 +129,59 @@ describe("Todo Server Integration", () => {
         body: JSON.stringify({}),
       });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe("Persistence / Cold Start", () => {
+    it("survives a server restart", async () => {
+      // Use a shared data path so both server instances see the same BfTree file
+      const dataDir = mkdtempSync(join(tmpdir(), "jazz-cold-start-"));
+      const dbPath = join(dataDir, "jazz.db");
+
+      // --- First boot: create some todos ---
+      const server1 = await startServer(await createServer(dbPath), 0);
+
+      const createRes1 = await fetch(`${server1.baseUrl}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Survive restart", description: "persistent" }),
+      });
+      expect(createRes1.status).toBe(201);
+      const todo1: Todo = await createRes1.json();
+
+      const createRes2 = await fetch(`${server1.baseUrl}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "Also persist" }),
+      });
+      expect(createRes2.status).toBe(201);
+      const todo2: Todo = await createRes2.json();
+
+      // Flush to disk and shut down
+      server1.flush();
+      await stopServer(server1);
+
+      // --- Second boot: same data path, fresh server ---
+      const server2 = await startServer(await createServer(dbPath), 0);
+
+      const listRes = await fetch(`${server2.baseUrl}/todos`);
+      expect(listRes.status).toBe(200);
+      const todos: Todo[] = await listRes.json();
+
+      // Both todos should be present
+      expect(todos.length).toBe(2);
+
+      const found1 = todos.find((t) => t.id === todo1.id);
+      expect(found1).toBeDefined();
+      expect(found1!.title).toBe("Survive restart");
+      expect(found1!.description).toBe("persistent");
+      expect(found1!.done).toBe(false);
+
+      const found2 = todos.find((t) => t.id === todo2.id);
+      expect(found2).toBeDefined();
+      expect(found2!.title).toBe("Also persist");
+
+      await stopServer(server2);
     });
   });
 

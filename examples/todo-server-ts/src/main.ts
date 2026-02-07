@@ -7,8 +7,12 @@
 import express, { Request, Response, NextFunction } from "express";
 import type { Application } from "express";
 import type { Server } from "node:http";
+import { tmpdir } from "node:os";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
 import { JazzClient } from "jazz-ts";
 import type { Value, WasmSchema } from "jazz-ts";
+import { NapiRuntime } from "jazz-napi";
 
 // ============================================================================
 // Types
@@ -36,6 +40,7 @@ export interface TodoServer {
   app: Application;
   client: JazzClient;
   shutdown: () => Promise<void>;
+  flush: () => void;
 }
 
 export interface RunningServer extends TodoServer {
@@ -103,11 +108,15 @@ function buildQuery(table: string) {
 /**
  * Create a todo server.
  *
+ * @param dataPath Optional path to BfTree database file. If omitted, uses a temp directory.
  * @returns TodoServer with app, client, and shutdown function
  */
-export async function createServer(): Promise<TodoServer> {
-  // Connect to Jazz (in-memory storage)
-  const client = await JazzClient.connect({
+export async function createServer(dataPath?: string): Promise<TodoServer> {
+  // Create BfTree-backed runtime via NAPI
+  const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
+  const runtime = new NapiRuntime(JSON.stringify(schema), "todo-server-ts", "dev", "main", dbPath);
+
+  const client = JazzClient.connectWithRuntime(runtime, {
     appId: "todo-server-ts",
     schema,
     env: "dev",
@@ -325,6 +334,9 @@ export async function createServer(): Promise<TodoServer> {
     client,
     shutdown: async () => {
       await client.shutdown();
+    },
+    flush: () => {
+      runtime.flush();
     },
   };
 }

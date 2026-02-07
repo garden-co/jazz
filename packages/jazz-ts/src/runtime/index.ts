@@ -4,6 +4,7 @@ export {
   loadWasmModule,
   type PersistenceTier,
   type Row,
+  type Runtime,
   type SubscriptionCallback,
   type WasmModule,
 } from "./client.js";
