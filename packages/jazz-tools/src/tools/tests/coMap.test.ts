@@ -430,7 +430,6 @@ describe("CoMap", async () => {
         },
       });
 
-      console.log("Local root JSON:", root.toJSON());
 
       // Simulate loading in another context/component
       const loadedRoot = await ChatRoot.load(root.$jazz.id, {
