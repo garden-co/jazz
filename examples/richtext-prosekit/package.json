@@ -11,18 +11,18 @@
   "dependencies": {
     "jazz-tools": "workspace:*",
     "prosekit": "^0.13.3",
-    "react": "^19.1.10",
-    "react-dom": "^19.1.10"
+    "react": "catalog:react",
+    "react-dom": "catalog:react"
   },
   "devDependencies": {
     "@egoist/tailwindcss-icons": "^1.9.0",
     "@iconify-json/lucide": "^1.2.45",
-    "@types/react": "^19.1.10",
-    "@types/react-dom": "^19.1.10",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
     "@vitejs/plugin-react": "^4.5.0",
     "postcss": "^8.5.4",
     "tailwindcss": "^3.4.17",
-    "typescript": "5.6.2",
-    "vite": "^6.3.5"
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
   }
 }

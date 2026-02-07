@@ -16,6 +16,7 @@
       "!**/ios/**",
       "!**/android/**",
       "!**/tests/jazz-svelte/src/**",
+      "!**/examples/**/components/ui/**",
       "!**/examples/**/*svelte*/**",
       "!**/starters/**/*svelte*/**",
       "!**/examples/server-worker-inbox/src/routeTree.gen.ts",
