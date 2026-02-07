@@ -26,10 +26,20 @@ import { getBrowserLockSessionProvider } from "./provideBrowserLockSession/index
 
 setupInspector();
 
+export type BrowserStorageType = "indexedDB" | "experimental_bftree";
+
 export type BaseBrowserContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
-  storage?: "indexedDB";
+  /**
+   * Which storage backend to use for local persistence.
+   *
+   * - `"indexedDB"` (default) — uses IndexedDB, works everywhere.
+   * - `"experimental_bftree"` — uses a WASM B+ tree backed by OPFS,
+   *   running in a dedicated Web Worker. Requires HTTPS and a modern
+   *   browser with OPFS support.
+   */
+  storage?: BrowserStorageType;
   crypto?: CryptoProvider;
   authSecretStorage: AuthSecretStorage;
 };
@@ -47,13 +57,21 @@ class BrowserWebSocketPeerWithReconnection extends WebSocketPeerWithReconnection
   }
 }
 
+async function createStorage(type?: BrowserStorageType) {
+  if (type === "experimental_bftree") {
+    const { getBfTreeStorage } = await import("cojson-storage-bftree");
+    return getBfTreeStorage();
+  }
+  return getIndexedDBStorage();
+}
+
 async function setupPeers(options: BaseBrowserContextOptions) {
   const crypto = options.crypto || (await WasmCrypto.create());
   let node: LocalNode | undefined = undefined;
 
   const peers: Peer[] = [];
 
-  const storage = await getIndexedDBStorage();
+  const storage = await createStorage(options.storage);
 
   if (options.sync.when === "never") {
     return {

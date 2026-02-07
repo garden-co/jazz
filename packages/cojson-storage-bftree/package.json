@@ -1,0 +1,25 @@
+{
+  "name": "cojson-storage-bftree",
+  "version": "0.0.1",
+  "main": "dist/index.js",
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "dependencies": {
+    "cojson": "workspace:*",
+    "cojson-core-wasm": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:default",
+    "vitest": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default"
+  },
+  "scripts": {
+    "dev": "tsc --watch --sourceMap --outDir dist",
+    "test": "vitest --run --root ../../ --project cojson-storage-bftree",
+    "test:watch": "vitest --watch --root ../../ --project cojson-storage-bftree",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
+  }
+}
