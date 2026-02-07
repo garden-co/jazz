@@ -11,13 +11,16 @@ import type {
   DBTransactionInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "../types.js";
 import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriverAsync } from "./types.js";
 import type { PeerID } from "../../sync.js";
+import { STORAGE_RECONCILIATION_CONFIG } from "../../config.js";
 
 export type RawCoValueRow = {
   id: RawCoID;
@@ -150,6 +153,39 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
         coValueRow.id,
         DeletedCoValueDeletionStatus.Done,
         DeletedCoValueDeletionStatus.Done,
+      ],
+    );
+  }
+
+  async getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined> {
+    return this.tx.get<StorageReconciliationLockRow>(
+      "SELECT * FROM storageReconciliationLocks WHERE key = ?",
+      [key],
+    );
+  }
+
+  async putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void> {
+    const {
+      key,
+      holderSessionId,
+      acquiredAt,
+      expiresAt,
+      releasedAt,
+      lastProcessedOffset,
+    } = entry;
+    await this.tx.run(
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        key,
+        holderSessionId,
+        acquiredAt,
+        expiresAt,
+        releasedAt ?? null,
+        lastProcessedOffset,
       ],
     );
   }
@@ -332,6 +368,96 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     await this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [
       id,
     ]);
+  }
+
+  async getCoValueIDs(
+    limit: number,
+    offset: number,
+  ): Promise<{ id: RawCoID }[]> {
+    return this.db.query<{ id: RawCoID }>(
+      "SELECT id FROM coValues ORDER BY rowID LIMIT ? OFFSET ?",
+      [limit, offset],
+    );
+  }
+
+  async tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<StorageReconciliationAcquireResult> {
+    let result: StorageReconciliationAcquireResult = {
+      acquired: false,
+      reason: "not_due",
+    };
+    await this.transaction(async (tx) => {
+      const now = Date.now();
+      const lockKey = `lock#${peerId}`;
+
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow?.releasedAt &&
+        now - lockRow.releasedAt <
+          STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS
+      ) {
+        result = { acquired: false, reason: "not_due" };
+        return;
+      }
+      if (lockRow && !lockRow.releasedAt && lockRow.expiresAt >= now) {
+        result = { acquired: false, reason: "lock_held" };
+        return;
+      }
+
+      const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+      const lastProcessedOffset =
+        lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
+      await tx.putStorageReconciliationLock({
+        key: lockKey,
+        holderSessionId: sessionId,
+        acquiredAt: now,
+        expiresAt,
+        lastProcessedOffset,
+      });
+      result = { acquired: true, lastProcessedOffset };
+    });
+    return result;
+  }
+
+  async renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): Promise<void> {
+    await this.transaction(async (tx) => {
+      const lockKey = `lock#${peerId}`;
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow &&
+        lockRow.holderSessionId === sessionId &&
+        !lockRow.releasedAt
+      ) {
+        await tx.putStorageReconciliationLock({
+          ...lockRow,
+          lastProcessedOffset: offset,
+        });
+      }
+    });
+  }
+
+  async releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<void> {
+    await this.transaction(async (tx) => {
+      const lockKey = `lock#${peerId}`;
+      const releasedAt = Date.now();
+      const lockRow = await tx.getStorageReconciliationLock(lockKey);
+      if (lockRow && lockRow.holderSessionId === sessionId) {
+        await tx.putStorageReconciliationLock({
+          ...lockRow,
+          releasedAt,
+          lastProcessedOffset: 0,
+        });
+      }
+    });
   }
 
   async getCoValueKnownState(

@@ -12,12 +12,15 @@ import type {
   DBTransactionInterfaceSync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "../types.js";
 import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriver } from "./types.js";
+import { STORAGE_RECONCILIATION_CONFIG } from "../../config.js";
 
 export type RawCoValueRow = {
   id: RawCoID;
@@ -268,9 +271,47 @@ export class SQLiteClient
     );
   }
 
+  getStorageReconciliationLock(
+    key: string,
+  ): StorageReconciliationLockRow | undefined {
+    return this.db.get<StorageReconciliationLockRow>(
+      "SELECT * FROM storageReconciliationLocks WHERE key = ?",
+      [key],
+    );
+  }
+
+  putStorageReconciliationLock(entry: StorageReconciliationLockRow): void {
+    const {
+      key,
+      holderSessionId,
+      acquiredAt,
+      expiresAt,
+      releasedAt,
+      lastProcessedOffset,
+    } = entry;
+    this.db.run(
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        key,
+        holderSessionId,
+        acquiredAt,
+        expiresAt,
+        releasedAt ?? null,
+        lastProcessedOffset,
+      ],
+    );
+  }
+
   transaction(operationsCallback: (tx: DBTransactionInterfaceSync) => unknown) {
     this.db.transaction(() => operationsCallback(this));
     return undefined;
+  }
+
+  getCoValueIDs(limit: number, offset: number): { id: RawCoID }[] {
+    return this.db.query<{ id: RawCoID }>(
+      "SELECT id FROM coValues ORDER BY rowID LIMIT ? OFFSET ?",
+      [limit, offset],
+    );
   }
 
   getUnsyncedCoValueIDs(): RawCoID[] {
@@ -301,6 +342,80 @@ export class SQLiteClient
 
   stopTrackingSyncState(id: RawCoID): void {
     this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [id]);
+  }
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): StorageReconciliationAcquireResult {
+    let result: StorageReconciliationAcquireResult = {
+      acquired: false,
+      reason: "not_due",
+    };
+    this.transaction(() => {
+      const now = Date.now();
+      const lockKey = `lock#${peerId}`;
+      const lockRow = this.getStorageReconciliationLock(lockKey);
+      if (
+        lockRow?.releasedAt &&
+        now - lockRow.releasedAt <
+          STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS
+      ) {
+        result = { acquired: false, reason: "not_due" };
+        return;
+      }
+      if (lockRow && !lockRow.releasedAt && lockRow.expiresAt >= now) {
+        result = { acquired: false, reason: "lock_held" };
+        return;
+      }
+
+      const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+      const lastProcessedOffset =
+        lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
+      this.putStorageReconciliationLock({
+        key: lockKey,
+        holderSessionId: sessionId,
+        acquiredAt: now,
+        expiresAt,
+        lastProcessedOffset,
+      });
+      result = { acquired: true, lastProcessedOffset };
+    });
+    return result;
+  }
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    const lockKey = `lock#${peerId}`;
+    const lockRow = this.getStorageReconciliationLock(lockKey);
+    if (
+      lockRow &&
+      lockRow.holderSessionId === sessionId &&
+      !lockRow.releasedAt
+    ) {
+      this.putStorageReconciliationLock({
+        ...lockRow,
+        lastProcessedOffset: offset,
+      });
+    }
+  }
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
+    this.transaction(() => {
+      const lockKey = `lock#${peerId}`;
+      const releasedAt = Date.now();
+      const lockRow = this.getStorageReconciliationLock(lockKey);
+      if (lockRow?.holderSessionId === sessionId) {
+        this.putStorageReconciliationLock({
+          ...lockRow,
+          releasedAt,
+          lastProcessedOffset: 0,
+        });
+      }
+    });
   }
 
   getCoValueKnownState(coValueId: string): CoValueKnownState | undefined {

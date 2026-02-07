@@ -29,6 +29,7 @@ import type {
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
+  StorageReconciliationAcquireResult,
 } from "./types.js";
 import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
 import {
@@ -66,6 +67,39 @@ export class StorageApiSync implements StorageAPI {
 
   getKnownState(id: string): CoValueKnownState {
     return this.knownStates.getKnownState(id);
+  }
+
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void {
+    const batch = this.dbClient.getCoValueIDs(limit, offset);
+    callback(batch);
+  }
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    callback: (result: StorageReconciliationAcquireResult) => void,
+  ): void {
+    const result = this.dbClient.tryAcquireStorageReconciliationLock(
+      sessionId,
+      peerId,
+    );
+    callback(result);
+  }
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    this.dbClient.renewStorageReconciliationLock(sessionId, peerId, offset);
+  }
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
+    this.dbClient.releaseStorageReconciliationLock(sessionId, peerId);
   }
 
   loadKnownState(

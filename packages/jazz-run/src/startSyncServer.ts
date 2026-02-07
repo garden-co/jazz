@@ -15,6 +15,7 @@ export const startSyncServer = async ({
   db,
   crypto,
   middleware,
+  enableFullStorageReconciliation = false,
 }: {
   host: string | undefined;
   port: string | undefined;
@@ -22,6 +23,7 @@ export const startSyncServer = async ({
   db: string;
   crypto?: CryptoProvider;
   middleware?: (req: IncomingMessage, res: ServerResponse) => boolean;
+  enableFullStorageReconciliation?: boolean;
 }): Promise<SyncServer> => {
   crypto ??= await WasmCrypto.create();
 
@@ -43,6 +45,8 @@ export const startSyncServer = async ({
     agentSecret,
     crypto.newRandomSessionID(agentID),
     crypto,
+    undefined,
+    enableFullStorageReconciliation,
   );
 
   if (!inMemory) {

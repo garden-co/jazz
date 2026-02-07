@@ -60,6 +60,10 @@ export function toSimplifiedMessages(
         return `${from} -> ${to} | GET_KNOWN_STATE ${getCoValue(msg.id)}`;
       case "lazyLoadResult":
         return `${from} -> ${to} | GET_KNOWN_STATE_RESULT ${getCoValue(msg.id)} sessions: ${simplifySessions(msg)}`;
+      case "reconcile":
+        return `${from} -> ${to} | RECONCILE`;
+      case "reconcile-ack":
+        return `${from} -> ${to} | RECONCILE_ACK`;
     }
   }
 

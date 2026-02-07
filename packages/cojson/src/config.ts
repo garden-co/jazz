@@ -64,3 +64,21 @@ export function setMaxOutgoingMessagesChunkBytes(bytes: number) {
 export function setMaxInFlightLoadsPerPeer(limit: number) {
   CO_VALUE_LOADING_CONFIG.MAX_IN_FLIGHT_LOADS_PER_PEER = limit;
 }
+
+export const STORAGE_RECONCILIATION_CONFIG = {
+  BATCH_SIZE: 100,
+  LOCK_TTL_MS: 24 * 60 * 60 * 1000, // 1 day
+  RECONCILIATION_INTERVAL_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
+};
+
+export function setStorageReconciliationBatchSize(size: number) {
+  STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE = size;
+}
+
+export function setStorageReconciliationLockTTL(ttl: number) {
+  STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS = ttl;
+}
+
+export function setStorageReconciliationInterval(interval: number) {
+  STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS = interval;
+}

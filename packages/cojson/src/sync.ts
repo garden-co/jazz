@@ -3,7 +3,10 @@ import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
 import { UnsyncedCoValuesTracker } from "./UnsyncedCoValuesTracker.js";
-import { SYNC_SCHEDULER_CONFIG } from "./config.js";
+import {
+  STORAGE_RECONCILIATION_CONFIG,
+  SYNC_SCHEDULER_CONFIG,
+} from "./config.js";
 import {
   getContenDebugInfo,
   getNewTransactionsFromContentMessage,
@@ -33,7 +36,9 @@ export type SyncMessage =
   | LoadMessage
   | KnownStateMessage
   | NewContentMessage
-  | DoneMessage;
+  | DoneMessage
+  | ReconcileMessage
+  | ReconcileAckMessage;
 
 export type LoadMessage = {
   action: "load";
@@ -66,6 +71,17 @@ export type SessionNewContent = {
 export type DoneMessage = {
   action: "done";
   id: RawCoID;
+};
+
+export type ReconcileMessage = {
+  action: "reconcile";
+  id: string;
+  values: [coValue: RawCoID, sessionsHash: string][];
+};
+
+export type ReconcileAckMessage = {
+  action: "reconcile-ack";
+  id: string;
 };
 
 /**
@@ -111,9 +127,18 @@ export type ServerPeerSelector = (
   serverPeers: PeerState[],
 ) => PeerState[];
 
+/**
+ * Manages the sync of coValues between peers.
+ * It is responsible for sending, receiving and processing sync messages.
+ * For more details on how the sync protocol works, see the sync protocol documentation:
+ * {@link docs/sync-protocol.md}
+ */
 export class SyncManager {
   peers: { [key: PeerID]: PeerState } = {};
   local: LocalNode;
+
+  /** Tracks pending reconcile acks: "batchId#peerId->offset". Cleared in handleReconcileAck. */
+  pendingReconciliationAck: Map<string, number> = new Map();
 
   // When true, transactions will not be verified.
   // This is useful when syncing only for storage purposes, with the expectation that
@@ -126,6 +151,8 @@ export class SyncManager {
   ignoreUnknownCoValuesFromServers() {
     this._ignoreUnknownCoValuesFromServers = true;
   }
+
+  fullStorageReconciliationEnabled = false;
 
   peersCounter = metrics.getMeter("cojson").createUpDownCounter("jazz.peers", {
     description: "Amount of connected peers",
@@ -179,6 +206,15 @@ export class SyncManager {
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
+    if (msg.action === "reconcile") {
+      this.handleReconcile(msg, peer);
+      return;
+    }
+    if (msg.action === "reconcile-ack") {
+      this.handleReconcileAck(msg, peer);
+      return;
+    }
+
     if (!isRawCoID(msg.id)) {
       const errorType = msg.id ? "invalid" : "undefined";
       logger.warn(`Received sync message with ${errorType} id`, {
@@ -281,13 +317,146 @@ export class SyncManager {
     peer.trackToldKnownState(id);
   }
 
+  /**
+   * Reconciles all in-memory CoValues with all persistent server peers
+   */
   reconcileServerPeers() {
     const serverPeers = Object.values(this.peers).filter(
-      (peer) => peer.role === "server",
+      isPersistentServerPeer,
     );
     for (const peer of serverPeers) {
       this.startPeerReconciliation(peer);
     }
+  }
+
+  /**
+   * Ensures all CoValues in storage are synced to the given server peer.
+   * Sends "reconcile" message(s) with [coValueId, sessionsHash] for each CoValue.
+   * Server responds with "known" only where it is missing the CoValue or has different sessions,
+   * so that client can send missing content.
+   * Processes CoValues in batches of RECONCILIATION_BATCH_SIZE.
+   * @param peer - The server peer to reconcile with.
+   * @param initialOffset - Offset to start from (for resuming after interrupt). Default 0.
+   * @param onComplete - Called when reconciliation is fully complete (all batches sent and acked).
+   */
+  startStorageReconciliation(
+    peer: PeerState,
+    initialOffset?: number,
+    onComplete?: () => void,
+  ): void {
+    if (!this.local.storage) return;
+    if (!isPersistentServerPeer(peer)) return;
+
+    const peerId = peer.id;
+    const startOffset = initialOffset ?? 0;
+
+    const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
+    let lastBatchSent = false;
+    const hasPendingAcksForPeer = () =>
+      this.pendingReconciliationAck
+        .keys()
+        .some((k) => k.endsWith(`#${peerId}`));
+    const maybeComplete = () => {
+      if (lastBatchSent && !hasPendingAcksForPeer() && onComplete) {
+        onComplete();
+      }
+    };
+
+    const sendReconcileBatch = (
+      entries: [RawCoID, string][],
+      offset: number,
+    ) => {
+      if (entries.length === 0) return;
+      const batchId = crypto.randomUUID();
+      const msg: ReconcileMessage = {
+        action: "reconcile",
+        id: batchId,
+        values: entries,
+      };
+      this.pendingReconciliationAck.set(
+        `${batchId}#${peer.id}`,
+        offset + batchSize,
+      );
+      this.trySendToPeer(peer, msg);
+    };
+
+    const processStorageBatch = (offset: number) => {
+      this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
+        // Skip in-memory CoValues
+        const coValues = batch.map(({ id }) => this.local.getCoValue(id));
+        const pending = coValues.filter((coValue) => !coValue.isAvailable());
+        let done = 0;
+        const entries: [RawCoID, string][] = [];
+        const sendReconcileMessageWhenDone = () => {
+          if (++done === pending.length) {
+            sendReconcileBatch(entries, offset);
+            if (batch.length === batchSize) {
+              processStorageBatch(offset + batch.length);
+            } else {
+              lastBatchSent = true;
+              maybeComplete();
+            }
+          }
+        };
+        for (const coValue of pending) {
+          coValue.getKnownStateFromStorage((storageKnownState) => {
+            if (storageKnownState) {
+              entries.push([
+                coValue.id,
+                this.hashKnownStateSessions(storageKnownState.sessions),
+              ]);
+            }
+            sendReconcileMessageWhenDone();
+          });
+        }
+        if (pending.length === 0 && batch.length >= batchSize) {
+          processStorageBatch(offset + batchSize);
+        } else if (pending.length === 0 && batch.length < batchSize) {
+          lastBatchSent = true;
+          maybeComplete();
+        }
+      });
+    };
+
+    let completed = false;
+    const completionCallback = onComplete;
+    const checkInterval = completionCallback
+      ? setInterval(() => {
+          if (peer.closed || completed) {
+            clearInterval(checkInterval);
+            return;
+          }
+          if (lastBatchSent && !hasPendingAcksForPeer()) {
+            completed = true;
+            clearInterval(checkInterval);
+            completionCallback();
+          }
+        }, 500)
+      : undefined;
+
+    processStorageBatch(startOffset);
+  }
+
+  private maybeStartStorageReconciliationForPeer(peer: PeerState): void {
+    if (!this.fullStorageReconciliationEnabled) return;
+    if (!this.local.storage) return;
+
+    const sessionId = this.local.currentSessionID;
+    this.local.storage.tryAcquireStorageReconciliationLock(
+      sessionId,
+      peer.id,
+      (result) => {
+        if (!result.acquired) return;
+
+        const lastProcessedOffset = result.lastProcessedOffset;
+        this.startStorageReconciliation(peer, lastProcessedOffset, () => {
+          this.local.storage?.releaseStorageReconciliationLock(
+            sessionId,
+            peer.id,
+          );
+        });
+      },
+    );
   }
 
   async resumeUnsyncedCoValues(): Promise<void> {
@@ -364,12 +533,19 @@ export class SyncManager {
     });
   }
 
+  /**
+   * Reconciles all in-memory CoValues with the given peer.
+   * Creates a subscription for each CoValue that is not already subscribed to.
+   */
   startPeerReconciliation(peer: PeerState) {
     if (isPersistentServerPeer(peer)) {
       // Resume syncing unsynced CoValues asynchronously
       this.resumeUnsyncedCoValues().catch((error) => {
         logger.warn("Failed to resume unsynced CoValues:", error);
       });
+
+      // Try to run full storage reconciliation for this peer (scheduled per peer, every 30 days)
+      this.maybeStartStorageReconciliationForPeer(peer);
     }
 
     const coValuesOrderedByDependency: CoValueCore[] = [];
@@ -734,9 +910,75 @@ export class SyncManager {
 
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
+    } else if (coValue.loadingState === "onlyKnownState") {
+      // Validate if content is missing before loading it from storage
+      if (!this.syncState.isSynced(peer, msg.id)) {
+        this.local.loadCoValueCore(msg.id).then(() => {
+          this.sendNewContent(msg.id, peer);
+        });
+      }
     }
 
     peer.trackLoadRequestComplete(coValue);
+  }
+
+  handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
+    let pending = msg.values.length;
+    const sendAckWhenDone = () => {
+      if (--pending === 0) {
+        this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
+      }
+    };
+
+    for (const [coValueId, clientSessionsHash] of msg.values) {
+      const coValue = this.local.getCoValue(coValueId);
+      if (coValue.isErroredInPeer(peer.id)) {
+        sendAckWhenDone();
+        continue;
+      }
+
+      const maybeSendKnown = (knownState: CoValueKnownState | undefined) => {
+        if (!knownState) {
+          this.handleLoadNotFound(coValueId, peer);
+        } else {
+          const serverSessionsHash = this.hashKnownStateSessions(
+            knownState.sessions,
+          );
+          if (serverSessionsHash !== clientSessionsHash) {
+            peer.trackToldKnownState(coValueId);
+            this.trySendToPeer(peer, { action: "known", ...knownState });
+          }
+        }
+        sendAckWhenDone();
+      };
+
+      if (coValue.isAvailable()) {
+        maybeSendKnown(coValue.knownState());
+      } else {
+        coValue.getKnownStateFromStorage(maybeSendKnown);
+      }
+    }
+
+    if (msg.values.length === 0) {
+      this.trySendToPeer(peer, { action: "reconcile-ack", id: msg.id });
+    }
+  }
+
+  handleReconcileAck(msg: ReconcileAckMessage, peer: PeerState): void {
+    const key = `${msg.id}#${peer.id}`;
+    const nextOffset = this.pendingReconciliationAck.get(key);
+    this.pendingReconciliationAck.delete(key);
+    if (nextOffset !== undefined) {
+      this.local.storage?.renewStorageReconciliationLock(
+        this.local.currentSessionID,
+        peer.id,
+        nextOffset,
+      );
+    }
+  }
+
+  private hashKnownStateSessions(sessions: KnownStateSessions): string {
+    return this.local.crypto.shortHash(sessions);
   }
 
   recordTransactionsSize(newTransactions: Transaction[], source: string) {

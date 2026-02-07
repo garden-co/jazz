@@ -36,7 +36,7 @@ describe("SQLiteClientAsync", () => {
 
       const signatures = await dbClient.getSignatures(0, 0);
       expect(signatures.length).toBe(10);
-      signatures.forEach(async ({ signature }, i) => {
+      signatures.forEach(({ signature }, i) => {
         expect(signature).toBe(`signature_z${i}`);
       });
     });

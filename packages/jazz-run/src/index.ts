@@ -74,6 +74,14 @@ const dbOption = Options.file("db")
   )
   .pipe(Options.withDefault(serverDefaults.db));
 
+const enableFullStorageReconciliationOption = Options.boolean(
+  "full-storage-reconciliation",
+).pipe(
+  Options.withDescription(
+    "Enable full storage reconciliation on the server's node",
+  ),
+);
+
 const startSyncServerCommand = Command.make(
   "sync",
   {
@@ -81,11 +89,18 @@ const startSyncServerCommand = Command.make(
     port: portOption,
     inMemory: inMemoryOption,
     db: dbOption,
+    enableFullStorageReconciliation: enableFullStorageReconciliationOption,
   },
-  ({ host, port, inMemory, db }) => {
+  ({ host, port, inMemory, db, enableFullStorageReconciliation }) => {
     return Effect.gen(function* () {
       const server = yield* Effect.promise(() =>
-        startSyncServer({ host, port, inMemory, db }),
+        startSyncServer({
+          host,
+          port,
+          inMemory,
+          db,
+          enableFullStorageReconciliation,
+        }),
       );
 
       const serverAddress = server.address();

@@ -77,10 +77,14 @@ export class LocalNode {
     currentSessionID: SessionID,
     crypto: CryptoProvider,
     public readonly syncWhen?: SyncWhen,
+    enableFullStorageReconciliation?: boolean,
   ) {
     this.agentSecret = agentSecret;
     this.currentSessionID = currentSessionID;
     this.crypto = crypto;
+    if (enableFullStorageReconciliation) {
+      this.syncManager.fullStorageReconciliationEnabled = true;
+    }
   }
 
   enableGarbageCollector() {
@@ -256,6 +260,7 @@ export class LocalNode {
     peers?: Peer[];
     syncWhen?: SyncWhen;
     storage?: StorageAPI;
+    enableFullStorageReconciliation?: boolean;
   }): RawAccount {
     const {
       crypto,
@@ -274,6 +279,7 @@ export class LocalNode {
       crypto.newRandomSessionID(accountID as RawAccountID),
       crypto,
       syncWhen,
+      opts.enableFullStorageReconciliation,
     );
 
     if (opts.storage) {
@@ -320,6 +326,7 @@ export class LocalNode {
     crypto,
     initialAgentSecret = crypto.newRandomAgentSecret(),
     storage,
+    enableFullStorageReconciliation,
   }: {
     creationProps: { name: string };
     peers?: Peer[];
@@ -328,6 +335,7 @@ export class LocalNode {
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
     storage?: StorageAPI;
+    enableFullStorageReconciliation?: boolean;
   }): Promise<{
     node: LocalNode;
     accountID: RawAccountID;
@@ -340,6 +348,7 @@ export class LocalNode {
       peers,
       syncWhen,
       storage,
+      enableFullStorageReconciliation,
     });
     const node = account.core.node;
 
@@ -385,6 +394,7 @@ export class LocalNode {
     crypto,
     migration,
     storage,
+    enableFullStorageReconciliation,
   }: {
     accountID: RawAccountID;
     accountSecret: AgentSecret;
@@ -394,6 +404,7 @@ export class LocalNode {
     crypto: CryptoProvider;
     migration?: RawAccountMigration<AccountMeta>;
     storage?: StorageAPI;
+    enableFullStorageReconciliation?: boolean;
   }): Promise<LocalNode> {
     try {
       const expectedAgentID = crypto.getAgentID(accountSecret);
@@ -403,6 +414,7 @@ export class LocalNode {
         sessionID || crypto.newRandomSessionID(accountID),
         crypto,
         syncWhen,
+        enableFullStorageReconciliation,
       );
 
       if (storage) {

@@ -1237,4 +1237,118 @@ describe("StorageApiSync", () => {
       expect(result2).toEqual(result1);
     });
   });
+
+  describe("getCoValueIDs", () => {
+    test("should return empty array when storage has no CoValues", async () => {
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const ids = await new Promise<{ id: RawCoID }[]>((resolve) => {
+        storage.getCoValueIDs(100, 0, resolve);
+      });
+
+      expect(ids).toEqual([]);
+    });
+
+    test("should return CoValue IDs in batch after storing CoValues", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create CoValues and sync to storage
+      const group = fixtures.node.createGroup();
+      group.addMember("everyone", "reader");
+      const map = group.createMap();
+      map.set("key", "value", "trusting");
+      await map.core.waitForSync();
+
+      const ids = await new Promise<{ id: RawCoID }[]>((resolve) => {
+        storage.getCoValueIDs(100, 0, resolve);
+      });
+
+      expect(ids.map((e) => e.id)).toContain(group.id);
+      expect(ids.map((e) => e.id)).toContain(map.id);
+      expect(ids.length).toEqual(2);
+    });
+
+    test("should paginate when there are more CoValues than the limit and return each ID only once", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      // Create more CoValues than the page size (1 group + 4 maps = 5 CoValues, limit = 2)
+      const group = fixtures.node.createGroup();
+      group.addMember("everyone", "reader");
+      const expectedIds = new Set<RawCoID>([group.id]);
+      const maps: ReturnType<typeof group.createMap>[] = [];
+      for (let i = 0; i < 4; i++) {
+        const map = group.createMap();
+        map.set(`key${i}`, `value${i}`, "trusting");
+        maps.push(map);
+        expectedIds.add(map.id);
+      }
+      await maps[maps.length - 1]!.core.waitForSync();
+
+      const limit = 2;
+      const allIds: RawCoID[] = [];
+      await new Promise<void>((resolve) => {
+        const fetchBatch = (offset: number) => {
+          storage.getCoValueIDs(limit, offset, (batch) => {
+            for (const { id } of batch) {
+              allIds.push(id);
+            }
+            if (batch.length >= limit) {
+              fetchBatch(offset + batch.length);
+            } else {
+              resolve();
+            }
+          });
+        };
+        fetchBatch(0);
+      });
+
+      expect(allIds).toHaveLength(expectedIds.size);
+      const seen = new Set<RawCoID>();
+      for (const id of allIds) {
+        expect(seen.has(id)).toBe(false);
+        seen.add(id);
+        expect(expectedIds.has(id)).toBe(true);
+      }
+    });
+  });
 });
