@@ -78,7 +78,7 @@ When using CoTexts in JSX, you can read the text directly:
 </CodeGroup>
 </ContentByFramework>
 
-<Alert variant="info" title="Primitive values">
+<Alert variant="info" title="Primitive values" className="mt-4">
 `CoTexts` extend the native `String` class, so `typeof description` will return `object`. If you need the primitive string value (e.g. for strict equality checks or 3rd party libraries), use `description.toString()`.
 </Alert>
 
@@ -125,7 +125,7 @@ Perfect for handling user input in form controls:
 
 ## Using Rich Text with ProseMirror
 
-Jazz provides a dedicated plugin for integrating `co.richText()` with the popular ProseMirror editor that enables bidirectional synchronization between your co.richText() instances and ProseMirror editors.
+Jazz provides a dedicated plugin for integrating `co.richText()` with the popular ProseMirror editor (and other editors built on top of it). The plugin enables bidirectional synchronization between your `co.richText()` instances and ProseMirror editors.
 
 ### ProseMirror Plugin Features
 
@@ -144,14 +144,6 @@ pnpm add prosemirror-view \
 </CodeGroup>
 
 ### Integration
-
-<ContentByFramework framework="react-native">
-We don't currently have a React Native-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
-</ContentByFramework>
-
-<ContentByFramework framework="react-native-expo">
-We don't currently have a React Native Expo-specific example, but you need help please [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
-</ContentByFramework>
 
 <ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 For use with React:
@@ -172,3 +164,21 @@ For use without a framework:
 ```
 </CodeGroup>
 </ContentByFramework>
+
+## ProseKit
+
+You can integrate Jazz with [ProseKit](https://prosekit.dev/) by using the ProseMirror plugin. You can compose this with other plugins as detailed in the [ProseKit docs](https://prosekit.dev/getting-started/using-extensions/#composing-extensions-with-union).
+
+<CodeGroup preferWrap>
+```ts prosekit.ts
+```
+</CodeGroup>
+
+## TipTap
+
+You can also use Jazz with [TipTap](https://tiptap.dev/) using the ProseMirror plugin. 
+
+<CodeGroup preferWrap>
+```ts tiptap.ts
+```
+</CodeGroup>

@@ -136,13 +136,6 @@ export default defineConfig([
   {
     ...cfg,
     entry: {
-      index: "src/tiptap/index.ts",
-    },
-    outDir: "dist/tiptap",
-  },
-  {
-    ...cfg,
-    entry: {
       index: "src/worker/index.ts",
       "edge-wasm": "src/worker/edge-wasm.ts",
       "napi-crypto": "src/worker/napi-crypto.ts",
