@@ -370,37 +370,20 @@ export class StorageApiAsync implements StorageAPI {
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
       await this.dbClient.transaction(async (tx) => {
-        const sessionRow = await tx.getSingleCoValueSession(
-          storedCoValueRowID,
+        const sessionHadInvalidAssumptions = await this.applyMessageForSession(
+          tx,
+          msg,
           sessionID,
+          knownState,
+          storedCoValueRowID,
+          {
+            allowInvalidAssumptions: true,
+            coValueId: id as RawCoID,
+          },
         );
 
-        if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
-          await tx.markCoValueAsDeleted(id);
-        }
-
-        if (sessionRow) {
-          setSessionCounter(
-            knownState.sessions,
-            sessionRow.sessionID,
-            sessionRow.lastIdx,
-          );
-        }
-
-        const lastIdx = sessionRow?.lastIdx || 0;
-        const after = msg.new[sessionID]?.after || 0;
-
-        if (lastIdx < after) {
+        if (sessionHadInvalidAssumptions) {
           invalidAssumptions = true;
-        } else {
-          const newLastIdx = await this.putNewTxs(
-            tx,
-            msg,
-            sessionID,
-            sessionRow,
-            storedCoValueRowID,
-          );
-          setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
       });
     }
@@ -414,6 +397,66 @@ export class StorageApiAsync implements StorageAPI {
     }
 
     return true;
+  }
+
+  /**
+   * Apply a single message to storage for a specific session within an existing
+   * transaction.
+   *
+   * @returns true if this session had invalid assumptions (only when
+   *          allowInvalidAssumptions is true), otherwise false.
+   */
+  private async applyMessageForSession(
+    tx: DBTransactionInterfaceAsync,
+    msg: NewContentMessage,
+    sessionID: SessionID,
+    knownState: CoValueKnownState,
+    storedCoValueRowID: number,
+    options: { allowInvalidAssumptions: boolean; coValueId: RawCoID },
+  ): Promise<boolean> {
+    const { allowInvalidAssumptions, coValueId } = options;
+
+    const sessionRow = await tx.getSingleCoValueSession(
+      storedCoValueRowID,
+      sessionID,
+    );
+
+    if (this.deletedValues.has(coValueId) && isDeleteSessionID(sessionID)) {
+      await tx.markCoValueAsDeleted(coValueId);
+    }
+
+    if (sessionRow) {
+      setSessionCounter(
+        knownState.sessions,
+        sessionRow.sessionID,
+        sessionRow.lastIdx,
+      );
+    }
+
+    const lastIdx = sessionRow?.lastIdx || 0;
+    const after = msg.new[sessionID]?.after || 0;
+
+    if (lastIdx < after) {
+      if (!allowInvalidAssumptions) {
+        // In atomic batches we expect to have all required data; treat this as an error.
+        throw new Error(
+          `Invalid state assumption for ${coValueId}: lastIdx ${lastIdx} < after ${after}`,
+        );
+      }
+
+      return true;
+    }
+
+    const newLastIdx = await this.putNewTxs(
+      tx,
+      msg,
+      sessionID,
+      sessionRow,
+      storedCoValueRowID,
+    );
+    setSessionCounter(knownState.sessions, sessionID, newLastIdx);
+
+    return false;
   }
 
   private async putNewTxs(
@@ -529,6 +572,73 @@ export class StorageApiAsync implements StorageAPI {
 
   onCoValueUnmounted(id: RawCoID): void {
     this.inMemoryCoValues.delete(id);
+  }
+
+  /**
+   * Store multiple messages atomically in a single transaction.
+   * All messages are committed together, or none are committed if an error occurs.
+   *
+   * Used by atomic transactions to ensure all mutations are persisted together.
+   */
+  async storeAtomicBatch(messages: NewContentMessage[]): Promise<void> {
+    if (messages.length === 0) {
+      return; // No-op for empty batches
+    }
+
+    console.trace("storeAtomicBatch", messages);
+
+    this.interruptEraser("storeAtomicBatch");
+
+    await this.dbClient.transaction(async (tx) => {
+      for (const msg of messages) {
+        await this.storeMessageInTransaction(tx, msg);
+      }
+    });
+
+    // Update known states after successful commit
+    for (const msg of messages) {
+      this.inMemoryCoValues.add(msg.id);
+    }
+  }
+
+  /**
+   * Store a single message within an existing transaction context.
+   * Used by storeAtomicBatch to store multiple messages atomically.
+   */
+  private async storeMessageInTransaction(
+    tx: DBTransactionInterfaceAsync,
+    msg: NewContentMessage,
+  ): Promise<void> {
+    const id = msg.id;
+
+    // Upsert the CoValue header (must happen outside transaction for some DBs)
+    const storedCoValueRowID = await this.dbClient.upsertCoValue(
+      id,
+      msg.header,
+    );
+
+    if (!storedCoValueRowID) {
+      throw new Error(`Failed to upsert CoValue ${id} in atomic batch`);
+    }
+
+    const knownState = this.knownStates.getKnownState(id);
+    knownState.header = true;
+
+    for (const sessionID of Object.keys(msg.new) as SessionID[]) {
+      await this.applyMessageForSession(
+        tx,
+        msg,
+        sessionID,
+        knownState,
+        storedCoValueRowID,
+        {
+          allowInvalidAssumptions: false,
+          coValueId: id as RawCoID,
+        },
+      );
+    }
+
+    this.knownStates.handleUpdate(id, knownState);
   }
 
   close() {
