@@ -430,7 +430,6 @@ describe("CoMap", async () => {
         },
       });
 
-
       // Simulate loading in another context/component
       const loadedRoot = await ChatRoot.load(root.$jazz.id, {
         resolve: {
@@ -440,7 +439,6 @@ describe("CoMap", async () => {
 
       if (!loadedRoot || !loadedRoot.$isLoaded)
         throw new Error("Failed to load root");
-
 
       expect(loadedRoot.toJSON()).toEqual(
         expect.objectContaining({
