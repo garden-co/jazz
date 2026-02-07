@@ -11,7 +11,7 @@
     "check": "concurrently --kill-others-on-fail 'pnpm validate:docs-links' 'pnpm generate:snippet-paths' && concurrently --kill-others-on-fail 'tsc --noEmit -p tsconfig.snippets.json' 'svelte-check --tsconfig tsconfig.snippets.json' && pnpm run generate:llm-docs",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "generate:llm-docs": "node generate-docs/llms-full.mjs",
+    "generate:llm-docs": "node generate-docs/llms-full.mjs && node scripts/add-docs-links-to-agents.mjs",
     "generate:snippet-paths": "node scripts/generate-snippet-paths.mjs",
     "validate:docs-links": "node scripts/validate-docs-links.mjs",
     "test": "pnpm test:unit",
