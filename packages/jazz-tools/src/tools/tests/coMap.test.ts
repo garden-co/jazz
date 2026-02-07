@@ -442,7 +442,6 @@ describe("CoMap", async () => {
       if (!loadedRoot || !loadedRoot.$isLoaded)
         throw new Error("Failed to load root");
 
-      console.log("Loaded root JSON:", loadedRoot.toJSON());
 
       expect(loadedRoot.toJSON()).toEqual(
         expect.objectContaining({
