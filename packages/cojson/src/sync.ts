@@ -344,7 +344,7 @@ export class SyncManager {
   startStorageReconciliation(
     peer: PeerState,
     initialOffset?: number,
-    _onComplete?: () => void,
+    onComplete?: () => void,
   ): void {
     if (!this.local.storage) return;
     if (!isPersistentServerPeer(peer)) return;
@@ -370,24 +370,28 @@ export class SyncManager {
         );
         this.trySendToPeer(peer, msg);
       };
-      const onComplete = (reconciledCoValueCount: number) => {
-        // Note: `completed` can be higher than `total` if CoValues were added
-        // after the reconciliation started
-        logger.info("Storage reconciliation complete", {
-          peerId: peer.id,
-          startOffset,
-          completed: reconciledCoValueCount,
-          total: totalCoValueCount,
-        });
-        _onComplete?.();
+      const triggerNextBatch = (lastBatchLength: number, offset: number) => {
+        if (lastBatchLength === batchSize) {
+          logger.info("Reconciliated CoValues in storage", {
+            peerId: peer.id,
+            completed: offset + batchSize,
+            total: totalCoValueCount,
+          });
+          processStorageBatch(offset + batchSize);
+        } else {
+          // Note: `completed` can be higher than `total` if CoValues were added
+          // after the reconciliation started
+          logger.info("Storage reconciliation complete", {
+            peerId: peer.id,
+            startOffset,
+            completed: offset + lastBatchLength,
+            total: totalCoValueCount,
+          });
+          onComplete?.();
+        }
       };
 
       const processStorageBatch = (offset: number) => {
-        logger.info("Reconciliating CoValues in storage", {
-          peerId: peer.id,
-          completed: offset,
-          total: totalCoValueCount,
-        });
         this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
           // Process only CoValues that are not in memory
           const coValues = batch.map(({ id }) => this.local.getCoValue(id));
@@ -401,11 +405,7 @@ export class SyncManager {
               const batchId = base58.encode(this.local.crypto.randomBytes(12));
               sendReconcileBatch(batchId, entries, offset);
               await this.waitUntilNextBatch(batchId, peer);
-              if (batch.length === batchSize) {
-                processStorageBatch(offset + batchSize);
-              } else {
-                onComplete(offset + batch.length);
-              }
+              triggerNextBatch(batch.length, offset);
             }
           };
           for (const coValue of pending) {
@@ -420,11 +420,7 @@ export class SyncManager {
             });
           }
           if (pending.length === 0) {
-            if (batch.length === batchSize) {
-              processStorageBatch(offset + batchSize);
-            } else {
-              onComplete(offset + batch.length);
-            }
+            triggerNextBatch(batch.length, offset);
           }
         });
       };
