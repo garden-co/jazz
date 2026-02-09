@@ -526,6 +526,10 @@ export class StorageApiAsync implements StorageAPI {
     this.dbClient.getCoValueIDs(limit, offset).then(callback);
   }
 
+  getCoValueCount(callback: (count: number) => void): void {
+    this.dbClient.getCoValueCount().then(callback);
+  }
+
   tryAcquireStorageReconciliationLock(
     sessionId: SessionID,
     peerId: PeerID,

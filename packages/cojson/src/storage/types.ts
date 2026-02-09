@@ -105,6 +105,11 @@ export interface StorageAPI {
   ): void;
 
   /**
+   * Get the total number of CoValues in storage.
+   */
+  getCoValueCount(callback: (count: number) => void): void;
+
+  /**
    * Try to acquire the storage reconciliation lock for a given peer.
    * Atomically checks if reconciliation is due for this peer (lastRun older than 30 days or missing)
    * and if no other process/tab holds the lock for this peer, then acquires it.
@@ -298,6 +303,8 @@ export interface DBClientInterfaceAsync {
 
   getCoValueIDs(limit: number, offset: number): Promise<{ id: RawCoID }[]>;
 
+  getCoValueCount(): Promise<number>;
+
   tryAcquireStorageReconciliationLock(
     sessionId: SessionID,
     peerId: PeerID,
@@ -406,6 +413,8 @@ export interface DBClientInterfaceSync {
   getCoValueKnownState(coValueId: string): CoValueKnownState | undefined;
 
   getCoValueIDs(limit: number, offset: number): { id: RawCoID }[];
+
+  getCoValueCount(): number;
 
   tryAcquireStorageReconciliationLock(
     sessionId: SessionID,

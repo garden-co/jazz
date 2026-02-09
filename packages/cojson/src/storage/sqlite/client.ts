@@ -314,6 +314,14 @@ export class SQLiteClient
     );
   }
 
+  getCoValueCount(): number {
+    const row = this.db.get<{ count: number }>(
+      "SELECT COUNT(*) as count FROM coValues",
+      [],
+    );
+    return row?.count ?? 0;
+  }
+
   getUnsyncedCoValueIDs(): RawCoID[] {
     const rows = this.db.query<{ co_value_id: RawCoID }>(
       "SELECT DISTINCT co_value_id FROM unsynced_covalues",
