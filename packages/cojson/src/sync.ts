@@ -895,6 +895,8 @@ export class SyncManager {
 
     let wasAlreadyDeleted = coValue.isDeleted;
 
+    const knownState = coValue.knownState();
+
     /**
      * The coValue is in memory, load the transactions from the content message
      */
@@ -908,7 +910,7 @@ export class SyncManager {
 
       const newTransactions = getNewTransactionsFromContentMessage(
         newContentForSession,
-        coValue.knownState(),
+        knownState,
         sessionID,
       );
 

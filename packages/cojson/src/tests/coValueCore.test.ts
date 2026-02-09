@@ -867,42 +867,30 @@ describe("markErrored and isErroredInPeer", () => {
   });
 });
 
-test("knownState should return the same object until the CoValue is modified", () => {
+test("knownState should reflect modifications", () => {
   const [agent, sessionID] = randomAgentAndSessionID();
   const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
 
   const group = node.createGroup();
   const map = group.createMap();
 
-  // Get the knownState for the first time
+  // Get the knownState before any modification
   const knownState1 = map.core.knownState();
-
-  // Get the knownState again - should be the same object
-  const knownState2 = map.core.knownState();
-  expect(knownState2).toBe(knownState1);
-
-  // Call it multiple times to ensure it's always the same object
-  const knownState3 = map.core.knownState();
-  expect(knownState3).toBe(knownState1);
 
   // Now modify the CoValue by making a transaction
   map.set("hello", "world");
 
-  // Get the knownState after modification - should be a different object
-  const knownState4 = map.core.knownState();
-  expect(knownState4).not.toBe(knownState1);
-
-  // Verify that subsequent calls still return the same (new) object
-  const knownState5 = map.core.knownState();
-  expect(knownState5).toBe(knownState4);
+  // Get the knownState after modification - should have updated sessions
+  const knownState2 = map.core.knownState();
+  expect(knownState2).not.toEqual(knownState1);
 
   // Make another modification
   map.set("foo", "bar");
 
-  // Get the knownState after second modification - should be yet another different object
-  const knownState6 = map.core.knownState();
-  expect(knownState6).not.toBe(knownState4);
-  expect(knownState6).not.toBe(knownState1);
+  // Get the knownState after second modification - should have updated sessions again
+  const knownState3 = map.core.knownState();
+  expect(knownState3).not.toEqual(knownState2);
+  expect(knownState3).not.toEqual(knownState1);
 });
 
 describe("provideHeader uniqueness validation", () => {

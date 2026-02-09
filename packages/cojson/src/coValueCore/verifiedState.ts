@@ -29,7 +29,6 @@ import {
   CoValueKnownState,
   getKnownStateToSend,
   KnownStateSessions,
-  cloneKnownState,
 } from "../knownState.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 
@@ -91,9 +90,9 @@ export class VerifiedState {
   private sessionLogCache: Map<SessionID, SessionLog> = new Map();
   private sessionLogCacheValid: Map<SessionID, number> = new Map(); // txCount when cached
 
-  // Cache for immutable known state (same reference until invalidated)
-  private cachedImmutableKnownState: CoValueKnownState | undefined;
-  private cachedImmutableKnownStateWithStreaming: CoValueKnownState | undefined;
+  // Cache for known state to avoid repeated FFI calls between mutations
+  private cachedKnownState: CoValueKnownState | undefined;
+  private cachedKnownStateWithStreaming: CoValueKnownState | undefined;
 
   constructor(
     id: RawCoID,
@@ -124,9 +123,12 @@ export class VerifiedState {
   private invalidateCache() {
     this.sessionLogCache.clear();
     this.sessionLogCacheValid.clear();
-    // Invalidate immutable known state caches
-    this.cachedImmutableKnownState = undefined;
-    this.cachedImmutableKnownStateWithStreaming = undefined;
+    this.invalidateKnownStateCache();
+  }
+
+  private invalidateKnownStateCache() {
+    this.cachedKnownState = undefined;
+    this.cachedKnownStateWithStreaming = undefined;
   }
 
   /**
@@ -253,63 +255,6 @@ export class VerifiedState {
     return sessionLog;
   }
 
-  clone(): VerifiedState {
-    // Get streaming known state
-    const knownStateWithStreaming = this.knownStateWithStreaming();
-    let streamingKnownState: KnownStateSessions | undefined;
-    if (knownStateWithStreaming) {
-      // Calculate streaming state as difference between withStreaming and base
-      const baseKnownState = this.knownState();
-      streamingKnownState = {};
-      for (const [sessionId, count] of Object.entries(
-        knownStateWithStreaming.sessions,
-      )) {
-        const baseCount = baseKnownState.sessions[sessionId as SessionID] ?? 0;
-        if (count > baseCount) {
-          streamingKnownState[sessionId as SessionID] = count;
-        }
-      }
-    }
-
-    // Create new VerifiedState
-    const clone = new VerifiedState(
-      this.id,
-      this.crypto,
-      this.header,
-      streamingKnownState,
-    );
-
-    // Copy all sessions with their transactions
-    const sessionIds = this.impl.getSessionIds() as SessionID[];
-    for (const sessionID of sessionIds) {
-      const txCount = this.impl.getTransactionCount(sessionID);
-      if (txCount > 0) {
-        const transactions = this.impl.getSessionTransactions(sessionID, 0);
-        if (transactions) {
-          const lastSignature = this.impl.getLastSignature(sessionID) as
-            | Signature
-            | undefined;
-          if (lastSignature) {
-            clone.impl.addTransactions(
-              sessionID,
-              undefined, // signerID not tracked
-              JSON.stringify(transactions),
-              lastSignature,
-              true, // skip verify since we're cloning valid data
-            );
-          }
-        }
-      }
-    }
-
-    // Copy deletion state
-    if (this.isDeleted) {
-      clone.markAsDeleted();
-    }
-
-    return clone;
-  }
-
   markAsDeleted() {
     this.isDeleted = true;
     this.impl.markAsDeleted();
@@ -345,9 +290,7 @@ export class VerifiedState {
       newTransactions,
       newSignature,
     );
-    // Invalidate immutable known state caches
-    this.cachedImmutableKnownState = undefined;
-    this.cachedImmutableKnownStateWithStreaming = undefined;
+    this.invalidateKnownStateCache();
   }
 
   makeNewTrustingTransaction(
@@ -389,9 +332,7 @@ export class VerifiedState {
       [result.transaction],
       signature,
     );
-    // Invalidate immutable known state caches
-    this.cachedImmutableKnownState = undefined;
-    this.cachedImmutableKnownStateWithStreaming = undefined;
+    this.invalidateKnownStateCache();
 
     return {
       signature,
@@ -442,9 +383,7 @@ export class VerifiedState {
       [result.transaction],
       signature,
     );
-    // Invalidate immutable known state caches
-    this.cachedImmutableKnownState = undefined;
-    this.cachedImmutableKnownStateWithStreaming = undefined;
+    this.invalidateKnownStateCache();
 
     return {
       signature,
@@ -457,6 +396,7 @@ export class VerifiedState {
       return;
     }
     this.impl.setStreamingKnownState(JSON.stringify(streamingKnownState));
+    this.cachedKnownStateWithStreaming = undefined;
   }
 
   getSession(sessionID: SessionID): SessionLog | undefined {
@@ -649,36 +589,22 @@ export class VerifiedState {
   }
 
   knownState(): CoValueKnownState {
-    // Native object returned directly from Rust
-    return this.impl.getKnownState() as CoValueKnownState;
+    if (!this.cachedKnownState) {
+      this.cachedKnownState = this.impl.getKnownState() as CoValueKnownState;
+    }
+    return this.cachedKnownState;
   }
 
   knownStateWithStreaming(): CoValueKnownState {
-    // Native object returned directly from Rust
-    const result = this.impl.getKnownStateWithStreaming();
-    if (!result || result === undefined) {
-      return this.knownState();
+    if (!this.cachedKnownStateWithStreaming) {
+      const result = this.impl.getKnownStateWithStreaming();
+      if (!result || result === undefined) {
+        this.cachedKnownStateWithStreaming = this.knownState();
+      } else {
+        this.cachedKnownStateWithStreaming = result as CoValueKnownState;
+      }
     }
-    return result as CoValueKnownState;
-  }
-
-  immutableKnownState(): CoValueKnownState {
-    if (!this.cachedImmutableKnownState) {
-      this.cachedImmutableKnownState = cloneKnownState(this.knownState());
-    }
-    return this.cachedImmutableKnownState;
-  }
-
-  immutableKnownStateWithStreaming(): CoValueKnownState {
-    const withStreaming = this.knownStateWithStreaming();
-    if (!withStreaming) {
-      return this.immutableKnownState();
-    }
-    if (!this.cachedImmutableKnownStateWithStreaming) {
-      this.cachedImmutableKnownStateWithStreaming =
-        cloneKnownState(withStreaming);
-    }
-    return this.cachedImmutableKnownStateWithStreaming;
+    return this.cachedKnownStateWithStreaming;
   }
 
   isStreaming(): boolean {
