@@ -25,7 +25,6 @@ pub(crate) mod sync;
 #[cfg(test)]
 mod tests;
 
-#[cfg(not(target_arch = "wasm32"))]
 mod snapshot;
 mod tree;
 mod utils;
@@ -124,6 +123,45 @@ pub mod wasm {
         pub fn delete(&self, key: &[u8]) {
             self.inner.delete(key);
         }
+
+        /// Take a snapshot of the current tree state.
+        ///
+        /// Flushes all in-memory data to the VFS, writing the tree metadata,
+        /// inner nodes, and leaf page mappings. After snapshot, the tree can
+        /// be recovered from the VFS file alone.
+        pub fn snapshot(&self) {
+            self.inner.snapshot();
+        }
+
+        /// Flush the WAL buffer to ensure all buffered writes are persisted.
+        pub fn flush_wal(&self) {
+            if let Some(ref wal) = self.inner.wal {
+                wal.flush();
+            }
+        }
+
+        /// Scan keys in the range [start_key, end_key).
+        ///
+        /// Returns a list of (key, value) pairs as a flat Vec of Vec<u8> pairs.
+        /// Results are returned as [key1, value1, key2, value2, ...].
+        pub fn scan_range(&self, start_key: &[u8], end_key: &[u8]) -> Vec<js_sys::Uint8Array> {
+            let scan_result = self
+                .inner
+                .scan_with_end_key(start_key, end_key, crate::ScanReturnField::KeyAndValue);
+            let mut scan_iter = match scan_result {
+                Ok(iter) => iter,
+                Err(_) => return Vec::new(),
+            };
+            let mut results = Vec::new();
+            let mut buf = vec![0u8; 65536];
+            while let Some((key_len, val_len)) = scan_iter.next(&mut buf) {
+                let key = js_sys::Uint8Array::from(&buf[..key_len]);
+                let value = js_sys::Uint8Array::from(&buf[key_len..key_len + val_len]);
+                results.push(key);
+                results.push(value);
+            }
+            results
+        }
     }
 
     /// Create a BfTree backed by OPFS.
@@ -156,7 +194,39 @@ pub mod wasm {
         let opfs_vfs = OpfsVfs::open(db_name).await?;
 
         // Create BfTree with the OPFS VFS
-        let inner = BfTreeInner::with_opfs_vfs(opfs_vfs, cache_size_byte)
+        let mut config = crate::Config::default();
+        config.cb_size_byte(cache_size_byte);
+        let inner = BfTreeInner::with_opfs_vfs(opfs_vfs, config)
+            .map_err(|e| JsValue::from_str(&format!("Config error: {:?}", e)))?;
+
+        Ok(BfTree { inner })
+    }
+
+    /// Create a persistent BfTree backed by OPFS with snapshot + WAL recovery.
+    ///
+    /// This opens two OPFS files: `{db_name}.bftree` for the tree data and
+    /// `{db_name}.wal` for the write-ahead log. On open:
+    /// - If a previous snapshot exists, it is loaded
+    /// - If WAL entries exist, they are replayed
+    /// - A fresh WAL is started for ongoing writes
+    ///
+    /// This is the recommended way to create a persistent BfTree that survives
+    /// Worker termination.
+    #[wasm_bindgen]
+    pub async fn open_tree_with_opfs_persistent(
+        db_name: &str,
+        cache_size_byte: usize,
+    ) -> Result<BfTree, JsValue> {
+        let tree_name = format!("{}.bftree", db_name);
+        let wal_name = format!("{}.wal", db_name);
+
+        let tree_vfs = OpfsVfs::open(&tree_name).await?;
+        let wal_vfs = OpfsVfs::open(&wal_name).await?;
+
+        let mut config = crate::Config::default();
+        config.cb_size_byte(cache_size_byte);
+
+        let inner = BfTreeInner::open_with_opfs(tree_vfs, wal_vfs, config)
             .map_err(|e| JsValue::from_str(&format!("Config error: {:?}", e)))?;
 
         Ok(BfTree { inner })

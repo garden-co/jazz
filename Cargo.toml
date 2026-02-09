@@ -11,3 +11,4 @@ members = [
   "crates/groove-napi",
   "examples/todo-server-rs",
 ]
+exclude = ["crates/bf-tree/tests/wasm"]

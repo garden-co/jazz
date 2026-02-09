@@ -12,6 +12,7 @@ This fork adds **WASM/browser support** to the original [microsoft/bf-tree](http
 - **Browser benchmark suite** - test harness in `tests/wasm/` with memory and OPFS benchmarks
 
 Build for WASM:
+
 ```bash
 RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' \
   cargo build --target wasm32-unknown-unknown
@@ -22,11 +23,13 @@ See `tests/wasm/` for a complete browser example with benchmarks.
 ## Design Details
 
 You can find the Bf-Tree research paper [here](https://badrish.net/papers/bftree-vldb2024.pdf). You can find more design docs [here](/doc).
+
 ## User Guide
 
 ### Rust
 
 Bf-Tree is written in Rust, and is available as a Rust crate. You can add Bf-Tree to your `Cargo.toml` like this:
+
 ```toml
 [dependencies]
 bf-tree = "0.1.0"
@@ -51,7 +54,6 @@ assert_eq!(&buffer[..5], b"value");
 ```
 
 PRs are accepted and preferred over feature requests. Feel free to reach out if you have any design questions.
-
 
 ## Developer Guide
 
@@ -91,14 +93,14 @@ to deterministically and systematically explore different thread interleaving to
 ```bash
 cargo test --features "shuttle" --release shuttle_bf_tree_concurrent_operations
 ```
+
 (Takes about 5 minute to run)
 
 #### Fuzz Tests
 
 Fuzz testing is a bug finding technique that generates random inputs to the system and test for crash. Bf-Tree employs fuzzing to generate random operation sequences
-(e.g., insert, read, scan) to the system and check that none of the operation sequence will crash the system or lead to inconsistent state. Check the 
+(e.g., insert, read, scan) to the system and check that none of the operation sequence will crash the system or lead to inconsistent state. Check the
 [fuzz](fuzz/README.md) folder for more details.
-
 
 ### Benchmarking
 
@@ -110,6 +112,7 @@ env SHUMAI_FILTER="inmemory" MIMALLOC_LARGE_OS_PAGES=1 cargo run --bin bftree --
 ```
 
 More advanced benchmarking, with metrics collecting, numa-node binding, huge page, etc:
+
 ```bash
 env MIMALLOC_SHOW_STATS=1 MIMALLOC_LARGE_OS_PAGES=1 MIMALLOC_RESERVE_HUGE_OS_PAGES_AT=0 numactl --membind=0 --cpunodebind=0 cargo bench --features "metrics-rt" micro
 ```
@@ -128,12 +131,11 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 See [SECURITY.md](SECURITY.md) for security reporting details.
 
-
 ### Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks
 or logos is subject to and must follow [Microsoft’s Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in
-modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party 
+modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party
 trademarks or logos are subject to those third-party’s policies.
 
 ### Contact

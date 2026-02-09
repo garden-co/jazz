@@ -511,6 +511,20 @@ impl WalConfig {
         }
     }
 
+    /// Create a WalConfig with WASM-appropriate defaults.
+    ///
+    /// Uses a small segment size (64KB) suitable for browser memory constraints,
+    /// with an empty file path (since OPFS doesn't use filesystem paths).
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_for_wasm() -> Self {
+        Self {
+            file_path: std::path::PathBuf::new(),
+            flush_interval: Duration::from_millis(1),
+            segment_size: 64 * 1024, // 64KB — suitable for browser memory
+            storage_backend: StorageBackend::Opfs,
+        }
+    }
+
     /// Default: 1ms
     pub fn flush_interval(&mut self, interval: Duration) -> &mut Self {
         self.flush_interval = interval;

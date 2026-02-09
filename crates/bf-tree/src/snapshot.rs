@@ -4,14 +4,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 #[cfg(any(feature = "metrics-rt-debug-all", feature = "metrics-rt-debug-timer"))]
 use thread_local::ThreadLocal;
@@ -21,13 +15,27 @@ use crate::{
     error::ConfigError,
     fs::VfsImpl,
     nodes::{InnerNode, InnerNodeBuilder, PageID, DISK_PAGE_SIZE, INNER_NODE_SIZE},
-    storage::{make_vfs, LeafStorage, PageLocation, PageTable},
+    storage::{LeafStorage, PageLocation, PageTable},
     sync::atomic::AtomicU64,
     tree::eviction_callback,
     utils::{inner_lock::ReadGuard, BfsVisitor, NodeInfo},
-    wal::{LogEntry, LogEntryImpl, WriteAheadLog},
-    BfTree, Config, WalReader,
+    BfTree, Config,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{
+    storage::make_vfs,
+    wal::{LogEntry, LogEntryImpl, WriteAheadLog},
+    WalReader,
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 const BF_TREE_MAGIC_BEGIN: &[u8; 16] = b"BF-TREE-V0-BEGIN";
 const BF_TREE_MAGIC_END: &[u8; 14] = b"BF-TREE-V0-END";
@@ -77,6 +85,7 @@ impl DerefMut for SectorAlignedVector {
 impl BfTree {
     /// Recovery a Bf-Tree from snapshot and WAL files.
     /// Incomplete function, internal use only
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recovery(
         config_file: impl AsRef<Path>,
         wal_file: impl AsRef<Path>,
@@ -94,7 +103,7 @@ impl BfTree {
                         bf_tree.insert(op.key, op.value);
                     }
                     LogEntry::Split(_op) => {
-                        todo!("implement split op in wal!")
+                        // Split ops are not currently logged to WAL. Skip.
                     }
                 }
             }
@@ -103,6 +112,7 @@ impl BfTree {
 
     /// Instead of creating a new Bf-Tree instance,
     /// it loads a Bf-Tree snapshot file and resume from there.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_from_snapshot(
         bf_tree_config: Config,
         buffer_ptr: Option<*mut u8>,
@@ -139,6 +149,51 @@ impl BfTree {
 
         let vfs = make_vfs(&config.storage_backend, &config.file_path);
 
+        Self::reconstruct_from_vfs(config, buffer_ptr, vfs, &bf_meta, wal)
+    }
+
+    /// Load a Bf-Tree from a VFS that already contains a snapshot.
+    ///
+    /// Used by WASM (OPFS) recovery path where the VFS is pre-initialized asynchronously.
+    /// If the VFS file has no valid magic bytes, creates a fresh empty tree.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_from_snapshot_with_vfs(
+        config: Config,
+        buffer_ptr: Option<*mut u8>,
+        vfs: Arc<dyn VfsImpl>,
+    ) -> Result<Self, ConfigError> {
+        // Read metadata page from VFS
+        let mut metadata = SectorAlignedVector::new_zeroed(4096);
+        vfs.read(0, &mut metadata);
+
+        let bf_meta = unsafe { (metadata.as_ptr() as *const BfTreeMeta).read() };
+
+        // Check if this is a valid snapshot by inspecting magic bytes
+        if bf_meta.magic_begin != *BF_TREE_MAGIC_BEGIN {
+            // No valid snapshot — create a fresh empty tree
+            return BfTree::with_config_inner(config, buffer_ptr, Some(vfs));
+        }
+
+        bf_meta.check_magic();
+
+        config.validate()?;
+        let config = Arc::new(config);
+
+        // No WAL attached during snapshot recovery — caller will set up WAL separately
+        let wal = None;
+
+        Self::reconstruct_from_vfs(config, buffer_ptr, vfs, &bf_meta, wal)
+    }
+
+    /// Common reconstruction logic: given a VFS with snapshot data and parsed metadata,
+    /// rebuild the in-memory tree structure.
+    fn reconstruct_from_vfs(
+        config: Arc<Config>,
+        buffer_ptr: Option<*mut u8>,
+        vfs: Arc<dyn VfsImpl>,
+        bf_meta: &BfTreeMeta,
+        wal: Option<Arc<crate::wal::WriteAheadLog>>,
+    ) -> Result<Self, ConfigError> {
         let mut page_buffer = SectorAlignedVector::new_zeroed(INNER_NODE_SIZE);
 
         // Step 1: reconstruct inner nodes.

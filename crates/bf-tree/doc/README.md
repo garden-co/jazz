@@ -19,19 +19,23 @@ The core of Bf-Tree are the mini-page abstraction and the buffer pool to support
 ## Mini-pages
 
 #### 1. As a record-level cache
+
 More fine-grained than page-level cache, which is more efficient at identifying individual hot records.
 ![Mini-pages serves as a record level cache](figures/bf-tree-cache-records.gif)
 
 #### 2. As a write buffer
+
 Mini pages absorb writes records and batch flush them to disk.
 ![Mini-pages serves as a write buffer](figures/bf-tree-buffer-writes.gif)
 
 #### 3. Grow/shrink in size
-Mini-pages grow and shrink in size to be more precise in memory usage. 
+
+Mini-pages grow and shrink in size to be more precise in memory usage.
 
 ![Mini-pages grow and shrink in size](figures/bf-tree-grow-larger.gif)
 
 #### 4. Flush to disk
+
 Mini-pages are flushed to disk when they are too large or too cold.
 
 ![Mini-pages are flushed to disk](figures/bf-tree-batch-write.gif)
@@ -41,21 +45,26 @@ Mini-pages are flushed to disk when they are too large or too cold.
 The buffer pool is a circular buffer, allocated space is defined by head and tail address.
 
 #### 1. Allocate mini-pages
+
 ![Allocate mini-pages](figures/buffer-pool-alloc.gif)
 
 #### 2. Evict mini-pages when full
+
 ![Evict mini-pages when full](figures/buffer-pool-evict.gif)
 
 #### 3. Track hot mini-pages
+
 Naive circular buffer is a fifo queue, we make it a LRU-approximation using the second chance region.
 
 Mini-pages in the second-chance region are:
+
 - Copy-on-accessed to the tail address
 - Evicted to disk if not being accessed while in the region
 
 ![Track hot mini-pages](figures/buffer-pool-lru.gif)
 
 #### 4. Grow mini-pages
+
 Mini-pages are copied to a larger mini-page when they need to grow.
 The old space is added to a free list for future allocations.
 
@@ -66,7 +75,6 @@ The old space is added to a free list for future allocations.
 - [Snapshot Recovery](snapshot-recovery.md)
 - [Debugging Tips](debugging-tips.md)
 - [SPDK](spdk-support.md)
-
 
 ## What are the drawbacks of Bf-Tree?
 
@@ -84,7 +92,7 @@ The old space is added to a free list for future allocations.
 
 - Better async. Bf-Tree relies on OS threads to interleave I/O operations, many people believe this is not ideal. Implement Bf-Tree with user-space async I/O (e.g., tokio) might be useful.
 
-- Go lock/latch free. Bf-Tree is lock-based, and is carefully designed so that no dead lock is possible. 
+- Go lock/latch free. Bf-Tree is lock-based, and is carefully designed so that no dead lock is possible.
 
 - Future hardware. Apply Bf-Tree to modern hardware such as CXL, RDMA, PM, GPU, and SmartNic.
 

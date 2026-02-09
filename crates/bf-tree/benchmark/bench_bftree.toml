@@ -5,9 +5,7 @@ time = 10
 repeat = 5
 record_cnt = 100_000_000
 distribution = ["Uniform"]
-workload_mix = [
-	{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 },
-]
+workload_mix = [{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 }]
 memory_size_mb = [16384]
 file_path = ":memory:"
 key_len = 16
@@ -24,9 +22,9 @@ repeat = 5
 record_cnt = 100_000_000
 distribution = [{ Zipf = 0.9 }]
 workload_mix = [
-	{ read = 0, negative_read = 0, update = 0, scan = 100, insert = 0 },
-	{ read = 0, negative_read = 0, update = 100, scan = 0, insert = 0 },
-	{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 },
+  { read = 0, negative_read = 0, update = 0, scan = 100, insert = 0 },
+  { read = 0, negative_read = 0, update = 100, scan = 0, insert = 0 },
+  { read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 },
 ]
 memory_size_mb = [1024]
 file_path = "/mnt/ssd/micro"
@@ -43,9 +41,7 @@ time = 30
 repeat = 5
 record_cnt = 100_000_000
 distribution = [{ Zipf = 0.9 }]
-workload_mix = [
-	{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 },
-]
+workload_mix = [{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 }]
 memory_size_mb = [1024]
 file_path = "/mnt/ssd/micro"
 key_len = 16
@@ -62,9 +58,7 @@ time = 30
 repeat = 5
 record_cnt = 100_000_000
 distribution = [{ Zipf = 0.9 }]
-workload_mix = [
-	{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 },
-]
+workload_mix = [{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 }]
 memory_size_mb = [1024]
 file_path = "/mnt/ssd/micro"
 key_len = 16
@@ -81,9 +75,7 @@ time = 30
 repeat = 5
 record_cnt = 100_000_000
 distribution = [{ Zipf = 0.9 }]
-workload_mix = [
-	{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 },
-]
+workload_mix = [{ read = 100, negative_read = 0, update = 0, scan = 0, insert = 0 }]
 memory_size_mb = [1024]
 file_path = "/mnt/ssd/micro"
 key_len = 16
@@ -100,9 +92,7 @@ time = 10
 repeat = 3
 record_cnt = 1_000_000
 distribution = [{ Zipf = 0.9 }]
-workload_mix = [
-	{ read = 0, negative_read = 0, update = 0, scan = 0, insert = 100 },
-]
+workload_mix = [{ read = 0, negative_read = 0, update = 0, scan = 0, insert = 100 }]
 memory_size_mb = [1024]
 file_path = "/mnt/ssd/micro"
 key_len = 16
