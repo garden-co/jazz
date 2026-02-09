@@ -116,7 +116,7 @@ impl<'a> LogEntryImpl<'a> for LogEntry<'a> {
         let tag_size = LogEntryTagVal::size();
         let data_size = match self {
             LogEntry::Write(op) => op.log_size(),
-            LogEntry::Split(_) => todo!(),
+            LogEntry::Split(_) => 0, // Split ops are never written to WAL
         };
         tag_size + data_size
     }
@@ -126,7 +126,7 @@ impl<'a> LogEntryImpl<'a> for LogEntry<'a> {
         match self {
             LogEntry::Write(op) => op.write_to_buffer(&mut buffer[1..]),
             LogEntry::Split(_) => {
-                todo!()
+                // Split ops are never written to WAL
             }
         }
     }

@@ -968,7 +968,8 @@ The original Phase 6c spec described `MutationResult.persisted()` chaining. This
 
 - **7a**: Subtree import + `BfTreeStorage` + native integration (jazz-rs, jazz-cli) ✅
 - **7b**: `groove-napi` crate — NAPI addon for server-side TypeScript persistence ✅
-- **7c**: OPFS persistence in WASM worker (wasm-pack test with headless browser)
+- **7c-i**: bf-tree WASM persistence (snapshot + WAL recovery via VFS) ✅
+- **7c-ii**: groove-wasm integration (BfTreeStorage in WasmRuntime, `open_persistent()`)
 
 > All prior phases (1-6) work with `MemoryStorage`. bf-tree is only needed for actual persistence.
 
@@ -997,7 +998,8 @@ The original Phase 6c spec described `MutationResult.persisted()` chaining. This
 // Constructors
 BfTree::new(path, cache_size_byte) -> Result<Self, ConfigError>  // StdVfs (native)
 BfTree::new(":memory:", cache_size_byte)                          // MemoryVfs
-BfTree::with_opfs_vfs(opfs_vfs, cache_size_byte)                 // OpfsVfs (WASM)
+BfTree::with_opfs_vfs(opfs_vfs, config)                          // OpfsVfs (WASM, single file)
+BfTree::open_with_opfs(tree_vfs, wal_vfs, config)                // OpfsVfs (WASM, snapshot + WAL recovery)
 
 // All methods take &self (not &mut self) — internal concurrency control
 tree.insert(key: &[u8], value: &[u8]) -> LeafInsertResult
@@ -1303,75 +1305,191 @@ pnpm test --filter todo-server-ts                   # 10 pass
 
 ## Phase 7c: OPFS Persistence (WASM Worker)
 
-**Goal**: Make `BfTreeStorage` work with OPFS in a Web Worker. Verify with wasm-pack tests in headless browser.
+**Goal**: Make `BfTreeStorage` work with OPFS in a Web Worker with full persistence (snapshot + WAL recovery). Verify with wasm-pack tests in headless browser.
 
 **Depends on**: Phase 7a (BfTreeStorage and key encoding exist).
 
-**After 7c**: groove-wasm can persist data via OPFS when running in a Dedicated Web Worker. This is the storage layer for Phase 8's worker architecture, but we don't build the worker bridge yet — just prove persistence works.
+**After 7c**: groove-wasm can persist data via OPFS when running in a Dedicated Web Worker. Data survives Worker termination via snapshot + WAL recovery. This is the storage layer for Phase 8's worker architecture.
+
+### Key Design Decisions
+
+| Decision                | Choice                                | Rationale                                                                                                                 |
+| ----------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **groove-wasm storage** | BfTreeStorage only (no MemoryStorage) | `BfTreeStorage::memory()` for main thread, `BfTreeStorage` with OPFS for worker. Same RuntimeCore type, no enum dispatch. |
+| **Persistence model**   | Snapshot + WAL                        | Snapshot for clean shutdown/reopen. WAL for crash recovery (no data loss between snapshots).                              |
+| **OPFS files**          | Two per database                      | `{db_name}.bftree` for tree data, `{db_name}.wal` for WAL. Separate `OpfsVfs` instances (both async to open, sync after). |
+| **WasmRuntime API**     | `new()` + `open_persistent()`         | `new()` uses `BfTreeStorage::memory()` (main thread). `open_persistent()` async, opens OPFS + enables WAL (worker).       |
 
 ### Architecture
 
 ```
-groove-wasm (already exists)
-  └── WasmIoHandler
-        └── wraps MemoryIoHandler (current)
+WASM Worker context:
 
-After 7c:
-  └── WasmBfTreeStorage
-        └── wraps BfTreeStorage
-              └── wraps BfTree::with_opfs_vfs(opfs_vfs)
+  OpfsVfs::open("mydb.bftree").await  →  tree_vfs
+  OpfsVfs::open("mydb.wal").await     →  wal_vfs
+                    │                           │
+                    ▼                           ▼
+         BfTree (data pages,          WriteAheadLog (append-only
+          inner nodes, metadata)       log entries, crash recovery)
+                    │                           │
+                    └───────────┬───────────────┘
+                                │
+                     BfTree::open_with_opfs()
+                     - fresh: create empty tree + start WAL
+                     - recovery: load snapshot + replay WAL
+
+groove-wasm:
+  WasmRuntime
+    └── RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>
+          └── BfTreeStorage
+                └── BfTree (with OPFS or in-memory)
 ```
 
-### Key Design
+### Technical Discoveries (from planning)
 
-- `BfTree::with_opfs_vfs()` is async (OPFS init requires async APIs) but the resulting `BfTree` is fully synchronous
-- `WasmRuntime` gains an async constructor: `WasmRuntime::open_persistent(db_name, cache_size)` → initializes OPFS, creates `BfTreeStorage`, wraps in `RuntimeCore`
-- Existing `WasmRuntime::new()` (in-memory) stays unchanged for main-thread use
-- Must run in a Dedicated Web Worker (OPFS sync API is Worker-only)
+#### bf-tree snapshot recovery gap
 
-### Steps
+`snapshot()` writes metadata through VFS — works on OPFS. But `new_from_snapshot()` (snapshot.rs:118) reads metadata via `std::fs::File::open()` + `read_at()` — bypasses VFS entirely. Won't compile/run on WASM.
 
-1. Add `bf-tree` dependency to `groove-wasm/Cargo.toml` (WASM target)
-2. Create `WasmBfTreeStorage` that wraps `BfTreeStorage` + adds JS sync callback bridge
-3. Add `WasmRuntime::open_persistent()` async constructor
-4. WASM build: `RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' cargo build -p groove-wasm --target wasm32-unknown-unknown`
-5. Tests: wasm-pack test + headless browser (reuse bf-tree-web pattern from `tests/wasm/`)
+**Fix**: Add `new_from_snapshot_with_vfs()` that reads metadata from VFS (`vfs.read(0, &mut metadata)`) instead of `std::fs::File`. ~100 lines, structurally identical to existing function.
+
+#### WAL panics on OPFS
+
+`WriteAheadLog::new()` calls `make_vfs()` which **panics** for `StorageBackend::Opfs` (storage.rs:408): _"OPFS backend requires async initialization."_
+
+**Fix**: Add `WriteAheadLog::new_with_vfs()` that accepts a pre-initialized `Arc<dyn VfsImpl>`, bypassing `make_vfs()`. Uses existing `make_vfs_from_opfs()` helper (storage.rs:415).
+
+#### WAL reader gated out on WASM
+
+`WalReader` is behind `#[cfg(not(target_arch = "wasm32"))]` — uses `std::fs::File` for reads. Recovery function (`recovery()` in snapshot.rs) depends on it.
+
+**Fix**: Add `VfsWalReader` that reads segments via VFS (`vfs.read(offset, &mut buf)`) instead of `std::fs::File`.
+
+#### SplitOp is dead code
+
+`SplitOp` struct is empty, `LogEntry::Split` has `todo!()` in serialization and recovery. But SplitOp is **never written** to WAL — only `WriteOp` is logged during insert/delete. The `todo!()` is dead code.
+
+**Fix**: Replace `todo!()` with skip/no-op in recovery.
+
+#### `with_opfs_vfs()` doesn't accept Config
+
+`BfTree::with_opfs_vfs(opfs_vfs, cache_size_byte)` creates `Config::default()` which doesn't set `BfTreeStorage`'s required constants (max_key_len=256, max_record_size=16000, leaf_page_size=32768, min_record_size=8).
+
+**Fix**: Change signature to accept full `Config` parameter.
+
+### Sub-phases
+
+#### Phase 7c-i: bf-tree WASM Persistence ✅
+
+All changes in `crates/bf-tree/`. Tested with wasm-pack at the bf-tree level.
+
+**After 7c-i**: bf-tree's snapshot and WAL recovery work on WASM/OPFS. `open_with_opfs()` handles both fresh start and crash recovery. 11 WASM tests pass (headless Chrome) + 67 native tests + 9 doc-tests.
+
+**Steps (all complete):**
+
+1. ✅ Modify `BfTree::with_opfs_vfs()` to accept `Config` (not just `cache_size_byte`)
+2. ✅ Add `new_from_snapshot_with_vfs()` — VFS-aware snapshot recovery
+3. ✅ Add `WriteAheadLog::new_with_vfs()` — WAL with pre-initialized VFS
+4. ✅ Add `VfsWalReader` — VFS-based WAL reader for recovery
+5. ✅ Replace SplitOp `todo!()` with skip in recovery
+6. ✅ Add `BfTree::open_with_opfs(tree_vfs, wal_vfs, config)` — integrated fresh/recovery constructor
+7. ✅ Add `OpfsVfs::file_size()` method
+8. ✅ Add `open_tree_with_opfs_persistent()` async WASM entry point
+9. ✅ Tests: snapshot round-trip, WAL recovery, snapshot+WAL, fresh start, delete recovery, scan after recovery (6 tests, 12 total WASM tests pass)
+
+**Technical discoveries during implementation:**
+
+- **WASM32 `usize` is 4 bytes**: `LogHeader::from_slice` used `buffer[0..8]` for `usize` — fails on WASM32. Fixed to use `std::mem::size_of::<usize>()`. `lsn` and `page_offset` offsets remain `[8..16]` and `[16..24]` due to `#[repr(C)]` alignment padding.
+- **BfTree writes `WriteOp` directly to WAL, not `LogEntry`**: `wal.append_and_wait(&write_op, ...)` writes raw `WriteOp` format (`[key_len:u16][val_len:u16][op_type:u8][key][value]`), not `LogEntry` which adds a tag byte. Recovery must use `WriteOp::read_from_buffer()`, not `LogEntry::read_from_buffer()`.
+- **WAL segment size**: `WalConfig::new_for_wasm()` sets 64KB segments (vs 1GB native default) to avoid browser memory issues.
+- **SplitOp**: Never written to WAL. Only `WriteOp` is logged during insert/delete. SplitOp `todo!()` replaced with no-op.
+
+**Files:**
+
+| File                                   | Change                                                                       |
+| -------------------------------------- | ---------------------------------------------------------------------------- |
+| `crates/bf-tree/src/tree.rs`           | Modify `with_opfs_vfs()` to accept Config; add `open_with_opfs()`            |
+| `crates/bf-tree/src/snapshot.rs`       | Add `new_from_snapshot_with_vfs()`                                           |
+| `crates/bf-tree/src/wal/mod.rs`        | Add `new_with_vfs()`, `VfsWalReader`, fix `LogHeader::from_slice` for WASM32 |
+| `crates/bf-tree/src/wal/operations.rs` | Replace SplitOp `todo!()` with skip                                          |
+| `crates/bf-tree/src/fs/opfs_vfs.rs`    | Add `file_size()` method                                                     |
+| `crates/bf-tree/src/lib.rs`            | Add `open_tree_with_opfs_persistent()`, `flush_wal()`, `snapshot()`          |
+| `crates/bf-tree/src/config.rs`         | Add `WalConfig::new_for_wasm()` (64KB segments)                              |
+| `crates/bf-tree/tests/wasm/src/lib.rs` | 5 new OPFS persistence tests + cleanup helper                                |
+| `crates/bf-tree/tests/wasm/Cargo.toml` | Add `[workspace]` for standalone compilation                                 |
+
+#### Phase 7c-ii: groove-wasm Integration
+
+Changes in `crates/groove/` and `crates/groove-wasm/`. Builds on 7c-i.
+
+**Steps:**
+
+1. Add `flush()` to `Storage` trait (default no-op; BfTreeStorage overrides with `snapshot()`)
+2. Add `flush_storage()` to `RuntimeCore`
+3. Add `BfTreeStorage::with_opfs(opfs_vfs, wal_vfs, cache_size_bytes)` constructor (behind `#[cfg(target_arch = "wasm32")]`)
+4. Update `groove-wasm/Cargo.toml`: `groove` with `bftree` feature + direct `bf-tree` dependency
+5. Switch `WasmRuntime` type alias: `RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>`
+6. Update `WasmRuntime::new()`: use `BfTreeStorage::memory(DEFAULT_CACHE_SIZE)`
+7. Add `WasmRuntime::open_persistent()` async constructor (OPFS + WAL)
+8. Expose `flush()` on `WasmRuntime`
+9. Tests: 4 wasm-pack tests through `WasmRuntime::open_persistent()`
+
+**Files:**
+
+| File                                  | Change                                                 |
+| ------------------------------------- | ------------------------------------------------------ |
+| `crates/groove/src/storage/mod.rs`    | Add `fn flush(&self) {}` to Storage trait              |
+| `crates/groove/src/storage/bftree.rs` | Add `with_opfs()` constructor, impl `Storage::flush()` |
+| `crates/groove/src/runtime_core.rs`   | Add `flush_storage()` method                           |
+| `crates/groove-wasm/Cargo.toml`       | Add bf-tree dep, groove bftree feature                 |
+| `crates/groove-wasm/src/runtime.rs`   | BfTreeStorage type, `open_persistent()`, `flush()`     |
+| `crates/groove-wasm/tests/opfs.rs`    | New: 4 wasm-pack browser tests via WasmRuntime         |
 
 ### Test Plan
 
-Using wasm-pack test with headless Chrome:
+**bf-tree level (Phase 7c-i):**
 
-1. **`opfs_crud_round_trip`** — Open persistent store in worker, insert data, read back, verify.
-2. **`opfs_persistence_across_reopen`** — Open store, insert data, drop, reopen same db_name, verify data survives.
-3. **`opfs_index_operations`** — Insert index entries via IoHandler, scan ranges, verify correct results.
-4. **`opfs_runtime_core_e2e`** — Full RuntimeCore with OPFS-backed BfTreeStorage: insert, query, update, delete.
+1. **`test_opfs_snapshot_round_trip`** — Insert 100 keys, `snapshot()`, drop, reopen same db_name → all 100 readable.
+2. **`test_opfs_wal_recovery`** — Insert 50 keys (no snapshot), drop → WAL replays all 50.
+3. **`test_opfs_snapshot_plus_wal`** — Insert 50, snapshot, insert 50 more, drop → snapshot restores first 50, WAL replays next 50.
+4. **`test_opfs_scan_after_recovery`** — Insert indexed keys, snapshot, reopen → `scan_with_end_key()` returns correct results.
+5. **`test_opfs_fresh_start`** — New db_name, insert/read works (proves fresh detection).
 
-### Files to Create/Modify
+**groove-wasm level (Phase 7c-ii):**
 
-| File                                  | Change                              |
-| ------------------------------------- | ----------------------------------- |
-| `crates/groove-wasm/Cargo.toml`       | Add `bf-tree` dependency            |
-| `crates/groove-wasm/src/runtime.rs`   | Add `open_persistent()` constructor |
-| `crates/groove-wasm/src/bftree_io.rs` | New: `WasmBfTreeStorage`            |
-| `crates/groove-wasm/tests/`           | New: wasm-pack browser tests        |
+All through `WasmRuntime::open_persistent()`:
+
+1. **`opfs_crud_round_trip`** — Insert row, query back, verify.
+2. **`opfs_persistence_across_reopen`** — Insert, flush, drop, reopen same db_name → data survives.
+3. **`opfs_index_operations`** — Insert rows with different values, query with filters (equality, range).
+4. **`opfs_runtime_core_e2e`** — Full lifecycle: insert, query, update, delete.
+
+**Deferred:** wasm-pack test for large value chunking (>16KB) over OPFS. Chunking works natively (covered by `bftree_iohandler_*` tests) but should be verified in OPFS context later.
 
 ### Verification
 
 ```bash
+# bf-tree WASM tests (Phase 7c-i)
+RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' \
+  wasm-pack test --headless --chrome crates/bf-tree
+
+# groove-wasm WASM tests (Phase 7c-ii)
 RUSTFLAGS='--cfg=web_sys_unstable_apis --cfg getrandom_backend="wasm_js"' \
   wasm-pack test --headless --chrome crates/groove-wasm
+
+# Native tests still pass
+cargo test -p bf-tree
+cargo test -p groove --features bftree
+cargo check --workspace
 ```
 
-### Expected test status after 7c
+### Risks (resolved after 7c-i)
 
-| Test                                                | Status    | Notes                                           |
-| --------------------------------------------------- | --------- | ----------------------------------------------- |
-| `groove-wasm::opfs_crud_round_trip` (new)           | **GREEN** | wasm-pack test, headless Chrome, Worker context |
-| `groove-wasm::opfs_persistence_across_reopen` (new) | **GREEN** | Drop + reopen in Worker, data survives          |
-| `groove-wasm::opfs_index_operations` (new)          | **GREEN** | Index insert/scan via OPFS-backed IoHandler     |
-| `groove-wasm::opfs_runtime_core_e2e` (new)          | **GREEN** | Full RuntimeCore lifecycle in Worker            |
-
-These run in a **special test Worker** (spawned by wasm-pack test harness). They prove OPFS persistence works at the Rust/WASM level but don't exercise the JS worker bridge or main-thread coordination.
+1. ~~**bf-tree snapshot recovery with OPFS is uncharted**~~ — **Resolved.** `new_from_snapshot_with_vfs()` works correctly. VFS reads replace `std::fs::File` reads. Pointer reconstruction logic is identical.
+2. ~~**WAL segment size**~~ — **Resolved.** `WalConfig::new_for_wasm()` uses 64KB segments.
+3. ~~**Two OPFS file handles**~~ — **Resolved.** Two handles to different OPFS files work in Chrome headless (verified by all WAL tests).
+4. **WASM binary size** — Bundling bf-tree increases groove-wasm binary. Acceptable for now. (Still applies to 7c-ii.)
+5. ~~**Pointer-based serialization**~~ — **Resolved.** Snapshot round-trip tests confirm reconstruction works identically in VFS-aware version.
 
 ### What does NOT work after 7c (needs Phase 8)
 

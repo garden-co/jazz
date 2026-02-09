@@ -86,6 +86,11 @@ impl OpfsVfs {
         })
     }
 
+    /// Get the current file size in bytes.
+    pub fn file_size(&self) -> usize {
+        self.handle.get_size().unwrap_or(0.0) as usize
+    }
+
     /// Close the OPFS file handle.
     ///
     /// This should be called when done with the file to ensure proper cleanup.

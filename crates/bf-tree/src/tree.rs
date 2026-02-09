@@ -307,23 +307,77 @@ impl BfTree {
         Self::with_config_inner(config, buffer_ptr, None)
     }
 
-    /// Create a BfTree with an OPFS VFS backend.
+    /// Create a BfTree with an OPFS VFS backend (no WAL, no recovery).
     ///
     /// This is used internally by the WASM module to create trees backed by OPFS.
     /// The OPFS VFS must be initialized asynchronously before calling this.
+    /// For persistence with recovery, use `open_with_opfs()` instead.
     #[cfg(target_arch = "wasm32")]
     pub fn with_opfs_vfs(
         opfs_vfs: crate::fs::OpfsVfs,
-        cache_size_byte: usize,
+        config: Config,
     ) -> Result<Self, ConfigError> {
-        let mut config = Config::default();
-        config.cb_size_byte(cache_size_byte);
         let vfs: Arc<dyn crate::fs::VfsImpl> = Arc::new(opfs_vfs);
         Self::with_config_inner(config, None, Some(vfs))
     }
 
+    /// Open a persistent BfTree backed by two OPFS files: one for tree data
+    /// (snapshot) and one for the WAL.
+    ///
+    /// Handles both fresh start and recovery:
+    /// - If the tree VFS has a valid snapshot, it is loaded
+    /// - If the WAL VFS has entries, they are replayed
+    /// - A fresh WAL is started for ongoing writes
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_with_opfs(
+        tree_vfs: crate::fs::OpfsVfs,
+        wal_vfs: crate::fs::OpfsVfs,
+        config: Config,
+    ) -> Result<Self, ConfigError> {
+        use crate::nodes::leaf_node::OpType;
+        use crate::wal::{LogEntryImpl, VfsWalReader, WriteAheadLog, WriteOp};
+        use crate::WalConfig;
+
+        let wal_file_size = wal_vfs.file_size();
+
+        let tree_vfs: Arc<dyn crate::fs::VfsImpl> = Arc::new(tree_vfs);
+        let wal_vfs: Arc<dyn crate::fs::VfsImpl> = Arc::new(wal_vfs);
+
+        // Step 1: Recover or create tree from snapshot
+        let mut tree = Self::new_from_snapshot_with_vfs(config.clone(), None, tree_vfs)?;
+
+        // Step 2: Replay WAL if it has entries
+        // Note: BfTree writes WriteOp directly to WAL (not wrapped in LogEntry),
+        // so we read back WriteOp directly.
+        if wal_file_size > 0 {
+            let wal_config = WalConfig::new_for_wasm();
+            let reader = VfsWalReader::new(wal_vfs.clone(), wal_config.segment_size, wal_file_size);
+            for segment in reader.segment_iter() {
+                for (_header, data) in segment.entry_iter() {
+                    let op = WriteOp::read_from_buffer(data);
+                    match op.op_type {
+                        OpType::Insert | OpType::Cache => {
+                            tree.insert(op.key, op.value);
+                        }
+                        OpType::Delete | OpType::Phantom => {
+                            tree.delete(op.key);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 3: Create a fresh WAL for ongoing writes
+        // (Previous WAL entries have been replayed into the tree)
+        let wal_config = WalConfig::new_for_wasm();
+        let wal = WriteAheadLog::new_with_vfs(Arc::new(wal_config), wal_vfs);
+        tree.wal = Some(wal);
+
+        Ok(tree)
+    }
+
     /// Internal constructor that optionally accepts a pre-created VFS.
-    fn with_config_inner(
+    pub(crate) fn with_config_inner(
         config: Config,
         buffer_ptr: Option<*mut u8>,
         custom_vfs: Option<Arc<dyn crate::fs::VfsImpl>>,

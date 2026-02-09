@@ -3,6 +3,7 @@
 ## WAL format
 
 ## Snapshot file format
+
 Bf-Tree now supports persisting data to a snapshot file or recovering from a snapshot file.
 The doc describes the file format of Bf-Tree snapshot files.
 
@@ -26,12 +27,14 @@ struct BfTreeMeta {
 ```
 
 ### Magic words
+
 ```rust
 const BF_TREE_MAGIC_BEGIN: &[u8; 16] = b"BF-TREE-V0-BEGIN";
 const BF_TREE_MAGIC_END: &[u8; 14] = b"BF-TREE-V0-END";
 ```
 
 ### Inner mapping
+
 Inner nodes are pinned to memory (I don't think we will change this in the future).
 We write the inner nodes to disk for ease of recovery when snapshotting.
 
@@ -45,10 +48,10 @@ If the child ptr points to an inner node, we need to correct the child node's ch
 as page ID translations are handled by the page table (described below).
 
 ### Leaf mapping
+
 Leaf mapping is a page table that maps page ID to disk offset.
 
 To snapshot, we serialize the page table to disk; nothing needs to be changed for the last level inner nodes or leaf page.
 
 To recover, we also need to reconstruct the page table.
 Specifically, we use the `(leaf_offset, leaf_size)` pair in the metadata to read the (PageID, offset) pairs from the disk; we then use it to reconstruct the page table.
-

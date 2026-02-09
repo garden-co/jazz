@@ -7,6 +7,7 @@ The packages are imported through the `nix-shell` automatically. If you
 run NixOS, read the following section.
 
 ## Adding the overlay(s)
+
 ```
 $ mkdir -p ~/.config/nixpkgs/overlays
 $ ln -s $(pwd)/nix/mayastor-overlay.nix ~/.config/nixpkgs/overlays/mayastor-overlay.nix
@@ -38,5 +39,5 @@ in your `configuration`.
 Build environment for mayastor including all test and debug dependencies.
 It can be run with two arguments:
 
-* `--arg nospdk true`: to use your own SPDK.
-* `--arg norust true`: to use your own rust toolchain.
+- `--arg nospdk true`: to use your own SPDK.
+- `--arg norust true`: to use your own rust toolchain.

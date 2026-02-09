@@ -316,6 +316,31 @@ impl WriteAheadLog {
         let mut inner = self.inner.lock().unwrap();
         inner.flush();
     }
+
+    /// Create a new WAL instance with a pre-initialized VFS.
+    ///
+    /// Used on WASM where the VFS (OPFS) must be initialized asynchronously
+    /// before the WAL can be created. No background flush thread is started.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_with_vfs(config: Arc<WalConfig>, vfs: Arc<dyn VfsImpl>) -> Arc<Self> {
+        let wal = WriteAheadLog {
+            inner: Mutex::new(WriteAheadLogInner {
+                buffer: RawBuffer::new(config.segment_size),
+                file_handle: vfs,
+                buffer_cursor: 0,
+                file_offset: 0,
+                next_lsn: 0,
+                flushed_lsn: 0,
+                need_flush: false,
+            }),
+            flushed_cond: Condvar::new(),
+            need_flush_cond: Condvar::new(),
+            background_job_running: AtomicBool::new(false),
+            config,
+        };
+
+        Arc::new(wal)
+    }
 }
 
 /// Read the write-ahead-log file produced by Bf-Tree.
@@ -455,6 +480,106 @@ impl<'a> Iterator for WalEntryIter<'a> {
     }
 }
 
+/// VFS-based WAL reader for WASM (OPFS) recovery.
+///
+/// Reads WAL segments from a VFS instead of std::fs::File,
+/// allowing WAL replay on WASM targets.
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct VfsWalReader {
+    vfs: Arc<dyn VfsImpl>,
+    segment_size: usize,
+    file_size: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl VfsWalReader {
+    pub fn new(vfs: Arc<dyn VfsImpl>, segment_size: usize, file_size: usize) -> Self {
+        Self {
+            vfs,
+            segment_size,
+            file_size,
+        }
+    }
+
+    pub fn segment_iter(&self) -> VfsWalSegmentIter<'_> {
+        VfsWalSegmentIter {
+            reader: self,
+            cursor: 0,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct VfsWalSegmentIter<'a> {
+    reader: &'a VfsWalReader,
+    cursor: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Iterator for VfsWalSegmentIter<'_> {
+    type Item = VfsWalSegment;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.reader.file_size {
+            return None;
+        }
+
+        let remaining = self.reader.file_size - self.cursor;
+        let read_size = remaining.min(self.reader.segment_size);
+        let mut buffer = vec![0u8; read_size];
+        self.reader.vfs.read(self.cursor, &mut buffer);
+
+        self.cursor += self.reader.segment_size;
+
+        Some(VfsWalSegment { data: buffer })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct VfsWalSegment {
+    data: Vec<u8>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl VfsWalSegment {
+    pub fn entry_iter(&self) -> VfsWalEntryIter<'_> {
+        VfsWalEntryIter {
+            segment: self,
+            cur_offset: 0,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct VfsWalEntryIter<'a> {
+    segment: &'a VfsWalSegment,
+    cur_offset: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl<'a> Iterator for VfsWalEntryIter<'a> {
+    type Item = (LogHeader, &'a [u8]);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cur_offset + LogHeader::size() >= self.segment.data.len() {
+            return None;
+        }
+
+        let header = LogHeader::from_slice(&self.segment.data[self.cur_offset..]);
+
+        if header.log_len == 0 {
+            return None;
+        }
+
+        let data_start = self.cur_offset + LogHeader::size();
+        let data_end = data_start + header.log_len - LogHeader::size();
+        if data_end > self.segment.data.len() {
+            return None;
+        }
+        let data = &self.segment.data[data_start..data_end];
+        self.cur_offset += header.log_len;
+        Some((header, data))
+    }
+}
+
 /// The header of a log entry in the wal file.
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -480,7 +605,9 @@ impl LogHeader {
     }
 
     fn from_slice(buffer: &[u8]) -> Self {
-        let log_len = usize::from_le_bytes(buffer[0..8].try_into().unwrap());
+        let usize_size = std::mem::size_of::<usize>();
+        let log_len = usize::from_le_bytes(buffer[0..usize_size].try_into().unwrap());
+        // lsn is at offset 8 regardless (repr(C) alignment pads usize to 8 on 32-bit)
         let lsn = u64::from_le_bytes(buffer[8..16].try_into().unwrap());
         let page_offset = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
         Self::new(lsn, page_offset, log_len)
