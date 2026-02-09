@@ -33,6 +33,11 @@ export class MessagePortOutgoingChannel implements OutgoingPeerChannel {
     this.port.postMessage(msg);
   }
 
+  hasUnsentMessages(): boolean {
+    // There's no way to know if the port has unsent messages, so we return false.
+    return false;
+  }
+
   close(): void {
     if (this.closed) {
       return;

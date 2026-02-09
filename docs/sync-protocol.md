@@ -22,7 +22,6 @@ The Jazz sync protocol uses four message types:
 - **Contains**: Current known state (header + session transaction counts)
 - **Variants**: 
   - Normal: `{action: "known", ...}`
-  - CoValue dependency: `{action: "known", asDependencyOf: "co_z...", ...}`
   - Correction: `{action: "known", isCorrection: true, ...}`
 - **Response**: CONTENT missing from the sender's known state
 

@@ -62,7 +62,7 @@ describe("full storage reconciliation", () => {
     )!;
     anotherClient.node.syncManager.startStorageReconciliation(serverPeer);
 
-    await waitForStorageReconciliationToComplete(anotherClient.node);
+    await waitForStorageReconciliationBatchAck(anotherClient.node);
 
     const messages = SyncMessagesLog.getMessages({
       Group: group.core,
@@ -115,7 +115,7 @@ describe("full storage reconciliation", () => {
     )!;
     client.node.syncManager.startStorageReconciliation(serverPeer);
 
-    await waitForStorageReconciliationToComplete(client.node);
+    await waitForStorageReconciliationBatchAck(client.node);
 
     const messages = SyncMessagesLog.getMessages({
       Group: group.core,
@@ -202,7 +202,7 @@ describe("full storage reconciliation", () => {
     )!;
     anotherClient.node.syncManager.startStorageReconciliation(serverPeer);
 
-    await waitForStorageReconciliationToComplete(anotherClient.node);
+    await waitForStorageReconciliationBatchAck(anotherClient.node);
 
     const messages = SyncMessagesLog.getMessages({
       Group: group.core,
@@ -260,7 +260,7 @@ describe("full storage reconciliation", () => {
     expect(messages).toMatchInlineSnapshot(`[]`);
   });
 
-  test("sends reconcile messages for each batch, each batch gets reconcile-ack", async () => {
+  test("sends reconcile messages for each batch, waits for reconcile-ack, then sends next batch", async () => {
     setStorageReconciliationBatchSize(2);
 
     const client = setupTestNode();
@@ -286,10 +286,12 @@ describe("full storage reconciliation", () => {
     const serverPeer = Object.values(anotherClient.node.syncManager.peers).find(
       (p) => p.role === "server" && p.persistent,
     )!;
-    anotherClient.node.syncManager.startStorageReconciliation(serverPeer);
-
-    await waitFor(
-      () => anotherClient.node.syncManager.pendingReconciliationAck.size === 0,
+    await new Promise<void>((resolve) =>
+      anotherClient.node.syncManager.startStorageReconciliation(
+        serverPeer,
+        0,
+        resolve,
+      ),
     );
 
     const coValueMapping = Object.fromEntries([
@@ -304,16 +306,16 @@ describe("full storage reconciliation", () => {
         "client -> storage | GET_KNOWN_STATE Map0",
         "storage -> client | GET_KNOWN_STATE_RESULT Map0 sessions: header/1",
         "client -> server | RECONCILE",
+        "server -> client | RECONCILE_ACK",
         "client -> storage | GET_KNOWN_STATE Map1",
         "storage -> client | GET_KNOWN_STATE_RESULT Map1 sessions: header/1",
         "client -> storage | GET_KNOWN_STATE Map2",
         "storage -> client | GET_KNOWN_STATE_RESULT Map2 sessions: header/1",
         "client -> server | RECONCILE",
+        "server -> client | RECONCILE_ACK",
         "client -> storage | GET_KNOWN_STATE Map3",
         "storage -> client | GET_KNOWN_STATE_RESULT Map3 sessions: header/1",
         "client -> server | RECONCILE",
-        "server -> client | RECONCILE_ACK",
-        "server -> client | RECONCILE_ACK",
         "server -> client | RECONCILE_ACK",
       ]
     `);
@@ -367,7 +369,7 @@ describe("full storage reconciliation", () => {
         persistent: true,
       });
 
-      await waitForStorageReconciliationToComplete(anotherClient.node);
+      await waitForStorageReconciliationBatchAck(anotherClient.node);
 
       const messages = SyncMessagesLog.getMessages({
         Group: group.core,
@@ -462,7 +464,7 @@ describe("full storage reconciliation", () => {
 
       // Runs storage reconciliation again
       anotherClient.connectToSyncServer({ persistent: true });
-      await waitForStorageReconciliationToComplete(anotherClient.node);
+      await waitForStorageReconciliationBatchAck(anotherClient.node);
 
       const messages = SyncMessagesLog.getMessages({
         Group: group.core,
@@ -584,7 +586,6 @@ describe("full storage reconciliation", () => {
       };
       await promise;
       await anotherClient.node.gracefulShutdown();
-      expect(syncManager.pendingReconciliationAck.size).toBe(1);
 
       // Wait for the lock to expire
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -623,7 +624,7 @@ describe("full storage reconciliation", () => {
       const { peer } = anotherClient.connectToSyncServer({
         persistent: true,
       });
-      await waitForStorageReconciliationToComplete(anotherClient.node);
+      await waitForStorageReconciliationBatchAck(anotherClient.node);
 
       await new Promise((resolve) => setTimeout(resolve, 500));
 
@@ -643,9 +644,7 @@ describe("full storage reconciliation", () => {
   });
 });
 
-function waitForStorageReconciliationToComplete(
-  node: LocalNode,
-): Promise<void> {
+function waitForStorageReconciliationBatchAck(node: LocalNode): Promise<void> {
   const pendingReconciliationAck = node.syncManager.pendingReconciliationAck;
   expect(pendingReconciliationAck.size).toBeGreaterThan(0);
 

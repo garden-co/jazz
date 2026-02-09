@@ -108,6 +108,7 @@ export interface OutgoingPeerChannel {
   push: (msg: SyncMessage | DisconnectedError) => void;
   close: () => void;
   onClose: (callback: () => void) => void;
+  hasUnsentMessages: () => boolean;
 }
 
 export interface Peer {
@@ -348,27 +349,15 @@ export class SyncManager {
     if (!this.local.storage) return;
     if (!isPersistentServerPeer(peer)) return;
 
-    const peerId = peer.id;
     const startOffset = initialOffset ?? 0;
 
     const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
-    let lastBatchSent = false;
-    const hasPendingAcksForPeer = () =>
-      this.pendingReconciliationAck
-        .keys()
-        .some((k) => k.endsWith(`#${peerId}`));
-    const maybeComplete = () => {
-      if (lastBatchSent && !hasPendingAcksForPeer() && onComplete) {
-        onComplete();
-      }
-    };
-
     const sendReconcileBatch = (
+      batchId: string,
       entries: [RawCoID, string][],
       offset: number,
     ) => {
       if (entries.length === 0) return;
-      const batchId = base58.encode(this.local.crypto.randomBytes(12));
       const msg: ReconcileMessage = {
         action: "reconcile",
         id: batchId,
@@ -390,14 +379,15 @@ export class SyncManager {
         );
         let done = 0;
         const entries: [RawCoID, string][] = [];
-        const sendReconcileMessageWhenDone = () => {
+        const sendReconcileMessageWhenDone = async () => {
           if (++done === pending.length) {
-            sendReconcileBatch(entries, offset);
+            const batchId = base58.encode(this.local.crypto.randomBytes(12));
+            sendReconcileBatch(batchId, entries, offset);
+            await this.waitUntilNextBatch(batchId, peer);
             if (batch.length === batchSize) {
-              processStorageBatch(offset + batch.length);
+              processStorageBatch(offset + batchSize);
             } else {
-              lastBatchSent = true;
-              maybeComplete();
+              onComplete?.();
             }
           }
         };
@@ -412,32 +402,39 @@ export class SyncManager {
             sendReconcileMessageWhenDone();
           });
         }
-        if (pending.length === 0 && batch.length >= batchSize) {
-          processStorageBatch(offset + batchSize);
-        } else if (pending.length === 0 && batch.length < batchSize) {
-          lastBatchSent = true;
-          maybeComplete();
+        if (pending.length === 0) {
+          if (batch.length === batchSize) {
+            processStorageBatch(offset + batchSize);
+          } else {
+            onComplete?.();
+          }
         }
       });
     };
 
-    let completed = false;
-    const completionCallback = onComplete;
-    const checkInterval = completionCallback
-      ? setInterval(() => {
-          if (peer.closed || completed) {
-            clearInterval(checkInterval);
-            return;
-          }
-          if (lastBatchSent && !hasPendingAcksForPeer()) {
-            completed = true;
-            clearInterval(checkInterval);
-            completionCallback();
-          }
-        }, 500)
-      : undefined;
-
     processStorageBatch(startOffset);
+  }
+
+  /**
+   * Waits until the previous batch is acknowledged before sending the next batch.
+   * Also checks the peer has no unsent messages to avoid queuing additional low-priority
+   * reconciliation messages.
+   */
+  private async waitUntilNextBatch(batchId: string, peer: PeerState) {
+    const sendNextBatch = (): boolean => {
+      const isBatchAcknowledged = !this.pendingReconciliationAck.has(
+        `${batchId}#${peer.id}`,
+      );
+      return isBatchAcknowledged && !peer.hasUnsentMessages;
+    };
+    while (!sendNextBatch()) {
+      await new Promise<void>((resolve) =>
+        setTimeout(
+          resolve,
+          STORAGE_RECONCILIATION_CONFIG.BATCH_ACK_POLLING_INTERVAL_MS,
+        ),
+      );
+    }
   }
 
   private maybeStartStorageReconciliationForPeer(peer: PeerState): void {

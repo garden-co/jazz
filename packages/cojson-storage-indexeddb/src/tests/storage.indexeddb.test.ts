@@ -966,7 +966,7 @@ describe("full storage reconciliation", () => {
     });
 
     test("reconciliation is not run again until the reconciliation interval passed", async () => {
-      cojsonInternals.setStorageReconciliationInterval(100);
+      cojsonInternals.setStorageReconciliationInterval(200);
 
       const syncServer = createTestNode();
       const client = createTestNode({ enableFullStorageReconciliation: true });
@@ -985,7 +985,7 @@ describe("full storage reconciliation", () => {
       });
 
       // Wait for the reconciliation interval to pass
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       const lock = await tryAcquireStorageReconciliationLock(client);
       expect(lock.acquired).toBe(true);

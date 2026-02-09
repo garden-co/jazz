@@ -42,4 +42,8 @@ export class PriorityBasedMessageQueue {
 
     return this.queues[priority]?.shift();
   }
+
+  public get length(): number {
+    return this.queues.reduce((acc, queue) => acc + queue.length, 0);
+  }
 }

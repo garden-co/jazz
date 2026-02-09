@@ -128,6 +128,7 @@ describe("sharding", () => {
         onClose: () => {},
       },
       outgoing: {
+        hasUnsentMessages: () => false,
         push: () => {},
         close: () => {},
         onClose: () => {},

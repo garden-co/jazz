@@ -69,6 +69,7 @@ export const STORAGE_RECONCILIATION_CONFIG = {
   BATCH_SIZE: 100,
   LOCK_TTL_MS: 24 * 60 * 60 * 1000, // 1 day
   RECONCILIATION_INTERVAL_MS: 30 * 24 * 60 * 60 * 1000, // 30 days
+  BATCH_ACK_POLLING_INTERVAL_MS: 10,
 };
 
 export function setStorageReconciliationBatchSize(size: number) {

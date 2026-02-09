@@ -210,4 +210,32 @@ describe("PriorityBasedMessageQueue", () => {
     const { queue } = setup();
     expect(queue.pull()).toBeUndefined();
   });
+
+  test("length should return the number of messages in the queue", () => {
+    const { queue } = setup();
+    const lowPriorityMsg: SyncMessage = {
+      action: "content",
+      id: "co_zlow",
+      new: {},
+      priority: CO_VALUE_PRIORITY.LOW,
+    };
+    const mediumPriorityMsg: SyncMessage = {
+      action: "content",
+      id: "co_zmedium",
+      new: {},
+      priority: CO_VALUE_PRIORITY.MEDIUM,
+    };
+    const highPriorityMsg: SyncMessage = {
+      action: "content",
+      id: "co_zhigh",
+      new: {},
+      priority: CO_VALUE_PRIORITY.HIGH,
+    };
+
+    void queue.push(lowPriorityMsg);
+    void queue.push(mediumPriorityMsg);
+    void queue.push(highPriorityMsg);
+
+    expect(queue.length).toEqual(3);
+  });
 });
