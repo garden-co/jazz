@@ -351,88 +351,91 @@ export class SyncManager {
 
     const startOffset = initialOffset ?? 0;
     const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
-    const totalCoValueCount = 0; // TODO
 
-    const sendReconcileBatch = (
-      batchId: string,
-      entries: [RawCoID, string][],
-      offset: number,
-    ) => {
-      if (entries.length === 0) return;
-      const msg: ReconcileMessage = {
-        action: "reconcile",
-        id: batchId,
-        values: entries,
-      };
-      this.pendingReconciliationAck.set(
-        `${batchId}#${peer.id}`,
-        offset + batchSize,
-      );
-      this.trySendToPeer(peer, msg);
-    };
-    const onComplete = (reconciledCoValueCount: number) => {
-      logger.info("Storage reconciliation complete", {
-        peerId: peer.id,
-        startOffset,
-        completed: reconciledCoValueCount,
-        total: reconciledCoValueCount,
-      });
-      _onComplete?.();
-    };
-
-    const processStorageBatch = (offset: number) => {
-      logger.info("Reconciliating CoValues in storage", {
-        peerId: peer.id,
-        completed: offset,
-        total: totalCoValueCount,
-      });
-      this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
-        // Process only CoValues that are not in memory
-        const coValues = batch.map(({ id }) => this.local.getCoValue(id));
-        const pending = coValues.filter(
-          (coValue) => coValue.loadingState === "unknown",
+    this.local.storage.getCoValueCount((totalCoValueCount) => {
+      const sendReconcileBatch = (
+        batchId: string,
+        entries: [RawCoID, string][],
+        offset: number,
+      ) => {
+        if (entries.length === 0) return;
+        const msg: ReconcileMessage = {
+          action: "reconcile",
+          id: batchId,
+          values: entries,
+        };
+        this.pendingReconciliationAck.set(
+          `${batchId}#${peer.id}`,
+          offset + batchSize,
         );
-        let done = 0;
-        const entries: [RawCoID, string][] = [];
-        const sendReconcileMessageWhenDone = async () => {
-          if (++done === pending.length) {
-            const batchId = base58.encode(this.local.crypto.randomBytes(12));
-            sendReconcileBatch(batchId, entries, offset);
-            await this.waitUntilNextBatch(batchId, peer);
+        this.trySendToPeer(peer, msg);
+      };
+      const onComplete = (reconciledCoValueCount: number) => {
+        // Note: `completed` can be higher than `total` if CoValues were added
+        // after the reconciliation started
+        logger.info("Storage reconciliation complete", {
+          peerId: peer.id,
+          startOffset,
+          completed: reconciledCoValueCount,
+          total: totalCoValueCount,
+        });
+        _onComplete?.();
+      };
+
+      const processStorageBatch = (offset: number) => {
+        logger.info("Reconciliating CoValues in storage", {
+          peerId: peer.id,
+          completed: offset,
+          total: totalCoValueCount,
+        });
+        this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
+          // Process only CoValues that are not in memory
+          const coValues = batch.map(({ id }) => this.local.getCoValue(id));
+          const pending = coValues.filter(
+            (coValue) => coValue.loadingState === "unknown",
+          );
+          let done = 0;
+          const entries: [RawCoID, string][] = [];
+          const sendReconcileMessageWhenDone = async () => {
+            if (++done === pending.length) {
+              const batchId = base58.encode(this.local.crypto.randomBytes(12));
+              sendReconcileBatch(batchId, entries, offset);
+              await this.waitUntilNextBatch(batchId, peer);
+              if (batch.length === batchSize) {
+                processStorageBatch(offset + batchSize);
+              } else {
+                onComplete(offset + batch.length);
+              }
+            }
+          };
+          for (const coValue of pending) {
+            coValue.getKnownStateFromStorage((storageKnownState) => {
+              if (storageKnownState) {
+                entries.push([
+                  coValue.id,
+                  this.hashKnownStateSessions(storageKnownState.sessions),
+                ]);
+              }
+              sendReconcileMessageWhenDone();
+            });
+          }
+          if (pending.length === 0) {
             if (batch.length === batchSize) {
               processStorageBatch(offset + batchSize);
             } else {
               onComplete(offset + batch.length);
             }
           }
-        };
-        for (const coValue of pending) {
-          coValue.getKnownStateFromStorage((storageKnownState) => {
-            if (storageKnownState) {
-              entries.push([
-                coValue.id,
-                this.hashKnownStateSessions(storageKnownState.sessions),
-              ]);
-            }
-            sendReconcileMessageWhenDone();
-          });
-        }
-        if (pending.length === 0) {
-          if (batch.length === batchSize) {
-            processStorageBatch(offset + batchSize);
-          } else {
-            onComplete(offset + batch.length);
-          }
-        }
-      });
-    };
+        });
+      };
 
-    logger.info("Starting storage reconciliation", {
-      peerId: peer.id,
-      startOffset,
-      total: totalCoValueCount,
+      logger.info("Starting storage reconciliation", {
+        peerId: peer.id,
+        startOffset,
+        total: totalCoValueCount,
+      });
+      processStorageBatch(startOffset);
     });
-    processStorageBatch(startOffset);
   }
 
   /**
