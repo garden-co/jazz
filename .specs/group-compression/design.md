@@ -6,6 +6,8 @@ Group compression consolidates transactions from multiple sessions in a group in
 
 The core idea is that eligible sessions (owned by non-admin, non-manager, non-invite members) are packed into a single LZ4-compressed transaction on a new compression session. The original sessions are then pruned from `KnownState` and sync. Decompression is **lazy** — the compressed blob is only unpacked when the group needs data not present in its non-compressed state (e.g., looking up a key revelation). When decompression is triggered, the entries are loaded into the group state via `processNewTransactions`.
 
+**Rust-first implementation**: LZ4 compression/decompression and the KnownState computation for compressed sessions are implemented in the Rust `cojson-core` crate and exposed through the WASM, NAPI, and React Native bindings. This ensures consistent behavior across all platforms and avoids JavaScript LZ4 library dependencies.
+
 ## Architecture / Components
 
 ### 1. Compression Session ID Format
@@ -191,9 +193,10 @@ compressGroup(sessionIDs: SessionID[]): boolean {
     return false;
   }
 
-  // 2. LZ4-compress the sessions
+  // 2. LZ4-compress the sessions (lz4 runs in the Rust cojson-core crate,
+  //    exposed via WASM/NAPI/RN bindings)
   const jsonPayload = JSON.stringify(compressedSessions);
-  const compressed = lz4Compress(new TextEncoder().encode(jsonPayload));
+  const compressed = this.crypto.lz4Compress(new TextEncoder().encode(jsonPayload));
   const encodedPayload = base64Encode(compressed);
 
   // 3. Create compression transaction(s)
@@ -237,7 +240,7 @@ Compression transaction validation is performed **before** adding the session to
 
 #### Phase 1: Detect and park (during `tryAddTransactions`)
 
-When a compression session is detected, we check if the group is still streaming, **excluding compressed sessions from the streaming check**. Compressed sessions listed in the meta will never arrive as individual sessions (their data is in the compression blob), so they must not block streaming completion. If streaming is still in progress for non-compressed sessions, the compression transaction is parked — queued for processing once streaming completes.
+When a compression session is detected, we check if the group is still streaming, **excluding compression sessions (those ending with `@`) from the streaming check**. This ensures we wait for all "real" session data to arrive before processing any compression transactions, but don't wait for other compression sessions which are independent and can be processed separately. If streaming is still in progress for non-compression sessions, the compression transaction is parked — queued for processing once streaming completes.
 
 ```typescript
 // In coValueCore.ts — alongside #isDeleteTransaction
@@ -263,8 +266,8 @@ When a compression session is detected, we check if the group is still streaming
     };
   }
 
-  // Exclude compressed sessions from the streaming check — they will never
-  // arrive individually, their data is inside the compression blob.
+  // Exclude compression sessions (@-suffix) from the streaming check —
+  // we only need all non-compression session data before validating.
   if (this.isStreaming({ excludeCompressionSessions: true })) {
     this.parkCompressionTransaction(sessionID, newTransactions, compressionMeta);
     return { value: true, parked: true };
@@ -274,7 +277,7 @@ When a compression session is detected, we check if the group is still streaming
 }
 ```
 
-When the compression is parked, the transaction is not yet added to the `SessionMapImpl`. Once streaming completes (i.e., `isStreaming({ excludeCompressionSessions: true })` returns `false`), parked compression transactions are dequeued and validated.
+When the compression is parked, the transaction is not yet added to the `SessionMapImpl`. Once streaming completes (i.e., `isStreaming({ excludeCompressionSessions: true })` returns `false` — meaning all non-`@`-suffix sessions have arrived), parked compression transactions are dequeued and validated.
 
 #### Phase 2: Validate and accept (after streaming completes)
 
@@ -365,7 +368,7 @@ if (isCompressionSessionID(transaction.txID.sessionID)) {
 
 #### Streaming state management
 
-The `isStreaming` method on `CoValueCore` accepts an option to exclude compressed sessions from the check:
+The `isStreaming` method on `CoValueCore` accepts an option to exclude **compression sessions** (those ending with `@`) from the check. This is distinct from "compressed sessions" (the original sessions whose data was packed into a blob):
 
 ```typescript
 // In coValueCore.ts
@@ -373,9 +376,10 @@ isStreaming(options?: { excludeCompressionSessions: boolean }) {
   if (!this.verified) return false;
 
   if (options?.excludeCompressionSessions) {
-    // Check streaming state but ignore sessions listed in any
-    // compression meta — they will never arrive individually
-    return this.verified.isStreaming({ excludeSessionIDs: this.getCompressedSessionIDs() });
+    // Exclude all compression sessions (@-suffix) from the streaming check.
+    // We only need all non-compression session data to arrive before
+    // processing parked compression transactions.
+    return this.verified.isStreaming({ excludeCompressionSessions: true });
   }
 
   return this.verified.isStreaming();
@@ -384,16 +388,16 @@ isStreaming(options?: { excludeCompressionSessions: boolean }) {
 
 ```typescript
 // In verifiedState.ts
-isStreaming(options?: { excludeSessionIDs: Set<SessionID> }): boolean {
+isStreaming(options?: { excludeCompressionSessions: boolean }): boolean {
   const streamingState = this.impl.getKnownStateWithStreaming();
   if (!streamingState) return false;
 
-  if (options?.excludeSessionIDs) {
-    // Check if any non-excluded sessions are still pending
+  if (options?.excludeCompressionSessions) {
+    // Check if any non-compression sessions are still pending
     const sessions = (streamingState as CoValueKnownState).sessions;
     const knownSessions = this.knownState().sessions;
     for (const [sessionID, expectedCount] of Object.entries(sessions)) {
-      if (options.excludeSessionIDs.has(sessionID as SessionID)) continue;
+      if (isCompressionSessionID(sessionID as SessionID)) continue;
       const currentCount = knownSessions[sessionID as SessionID] ?? 0;
       if (currentCount < expectedCount) return true;
     }
@@ -404,63 +408,84 @@ isStreaming(options?: { excludeSessionIDs: Set<SessionID> }): boolean {
 }
 ```
 
-This ensures the streaming check returns `false` once all non-compressed sessions have arrived, even if the original `expectContentUntil` included the compressed sessions.
+This ensures the streaming check returns `false` once all non-compression sessions have arrived, even if the original `expectContentUntil` included compression sessions that haven't arrived yet.
 
-**What if validation fails?** If the compression transaction is marked invalid, the compressed sessions are restored — they're removed from the `compressedSessions` map and become active again.
+**What if validation fails?** If the compression transaction is marked invalid, the sessions it referenced are restored — they're removed from the `compressedSessions` map and become active again.
 
 ### 6. Session Pruning and KnownState
 
-Compressed sessions are tracked on the `VerifiedState`:
+Compressed sessions are tracked in the **Rust `SessionMapImpl`**, not in TypeScript. This ensures that `knownState()` is computed entirely on the Rust side with compressed session counts already merged in:
 
-```typescript
-// In verifiedState.ts
-class VerifiedState {
-  // Maps compressed sessionID -> txCount at time of compression
-  private compressedSessions: Map<SessionID, number> = new Map();
+```rust
+// In cojson-core (Rust) — SessionMapImpl gains:
+struct SessionMapImpl {
+    // ... existing session data ...
 
-  markSessionsAsCompressed(
-    sessions: CompressionMeta["compressed"]["sessions"],
-  ) {
-    for (const [sessionID, txCount] of Object.entries(sessions)) {
-      // Only mark as compressed if the session doesn't have more transactions
-      // than what was captured in the compression. This prevents data loss
-      // when a session receives late transactions between compression creation
-      // and ingestion.
-      const currentTxCount = this.getTransactionsCount(sessionID as SessionID) ?? 0;
-      if (currentTxCount > txCount) {
-        // Session has more transactions than the compression captured —
-        // skip marking it as compressed to avoid losing the extra transactions
-        continue;
-      }
+    // Maps compressed sessionID -> txCount at time of compression
+    compressed_sessions: HashMap<SessionID, u64>,
+}
 
-      const existing = this.compressedSessions.get(sessionID as SessionID) ?? 0;
-      // Take the max txCount to handle concurrent compressions
-      this.compressedSessions.set(
-        sessionID as SessionID,
-        Math.max(existing, txCount),
-      );
+impl SessionMapImpl {
+    fn mark_sessions_as_compressed(&mut self, sessions: HashMap<SessionID, u64>) {
+        for (session_id, tx_count) in sessions {
+            // Only mark as compressed if the session doesn't have more transactions
+            // than what was captured in the compression. This prevents data loss
+            // when a session receives late transactions between compression creation
+            // and ingestion.
+            let current_tx_count = self.get_transactions_count(&session_id).unwrap_or(0);
+            if current_tx_count > tx_count {
+                continue;
+            }
+
+            let existing = self.compressed_sessions.get(&session_id).copied().unwrap_or(0);
+            // Take the max txCount to handle concurrent compressions
+            self.compressed_sessions.insert(session_id, existing.max(tx_count));
+        }
     }
-    this.invalidateCache();
-  }
 
-  isSessionCompressed(sessionID: SessionID): boolean {
-    return this.compressedSessions.has(sessionID);
-  }
+    fn is_session_compressed(&self, session_id: &SessionID) -> bool {
+        self.compressed_sessions.contains_key(session_id)
+    }
 }
 ```
 
-**KnownState** includes compressed sessions — it is built by merging the Rust session map with the `compressedSessions` map. This ensures peers know we already have that data and won't re-send it:
+The TypeScript `VerifiedState` delegates to the Rust implementation:
 
 ```typescript
-// knownState() — merges actual sessions with compressed session tx counts
+// In verifiedState.ts
+markSessionsAsCompressed(
+  sessions: CompressionMeta["compressed"]["sessions"],
+) {
+  this.impl.markSessionsAsCompressed(sessions);
+  this.invalidateCache();
+}
+
+isSessionCompressed(sessionID: SessionID): boolean {
+  return this.impl.isSessionCompressed(sessionID);
+}
+```
+
+**KnownState** is computed entirely on the Rust side — the Rust `SessionMapImpl.getKnownState()` already includes compressed session counts merged in. No TypeScript-side merging is needed:
+
+```typescript
+// knownState() — Rust side already includes compressed sessions
 knownState(): CoValueKnownState {
-  const raw = this.impl.getKnownState() as CoValueKnownState;
-  // Merge in compressed session tx counts from compression meta
-  for (const [sessionID, txCount] of this.compressedSessions) {
-    const existing = raw.sessions[sessionID] ?? 0;
-    raw.sessions[sessionID] = Math.max(existing, txCount);
-  }
-  return raw;
+  return this.impl.getKnownState() as CoValueKnownState;
+}
+```
+
+```rust
+// In cojson-core (Rust) — getKnownState includes compressed sessions
+fn get_known_state(&self) -> CoValueKnownState {
+    let mut sessions = self.get_active_session_counts();
+
+    // Merge in compressed session tx counts
+    for (session_id, tx_count) in &self.compressed_sessions {
+        let existing = sessions.get(session_id).copied().unwrap_or(0);
+        sessions.insert(session_id.clone(), existing.max(*tx_count));
+    }
+
+    CoValueKnownState { header: true, sessions }
 }
 ```
 
@@ -536,7 +561,7 @@ The compression transaction itself is stored as a normal session — storage doe
 
 #### Storage KnownState
 
-`StorageKnownState` caches known state from the database. It includes compressed sessions in the counts (they're still rows in the sessions table), which is consistent with the in-memory `knownState()` that also includes them via the compression meta merge. Both layers agree on what sessions exist and their tx counts.
+`StorageKnownState` caches known state from the database. It includes compressed sessions in the counts (they're still rows in the sessions table), which is consistent with the in-memory `knownState()` that also includes them via the Rust `SessionMapImpl`'s compressed session merge. Both layers agree on what sessions exist and their tx counts.
 
 ### 7. On-Demand Decompression
 
@@ -603,7 +628,7 @@ private decompressIfNeeded(): void {
   // Decompress all pending blobs
   for (const blob of this.pendingCompressedBlobs) {
     const compressed = base64Decode(blob.payload);
-    const result = lz4Decompress(compressed); // lz4Decompress should automatically fail if the compressed size is bigger than 250MB
+    const result = this.crypto.lz4Decompress(compressed); // lz4Decompress should automatically fail if the compressed size is bigger than 250MB
 
     if (!result.ok) return;
 
@@ -805,7 +830,7 @@ recompressGroup(sessionIDs: SessionID[]): boolean {
 
   // Create new compression transaction with merged payload
   const jsonPayload = JSON.stringify(allCompressedSessions);
-  const compressed = lz4Compress(new TextEncoder().encode(jsonPayload));
+  const compressed = this.crypto.lz4Compress(new TextEncoder().encode(jsonPayload));
   const encodedPayload = base64Encode(compressed);
 
   const compressionSessionID = this.crypto.newCompressionSessionID(
@@ -958,9 +983,18 @@ type CompressedSessionRejectedError = {
 
 ### Modified Types
 
+```rust
+// cojson-core (Rust) — SessionMapImpl gains:
+compressed_sessions: HashMap<SessionID, u64>;
+fn mark_sessions_as_compressed(&mut self, sessions: HashMap<SessionID, u64>);
+fn is_session_compressed(&self, session_id: &SessionID) -> bool;
+// getKnownState() now merges compressed session counts automatically
+// lz4_compress(data: &[u8]) -> Vec<u8>
+// lz4_decompress(data: &[u8]) -> Result<Vec<u8>, Error>
+```
+
 ```typescript
-// verifiedState.ts — VerifiedState gains:
-private compressedSessions: Map<SessionID, number>;
+// verifiedState.ts — VerifiedState delegates to Rust:
 markSessionsAsCompressed(sessions: CompressionMeta["compressed"]["sessions"]): void;
 isSessionCompressed(sessionID: SessionID): boolean;
 
@@ -974,6 +1008,10 @@ private isDecompressed: boolean;
 private decompressIfNeeded(): void;
 private processDecompressedTransactions(session: CompressedSession): void;
 getEligibleSessionsForCompression(): SessionID[];
+
+// crypto.ts — CryptoProvider gains:
+lz4Compress(data: Uint8Array): Uint8Array;
+lz4Decompress(data: Uint8Array): { ok: boolean; data: Uint8Array };
 ```
 
 ## Testing Strategy

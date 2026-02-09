@@ -21,35 +21,37 @@
   - Add to all crypto provider implementations (NAPI, WASM, RN)
   - Ref: Design §1 — Compression Session ID Format
 
-### Layer 2: VerifiedState — Session Compression Tracking
+### Layer 2: Rust cojson-core — Compressed Session Tracking and LZ4
 
-- [ ] 4. Add `compressedSessions` map and `markSessionsAsCompressed()` to `VerifiedState`
-  - Private `compressedSessions: Map<SessionID, number>` tracking compressed session ID → txCount
-  - `markSessionsAsCompressed()` with late-transaction guard: skip marking if `currentTxCount > txCount`
-  - Use `Math.max` for concurrent compression merges
-  - Add `isSessionCompressed()` check
+- [ ] 4. Add `compressed_sessions` map and `mark_sessions_as_compressed()` to Rust `SessionMapImpl`
+  - `compressed_sessions: HashMap<SessionID, u64>` tracking compressed session ID → txCount
+  - `mark_sessions_as_compressed()` with late-transaction guard: skip marking if `currentTxCount > txCount`
+  - Use `max()` for concurrent compression merges
+  - Add `is_session_compressed()` check
+  - Expose via WASM, NAPI, and RN bindings
   - Ref: Design §6 — Session Pruning and KnownState
 
-- [ ] 5. Modify `knownState()` in `VerifiedState` to merge compressed sessions
-  - Merge `compressedSessions` map into the raw known state from Rust `SessionMapImpl`
-  - Use `Math.max(existing, txCount)` for each compressed session
+- [ ] 5. Modify `get_known_state()` in Rust `SessionMapImpl` to include compressed sessions
+  - Merge `compressed_sessions` map into the known state result automatically
+  - Use `max(existing, txCount)` for each compressed session
+  - No TypeScript-side merging needed — `knownState()` just delegates to Rust
   - Ref: Design §6 — KnownState merging
 
 - [ ] 6. Modify `getSessions()` and `newContentSince()` in `VerifiedState` to exclude compressed sessions
-  - `getSessions()`: skip sessions where `isSessionCompressed(sessionID)` is true
+  - `getSessions()`: skip sessions where `isSessionCompressed(sessionID)` is true (delegates to Rust)
   - `newContentSince()`: same exclusion — compressed session data lives in the blob, not in individual sessions
   - Ref: Design §6 — getSessions and newContentSince
 
-- [ ] 7. Add `isStreaming()` overload with `excludeSessionIDs` option to `VerifiedState`
-  - Accept `{ excludeSessionIDs: Set<SessionID> }` option
-  - When provided, iterate streaming known state and skip excluded sessions when checking if streaming is complete
+- [ ] 7. Add `isStreaming()` overload with `excludeCompressionSessions` option to `VerifiedState`
+  - Accept `{ excludeCompressionSessions: boolean }` option
+  - When provided, iterate streaming known state and skip sessions with `@` suffix (`isCompressionSessionID`) when checking if streaming is complete
   - Ref: Design §5 — Streaming state management
 
 ### Layer 3: CoValueCore — Compression Execution and Ingestion
 
 - [ ] 8. Add `isStreaming({ excludeCompressionSessions })` option to `CoValueCore`
-  - Delegate to `VerifiedState.isStreaming({ excludeSessionIDs })` with the set of compressed session IDs from all known compression metas
-  - Add `getCompressedSessionIDs()` helper to collect session IDs from parked and processed compression transactions
+  - Delegate to `VerifiedState.isStreaming({ excludeCompressionSessions: true })` which skips all `@`-suffix compression sessions
+  - This excludes compression sessions (the ones ending with `@`), not the compressed sessions (the originals that got compressed)
   - Ref: Design §5 — Streaming state management
 
 - [ ] 9. Add `makeCompressionTransaction()` to `CoValueCore`
@@ -170,12 +172,14 @@
   - Create new compression transaction with merged payload
   - Ref: Design §9a — Re-Compressing a Compressed Session
 
-### Layer 8: LZ4 Integration
+### Layer 8: LZ4 Integration (Rust cojson-core)
 
-- [ ] 26. Add LZ4 compression/decompression utilities
-  - Add LZ4 dependency (prioritize decompression speed)
-  - Create `lz4Compress(data: Uint8Array): Uint8Array` and `lz4Decompress(data: Uint8Array): { ok: boolean; data: Uint8Array }`
+- [ ] 26. Add LZ4 compression/decompression to Rust `cojson-core` crate
+  - Implement `lz4_compress(data: &[u8]) -> Vec<u8>` and `lz4_decompress(data: &[u8]) -> Result<Vec<u8>, Error>` in Rust
+  - Add `lz4` crate dependency in `cojson-core`
+  - Expose via WASM, NAPI, and RN bindings
   - Ensure decompression fails gracefully for corrupted data
+  - TypeScript `CryptoProvider` gains `lz4Compress(data: Uint8Array): Uint8Array` and `lz4Decompress(data: Uint8Array): { ok: boolean; data: Uint8Array }` that delegate to the Rust implementation
   - Add base64 encode/decode helpers if not already available
   - Add `splitString(str: string, maxSize: number): string[]` helper for chunking
   - Ref: Design §2 — Payload compression, §7.2 — decompressIfNeeded
