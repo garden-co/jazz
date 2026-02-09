@@ -642,7 +642,7 @@ export class CoValueCore {
    */
   knownStateWithStreaming(): CoValueKnownState {
     if (this.verified) {
-      return this.verified.immutableKnownStateWithStreaming();
+      return this.verified.knownStateWithStreaming();
     }
 
     return this.knownState();
@@ -651,16 +651,12 @@ export class CoValueCore {
   /**
    * Returns the known state of the CoValue
    *
-   * The return value identity is going to be stable as long as the CoValue is not modified.
-   *
-   * On change the knownState is invalidated and a new object is returned.
-   *
    * For garbageCollected/onlyKnownState CoValues, returns the cached knownState.
    */
   knownState(): CoValueKnownState {
     // 1. If we have verified content in memory, use that (authoritative)
     if (this.verified) {
-      return this.verified.immutableKnownState();
+      return this.verified.knownState();
     }
 
     // 2. If we have last known state (GC'd or onlyKnownState), use that
