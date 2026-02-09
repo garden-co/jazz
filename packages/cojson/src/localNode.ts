@@ -541,10 +541,28 @@ export class LocalNode {
     }
 
     this.garbageCollector?.trackCoValueAccess(coValue);
-    this.syncManager.syncLocalTransaction(
-      coValue.verified,
-      emptyKnownState(id),
-    );
+
+    // Check if we're inside a transaction context
+    const transactionContext = this.getTransactionContext();
+
+    if (transactionContext?.isActive()) {
+      // TODO: keeping the knownStateBefore can dedupe multiple changes into a single transaction
+      // as done in syncLocalTransaction
+
+      // Buffer the message instead of syncing immediately
+      const content = coValue.verified.newContentSince(emptyKnownState(id));
+      if (content) {
+        for (const msg of content) {
+          transactionContext.bufferMessage(msg);
+        }
+      }
+      // Don't sync now - will be done when transaction completes
+    } else {
+      this.syncManager.syncLocalTransaction(
+        coValue.verified,
+        emptyKnownState(id),
+      );
+    }
 
     return coValue;
   }

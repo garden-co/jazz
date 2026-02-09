@@ -150,6 +150,11 @@ export interface DBTransactionInterfaceAsync {
     sessionID: SessionID,
   ): Promise<StoredSessionRow | undefined>;
 
+  upsertCoValue(
+    id: RawCoID,
+    header?: CoValueHeader,
+  ): Promise<number | undefined>;
+
   /**
    * Persist a "deleted coValue" marker in storage (work queue entry).
    * This is an enqueue signal: implementations should set status to `Pending`.

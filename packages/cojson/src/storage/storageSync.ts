@@ -575,8 +575,6 @@ export class StorageApiSync implements StorageAPI {
       return; // No-op for empty batches
     }
 
-    console.trace("storeAtomicBatch", messages);
-
     this.dbClient.transaction((tx) => {
       for (const msg of messages) {
         this.storeMessageInTransaction(tx, msg);

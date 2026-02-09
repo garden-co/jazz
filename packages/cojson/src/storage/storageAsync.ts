@@ -585,8 +585,6 @@ export class StorageApiAsync implements StorageAPI {
       return; // No-op for empty batches
     }
 
-    console.trace("storeAtomicBatch", messages);
-
     this.interruptEraser("storeAtomicBatch");
 
     await this.dbClient.transaction(async (tx) => {
@@ -611,9 +609,9 @@ export class StorageApiAsync implements StorageAPI {
   ): Promise<void> {
     const id = msg.id;
 
-    // Upsert the CoValue header (must happen outside transaction for some DBs)
-    const storedCoValueRowID = await this.dbClient.upsertCoValue(
-      id,
+    // Upsert the CoValue header within the provided transaction
+    const storedCoValueRowID = await tx.upsertCoValue(
+      id as RawCoID,
       msg.header,
     );
 
