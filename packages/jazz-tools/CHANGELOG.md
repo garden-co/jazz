@@ -1,5 +1,45 @@
 # jazz-tools
 
+## 0.20.8
+
+### Patch Changes
+
+- 8688239: Add `getOrCreateUnique` method to CoMap, CoList, and CoFeed
+
+  This new method provides a "get or create only" semantic - it returns an existing value as-is, and only uses the provided value when creating a new CoValue. Unlike `upsertUnique`, it does NOT update existing values with the provided value.
+
+  Example usage:
+
+  ```typescript
+  const billingStatus = await BillingStatus.getOrCreateUnique({
+    value: { status: "pending" },
+    unique: `billing-${user.$jazz.id}`,
+    owner: billingGroup,
+  });
+  ```
+
+  Also deprecates `loadUnique` and `upsertUnique` methods in favor of `getOrCreateUnique`.
+
+- fc4163a: Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing
+- c7be307: Improved FileStream base64 encoding performance by using `bytesToBase64url` instead of `btoa` with `String.fromCharCode`. Added native `toBase64`/`fromBase64` support in cojson when available.
+
+  **Benchmark results (5MB file):**
+  - `asBase64`: 732.39 op/sec vs 49.78 op/sec (**+1371.36% faster**)
+  - `write`: 12.53 op/sec vs 12.19 op/sec (+2.79%)
+  - `getChunks`: 695.03 op/sec vs 153.89 op/sec (**+351.64% faster**)
+
+- 739ea48: Fixed createdAt getter to use CoValue's header
+- b38a526: fix: prevent conflicts between concurrent async SQLite transactions
+- f701fd7: Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Engineering" })`)
+- 0fa9e15: Fix issue with CoRecord serialisation
+- Updated dependencies [c7be307]
+- Updated dependencies [b38a526]
+- Updated dependencies [f701fd7]
+- Updated dependencies [99f9d47]
+  - cojson@0.20.8
+  - cojson-storage-indexeddb@0.20.8
+  - cojson-transport-ws@0.20.8
+
 ## 0.20.7
 
 ### Patch Changes

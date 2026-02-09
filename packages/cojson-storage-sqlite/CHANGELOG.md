@@ -1,5 +1,15 @@
 # cojson-storage-sqlite
 
+## 0.20.8
+
+### Patch Changes
+
+- Updated dependencies [c7be307]
+- Updated dependencies [b38a526]
+- Updated dependencies [f701fd7]
+- Updated dependencies [99f9d47]
+  - cojson@0.20.8
+
 ## 0.20.7
 
 ### Patch Changes
