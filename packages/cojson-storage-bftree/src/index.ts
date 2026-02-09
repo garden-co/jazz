@@ -1,5 +1,5 @@
-import { type StorageAPI, StorageApiAsync } from "cojson";
-import { BfTreeClient } from "./client.js";
+import type { StorageAPI } from "cojson";
+import { BfTreeStorageProxy } from "./proxy.js";
 
 /**
  * Create a `StorageAPI` backed by a bf-tree B+ tree running in a
@@ -40,14 +40,15 @@ export async function getBfTreeStorage(
     worker.postMessage({ type: "init", dbName, cacheSizeBytes });
   });
 
-  const client = new BfTreeClient(worker);
-  return new StorageApiAsync(client);
+  // Returns StorageAPI directly — no StorageApiAsync wrapper needed!
+  return new BfTreeStorageProxy(worker);
 }
 
-export { BfTreeClient } from "./client.js";
+export { BfTreeStorageProxy } from "./proxy.js";
 export type {
   WorkerRequest,
   WorkerResponse,
   WorkerInitRequest,
   WorkerInitResponse,
+  WorkerFireAndForget,
 } from "./protocol.js";

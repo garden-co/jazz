@@ -1,22 +1,23 @@
 import type {
   AgentSecret,
-  DBClientInterfaceAsync,
-  DBTransactionInterfaceAsync,
+  CoValueCore,
+  CoValueKnownState,
+  CorrectionCallback,
+  NewContentMessage,
+  PeerID,
   RawCoID,
   RawCoMap,
   SessionID,
-  SignatureAfterRow,
-  StoredCoValueRow,
-  StoredSessionRow,
-  TransactionRow,
   StorageAPI,
   SyncMessage,
 } from "cojson";
 import {
+  StorageKnownState,
+  StoreQueue,
   cojsonInternals,
   ControlledAgent,
   LocalNode,
-  StorageApiAsync,
+  getDependedOnCoValues,
 } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { initializeSync, create_bftree_memory } from "cojson-core-wasm";
@@ -39,141 +40,211 @@ export function ensureWasm() {
 }
 
 // ============================================================================
-// Direct adapter: wraps BfTreeWorkerBackend as DBClientInterfaceAsync
-// without going through postMessage (for testing).
+// Direct StorageAPI proxy: wraps BfTreeWorkerBackend without postMessage.
+// Replaces the old DirectBfTreeClient + StorageApiAsync pattern.
 // ============================================================================
 
-class DirectBfTreeClient implements DBClientInterfaceAsync {
-  constructor(private backend: BfTreeWorkerBackend) {}
+/**
+ * A test-only StorageAPI that calls BfTreeWorkerBackend directly
+ * (no Worker, no postMessage). Replicates BfTreeStorageProxy logic
+ * but with synchronous backend calls.
+ */
+export class DirectBfTreeStorageProxy implements StorageAPI {
+  backend: BfTreeWorkerBackend;
+  private knownStates = new StorageKnownState();
+  private storeQueue = new StoreQueue();
+  private inMemoryCoValues = new Set<RawCoID>();
+  private deletedValues = new Set<RawCoID>();
+  private pendingKnownStateLoads = new Map<
+    string,
+    Promise<CoValueKnownState | undefined>
+  >();
 
-  getCoValue(coValueId: string) {
-    return Promise.resolve(
-      this.backend.dispatch("getCoValue", [coValueId]) as
-        | StoredCoValueRow
-        | undefined,
-    );
+  constructor(backend: BfTreeWorkerBackend) {
+    this.backend = backend;
   }
 
-  upsertCoValue(id: string, header?: unknown) {
-    return Promise.resolve(
-      this.backend.dispatch("upsertCoValue", [id, header]) as
-        | number
-        | undefined,
-    );
+  getKnownState(id: string): CoValueKnownState {
+    return this.knownStates.getKnownState(id);
   }
 
-  getCoValueSessions(coValueRowId: number) {
-    return Promise.resolve(
-      this.backend.dispatch("getCoValueSessions", [
-        coValueRowId,
-      ]) as StoredSessionRow[],
-    );
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void {
+    const cached = this.knownStates.getCachedKnownState(id);
+    if (cached) {
+      callback(cached);
+      return;
+    }
+
+    const pending = this.pendingKnownStateLoads.get(id);
+    if (pending) {
+      pending.then(callback, () => callback(undefined));
+      return;
+    }
+
+    const loadPromise = Promise.resolve(this.backend.getCoValueKnownState(id))
+      .then((knownState) => {
+        if (knownState) {
+          this.knownStates.setKnownState(id, knownState);
+        }
+        return knownState;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.pendingKnownStateLoads.delete(id);
+      });
+
+    this.pendingKnownStateLoads.set(id, loadPromise);
+    loadPromise.then(callback);
   }
 
-  getNewTransactionInSession(
-    sessionRowId: number,
-    fromIdx: number,
-    toIdx: number,
+  load(
+    id: string,
+    callback: (data: NewContentMessage) => void,
+    done: (found: boolean) => void,
+  ): void {
+    this.loadWithDependencies(id, callback, done);
+  }
+
+  private async loadWithDependencies(
+    id: string,
+    callback: (data: NewContentMessage) => void,
+    done: (found: boolean) => void,
   ) {
-    return Promise.resolve(
-      this.backend.dispatch("getNewTransactionInSession", [
-        sessionRowId,
-        fromIdx,
-        toIdx,
-      ]) as TransactionRow[],
-    );
+    const { messages, knownState, found } = this.backend.loadContent(id);
+
+    if (!found) {
+      done(false);
+      return;
+    }
+
+    // Process each content message, loading dependencies first
+    for (const contentMessage of messages) {
+      if (contentMessage.header) {
+        const deps = getDependedOnCoValues(
+          contentMessage.header,
+          contentMessage,
+        );
+
+        for (const depId of deps) {
+          if (this.inMemoryCoValues.has(depId)) continue;
+
+          await new Promise<void>((resolve) => {
+            this.loadWithDependencies(depId, callback, () => resolve());
+          });
+        }
+      }
+
+      callback(contentMessage);
+    }
+
+    this.inMemoryCoValues.add(id as RawCoID);
+
+    if (knownState) {
+      this.knownStates.setKnownState(id, knownState);
+      this.knownStates.handleUpdate(id, knownState);
+    }
+
+    done(true);
   }
 
-  getSignatures(sessionRowId: number, firstNewTxIdx: number) {
-    return Promise.resolve(
-      this.backend.dispatch("getSignatures", [
-        sessionRowId,
-        firstNewTxIdx,
-      ]) as SignatureAfterRow[],
-    );
+  store(msg: NewContentMessage, correctionCallback: CorrectionCallback): void {
+    this.storeQueue.push(msg, correctionCallback);
+
+    this.storeQueue.processQueue(async (data, correctionCallback) => {
+      return this.storeSingle(data, correctionCallback);
+    });
   }
 
-  getAllCoValuesWaitingForDelete() {
-    return Promise.resolve(
-      this.backend.dispatch("getAllCoValuesWaitingForDelete", []) as RawCoID[],
+  private async storeSingle(
+    msg: NewContentMessage,
+    correctionCallback: CorrectionCallback,
+  ): Promise<boolean> {
+    if (this.storeQueue.closed) {
+      return false;
+    }
+
+    const { knownState, storedCoValueRowID } = this.backend.storeContent(
+      msg,
+      this.deletedValues,
     );
+
+    this.inMemoryCoValues.add(msg.id);
+    this.knownStates.setKnownState(msg.id, knownState);
+    this.knownStates.handleUpdate(msg.id, knownState);
+
+    if (!storedCoValueRowID) {
+      return this.handleCorrection(knownState, correctionCallback);
+    }
+
+    return true;
   }
 
-  async transaction(
-    callback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
-  ) {
-    const txProxy: DBTransactionInterfaceAsync = {
-      getSingleCoValueSession: (coValueRowId, sessionID) =>
-        Promise.resolve(
-          this.backend.dispatch("tx.getSingleCoValueSession", [
-            coValueRowId,
-            sessionID,
-          ]) as StoredSessionRow | undefined,
-        ),
-      markCoValueAsDeleted: (id) =>
-        Promise.resolve(this.backend.dispatch("tx.markCoValueAsDeleted", [id])),
-      addSessionUpdate: ({ sessionUpdate, sessionRow }) =>
-        Promise.resolve(
-          this.backend.dispatch("tx.addSessionUpdate", [
-            { sessionUpdate, sessionRow },
-          ]) as number,
-        ),
-      addTransaction: (sessionRowID, idx, newTransaction) =>
-        Promise.resolve(
-          this.backend.dispatch("tx.addTransaction", [
-            sessionRowID,
-            idx,
-            newTransaction,
-          ]),
-        ),
-      addSignatureAfter: ({ sessionRowID, idx, signature }) =>
-        Promise.resolve(
-          this.backend.dispatch("tx.addSignatureAfter", [
-            { sessionRowID, idx, signature },
-          ]),
-        ),
-      deleteCoValueContent: (coValueRow) =>
-        Promise.resolve(
-          this.backend.dispatch("tx.deleteCoValueContent", [coValueRow]),
-        ),
-    };
-    return callback(txProxy);
+  private async handleCorrection(
+    knownState: CoValueKnownState,
+    correctionCallback: CorrectionCallback,
+  ): Promise<boolean> {
+    const correction = correctionCallback(knownState);
+
+    if (!correction) {
+      return false;
+    }
+
+    for (const msg of correction) {
+      const success = await this.storeSingle(msg, (_knownState) => {
+        return undefined;
+      });
+
+      if (!success) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  markDeleteAsValid(id: RawCoID): void {
+    this.deletedValues.add(id);
+  }
+
+  enableDeletedCoValuesErasure(): void {
+    // No-op in tests — tests call eraseAllDeletedCoValues directly
+  }
+
+  async eraseAllDeletedCoValues(): Promise<void> {
+    this.backend.eraseAllDeletedCoValues();
+  }
+
+  waitForSync(id: string, coValue: CoValueCore): Promise<void> {
+    return this.knownStates.waitForSync(id, coValue);
   }
 
   trackCoValuesSyncState(
-    updates: { id: RawCoID; peerId: string; synced: boolean }[],
-  ) {
-    return Promise.resolve(
-      this.backend.dispatch("trackCoValuesSyncState", [
-        updates,
-      ]) as undefined as void,
-    );
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
+  ): void {
+    this.backend.trackCoValuesSyncState(updates);
+    done?.();
   }
 
-  getUnsyncedCoValueIDs() {
-    return Promise.resolve(
-      this.backend.dispatch("getUnsyncedCoValueIDs", []) as RawCoID[],
-    );
+  getUnsyncedCoValueIDs(
+    callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+  ): void {
+    callback(this.backend.getUnsyncedCoValueIDs() as RawCoID[]);
   }
 
-  stopTrackingSyncState(id: RawCoID) {
-    return Promise.resolve(
-      this.backend.dispatch("stopTrackingSyncState", [id]) as undefined as void,
-    );
+  stopTrackingSyncState(id: RawCoID): void {
+    this.backend.stopTrackingSyncState(id);
   }
 
-  eraseCoValueButKeepTombstone(coValueID: RawCoID) {
-    return Promise.resolve(
-      this.backend.dispatch("eraseCoValueButKeepTombstone", [coValueID]),
-    );
+  onCoValueUnmounted(id: RawCoID): void {
+    this.inMemoryCoValues.delete(id);
   }
 
-  getCoValueKnownState(coValueId: string) {
-    return Promise.resolve(
-      this.backend.dispatch("getCoValueKnownState", [coValueId]) as
-        | { id: RawCoID; header: boolean; sessions: Record<string, number> }
-        | undefined,
-    );
+  close(): Promise<unknown> | undefined {
+    return this.storeQueue.close();
   }
 }
 
@@ -193,16 +264,15 @@ export function createBfTreeBackend(): BfTreeWorkerBackend {
 }
 
 /**
- * Wrap an existing backend in a fresh StorageApiAsync.
- * Each call returns a new StorageApiAsync with clean internal state
- * (inMemoryCoValues, storeQueue, etc.), mirroring how IndexedDB tests
+ * Wrap an existing backend in a fresh DirectBfTreeStorageProxy.
+ * Each call returns a new proxy with clean internal state
+ * (knownStates, storeQueue, etc.), mirroring how IndexedDB tests
  * create a new StorageApiAsync per `getIndexedDBStorage()` call.
  */
 export function createStorageFromBackend(
   backend: BfTreeWorkerBackend,
 ): StorageAPI {
-  const client = new DirectBfTreeClient(backend);
-  return new StorageApiAsync(client);
+  return new DirectBfTreeStorageProxy(backend);
 }
 
 /**
@@ -252,8 +322,11 @@ export function connectToSyncServer(
 export function getAllCoValuesWaitingForDelete(
   storage: StorageAPI,
 ): Promise<RawCoID[]> {
-  // @ts-expect-error - dbClient is private
-  return storage.dbClient.getAllCoValuesWaitingForDelete();
+  // Access the backend directly on our test proxy
+  const proxy = storage as DirectBfTreeStorageProxy;
+  return Promise.resolve(
+    proxy.backend.getAllCoValuesWaitingForDelete() as RawCoID[],
+  );
 }
 
 export async function getCoValueStoredSessions(
@@ -281,10 +354,10 @@ export function trackMessages() {
     msg: SyncMessage;
   }[] = [];
 
-  const originalLoad = StorageApiAsync.prototype.load;
-  const originalStore = StorageApiAsync.prototype.store;
+  const originalLoad = DirectBfTreeStorageProxy.prototype.load;
+  const originalStore = DirectBfTreeStorageProxy.prototype.store;
 
-  StorageApiAsync.prototype.load = async function (id, callback, done) {
+  DirectBfTreeStorageProxy.prototype.load = function (id, callback, done) {
     messages.push({
       from: "client",
       msg: {
@@ -297,7 +370,7 @@ export function trackMessages() {
     return originalLoad.call(
       this,
       id,
-      (msg) => {
+      (msg: NewContentMessage) => {
         messages.push({ from: "storage", msg });
         callback(msg);
       },
@@ -305,7 +378,10 @@ export function trackMessages() {
     );
   };
 
-  StorageApiAsync.prototype.store = async function (data, correctionCallback) {
+  DirectBfTreeStorageProxy.prototype.store = function (
+    data,
+    correctionCallback,
+  ) {
     messages.push({ from: "client", msg: data });
     return originalStore.call(this, data, (msg) => {
       messages.push({
@@ -323,8 +399,8 @@ export function trackMessages() {
   };
 
   const restore = () => {
-    StorageApiAsync.prototype.load = originalLoad;
-    StorageApiAsync.prototype.store = originalStore;
+    DirectBfTreeStorageProxy.prototype.load = originalLoad;
+    DirectBfTreeStorageProxy.prototype.store = originalStore;
     messages.length = 0;
   };
 

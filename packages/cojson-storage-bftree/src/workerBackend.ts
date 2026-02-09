@@ -1,5 +1,20 @@
-import { Keys } from "./keys.js";
+import {
+  type CojsonInternalTypes,
+  type RawCoID,
+  type SessionID,
+  cojsonInternals,
+  collectNewTxs,
+  getNewTransactionsSize,
+} from "cojson";
 import type { BfTreeStore } from "cojson-core-wasm";
+import { Keys } from "./keys.js";
+
+const {
+  createContentMessage,
+  exceedsRecommendedSize,
+  isDeleteSessionID,
+  setSessionCounter,
+} = cojsonInternals;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -10,13 +25,28 @@ const decoder = new TextDecoder();
  */
 const SCAN_LIMIT = 100_000;
 
+// Row types used internally by the backend
+type SessionRowData = {
+  lastIdx: number;
+  lastSignature: string;
+  bytesSinceLastSignature?: number;
+};
+
+type InternalSessionRow = SessionRowData & {
+  rowID: number;
+  coValue: number;
+  sessionID: string;
+};
+
 /**
  * Worker-side implementation of the storage backend.
  *
  * Runs entirely inside a Web Worker. It wraps the WASM BfTreeStore
- * with key encoding, JSON serialisation, and row-ID mapping so that
- * the main-thread `BfTreeClient` proxy can talk in the same terms as
- * `DBClientInterfaceAsync`.
+ * with key encoding, JSON serialisation, and row-ID mapping.
+ *
+ * Exposes high-level `storeContent` and `loadContent` methods that
+ * perform all DB operations in a single synchronous call, avoiding
+ * the per-operation postMessage overhead of the v1 DBClientInterfaceAsync design.
  */
 export class BfTreeWorkerBackend {
   private tree: BfTreeStore;
@@ -34,79 +64,295 @@ export class BfTreeWorkerBackend {
   }
 
   // ===================================================================
-  // Dispatch — maps RPC method names to concrete implementations
+  // High-level operations (StorageAPI-level)
   // ===================================================================
 
-  dispatch(method: string, args: unknown[]): unknown {
-    switch (method) {
-      // DBClientInterfaceAsync
-      case "getCoValue":
-        return this.getCoValue(args[0] as string);
-      case "upsertCoValue":
-        return this.upsertCoValue(args[0] as string, args[1]);
-      case "getCoValueSessions":
-        return this.getCoValueSessions(args[0] as number);
-      case "getNewTransactionInSession":
-        return this.getNewTransactionInSession(
-          args[0] as number,
-          args[1] as number,
-          args[2] as number,
-        );
-      case "getSignatures":
-        return this.getSignatures(args[0] as number, args[1] as number);
-      case "getAllCoValuesWaitingForDelete":
-        return this.getAllCoValuesWaitingForDelete();
-      case "trackCoValuesSyncState":
-        return this.trackCoValuesSyncState(
-          args[0] as { id: string; peerId: string; synced: boolean }[],
-        );
-      case "getUnsyncedCoValueIDs":
-        return this.getUnsyncedCoValueIDs();
-      case "stopTrackingSyncState":
-        return this.stopTrackingSyncState(args[0] as string);
-      case "eraseCoValueButKeepTombstone":
-        return this.eraseCoValueButKeepTombstone(args[0] as string);
-      case "getCoValueKnownState":
-        return this.getCoValueKnownState(args[0] as string);
+  /**
+   * Store a NewContentMessage in a single synchronous call.
+   *
+   * Performs: upsert CoValue + for each session: get/create session,
+   * write transactions, write signatures, update session metadata.
+   *
+   * Returns the resulting CoValueKnownState after the store, and whether
+   * the CoValue row was successfully stored (undefined if correction needed).
+   */
+  storeContent(
+    msg: CojsonInternalTypes.NewContentMessage,
+    deletedCoValues: Set<string>,
+  ): {
+    knownState: CojsonInternalTypes.CoValueKnownState;
+    storedCoValueRowID: number | undefined;
+  } {
+    const id = msg.id;
 
-      // DBTransactionInterfaceAsync (tx.* prefix)
-      case "tx.getSingleCoValueSession":
-        return this.getSingleCoValueSession(
-          args[0] as number,
-          args[1] as string,
+    // 1. Upsert the CoValue
+    const storedCoValueRowID = this.upsertCoValue(id, msg.header);
+
+    if (!storedCoValueRowID) {
+      // No header and CoValue doesn't exist yet — return empty known state
+      return {
+        knownState: { id: id as RawCoID, header: false, sessions: {} },
+        storedCoValueRowID: undefined,
+      };
+    }
+
+    const knownState: CojsonInternalTypes.CoValueKnownState = {
+      id: id as RawCoID,
+      header: true,
+      sessions: {},
+    };
+
+    // Pre-populate known state with ALL existing sessions in storage
+    // (not just the ones in the current message).
+    // This is critical for multi-session CoValues where the incoming
+    // message only contains a subset of sessions.
+    const existingSessions = this.getCoValueSessions(storedCoValueRowID);
+    for (const session of existingSessions) {
+      knownState.sessions[session.sessionID as SessionID] = session.lastIdx;
+    }
+
+    let invalidAssumptions = false;
+
+    // 2. Process each session
+    for (const sessionID of Object.keys(msg.new) as SessionID[]) {
+      const sessionRow = this.getSingleCoValueSession(
+        storedCoValueRowID,
+        sessionID,
+      );
+
+      // Handle delete markers
+      if (
+        deletedCoValues.has(id) &&
+        isDeleteSessionID(sessionID as SessionID)
+      ) {
+        this.markCoValueAsDeleted(id);
+      }
+
+      if (sessionRow) {
+        setSessionCounter(
+          knownState.sessions,
+          sessionRow.sessionID as SessionID,
+          sessionRow.lastIdx,
         );
-      case "tx.markCoValueAsDeleted":
-        return this.markCoValueAsDeleted(args[0] as string);
-      case "tx.addSessionUpdate":
-        return this.addSessionUpdate(
-          args[0] as {
-            sessionUpdate: {
-              coValue: number;
-              sessionID: string;
-              lastIdx: number;
-              lastSignature: string;
-              bytesSinceLastSignature?: number;
-            };
-            sessionRow?: { rowID: number };
+      }
+
+      const lastIdx = sessionRow?.lastIdx || 0;
+      const after = msg.new[sessionID]?.after || 0;
+
+      if (lastIdx < after) {
+        // Storage has less data than message assumes — need correction
+        invalidAssumptions = true;
+      } else {
+        // 3. Write new transactions + signatures
+        const newLastIdx = this.putNewTxs(
+          msg,
+          sessionID,
+          sessionRow,
+          storedCoValueRowID,
+        );
+        setSessionCounter(knownState.sessions, sessionID, newLastIdx);
+      }
+    }
+
+    return {
+      knownState,
+      storedCoValueRowID: invalidAssumptions ? undefined : storedCoValueRowID,
+    };
+  }
+
+  /**
+   * Write new transactions and signatures for a session.
+   * Synchronous — all bf-tree operations happen in the worker.
+   */
+  private putNewTxs(
+    msg: CojsonInternalTypes.NewContentMessage,
+    sessionID: SessionID,
+    sessionRow: InternalSessionRow | undefined,
+    storedCoValueRowID: number,
+  ): number {
+    const sessionEntry = msg.new[sessionID];
+    if (!sessionEntry) throw new Error("Session ID not found");
+
+    const newTransactions = sessionEntry.newTransactions || [];
+    const lastIdx = sessionRow?.lastIdx || 0;
+    const actuallyNewOffset = lastIdx - (sessionEntry.after || 0);
+    const actuallyNewTransactions = newTransactions.slice(actuallyNewOffset);
+
+    if (actuallyNewTransactions.length === 0) {
+      return lastIdx;
+    }
+
+    let bytesSinceLastSignature = sessionRow?.bytesSinceLastSignature || 0;
+    const newTransactionsSize = getNewTransactionsSize(actuallyNewTransactions);
+    const newLastIdx = lastIdx + actuallyNewTransactions.length;
+
+    let shouldWriteSignature = false;
+    if (exceedsRecommendedSize(bytesSinceLastSignature, newTransactionsSize)) {
+      shouldWriteSignature = true;
+      bytesSinceLastSignature = 0;
+    } else {
+      bytesSinceLastSignature += newTransactionsSize;
+    }
+
+    const sessionUpdate = {
+      coValue: storedCoValueRowID,
+      sessionID,
+      lastIdx: newLastIdx,
+      lastSignature: sessionEntry.lastSignature,
+      bytesSinceLastSignature,
+    };
+
+    const sessionRowID = this.addSessionUpdate({
+      sessionUpdate,
+      sessionRow,
+    });
+
+    if (shouldWriteSignature) {
+      this.addSignatureAfter({
+        sessionRowID,
+        idx: newLastIdx - 1,
+        signature: sessionEntry.lastSignature,
+      });
+    }
+
+    for (let i = 0; i < actuallyNewTransactions.length; i++) {
+      this.addTransaction(
+        sessionRowID,
+        lastIdx + i,
+        actuallyNewTransactions[i]!,
+      );
+    }
+
+    return newLastIdx;
+  }
+
+  /**
+   * Load all content for a CoValue in a single synchronous call.
+   *
+   * Assembles complete NewContentMessage objects (including streamed chunks
+   * for large CoValues with multiple signatures).
+   *
+   * Returns the messages, the resulting known state, and whether the CoValue was found.
+   */
+  loadContent(id: string): {
+    messages: CojsonInternalTypes.NewContentMessage[];
+    knownState: CojsonInternalTypes.CoValueKnownState | undefined;
+    found: boolean;
+  } {
+    const coValueRow = this.getCoValue(id);
+
+    if (!coValueRow) {
+      return { messages: [], knownState: undefined, found: false };
+    }
+
+    const allSessions = this.getCoValueSessions(coValueRow.rowID);
+    const messages: CojsonInternalTypes.NewContentMessage[] = [];
+
+    // Collect signatures per session
+    const signaturesBySession = new Map<
+      string,
+      { idx: number; signature: string }[]
+    >();
+    let needsStreaming = false;
+
+    for (const sessionRow of allSessions) {
+      const signatures = this.getSignatures(sessionRow.rowID, 0);
+      if (signatures.length > 0) {
+        needsStreaming = true;
+        signaturesBySession.set(sessionRow.sessionID, signatures);
+      }
+    }
+
+    // Build known state
+    const knownState: CojsonInternalTypes.CoValueKnownState = {
+      id: coValueRow.id as RawCoID,
+      header: true,
+      sessions: {},
+    };
+
+    for (const sessionRow of allSessions) {
+      knownState.sessions[sessionRow.sessionID as SessionID] =
+        sessionRow.lastIdx;
+    }
+
+    let contentMessage = createContentMessage(
+      coValueRow.id as RawCoID,
+      coValueRow.header as CojsonInternalTypes.CoValueHeader,
+    );
+
+    if (needsStreaming) {
+      contentMessage.expectContentUntil = knownState.sessions;
+    }
+
+    for (const sessionRow of allSessions) {
+      const signatures = [
+        ...(signaturesBySession.get(sessionRow.sessionID) || []),
+      ];
+
+      let idx = 0;
+
+      const lastSignature = signatures[signatures.length - 1];
+
+      if (lastSignature?.signature !== sessionRow.lastSignature) {
+        signatures.push({
+          idx: sessionRow.lastIdx,
+          signature: sessionRow.lastSignature,
+        });
+      }
+
+      for (const signature of signatures) {
+        const txRows = this.getNewTransactionInSession(
+          sessionRow.rowID,
+          idx,
+          signature.idx,
+        );
+
+        collectNewTxs({
+          newTxsInSession: txRows,
+          contentMessage,
+          sessionRow: sessionRow as {
+            rowID: number;
+            coValue: number;
+            sessionID: SessionID;
+            lastIdx: number;
+            lastSignature: CojsonInternalTypes.Signature;
+            bytesSinceLastSignature?: number;
           },
-        );
-      case "tx.addTransaction":
-        return this.addTransaction(
-          args[0] as number,
-          args[1] as number,
-          args[2],
-        );
-      case "tx.addSignatureAfter":
-        return this.addSignatureAfter(
-          args[0] as { sessionRowID: number; idx: number; signature: string },
-        );
-      case "tx.deleteCoValueContent":
-        return this.deleteCoValueContent(
-          args[0] as { rowID: number; id: string },
-        );
+          firstNewTxIdx: idx,
+          signature: signature.signature as CojsonInternalTypes.Signature,
+        });
 
-      default:
-        throw new Error(`BfTreeWorkerBackend: unknown method "${method}"`);
+        idx = signature.idx + 1;
+
+        if (signatures.length > 1) {
+          // Stream: push current chunk, start new message
+          messages.push(contentMessage);
+          contentMessage = createContentMessage(
+            coValueRow.id as RawCoID,
+            coValueRow.header as CojsonInternalTypes.CoValueHeader,
+          );
+        }
+      }
+    }
+
+    const hasNewContent = Object.keys(contentMessage.new).length > 0;
+    if (hasNewContent || !needsStreaming) {
+      messages.push(contentMessage);
+    }
+
+    return { messages, knownState, found: true };
+  }
+
+  /**
+   * Erase all CoValues that are waiting for deletion.
+   * Cooperative: checks an abort signal between iterations.
+   */
+  eraseAllDeletedCoValues(signal?: AbortSignal): void {
+    const ids = this.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      if (signal?.aborted) return;
+      this.eraseCoValueButKeepTombstone(id);
     }
   }
 
@@ -179,17 +425,13 @@ export class BfTreeWorkerBackend {
    * after a page reload are consistent within a session.
    */
   private rebuildRowIdMaps(): void {
-    // Scan all coValues
     for (const [key] of this.scanByPrefix(Keys.coValuePrefix())) {
-      // key = "cv|{coValueId}"
       const coValueId = key.slice(Keys.coValuePrefix().length);
       this.assignCoValueRowId(coValueId);
     }
 
-    // Scan all sessions
     for (const [key] of this.scanByPrefix("se|")) {
-      // key = "se|{coValueId}|{sessionID}"
-      const rest = key.slice(3); // skip "se|"
+      const rest = key.slice(3);
       const sepIdx = rest.indexOf("|");
       if (sepIdx === -1) continue;
       const coValueId = rest.slice(0, sepIdx);
@@ -199,7 +441,7 @@ export class BfTreeWorkerBackend {
   }
 
   // ===================================================================
-  // DBClientInterfaceAsync — method implementations
+  // CoValue CRUD operations
   // ===================================================================
 
   getCoValue(coValueId: string) {
@@ -223,22 +465,11 @@ export class BfTreeWorkerBackend {
     if (!coValueId) return [];
 
     const prefix = Keys.sessionPrefix(coValueId);
-    const results: {
-      rowID: number;
-      coValue: number;
-      sessionID: string;
-      lastIdx: number;
-      lastSignature: string;
-      bytesSinceLastSignature?: number;
-    }[] = [];
+    const results: InternalSessionRow[] = [];
 
     for (const [key, value] of this.scanByPrefix(prefix)) {
       const sessionID = key.slice(prefix.length);
-      const data = JSON.parse(value) as {
-        lastIdx: number;
-        lastSignature: string;
-        bytesSinceLastSignature?: number;
-      };
+      const data = JSON.parse(value) as SessionRowData;
       results.push({
         rowID: this.assignSessionRowId(coValueId, sessionID),
         coValue: coValueRowId,
@@ -259,10 +490,16 @@ export class BfTreeWorkerBackend {
     if (!sessionKey) return [];
 
     const [coValueId, sessionID] = this.splitSessionKey(sessionKey);
-    const results: { ses: number; idx: number; tx: unknown }[] = [];
+    const results: {
+      ses: number;
+      idx: number;
+      tx: CojsonInternalTypes.Transaction;
+    }[] = [];
 
     for (let idx = fromIdx; idx <= toIdx; idx++) {
-      const tx = this.get(Keys.transaction(coValueId, sessionID, idx));
+      const tx = this.get<CojsonInternalTypes.Transaction>(
+        Keys.transaction(coValueId, sessionID, idx),
+      );
       if (tx !== undefined) {
         results.push({ ses: sessionRowId, idx, tx });
       }
@@ -300,7 +537,6 @@ export class BfTreeWorkerBackend {
 
     for (const [key, value] of this.scanByPrefix(prefix)) {
       const status = JSON.parse(value) as number;
-      // 0 = Pending
       if (status === 0) {
         result.push(key.slice(prefix.length));
       }
@@ -327,7 +563,6 @@ export class BfTreeWorkerBackend {
     const ids = new Set<string>();
 
     for (const [key] of this.scanByPrefix(prefix)) {
-      // key = "us|{coValueId}|{peerId}"
       const rest = key.slice(prefix.length);
       const sepIdx = rest.indexOf("|");
       if (sepIdx !== -1) {
@@ -348,7 +583,6 @@ export class BfTreeWorkerBackend {
   eraseCoValueButKeepTombstone(coValueID: string) {
     const coValueRow = this.getCoValue(coValueID);
     if (!coValueRow) return;
-
     this.deleteCoValueContent({ rowID: coValueRow.rowID, id: coValueID });
   }
 
@@ -358,37 +592,32 @@ export class BfTreeWorkerBackend {
 
     const sessions = this.getCoValueSessions(coValueRow.rowID);
 
-    const knownState: {
-      id: string;
-      header: boolean;
-      sessions: Record<string, number>;
-    } = {
-      id: coValueId,
+    const knownState: CojsonInternalTypes.CoValueKnownState = {
+      id: coValueId as RawCoID,
       header: true,
       sessions: {},
     };
 
     for (const session of sessions) {
-      knownState.sessions[session.sessionID] = session.lastIdx;
+      knownState.sessions[session.sessionID as SessionID] = session.lastIdx;
     }
 
     return knownState;
   }
 
   // ===================================================================
-  // DBTransactionInterfaceAsync — method implementations
+  // Session / Transaction / Signature operations
   // ===================================================================
 
-  getSingleCoValueSession(coValueRowId: number, sessionID: string) {
+  getSingleCoValueSession(
+    coValueRowId: number,
+    sessionID: string,
+  ): InternalSessionRow | undefined {
     const coValueId = this.rowIdToCoValueId.get(coValueRowId);
     if (!coValueId) return undefined;
 
     const key = Keys.session(coValueId, sessionID);
-    const data = this.get<{
-      lastIdx: number;
-      lastSignature: string;
-      bytesSinceLastSignature?: number;
-    }>(key);
+    const data = this.get<SessionRowData>(key);
     if (!data) return undefined;
 
     return {
@@ -400,7 +629,6 @@ export class BfTreeWorkerBackend {
   }
 
   markCoValueAsDeleted(id: string) {
-    // 0 = DeletedCoValueDeletionStatus.Pending
     this.put(Keys.deleted(id), 0);
   }
 
@@ -431,7 +659,6 @@ export class BfTreeWorkerBackend {
       bytesSinceLastSignature: sessionUpdate.bytesSinceLastSignature,
     });
 
-    // Return the session row ID (reuse if updating)
     if (sessionRow?.rowID) {
       return sessionRow.rowID;
     }
@@ -471,7 +698,6 @@ export class BfTreeWorkerBackend {
   deleteCoValueContent(coValueRow: { rowID: number; id: string }) {
     const coValueId = coValueRow.id;
 
-    // Get all sessions for this coValue
     const prefix = Keys.sessionPrefix(coValueId);
     const sessionKeys: string[] = [];
 
@@ -481,13 +707,11 @@ export class BfTreeWorkerBackend {
       // Keep delete sessions (ending with "$")
       if (sessionID.endsWith("$")) continue;
 
-      // Delete all transactions for this session
       const txPrefix = Keys.transactionPrefix(coValueId, sessionID);
       for (const [txKey] of this.scanByPrefix(txPrefix)) {
         this.del(txKey);
       }
 
-      // Delete all signatures for this session
       const sigPrefix = Keys.signaturePrefix(coValueId, sessionID);
       for (const [sigKey] of this.scanByPrefix(sigPrefix)) {
         this.del(sigKey);
@@ -496,12 +720,10 @@ export class BfTreeWorkerBackend {
       sessionKeys.push(key);
     }
 
-    // Delete the session entries themselves (non-delete sessions)
     for (const key of sessionKeys) {
       this.del(key);
     }
 
-    // Mark deletion as done (status = 1)
     this.put(Keys.deleted(coValueId), 1);
   }
 }
