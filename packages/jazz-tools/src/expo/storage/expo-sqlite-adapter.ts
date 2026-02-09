@@ -67,8 +67,8 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
       throw new Error("Database not initialized");
     }
 
-    await this.db.withExclusiveTransactionAsync(async (tx) => {
-      await callback(ExpoSQLiteAdapter.withDB(tx));
+    await this.db.withTransactionAsync(async () => {
+      await callback(ExpoSQLiteAdapter.withDB(this.db!));
     });
   }
 
