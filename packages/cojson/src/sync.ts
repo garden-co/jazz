@@ -344,14 +344,15 @@ export class SyncManager {
   startStorageReconciliation(
     peer: PeerState,
     initialOffset?: number,
-    onComplete?: () => void,
+    _onComplete?: () => void,
   ): void {
     if (!this.local.storage) return;
     if (!isPersistentServerPeer(peer)) return;
 
     const startOffset = initialOffset ?? 0;
-
     const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
+    const totalCoValueCount = 0; // TODO
+
     const sendReconcileBatch = (
       batchId: string,
       entries: [RawCoID, string][],
@@ -369,8 +370,22 @@ export class SyncManager {
       );
       this.trySendToPeer(peer, msg);
     };
+    const onComplete = (reconciledCoValueCount: number) => {
+      logger.info("Storage reconciliation complete", {
+        peerId: peer.id,
+        startOffset,
+        completed: reconciledCoValueCount,
+        total: reconciledCoValueCount,
+      });
+      _onComplete?.();
+    };
 
     const processStorageBatch = (offset: number) => {
+      logger.info("Reconciliating CoValues in storage", {
+        peerId: peer.id,
+        completed: offset,
+        total: totalCoValueCount,
+      });
       this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
         // Process only CoValues that are not in memory
         const coValues = batch.map(({ id }) => this.local.getCoValue(id));
@@ -387,7 +402,7 @@ export class SyncManager {
             if (batch.length === batchSize) {
               processStorageBatch(offset + batchSize);
             } else {
-              onComplete?.();
+              onComplete(offset + batch.length);
             }
           }
         };
@@ -406,12 +421,17 @@ export class SyncManager {
           if (batch.length === batchSize) {
             processStorageBatch(offset + batchSize);
           } else {
-            onComplete?.();
+            onComplete(offset + batch.length);
           }
         }
       });
     };
 
+    logger.info("Starting storage reconciliation", {
+      peerId: peer.id,
+      startOffset,
+      total: totalCoValueCount,
+    });
     processStorageBatch(startOffset);
   }
 
