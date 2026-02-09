@@ -172,7 +172,7 @@ export class CoValueCoreSubscription {
     // Subscribe to the value and store the unsubscribe function
     this._unsubscribe = value.subscribe((value) => {
       if (value.isAvailable()) {
-        this.emit(value.getCurrentContent());
+        this.emit(value);
       }
     });
 
@@ -183,28 +183,13 @@ export class CoValueCoreSubscription {
 
   lastState: CoValueLoadingState | undefined;
 
-  emit(value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE): void {
+  emit(value: CoValueCore | typeof CoValueLoadingState.UNAVAILABLE): void {
     if (this.unsubscribed) return;
-    if (!this.isReadyForEmit(value)) {
-      return;
-    }
-
-    this.listener(value);
-  }
-
-  isReadyForEmit(
-    value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
-  ): boolean {
     if (value === CoValueLoadingState.UNAVAILABLE) {
-      return true;
+      this.listener(CoValueLoadingState.UNAVAILABLE);
+    } else if (isCompletelyDownloaded(value)) {
+      this.listener(value.getCurrentContent());
     }
-
-    // If the value is not completely downloaded, we don't emit it to avoid providing partial data to the listener.
-    if (!isCompletelyDownloaded(value)) {
-      return false;
-    }
-
-    return true;
   }
 
   /**
@@ -221,10 +206,10 @@ export class CoValueCoreSubscription {
 /**
  * This is true if the value is unavailable, or if the value is a binary coValue or a completely downloaded coValue.
  */
-function isCompletelyDownloaded(value: RawCoValue) {
+function isCompletelyDownloaded(value: CoValueCore) {
   return (
-    value.core.isDeleted ||
-    value.core.verified?.header.meta?.type === "binary" ||
-    value.core.isCompletelyDownloaded()
+    value.isDeleted ||
+    value.verified?.header.meta?.type === "binary" ||
+    value.isCompletelyDownloaded()
   );
 }
