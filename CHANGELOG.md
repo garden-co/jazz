@@ -1,8 +1,10 @@
 Released Jazz 0.20.8:
+- Improved FileStream base64 encoding performance. Up to **20x faster** in `asBase64` conversion on React Native and around **5x faster** blob conversions on all the platforms.
+- Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing for streaming values
 - Added `getOrCreateUnique` method to CoMap, CoList, and CoFeed. This provides a "get or create only" semantic — it returns an existing value as-is, and only uses the provided value when creating a new CoValue. Unlike `upsertUnique`, it does NOT update existing values. Also deprecates `loadUnique` and `upsertUnique` in favor of `getOrCreateUnique`.
-- Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Engineering" })`)
-- Improved FileStream base64 encoding performance by using `bytesToBase64url` instead of `btoa` with `String.fromCharCode`, and added native `toBase64`/`fromBase64` support in cojson when available. Up to **14x faster** `asBase64` and **4.5x faster** `getChunks` on 5MB files.
-- Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing
+- Introduced key revelations based on a group owned asymmetric key. This makes extending groups without having access to the encryption key zero-cost for the parent group.
+- Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Billing" })`)
+- Improved performance of writeKey revelations permission checks in groups with many writeOnlyKeys
 - Bugfix: fixed `createdAt` getter to use CoValue's header
 - Bugfix: fixed issue with CoRecord serialisation
 - Bugfix: prevent conflicts between concurrent async SQLite transactions
