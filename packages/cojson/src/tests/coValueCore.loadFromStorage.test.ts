@@ -37,6 +37,7 @@ function createMockStorage(
       offset: number,
       callback: (batch: { id: RawCoID }[]) => void,
     ) => void;
+    getCoValueCount?: (callback: (count: number) => void) => void;
     load?: (
       id: RawCoID,
       callback: (data: any) => void,
@@ -77,6 +78,7 @@ function createMockStorage(
 ): StorageAPI {
   return {
     getCoValueIDs: opts.getCoValueIDs || vi.fn(),
+    getCoValueCount: opts.getCoValueCount || vi.fn(),
     markDeleteAsValid: opts.markDeleteAsValid || vi.fn(),
     enableDeletedCoValuesErasure: opts.enableDeletedCoValuesErasure || vi.fn(),
     eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),

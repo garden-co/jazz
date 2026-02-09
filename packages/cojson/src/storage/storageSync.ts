@@ -78,6 +78,10 @@ export class StorageApiSync implements StorageAPI {
     callback(batch);
   }
 
+  getCoValueCount(callback: (count: number) => void): void {
+    callback(this.dbClient.getCoValueCount());
+  }
+
   tryAcquireStorageReconciliationLock(
     sessionId: SessionID,
     peerId: PeerID,

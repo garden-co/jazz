@@ -853,6 +853,39 @@ describe("getCoValueIDs", () => {
   });
 });
 
+describe("getCoValueCount", () => {
+  test("returns 0 when storage has no CoValues", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const count = await new Promise<number>((resolve) => {
+      node1.storage!.getCoValueCount(resolve);
+    });
+
+    expect(count).toBe(0);
+  });
+
+  test("returns CoValue count after storing CoValues", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const countEmpty = await new Promise<number>((resolve) => {
+      node1.storage!.getCoValueCount(resolve);
+    });
+    expect(countEmpty).toBe(0);
+
+    const group = node1.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world");
+    await map.core.waitForSync();
+
+    const countTwo = await new Promise<number>((resolve) => {
+      node1.storage!.getCoValueCount(resolve);
+    });
+    expect(countTwo).toBe(2);
+  });
+});
+
 describe("full storage reconciliation", () => {
   test("syncs CoValues in storage", async () => {
     const client = createTestNode();

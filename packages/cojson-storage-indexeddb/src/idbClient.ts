@@ -396,6 +396,10 @@ export class IDBClient implements DBClientInterfaceAsync {
     return rows.map((row) => ({ id: row.id }));
   }
 
+  async getCoValueCount(): Promise<number> {
+    return queryIndexedDbStore(this.db, "coValues", (store) => store.count());
+  }
+
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
     const records = await queryIndexedDbStore<
       { rowID: number; coValueId: RawCoID; peerId: string }[]

@@ -380,6 +380,14 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     );
   }
 
+  async getCoValueCount(): Promise<number> {
+    const row = await this.db.get<{ count: number }>(
+      "SELECT COUNT(*) as count FROM coValues",
+      [],
+    );
+    return row?.count ?? 0;
+  }
+
   async tryAcquireStorageReconciliationLock(
     sessionId: SessionID,
     peerId: PeerID,

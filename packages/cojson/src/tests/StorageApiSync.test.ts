@@ -1351,4 +1351,66 @@ describe("StorageApiSync", () => {
       }
     });
   });
+
+  describe("getCoValueCount", () => {
+    test("should return 0 when storage has no CoValues", async () => {
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const count = await new Promise<number>((resolve) => {
+        storage.getCoValueCount(resolve);
+      });
+
+      expect(count).toBe(0);
+    });
+
+    test("should return CoValue count after storing CoValues", async () => {
+      const dbPath = getDbPath();
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const countEmpty = await new Promise<number>((resolve) => {
+        storage.getCoValueCount(resolve);
+      });
+      expect(countEmpty).toBe(0);
+
+      const group = fixtures.node.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      const countOne = await new Promise<number>((resolve) => {
+        storage.getCoValueCount(resolve);
+      });
+      expect(countOne).toBe(1);
+
+      const map = group.createMap();
+      map.set("key", "value", "trusting");
+      await map.core.waitForSync();
+
+      const countTwo = await new Promise<number>((resolve) => {
+        storage.getCoValueCount(resolve);
+      });
+      expect(countTwo).toBe(2);
+    });
+  });
 });
