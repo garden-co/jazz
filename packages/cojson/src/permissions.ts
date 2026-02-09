@@ -627,16 +627,16 @@ function isOwnWriteKeyRevelation(
 ): key is
   | `${KeyID}_for_${RawAccountID | AgentID}`
   | `${KeyID}_sealedFor_${SealerID}` {
-  if (Object.keys(writeOnlyKeys).length === 0) {
-    return false;
-  }
-
   let i = key.indexOf("_for_");
   if (i === -1) {
     i = key.indexOf("_sealedFor_");
   }
 
   const keyID = key.slice(0, i);
+
+  if (!keyID) {
+    return false;
+  }
 
   return writeOnlyKeys[memberKey] === keyID;
 }
