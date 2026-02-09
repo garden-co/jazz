@@ -32,7 +32,11 @@ export class PriorityBasedMessageQueue {
   }
 
   public push(msg: SyncMessage) {
-    const priority = "priority" in msg ? msg.priority : this.defaultPriority;
+    let priority = "priority" in msg ? msg.priority : this.defaultPriority;
+
+    if (msg.action === "reconcile") {
+      priority = CO_VALUE_PRIORITY.LOW;
+    }
 
     this.getQueue(priority).push(msg);
   }

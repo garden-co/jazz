@@ -25,6 +25,7 @@ import { CoValuePriority } from "./priority.js";
 import { IncomingMessagesQueue } from "./queue/IncomingMessagesQueue.js";
 import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.js";
 import type { StorageStreamingQueue } from "./queue/StorageStreamingQueue.js";
+import { StorageReconciliationAckTracker } from "./StorageReconciliationAckTracker.js";
 import {
   CoValueKnownState,
   knownStateFrom,
@@ -138,9 +139,11 @@ export type ServerPeerSelector = (
 export class SyncManager {
   peers: { [key: PeerID]: PeerState } = {};
   local: LocalNode;
+  private reconciliationAckTracker = new StorageReconciliationAckTracker();
 
-  /** Tracks pending reconcile acks: "batchId#peerId->offset". Cleared in handleReconcileAck. */
-  pendingReconciliationAck: Map<string, number> = new Map();
+  get pendingReconciliationAck(): Map<string, number> {
+    return this.reconciliationAckTracker.pendingReconciliationAck;
+  }
 
   // When true, transactions will not be verified.
   // This is useful when syncing only for storage purposes, with the expectation that
@@ -352,25 +355,32 @@ export class SyncManager {
     const startOffset = initialOffset ?? 0;
     const batchSize = STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
 
-    this.local.storage.getCoValueCount((totalCoValueCount) => {
-      const sendReconcileBatch = (
+    const storage = this.local.storage;
+
+    storage.getCoValueCount((totalCoValueCount) => {
+      const sendReconcileMessage = (
         batchId: string,
         entries: [RawCoID, string][],
         offset: number,
       ) => {
         if (entries.length === 0) return;
-        const msg: ReconcileMessage = {
+
+        this.reconciliationAckTracker.trackBatch(
+          batchId,
+          peer.id,
+          offset + batchSize,
+        );
+
+        this.trySendToPeer(peer, {
           action: "reconcile",
           id: batchId,
           values: entries,
-        };
-        this.pendingReconciliationAck.set(
-          `${batchId}#${peer.id}`,
-          offset + batchSize,
-        );
-        this.trySendToPeer(peer, msg);
+        });
       };
+
       const triggerNextBatch = (lastBatchLength: number, offset: number) => {
+        // This value becomes false when the last covalueid batch picked from the storage
+        // is smaller than the batch size.
         if (lastBatchLength === batchSize) {
           logger.info("Reconciliated CoValues in storage", {
             peerId: peer.id,
@@ -392,43 +402,20 @@ export class SyncManager {
       };
 
       const processStorageBatch = (offset: number) => {
-        this.local.storage!.getCoValueIDs(batchSize, offset, (batch) => {
-          // Process only CoValues that are not in memory
-          const coValues = batch.map(({ id }) => this.local.getCoValue(id));
-          const pending = coValues.filter(
-            (coValue) => coValue.loadingState === "unknown",
-          );
-          let done = 0;
-          const entries: [RawCoID, string][] = [];
-          const sendReconcileMessageWhenDone = async () => {
-            if (++done === pending.length) {
-              const batchId = base58.encode(this.local.crypto.randomBytes(12));
-              sendReconcileBatch(batchId, entries, offset);
-              const shouldContinue = await this.waitUntilNextBatch(
-                batchId,
-                peer,
-              );
-              if (!shouldContinue) {
-                this.pendingReconciliationAck.delete(`${batchId}#${peer.id}`);
-                return;
-              }
+        storage.getCoValueIDs(batchSize, offset, (batch) => {
+          this.buildStorageReconciliationEntries(batch, (entries) => {
+            if (entries.length === 0) {
               triggerNextBatch(batch.length, offset);
+              return;
             }
-          };
-          for (const coValue of pending) {
-            coValue.getKnownStateFromStorage((storageKnownState) => {
-              if (storageKnownState) {
-                entries.push([
-                  coValue.id,
-                  this.hashKnownStateSessions(storageKnownState.sessions),
-                ]);
-              }
-              sendReconcileMessageWhenDone();
+
+            const batchId = base58.encode(this.local.crypto.randomBytes(12));
+            sendReconcileMessage(batchId, entries, offset);
+
+            this.reconciliationAckTracker.waitForAck(batchId, peer, () => {
+              triggerNextBatch(batch.length, offset);
             });
-          }
-          if (pending.length === 0) {
-            triggerNextBatch(batch.length, offset);
-          }
+          });
         });
       };
 
@@ -441,34 +428,38 @@ export class SyncManager {
     });
   }
 
-  /**
-   * Waits until the previous batch is acknowledged before sending the next batch.
-   * Also checks the peer has no unsent messages to avoid queuing additional low-priority
-   * reconciliation messages.
-   * @returns true if the process should continue, and false if it should exit.
-   */
-  private async waitUntilNextBatch(
-    batchId: string,
-    peer: PeerState,
-  ): Promise<boolean> {
-    const sendNextBatch = (): boolean => {
-      const isBatchAcknowledged = !this.pendingReconciliationAck.has(
-        `${batchId}#${peer.id}`,
-      );
-      return isBatchAcknowledged && !peer.hasUnsentMessages;
-    };
-    while (!sendNextBatch()) {
-      if (peer.closed) {
-        return false;
-      }
-      await new Promise<void>((resolve) =>
-        setTimeout(
-          resolve,
-          STORAGE_RECONCILIATION_CONFIG.BATCH_ACK_POLLING_INTERVAL_MS,
-        ),
-      );
+  private buildStorageReconciliationEntries(
+    batch: { id: RawCoID }[],
+    callback: (entries: [RawCoID, string][]) => void,
+  ): void {
+    const coValues = batch.map(({ id }) => this.local.getCoValue(id));
+    const pending = coValues.filter(
+      (coValue) => coValue.loadingState === "unknown",
+    );
+
+    if (pending.length === 0) {
+      callback([]);
+      return;
     }
-    return true;
+
+    let done = 0;
+    const entries: [RawCoID, string][] = [];
+
+    for (const coValue of pending) {
+      coValue.getKnownStateFromStorage((storageKnownState) => {
+        if (storageKnownState) {
+          entries.push([
+            coValue.id,
+            this.hashKnownStateSessions(storageKnownState.sessions),
+          ]);
+        }
+
+        done += 1;
+        if (done === pending.length) {
+          callback(entries);
+        }
+      });
+    }
   }
 
   private maybeStartStorageReconciliationForPeer(peer: PeerState): void {
@@ -999,9 +990,7 @@ export class SyncManager {
   }
 
   handleReconcileAck(msg: ReconcileAckMessage, peer: PeerState): void {
-    const key = `${msg.id}#${peer.id}`;
-    const nextOffset = this.pendingReconciliationAck.get(key);
-    this.pendingReconciliationAck.delete(key);
+    const nextOffset = this.reconciliationAckTracker.handleAck(msg.id, peer.id);
     if (nextOffset !== undefined) {
       this.local.storage?.renewStorageReconciliationLock(
         this.local.currentSessionID,
