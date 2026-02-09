@@ -1,5 +1,23 @@
 # cojson
 
+## 0.20.8
+
+### Patch Changes
+
+- c7be307: Improved FileStream base64 encoding performance by using `bytesToBase64url` instead of `btoa` with `String.fromCharCode`. Added native `toBase64`/`fromBase64` support in cojson when available.
+
+  **Benchmark results (5MB file):**
+  - `asBase64`: 732.39 op/sec vs 49.78 op/sec (**+1371.36% faster**)
+  - `write`: 12.53 op/sec vs 12.19 op/sec (+2.79%)
+  - `getChunks`: 695.03 op/sec vs 153.89 op/sec (**+351.64% faster**)
+
+- b38a526: fix: prevent conflicts between concurrent async SQLite transactions
+- f701fd7: Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Engineering" })`)
+- 99f9d47: Improved performance of writeKey revelations validation in groups with many writeOnlyKeys
+  - cojson-core-wasm@0.20.8
+  - cojson-core-rn@0.20.8
+  - cojson-core-napi@0.20.8
+
 ## 0.20.7
 
 ### Patch Changes
