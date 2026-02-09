@@ -1,3 +1,12 @@
+Released Jazz 0.20.8:
+- Added `getOrCreateUnique` method to CoMap, CoList, and CoFeed. This provides a "get or create only" semantic — it returns an existing value as-is, and only uses the provided value when creating a new CoValue. Unlike `upsertUnique`, it does NOT update existing values. Also deprecates `loadUnique` and `upsertUnique` in favor of `getOrCreateUnique`.
+- Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Engineering" })`)
+- Improved FileStream base64 encoding performance by using `bytesToBase64url` instead of `btoa` with `String.fromCharCode`, and added native `toBase64`/`fromBase64` support in cojson when available. Up to **14x faster** `asBase64` and **4.5x faster** `getChunks` on 5MB files.
+- Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing
+- Bugfix: fixed `createdAt` getter to use CoValue's header
+- Bugfix: fixed issue with CoRecord serialisation
+- Bugfix: prevent conflicts between concurrent async SQLite transactions
+
 Released Jazz 0.20.7:
 - Bugfix: fixed a memory leak in the WebSocket outgoing queue introduced in 0.20.1 and improved queue close management
 
