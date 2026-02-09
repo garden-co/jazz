@@ -1,5 +1,5 @@
 ---
-"jazz-tools": minor
+"jazz-tools": patch
 ---
 
 Add `getOrCreateUnique` method to CoMap, CoList, and CoFeed
