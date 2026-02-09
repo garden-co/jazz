@@ -404,7 +404,14 @@ export class SyncManager {
             if (++done === pending.length) {
               const batchId = base58.encode(this.local.crypto.randomBytes(12));
               sendReconcileBatch(batchId, entries, offset);
-              await this.waitUntilNextBatch(batchId, peer);
+              const shouldContinue = await this.waitUntilNextBatch(
+                batchId,
+                peer,
+              );
+              if (!shouldContinue) {
+                this.pendingReconciliationAck.delete(`${batchId}#${peer.id}`);
+                return;
+              }
               triggerNextBatch(batch.length, offset);
             }
           };
@@ -438,8 +445,12 @@ export class SyncManager {
    * Waits until the previous batch is acknowledged before sending the next batch.
    * Also checks the peer has no unsent messages to avoid queuing additional low-priority
    * reconciliation messages.
+   * @returns true if the process should continue, and false if it should exit.
    */
-  private async waitUntilNextBatch(batchId: string, peer: PeerState) {
+  private async waitUntilNextBatch(
+    batchId: string,
+    peer: PeerState,
+  ): Promise<boolean> {
     const sendNextBatch = (): boolean => {
       const isBatchAcknowledged = !this.pendingReconciliationAck.has(
         `${batchId}#${peer.id}`,
@@ -447,6 +458,9 @@ export class SyncManager {
       return isBatchAcknowledged && !peer.hasUnsentMessages;
     };
     while (!sendNextBatch()) {
+      if (peer.closed) {
+        return false;
+      }
       await new Promise<void>((resolve) =>
         setTimeout(
           resolve,
@@ -454,6 +468,7 @@ export class SyncManager {
         ),
       );
     }
+    return true;
   }
 
   private maybeStartStorageReconciliationForPeer(peer: PeerState): void {

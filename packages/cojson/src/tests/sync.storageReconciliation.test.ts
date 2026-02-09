@@ -321,6 +321,55 @@ describe("full storage reconciliation", () => {
     `);
   });
 
+  test("aborts reconciliation when peer disconnects during wait for reconcile-ack", async () => {
+    const client = setupTestNode();
+    const { storage } = client.addStorage();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    const anotherClient = setupTestNode();
+    anotherClient.addStorage({ storage });
+    anotherClient.connectToSyncServer({
+      persistent: true,
+      skipReconciliation: true,
+    });
+
+    const serverPeer = Object.values(anotherClient.node.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    let reconciliationFinished = false;
+    anotherClient.node.syncManager.startStorageReconciliation(
+      serverPeer,
+      0,
+      () => {
+        reconciliationFinished = true;
+      },
+    );
+
+    // Prevent "reconcile" message from being processed so that client stays in "waiting" state
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const syncManager = jazzCloud.node.syncManager;
+    syncManager.handleReconcile = () => {
+      resolve();
+    };
+    await promise;
+
+    anotherClient.disconnect();
+
+    // Reconciliation should abort (peer closed) without hanging
+    // and clear the pending reconciliation ack
+    await waitFor(
+      () => anotherClient.node.syncManager.pendingReconciliationAck.size === 0,
+    );
+
+    // onComplete should NOT have been called (we aborted, did not complete)
+    expect(reconciliationFinished).toBe(false);
+  });
+
   describe("scheduling", () => {
     test("full storage reconciliation is not run if not enabled", async () => {
       const client = setupTestNode();
