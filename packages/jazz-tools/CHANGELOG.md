@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.20.9
+
+### Patch Changes
+
+- 75ecd19: Reverted the Expo SQLite adapter to use non-exclusive transactions, to fix the "database is locked" error when read queries are executed in the middle of a transaction.
+  - cojson@0.20.9
+  - cojson-storage-indexeddb@0.20.9
+  - cojson-transport-ws@0.20.9
+
 ## 0.20.8
 
 ### Patch Changes
