@@ -73,7 +73,7 @@ export class CoMapSchema<
           configurable: true,
         });
       } else {
-        plainShape[key] = generateValidationSchemaFromItem(this.shape[key]);
+        plainShape[key] = generateValidationSchemaFromItem(item);
       }
     }
 
