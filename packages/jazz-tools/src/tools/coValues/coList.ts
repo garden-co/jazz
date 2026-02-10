@@ -632,6 +632,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       itemDescriptor,
       this.owner,
       undefined,
+      undefined,
       options?.validation,
     )[0]!;
     if (rawValue === null && !itemDescriptor.optional) {
@@ -666,7 +667,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    */
   pushLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
     this.raw.appendItems(
-      toRawItems(items, this.schema[ItemsSym], this.owner, undefined, "loose"),
+      toRawItems(
+        items,
+        this.schema[ItemsSym],
+        this.owner,
+        undefined,
+        undefined,
+        "loose",
+      ),
       undefined,
       "private",
     );
@@ -703,6 +711,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       items as CoFieldInit<CoListItem<L>>[],
       this.schema[ItemsSym],
       this.owner,
+      undefined,
       undefined,
       "loose",
     )) {
@@ -794,6 +803,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       items as CoListItem<L>[],
       this.schema[ItemsSym],
       this.owner,
+      undefined,
       undefined,
       "loose",
     );
