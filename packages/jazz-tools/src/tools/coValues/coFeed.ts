@@ -3,9 +3,11 @@ import type {
   AgentID,
   BinaryStreamInfo,
   CojsonInternalTypes,
+  CoValueUniqueness,
   JsonValue,
   RawAccountID,
   RawBinaryCoStream,
+  RawCoID,
   RawCoStream,
   SessionID,
 } from "cojson";
@@ -15,14 +17,15 @@ import {
   CoFieldInit,
   CoValue,
   CoValueClass,
-  CoValueLoadingState,
   getCoValueOwner,
+  getIdFromHeader,
+  getUniqueHeader,
   Group,
   ID,
+  internalLoadUnique,
   MaybeLoaded,
   Settled,
   LoadedAndRequired,
-  unstable_mergeBranch,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -54,6 +57,7 @@ import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 import {
   executeValidation,
+  GlobalValidationMode,
   resolveValidationMode,
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
@@ -240,13 +244,17 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           validation?: LocalValidationMode;
+          unique?: CoValueUniqueness["uniqueness"];
+          firstComesWins?: boolean;
         }
       | Account
       | Group,
   ) {
-    const { owner } = parseCoValueCreateOptions(options);
-    const raw = owner.$jazz.raw.createStream();
-    const instance = new this({ fromRaw: raw });
+    const { owner, uniqueness, firstComesWins } =
+      parseCoValueCreateOptions(options);
+    const initMeta = firstComesWins ? { fww: "init" } : undefined;
+
+    const processedInit: JsonValue[] = [];
 
     if (init) {
       const validation =
@@ -262,9 +270,95 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         const fullSchema = coValueSchema.getValidationSchema();
         executeValidation(fullSchema, init, validationMode) as typeof init;
       }
-      instance.$jazz.pushLoose(...init);
+
+      // @ts-expect-error - _schema is not defined on the class
+      const itemDescriptor = this._schema[ItemsSym] as Schema;
+
+      for (let index = 0; index < init.length; index++) {
+        const item = init[index];
+        processedInit.push(
+          processCoFeedItem(
+            itemDescriptor,
+            item,
+            owner,
+            uniqueness
+              ? {
+                  uniqueness: uniqueness?.uniqueness,
+                  fieldName: `${index}`,
+                  firstComesWins,
+                }
+              : undefined,
+            validationMode,
+          ),
+        );
+      }
     }
-    return instance;
+
+    const raw = owner.$jazz.raw.createStream(
+      processedInit,
+      "private",
+      null,
+      uniqueness,
+      initMeta,
+    );
+    return new this({ fromRaw: raw }) as S;
+  }
+
+  /** @deprecated Use `CoFeed.getOrCreateUnique` instead. */
+  static findUnique<F extends CoFeed>(
+    this: CoValueClass<F>,
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+    as?: Account | Group | AnonymousJazzAgent,
+  ) {
+    const header = getUniqueHeader("costream", unique, ownerID);
+    return getIdFromHeader(header, as);
+  }
+
+  /**
+   * Get an existing unique CoFeed or create a new one if it doesn't exist.
+   *
+   * The provided value is only used when creating a new CoFeed.
+   *
+   * @example
+   * ```ts
+   * const feed = await MessageFeed.getOrCreateUnique({
+   *   value: [],
+   *   unique: `messages-${conversationId}`,
+   *   owner: group,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoFeed.
+   * @returns Either an existing CoFeed (unchanged), or a new initialised CoFeed if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    F extends CoFeed,
+    const R extends RefsToResolve<F> = true,
+  >(
+    this: CoValueClass<F>,
+    options: {
+      value: F extends CoFeed<infer Item> ? Item[] : never;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<F, R>;
+    },
+  ): Promise<Settled<Resolved<F, R>>> {
+    return internalLoadUnique(this, {
+      type: "costream",
+      unique: options.unique,
+      owner: options.owner,
+      resolve: options.resolve,
+      onCreateWhenMissing: () => {
+        (this as any).create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+          firstComesWins: true,
+        });
+      },
+      // No onUpdateWhenFound - CoFeed is append-only
+    });
   }
 
   /**
@@ -365,6 +459,45 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 /** @internal */
 type CoFeedItem<L> = L extends CoFeed<infer Item> ? Item : never;
 
+/** @internal */
+function processCoFeedItem<F extends CoFeed>(
+  itemDescriptor: Schema,
+  item: CoFieldInit<CoFeedItem<F>>,
+  owner: Group,
+  unique?: {
+    uniqueness: CoValueUniqueness["uniqueness"];
+    fieldName: string;
+    firstComesWins: boolean;
+  },
+  validationMode?: GlobalValidationMode,
+) {
+  if (itemDescriptor === "json") {
+    return item as JsonValue;
+  } else if ("encoded" in itemDescriptor) {
+    return itemDescriptor.encoded.encode(item);
+  } else if (isRefEncoded(itemDescriptor)) {
+    let refId = (item as unknown as CoValue).$jazz?.id;
+    if (!refId) {
+      const newOwnerStrategy =
+        itemDescriptor.permissions?.newInlineOwnerStrategy;
+      const onCreate = itemDescriptor.permissions?.onCreate;
+      const coValue = instantiateRefEncodedWithInit(
+        itemDescriptor,
+        item,
+        owner,
+        newOwnerStrategy,
+        onCreate,
+        unique,
+        validationMode,
+      );
+      refId = coValue.$jazz.id;
+    }
+    return refId;
+  }
+
+  throw new Error("Invalid item field schema");
+}
+
 export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   constructor(
     private coFeed: F,
@@ -443,28 +576,15 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   ) {
     const itemDescriptor = this.schema[ItemsSym] as Schema;
 
-    if (itemDescriptor === "json") {
-      this.raw.push(item as JsonValue);
-    } else if ("encoded" in itemDescriptor) {
-      this.raw.push(itemDescriptor.encoded.encode(item));
-    } else if (isRefEncoded(itemDescriptor)) {
-      let refId = (item as unknown as CoValue).$jazz?.id;
-      if (!refId) {
-        const newOwnerStrategy =
-          itemDescriptor.permissions?.newInlineOwnerStrategy;
-        const onCreate = itemDescriptor.permissions?.onCreate;
-        const coValue = instantiateRefEncodedWithInit(
-          itemDescriptor,
-          item,
-          this.owner,
-          newOwnerStrategy,
-          onCreate,
-          validationMode,
-        );
-        refId = coValue.$jazz.id;
-      }
-      this.raw.push(refId);
-    }
+    this.raw.push(
+      processCoFeedItem(
+        itemDescriptor,
+        item,
+        this.owner,
+        undefined,
+        validationMode,
+      ),
+    );
   }
 
   /**
@@ -911,22 +1031,30 @@ export class FileStream extends CoValueBase implements CoValue {
     allowUnfinished?: boolean;
     dataURL?: boolean;
   }): string | undefined {
-    const chunks = this.getChunks(options);
+    const data = this.getChunks({
+      allowUnfinished: options?.allowUnfinished,
+    });
 
-    if (!chunks) return undefined;
+    if (!data) return undefined;
 
-    const output = [];
-
-    for (const chunk of chunks.chunks) {
-      for (const byte of chunk) {
-        output.push(String.fromCharCode(byte));
-      }
+    // Calculate actual loaded bytes (may differ from totalSizeBytes when allowUnfinished)
+    let loadedBytes = 0;
+    for (const chunk of data.chunks) {
+      loadedBytes += chunk.length;
     }
 
-    const base64 = btoa(output.join(""));
+    // Merge all chunks into a single Uint8Array
+    const merged = new Uint8Array(loadedBytes);
+    let offset = 0;
+    for (const chunk of data.chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    const base64 = cojsonInternals.bytesToBase64(merged);
 
     if (options?.dataURL) {
-      return `data:${chunks.mimeType};base64,${base64}`;
+      return `data:${data.mimeType};base64,${base64}`;
     }
 
     return base64;

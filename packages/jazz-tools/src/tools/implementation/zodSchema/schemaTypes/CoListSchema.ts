@@ -208,7 +208,7 @@ export class CoListSchema<
     return this.coValueClass;
   }
 
-  /** @deprecated Use `CoList.upsertUnique` and `CoList.loadUnique` instead. */
+  /** @deprecated Use `loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
@@ -217,6 +217,46 @@ export class CoListSchema<
     return this.coValueClass.findUnique(unique, ownerID, as);
   }
 
+  /**
+   * Get an existing unique CoList or create a new one if it doesn't exist.
+   *
+   * Unlike `upsertUnique`, this method does NOT update existing values with the provided value.
+   * The provided value is only used when creating a new CoList.
+   *
+   * @example
+   * ```ts
+   * const items = await ItemList.getOrCreateUnique({
+   *   value: [item1, item2, item3],
+   *   unique: ["user-items", me.id],
+   *   owner: me,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoList.
+   * @returns Either an existing CoList (unchanged), or a new initialised CoList if none exists.
+   * @category Subscription & Loading
+   */
+  getOrCreateUnique<
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+    > = DefaultResolveQuery,
+  >(options: {
+    value: CoListSchemaInit<T>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
+  }): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(
+      // @ts-expect-error
+      withSchemaResolveQuery(options, this.resolveQuery),
+    );
+  }
+
+  /**
+   * @deprecated Use `getOrCreateUnique` instead. Note: getOrCreateUnique does not update existing values.
+   * If you need to update, use getOrCreateUnique followed by `$jazz.applyDiff`.
+   */
   upsertUnique<
     const R extends RefsToResolve<
       CoListInstanceCoValuesMaybeLoaded<T>

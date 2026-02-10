@@ -1,5 +1,32 @@
 # cojson-transport-nodejs-ws
 
+## 0.20.9
+
+### Patch Changes
+
+- cojson@0.20.9
+
+## 0.20.8
+
+### Patch Changes
+
+- Updated dependencies [c7be307]
+- Updated dependencies [b38a526]
+- Updated dependencies [f701fd7]
+- Updated dependencies [99f9d47]
+  - cojson@0.20.8
+
+## 0.20.7
+
+### Patch Changes
+
+- 988941c: Fixed a bug in `BatchedOutgoingMessages.push()` where messages sent via the fast path (when WebSocket is ready and not backpressured) were added to the queue but never removed. This caused the `pushed - pulled` metric to grow indefinitely even when the system was idle.
+
+  The fix moves the `queue.push()` call to only happen when taking the slow path (when WebSocket is not ready), since the fast path sends messages directly without using the queue.
+
+- Updated dependencies [988941c]
+  - cojson@0.20.7
+
 ## 0.20.6
 
 ### Patch Changes

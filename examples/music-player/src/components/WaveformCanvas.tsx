@@ -2,16 +2,10 @@
 
 import { MusicTrack, MusicTrackWaveform } from "@/1_schema";
 import { AudioManager, useAudioManager } from "@/lib/audio/AudioManager";
-import {
-  getPlayerCurrentTime,
-  setPlayerCurrentTime,
-  subscribeToPlayerCurrentTime,
-  usePlayerCurrentTime,
-} from "@/lib/audio/usePlayerCurrentTime";
 import { cn } from "@/lib/utils";
 import type React from "react";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 type Props = {
   track: MusicTrack;
@@ -153,7 +147,7 @@ async function renderWaveform(props: WaveformCanvasProps) {
   const { audioManager, canvas, waveformId, duration } = props;
 
   let mounted = true;
-  let currentTime = getPlayerCurrentTime(audioManager);
+  let currentTime = audioManager.currentTime;
   let waveformData: undefined | number[] = undefined;
   let isAnimating = true;
   const startTime = performance.now();
@@ -191,13 +185,10 @@ async function renderWaveform(props: WaveformCanvasProps) {
 
   requestAnimationFrame(animate);
 
-  const unsubscribeFromCurrentTime = subscribeToPlayerCurrentTime(
-    audioManager,
-    (time) => {
-      currentTime = time;
-      draw();
-    },
-  );
+  const unsubscribeFromCurrentTime = audioManager.on("timeUpdate", () => {
+    currentTime = audioManager.currentTime;
+    draw();
+  });
 
   const unsubscribeFromWaveform = MusicTrackWaveform.subscribe(
     waveformId,
@@ -250,11 +241,14 @@ export default function WaveformCanvas({
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = (e.clientX - rect.left) / rect.width;
     const time = Math.max(0, Math.min(1, ratio)) * duration;
-    setPlayerCurrentTime(audioManager, time);
+    audioManager.seekTo(time);
   };
 
-  const currentTime = usePlayerCurrentTime();
-  const progress = currentTime.value / duration;
+  const currentTime = useSyncExternalStore(
+    (callback) => audioManager.on("timeUpdate", callback),
+    () => audioManager.currentTime,
+  );
+  const progress = currentTime / duration;
 
   return (
     <div className={cn("w-full", className)}>

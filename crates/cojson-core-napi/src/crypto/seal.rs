@@ -44,3 +44,37 @@ pub fn unseal(
   .map(|unsealed| unsealed.into())
   .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
+
+/// NAPI-exposed function for sealing a message for a group (anonymous box pattern).
+/// Uses an ephemeral key pair, so no sender authentication is provided.
+/// - `message`: Raw bytes to seal
+/// - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix (the group's sealer)
+/// - `nonce_material`: Raw bytes used to generate the nonce
+/// Returns ephemeral_public_key (32 bytes) || ciphertext, or throws error if sealing fails.
+#[napi(js_name = "sealForGroup")]
+pub fn seal_for_group(
+  message: &[u8],
+  recipient_id: String,
+  nonce_material: &[u8],
+) -> napi::Result<Uint8Array> {
+  seal_crypto::seal_for_group(message, &recipient_id, nonce_material)
+    .map(|sealed| sealed.into())
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+}
+
+/// NAPI-exposed function for unsealing a message sealed for a group (anonymous box pattern).
+/// Extracts the ephemeral public key and decrypts the message.
+/// - `sealed_message`: ephemeral_public_key (32 bytes) || ciphertext
+/// - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+/// - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+/// Returns unsealed bytes or throws error if unsealing fails.
+#[napi(js_name = "unsealForGroup")]
+pub fn unseal_for_group(
+  sealed_message: &[u8],
+  recipient_secret: String,
+  nonce_material: &[u8],
+) -> napi::Result<Uint8Array> {
+  seal_crypto::unseal_for_group(sealed_message, &recipient_secret, nonce_material)
+    .map(|unsealed| unsealed.into())
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+}

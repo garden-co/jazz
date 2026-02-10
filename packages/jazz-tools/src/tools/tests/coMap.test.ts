@@ -423,6 +423,43 @@ describe("CoMap", async () => {
       });
     });
 
+    test("co.map with nested co.record should toJSON correctly", async () => {
+      const Chat = co.map({
+        title: z.string(),
+      });
+
+      const ChatRoot = co.map({
+        chats: co.record(z.string(), Chat),
+      });
+
+      const chat = Chat.create({ title: "General" });
+      const root = ChatRoot.create({
+        chats: {
+          general: chat,
+        },
+      });
+
+      // Simulate loading in another context/component
+      const loadedRoot = await ChatRoot.load(root.$jazz.id, {
+        resolve: {
+          chats: true,
+        },
+      });
+
+      if (!loadedRoot || !loadedRoot.$isLoaded)
+        throw new Error("Failed to load root");
+
+      expect(loadedRoot.toJSON()).toEqual(
+        expect.objectContaining({
+          chats: expect.objectContaining({
+            general: expect.objectContaining({
+              title: "General",
+            }),
+          }),
+        }),
+      );
+    });
+
     test("setting optional date as undefined should not throw", () => {
       const Person = co.map({
         name: z.string(),
@@ -2539,7 +2576,12 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
   test("empty map created time", () => {
     const emptyMap = co.map({}).create({});
 
-    expect(emptyMap.$jazz.lastUpdatedAt).toEqual(emptyMap.$jazz.createdAt);
+    expect(emptyMap.$jazz.createdAt).toEqual(
+      new Date(emptyMap.$jazz.raw.core.verified.header.createdAt!).getTime(),
+    );
+
+    const lastTx = emptyMap.$jazz.raw.core.verifiedTransactions.at(-1);
+    expect(emptyMap.$jazz.lastUpdatedAt).toEqual(lastTx!.madeAt);
   });
 
   test("empty map created by", () => {
@@ -2557,7 +2599,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
     const person = Person.create({ name: "John" });
 
     const createdAt = person.$jazz.createdAt;
-    expect(person.$jazz.lastUpdatedAt).toEqual(createdAt);
+    const setNameJohnTx = person.$jazz.raw.core.verifiedTransactions[0];
+    expect(person.$jazz.createdAt).toEqual(createdAt);
+    expect(person.$jazz.lastUpdatedAt).toEqual(setNameJohnTx!.madeAt);
 
     const createdBy = person.$jazz.createdBy;
     expect(createdBy).toEqual(me.$jazz.id);
@@ -2565,8 +2609,9 @@ describe("createdAt, lastUpdatedAt, createdBy", () => {
     await new Promise((r) => setTimeout(r, 10));
     person.$jazz.set("name", "Jane");
 
+    const setNameJaneTx = person.$jazz.raw.core.verifiedTransactions[1];
     expect(person.$jazz.createdAt).toEqual(createdAt);
-    expect(person.$jazz.lastUpdatedAt).not.toEqual(createdAt);
+    expect(person.$jazz.lastUpdatedAt).toEqual(setNameJaneTx!.madeAt);
 
     // Double check after update.
     expect(createdBy).toEqual(me.$jazz.id);

@@ -147,8 +147,6 @@ export class SyncStateManager {
       return false;
     }
 
-    // Accessing verified knownState to skip the immutability
-    // applied on CoValueCore
     const knownState = entry.verified.knownState();
 
     return areCurrentSessionsInSyncWith(

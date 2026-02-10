@@ -9,6 +9,7 @@ use salsa20::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value as JsonValue};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -66,7 +67,7 @@ pub enum TransactionMode {
     Trusting,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionLogInternal {
     public_key: Option<VerifyingKey>,
     hasher: blake3::Hasher,
@@ -78,6 +79,11 @@ pub struct SessionLogInternal {
     /// Transactions are added here via add_existing_* methods and committed
     /// to the main state only when commit_transactions() succeeds.
     pending_transactions: Vec<String>,
+    /// In-between signatures at specific transaction indices
+    /// Used for chunking large sessions in sync messages
+    signature_after: HashMap<u32, String>,
+    /// Size tracking for in-between signature decisions
+    tx_size_since_last_inbetween_signature: usize,
 }
 
 fn validate_tx_size_limit_in_bytes(changes_len: &str) -> Result<(), CoJsonCoreError> {
@@ -116,6 +122,8 @@ impl SessionLogInternal {
             nonce_generator: NonceGenerator::new(co_id, session_id),
             crypto_cache: CryptoCache::new(),
             pending_transactions: Vec::new(),
+            signature_after: HashMap::new(),
+            tx_size_since_last_inbetween_signature: 0,
         }
     }
 
@@ -363,7 +371,8 @@ impl SessionLogInternal {
         }
 
         // Add new transactions to the session log.
-        self.transactions_json.extend(self.pending_transactions.drain(..));
+        self.transactions_json
+            .extend(self.pending_transactions.drain(..));
 
         // Update the last signature.
         self.last_signature = Some(new_signature.clone());
@@ -462,6 +471,55 @@ impl SessionLogInternal {
             Transaction::Trusting(trusting_tx) => Ok(trusting_tx.meta),
         }
     }
+
+    // === NEW methods for SessionMapImpl support ===
+
+    /// Get transaction count
+    pub fn transaction_count(&self) -> usize {
+        self.transactions_json.len()
+    }
+
+    /// Get transaction at index (as JSON string)
+    pub fn get_transaction(&self, tx_index: usize) -> Option<&str> {
+        self.transactions_json.get(tx_index).map(|s| s.as_str())
+    }
+
+    /// Get signature after specific transaction index
+    pub fn get_signature_after(&self, tx_index: u32) -> Option<&str> {
+        self.signature_after.get(&tx_index).map(|s| s.as_str())
+    }
+
+    /// Get the last signature checkpoint index (max index in signature_after, or -1)
+    pub fn get_last_signature_checkpoint(&self) -> i32 {
+        self.signature_after
+            .keys()
+            .max()
+            .map(|&idx| idx as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Record an in-between signature after committing transactions
+    /// Called when tx_size_since_last_inbetween_signature exceeds threshold
+    pub fn record_inbetween_signature(&mut self, tx_index: u32, signature: String) {
+        self.signature_after.insert(tx_index, signature);
+        self.tx_size_since_last_inbetween_signature = 0;
+    }
+
+    /// Update size tracking after adding transactions
+    pub fn add_to_size_tracking(&mut self, size: usize) {
+        self.tx_size_since_last_inbetween_signature += size;
+    }
+
+    /// Get the cumulative transaction size since the last in-between signature
+    /// Used by SessionMapImpl to check against configurable threshold
+    pub fn cumulative_tx_size(&self) -> usize {
+        self.tx_size_since_last_inbetween_signature
+    }
+
+    /// Get the signature_after map (for iteration in newContentSince)
+    pub fn signature_after_map(&self) -> &HashMap<u32, String> {
+        &self.signature_after
+    }
 }
 
 #[cfg(test)]
@@ -499,11 +557,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         assert!(session.has_pending());
@@ -541,11 +595,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         // Create a wrong signature
@@ -579,11 +629,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         // Use a completely wrong signature but skip validation
@@ -609,11 +655,7 @@ mod tests {
 
         // Stage a trusting transaction
         session
-            .add_existing_trusting_transaction(
-                r#"{"test": "data"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test": "data"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         let mut csprng = OsRng;
@@ -796,7 +838,7 @@ mod tests {
         // Call the function we are testing
         let (new_signature, _new_tx) = session
             .add_new_transaction(
-                changes_json,
+                &changes_json,
                 TransactionMode::Private { key_id, key_secret },
                 &signing_key.into(),
                 made_at,
@@ -924,9 +966,7 @@ mod tests {
                 }
             }
         }
-        session
-            .commit_transactions(&new_signature, true)
-            .unwrap();
+        session.commit_transactions(&new_signature, true).unwrap();
 
         let key_secret = KeySecret(root.known_keys[0].secret.clone());
 
@@ -1004,9 +1044,7 @@ mod tests {
                 }
             }
         }
-        session
-            .commit_transactions(&new_signature, true)
-            .unwrap();
+        session.commit_transactions(&new_signature, true).unwrap();
 
         let key_secret = KeySecret(root.known_keys[0].secret.clone());
 
@@ -1167,7 +1205,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn test_trusting_transaction_mode() {
         let mut csprng = OsRng;
@@ -1186,7 +1223,7 @@ mod tests {
 
         let (signature, transaction) = session
             .add_new_transaction(
-                changes_json,
+                &changes_json,
                 TransactionMode::Trusting,
                 &signing_key.into(),
                 made_at,
@@ -1339,7 +1376,7 @@ mod tests {
 
         let (_, transaction) = session
             .add_new_transaction(
-                changes_json,
+                &changes_json,
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
@@ -1450,7 +1487,7 @@ mod tests {
         // Add a valid transaction
         let (_, _) = session_with_tx
             .add_new_transaction(
-                r#"{"test": "data"}"#,
+                &r#"{"test": "data"}"#,
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
@@ -1486,18 +1523,10 @@ mod tests {
 
         // Add multiple transactions using direct calls
         test_session
-            .add_existing_trusting_transaction(
-                r#"{"test":"data1"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test":"data1"}"#.to_string(), 1234567890, None)
             .unwrap();
         test_session
-            .add_existing_trusting_transaction(
-                r#"{"test":"data2"}"#.to_string(),
-                1234567890,
-                None,
-            )
+            .add_existing_trusting_transaction(r#"{"test":"data2"}"#.to_string(), 1234567890, None)
             .unwrap();
 
         let signature: Signature = SigningKey::generate(&mut OsRng).sign(b"test").into();

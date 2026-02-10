@@ -210,6 +210,7 @@ test("init the list correctly", () => {
     "universe",
     "hello",
   ]);
+  expect(content.core.verified.header.createdAt).toBeDefined();
 });
 
 test("Items prepended to start appear with latest first", () => {
@@ -904,6 +905,8 @@ describe("CoList Branching", () => {
     // Client1 adds items to the branch
     aliceBranch.append("eggs", undefined, "trusting");
 
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
     // Client2 loads the branch from a different session
     const branchOnClient2 = await loadCoValueOrFail(
       client2.node,
@@ -917,11 +920,11 @@ describe("CoList Branching", () => {
       "trusting",
     );
 
-    // Merge the branch back to source
     branchOnClient2.core.mergeBranch();
 
-    // Wait for sync
-    await groceryList.core.waitForSync();
+    // Wait for all coValues to sync on both nodes
+    await client2.node.syncManager.waitForAllCoValuesSync();
+    await client1.node.syncManager.waitForAllCoValuesSync();
 
     // Source list should contain the final state
     expect(groceryList.toJSON()).toEqual(["milk", "eggs", "cheese"]);
@@ -960,6 +963,8 @@ describe("CoList Branching", () => {
     // Client2 adds different items to second branch
     bobBranch.append("eggs", undefined, "trusting");
 
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
     // Client2 loads first branch and modifies it
     const aliceBranchOnClient2 = await loadCoValueOrFail(
       client2.node,
@@ -975,8 +980,9 @@ describe("CoList Branching", () => {
 
     bobBranch.core.mergeBranch();
 
-    // Wait for sync
-    await groceryList.core.waitForSync();
+    // Wait for all coValues to sync on both nodes
+    await client2.node.syncManager.waitForAllCoValuesSync();
+    await client1.node.syncManager.waitForAllCoValuesSync();
 
     // Source list should contain all changes
     expect(groceryList.toJSON()).toMatchInlineSnapshot(`
@@ -1016,4 +1022,32 @@ test("the list should rebuild when the group permissions change", async () => {
 
   expect(listOnBob.version).toEqual(1);
   expect(listOnBob.totalValidTransactions).toEqual(1);
+});
+
+test("items appended after a losing init transaction are preserved", async () => {
+  const alice = setupTestNode({ connected: true });
+  const bob = setupTestNode({ connected: true });
+
+  const group = alice.node.createGroup();
+  group.addMember("everyone", "writer");
+
+  const list = group.createList(
+    ["alice-init"],
+    undefined,
+    "trusting",
+    undefined,
+    { fww: "init" },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+
+  listOnBob.appendItems(["bob-init"], undefined, "trusting", { fww: "init" });
+  listOnBob.appendItems(["bob-update"], undefined, "trusting");
+
+  await waitFor(() => {
+    expect(listOnBob.toJSON()).toEqual(["alice-init", "bob-update"]);
+    expect(list.toJSON()).toEqual(["alice-init", "bob-update"]);
+  });
 });

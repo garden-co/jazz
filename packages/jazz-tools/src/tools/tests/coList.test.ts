@@ -53,6 +53,15 @@ describe("Simple CoList operations", async () => {
       "BUTTER",
       "ONION",
     ]);
+    expect(list.$jazz.createdAt).not.toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test("construction with empty list", () => {
+    const List = co.list(z.string());
+    const list = List.create([]);
+    expect(list.length).toBe(0);
+
+    expect(list.$jazz.createdAt).not.toBe(Number.MAX_SAFE_INTEGER);
   });
 
   test("list with enum type", () => {

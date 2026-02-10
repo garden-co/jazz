@@ -61,9 +61,9 @@ describe("sync after the garbage collector has run", () => {
         "client -> server | LOAD Map sessions: empty",
         "server -> storage | LOAD Map sessions: empty",
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -101,11 +101,11 @@ describe("sync after the garbage collector has run", () => {
       [
         "client -> server | LOAD Map sessions: empty",
         "server -> storage | LOAD Map sessions: empty",
-        "storage -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 4",
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -188,9 +188,9 @@ describe("sync after the garbage collector has run", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: header/1",
-        "client -> server | LOAD Group sessions: header/3",
-        "client -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | LOAD Group sessions: header/4",
+        "client -> storage | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
         "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> storage | GET_KNOWN_STATE Map",
@@ -199,8 +199,8 @@ describe("sync after the garbage collector has run", () => {
         "server -> storage | GET_KNOWN_STATE Group",
         "storage -> server | GET_KNOWN_STATE_RESULT Group sessions: empty",
         "server -> client | KNOWN Group sessions: empty",
-        "server -> client | KNOWN Group sessions: header/3",
-        "server -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Group sessions: header/4",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | KNOWN Map sessions: header/1",
         "server -> storage | CONTENT Map header: true new: After: 0 New: 1",
       ]

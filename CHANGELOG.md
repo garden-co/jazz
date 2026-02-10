@@ -1,3 +1,20 @@
+Released Jazz 0.20.8:
+- Improved FileStream base64 encoding performance. Up to **20x faster** in `asBase64` conversion on React Native and around **5x faster** blob conversions on all the platforms.
+- Delayed CoValue content parsing in subscriptions until the value is fully downloaded, avoiding unnecessary intermediate parsing for streaming values
+- Added `getOrCreateUnique` method to CoMap, CoList, and CoFeed. This provides a "get or create only" semantic — it returns an existing value as-is, and only uses the provided value when creating a new CoValue. Unlike `upsertUnique`, it does NOT update existing values. Also deprecates `loadUnique` and `upsertUnique` in favor of `getOrCreateUnique`.
+- Introduced key revelations based on a group owned asymmetric key. This makes extending groups without having access to the encryption key zero-cost for the parent group.
+- Added optional `name` metadata to Groups. Groups can now be created with a display name (e.g. `Group.create({ owner: account, name: "Billing" })`)
+- Improved performance of writeKey revelations permission checks in groups with many writeOnlyKeys
+- Bugfix: fixed `createdAt` getter to use CoValue's header
+- Bugfix: fixed issue with CoRecord serialisation
+- Bugfix: prevent conflicts between concurrent async SQLite transactions
+
+Released Jazz 0.20.7:
+- Bugfix: fixed a memory leak in the WebSocket outgoing queue introduced in 0.20.1 and improved queue close management
+
+Released Jazz 0.20.6:
+- Improved performance of read key lookups in groups by using cached indices instead of iterating through all keys
+
 Released Jazz 0.20.5:
 - Bugfix: fixed "TypeError: crypto.randomUUID is not a function (it is undefined)" on React Native
 - Bugfix: fixed "can't access property useContext, dispatcher is null" error when using the inspector in Svelte

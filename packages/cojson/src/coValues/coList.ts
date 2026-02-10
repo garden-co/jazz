@@ -35,6 +35,8 @@ type InsertionEntry<T extends JsonValue> = {
   predecessors: OpID[];
   successors: OpID[];
   change: InsertionOpPayload<T>;
+  /** Whether this entry comes from a valid transaction */
+  isValid: boolean;
 };
 
 type DeletionEntry = {
@@ -207,9 +209,12 @@ export class RawCoList<
   }
 
   private _processNewTransactions() {
+    // Get all transactions including invalid ones, so that items referencing
+    // entries from invalid init transactions can still find their references.
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
+      includeInvalidMetaTransactions: true,
     });
 
     if (transactions.length === 0) {
@@ -220,15 +225,19 @@ export class RawCoList<
     let oldestValidTransaction: number | undefined = undefined;
     this._cachedEntries = undefined;
 
-    for (const { txID, changes, madeAt } of transactions) {
+    for (const { txID, changes, madeAt, isValid } of transactions) {
       if (this.isFilteredOut(madeAt)) {
         continue;
       }
-      lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
-      oldestValidTransaction = Math.min(
-        oldestValidTransaction ?? Infinity,
-        madeAt,
-      );
+
+      // Only track valid transactions for the lastValidTransaction/oldestValidTransaction
+      if (isValid) {
+        lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
+        oldestValidTransaction = Math.min(
+          oldestValidTransaction ?? Infinity,
+          madeAt,
+        );
+      }
 
       for (const [changeIdx, changeUntyped] of changes.entries()) {
         const change = changeUntyped as ListOpPayload<Item>;
@@ -246,6 +255,7 @@ export class RawCoList<
             predecessors: [],
             successors: [],
             change,
+            isValid,
           });
 
           // If the change index already exists, we don't need to process it again
@@ -438,7 +448,9 @@ export class RawCoList<
 
         const deleted = this.isDeleted(currentOpID);
 
-        if (!deleted) {
+        // Skip entries that are deleted or from invalid transactions
+        // (e.g., losing init transactions in firstComesWins scenarios)
+        if (!deleted && entry.isValid) {
           arr.push({
             value: entry.change.value,
             madeAt: entry.madeAt,
@@ -563,6 +575,7 @@ export class RawCoList<
     items: Item[],
     after?: number,
     privacy: "private" | "trusting" = "private",
+    meta?: JsonObject,
   ) {
     const entries = this.entries();
     after =
@@ -597,7 +610,7 @@ export class RawCoList<
       changes.reverse();
     }
 
-    this.core.makeTransaction(changes, privacy);
+    this.core.makeTransaction(changes, privacy, meta);
     this.processNewTransactions();
   }
 

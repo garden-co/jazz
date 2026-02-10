@@ -252,6 +252,9 @@ test("delete account removes user data and shared playlists become inaccessible"
   await marioHome.navigateToSettings();
   await marioHome.deleteAccount();
 
+  // Wait for the deletion to complete (URL changes to "/" when onConfirm finishes)
+  await marioPage.waitForURL("/", { timeout: 100_000 });
+
   await sleep(4000); // Wait for the sync to complete
 
   // Luigi should no longer have access to the playlist

@@ -17,6 +17,7 @@ salsa20 = "0.10.2"
 rand = "0.8"
 x25519-dalek = { version = "2.0", features = ["getrandom", "static_secrets"] }
 lru = "0.16.1"
+indexmap = { version = "2.0", features = ["serde"] }
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }

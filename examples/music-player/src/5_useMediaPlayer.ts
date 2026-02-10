@@ -1,15 +1,43 @@
 import { MusicaAccount, MusicTrack, Playlist } from "@/1_schema";
 import { usePlayMedia } from "@/lib/audio/usePlayMedia";
-import { usePlayState } from "@/lib/audio/usePlayState";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
 import { useAudioManager } from "./lib/audio/AudioManager";
-import { getNextTrack, getPrevTrack } from "./lib/getters";
+import {
+  getNextTrack,
+  getPrevTrack,
+  getActivePlaylistTitle,
+} from "./lib/getters";
 import { useSuspenseAccount } from "jazz-tools/react-core";
+
+// Cache for prefetched audio files
+const prefetchCache = new Map<string, Blob>();
+const prefetchingInProgress = new Set<string>();
+
+async function prefetchTrackAudio(track: MusicTrack) {
+  const trackId = track.$jazz.id;
+
+  // Skip if already cached or prefetching
+  if (prefetchCache.has(trackId) || prefetchingInProgress.has(trackId)) {
+    return;
+  }
+
+  prefetchingInProgress.add(trackId);
+
+  try {
+    const file = await MusicTrack.shape.file.loadAsBlob(
+      track.$jazz.refs.file.id,
+    );
+    if (file) {
+      prefetchCache.set(trackId, file);
+    }
+  } finally {
+    prefetchingInProgress.delete(trackId);
+  }
+}
 
 export function useMediaPlayer() {
   const audioManager = useAudioManager();
-  const playState = usePlayState();
   const playMedia = usePlayMedia();
 
   const [loading, setLoading] = useState<string | null>(null);
@@ -20,16 +48,25 @@ export function useMediaPlayer() {
   // Reference used to avoid out-of-order track loads
   const lastLoadedTrackId = useRef<string | null>(null);
 
-  async function loadTrack(track: MusicTrack, autoPlay = true) {
-    lastLoadedTrackId.current = track.$jazz.id;
-    audioManager.unloadCurrentAudio();
+  // Store refs for the handlers so they can access current state
+  const playNextTrackRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const playPrevTrackRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
-    setLoading(track.$jazz.id);
+  async function loadTrack(track: MusicTrack, autoPlay = true) {
+    const trackId = track.$jazz.id;
+    lastLoadedTrackId.current = trackId;
+    audioManager.unload();
+
+    setLoading(trackId);
     updateActiveTrack(track);
 
-    const file = await MusicTrack.shape.file.loadAsBlob(
-      track.$jazz.refs.file.id,
-    );
+    // Check prefetch cache first
+    let file = prefetchCache.get(trackId);
+    if (file) {
+      prefetchCache.delete(trackId); // Use once, then remove from cache
+    } else {
+      file = await MusicTrack.shape.file.loadAsBlob(track.$jazz.refs.file.id);
+    }
 
     if (!file) {
       setLoading(null);
@@ -38,13 +75,28 @@ export function useMediaPlayer() {
 
     // Check if another track has been loaded during
     // the file download
-    if (lastLoadedTrackId.current !== track.$jazz.id) {
+    if (lastLoadedTrackId.current !== trackId) {
       return;
     }
 
     await playMedia(file, autoPlay);
 
+    // Set metadata for MediaSession API (browser media controls)
+    const playlistTitle = await getActivePlaylistTitle();
+    audioManager.setMetadata({
+      title: track.title,
+      artist: playlistTitle,
+      duration: track.duration,
+    });
+
     setLoading(null);
+
+    // Prefetch the next track in the background
+    getNextTrack().then((nextTrack) => {
+      if (nextTrack?.$isLoaded) {
+        prefetchTrackAudio(nextTrack);
+      }
+    });
   }
 
   async function playNextTrack() {
@@ -64,12 +116,29 @@ export function useMediaPlayer() {
     }
   }
 
+  // Keep refs updated
+  playNextTrackRef.current = playNextTrack;
+  playPrevTrackRef.current = playPrevTrack;
+
+  // Register handlers with AudioManager and enable keyboard shortcuts
+  useEffect(() => {
+    audioManager.setNextTrackHandler(() => playNextTrackRef.current?.());
+    audioManager.setPreviousTrackHandler(() => playPrevTrackRef.current?.());
+    audioManager.enableKeyboardShortcuts();
+
+    return () => {
+      audioManager.setNextTrackHandler(null);
+      audioManager.setPreviousTrackHandler(null);
+      audioManager.disableKeyboardShortcuts();
+    };
+  }, [audioManager]);
+
   async function setActiveTrack(track: MusicTrack, playlist?: Playlist) {
     if (
       activeTrackId === track.$jazz.id &&
       lastLoadedTrackId.current !== null
     ) {
-      playState.toggle();
+      audioManager.togglePlayPause();
       return;
     }
 
@@ -77,8 +146,8 @@ export function useMediaPlayer() {
 
     await loadTrack(track);
 
-    if (playState.value === "pause") {
-      playState.toggle();
+    if (audioManager.isPaused) {
+      audioManager.play();
     }
   }
 

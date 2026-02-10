@@ -1,11 +1,13 @@
 import {
   CoID,
   LocalNode,
+  RawBinaryCoStream,
   RawCoList,
   RawCoMap,
   RawCoPlainText,
   RawCoStream,
   RawCoValue,
+  RawGroup,
 } from "cojson";
 import { styled } from "goober";
 import React from "react";
@@ -15,6 +17,7 @@ import { Text } from "../ui/text.js";
 import { AccountOrGroupText } from "./account-or-group-text.js";
 import { AccountView } from "./account-view.js";
 import { CoPlainTextView } from "./co-plain-text-view.js";
+import { CoBinaryStreamView } from "./co-binary-stream-view.js";
 import { CoStreamView } from "./co-stream-view.js";
 import { GridView } from "./grid-view.js";
 import { GroupView } from "./group-view.js";
@@ -112,6 +115,10 @@ function View(
   const { type, extendedType } = props.coValue;
   const { snapshot, value } = props.coValue;
   const { node, onNavigate } = props;
+
+  if (type === "costream" && extendedType === "file") {
+    return <CoBinaryStreamView value={value as RawBinaryCoStream} />;
+  }
 
   if (!snapshot || snapshot === "unavailable") return;
 
@@ -230,6 +237,13 @@ export function Page(props: PageProps) {
                 <span style={{ color: "#57534e", fontWeight: 500 }}>
                   {" "}
                   {(snapshot as { name: string }).name}
+                </span>
+              ) : extendedType === "group" &&
+                value &&
+                (value as RawGroup).name ? (
+                <span style={{ color: "#57534e", fontWeight: 500 }}>
+                  {" "}
+                  {(value as RawGroup).name}
                 </span>
               ) : null}
             </span>

@@ -59,7 +59,7 @@ test("should sync and load data from storage", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 3",
+      "client -> CONTENT Group header: true new: After: 0 New: 4",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -94,7 +94,7 @@ test("should sync and load data from storage", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT Group header: true new: After: 0 New: 3",
+      "storage -> CONTENT Group header: true new: After: 0 New: 4",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -133,7 +133,7 @@ test("should send an empty content message if there is no content", async () => 
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 3",
+      "client -> CONTENT Group header: true new: After: 0 New: 4",
       "client -> CONTENT Map header: true new: ",
     ]
   `);
@@ -166,7 +166,7 @@ test("should send an empty content message if there is no content", async () => 
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT Group header: true new: After: 0 New: 3",
+      "storage -> CONTENT Group header: true new: After: 0 New: 4",
       "storage -> CONTENT Map header: true new: ",
     ]
   `);
@@ -211,9 +211,9 @@ test("should load dependencies correctly (group inheritance)", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> CONTENT ParentGroup header: true new: After: 0 New: 3",
-      "client -> CONTENT Group header: false new: After: 3 New: 2",
+      "client -> CONTENT Group header: true new: After: 0 New: 4",
+      "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "client -> CONTENT Group header: false new: After: 4 New: 2",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -248,8 +248,8 @@ test("should load dependencies correctly (group inheritance)", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 3",
-      "storage -> CONTENT Group header: true new: After: 0 New: 5",
+      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "storage -> CONTENT Group header: true new: After: 0 New: 6",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -316,8 +316,8 @@ test("should not send the same dependency value twice", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 3",
-      "storage -> CONTENT Group header: true new: After: 0 New: 5",
+      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "storage -> CONTENT Group header: true new: After: 0 New: 6",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
       "client -> LOAD MapFromParent sessions: empty",
       "storage -> CONTENT MapFromParent header: true new: After: 0 New: 1",
@@ -373,7 +373,7 @@ test("should recover from data loss", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 3",
+      "client -> CONTENT Group header: true new: After: 0 New: 4",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
       "client -> CONTENT Map header: false new: After: 3 New: 1",
       "storage -> KNOWN CORRECTION Map sessions: header/4",
@@ -417,7 +417,7 @@ test("should recover from data loss", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT Group header: true new: After: 0 New: 3",
+      "storage -> CONTENT Group header: true new: After: 0 New: 4",
       "storage -> CONTENT Map header: true new: After: 0 New: 4",
     ]
   `);
@@ -583,7 +583,7 @@ test("should sync multiple sessions in a single content message", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT Group header: true new: After: 0 New: 3",
+      "storage -> CONTENT Group header: true new: After: 0 New: 4",
       "storage -> CONTENT Map header: true new: After: 0 New: 1 | After: 0 New: 1",
     ]
   `);
@@ -657,7 +657,7 @@ test("large coValue upload streaming", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT Group header: true new: After: 0 New: 3",
+      "storage -> CONTENT Group header: true new: After: 0 New: 4",
       "storage -> CONTENT Map header: true new: After: 0 New: 97",
       "storage -> CONTENT Map header: true new: After: 97 New: 97",
       "storage -> CONTENT Map header: true new: After: 194 New: 6",

@@ -1,10 +1,11 @@
 ---
-description: "Guide for generating changeset files for versioning and changelog management"
+name: changeset
+description: Generate changeset files for versioning and changelog management in this monorepo.
 ---
 
 # Generating Changesets
 
-When the user asks to create a changeset or add a changeset, help them generate a changeset file in the `.changeset/` directory.
+Use this skill when the user asks to create a changeset or add a changeset.
 
 ## What is a Changeset?
 
@@ -15,9 +16,7 @@ A changeset is a markdown file with YAML front matter that documents:
 
 ## Changeset File Format
 
-Changeset files are stored in `.changeset/` directory with the naming pattern: `{unique-id}.md`
-
-The file format is:
+Changeset files are stored in `.changeset/` directory with a unique filename: `{unique-id}.md`
 
 ```markdown
 ---
@@ -30,7 +29,7 @@ A description of the changes that will appear in the changelog.
 
 ## Package Names
 
-When generating a changeset, use the exact package name from the package's `package.json` file. Common packages in this monorepo include:
+Use the exact package name from the package's `package.json` file. Common packages:
 
 - `cojson`
 - `jazz-tools`
@@ -48,15 +47,15 @@ When generating a changeset, use the exact package name from the package's `pack
 - `hash-slash`
 - `quint-ui`
 
-**Important**: Always check the actual `package.json` file to get the exact package name, as package names must match exactly.
+**Important**: Always check the actual `package.json` file to get the exact package name.
 
 ## Semver Bump Types
 
 - **major**: Never use this, we are still in v0
 - **minor**: Breaking changes that require users to update their code
-- **patch**: New features that are backward compatible, bug fixes and small changes that are backward compatible
+- **patch**: New features that are backward compatible, bug fixes and small changes
 
-**Important**: minor is only for breaking changes, the rest should be considered a patch
+**Important**: `minor` is only for breaking changes. Everything else should be `patch`.
 
 ## Example Changeset
 
@@ -78,7 +77,6 @@ Added new `useSuspenseCoState` hook for data fetching using Suspense
 ## Workflow
 
 1. User describes the change they made
-2. You identify which packages are affected
-3. You determine the appropriate semver bump type
-4. You create the changeset file in `.changeset/`
-5. The changeset will be processed during the next release cycle
+2. Identify which packages are affected
+3. Determine the appropriate semver bump type
+4. Create the changeset file in `.changeset/` with a unique filename

@@ -273,6 +273,9 @@ describe("lastUpdatedAt", () => {
   test("empty text last updated time", () => {
     const text = co.plainText().create("");
 
+    expect(text.$jazz.createdAt).toEqual(
+      new Date(text.$jazz.raw.core.verified.header.createdAt!).getTime(),
+    );
     expect(text.$jazz.lastUpdatedAt).toEqual(text.$jazz.createdAt);
     expect(text.$jazz.lastUpdatedAt).not.toEqual(0);
   });

@@ -87,7 +87,7 @@ const PersonWithOptionalProperties = co.map({
 const SelfReferencingPerson = co.map({
   name: z.string(),
   get bestFriend() {
-    return Person;
+    return SelfReferencingPerson;
   },
 });
 // #endregion
@@ -100,5 +100,5 @@ const MutuallyRecursivePerson = co.map({
   },
 });
 
-const ListOfFriends = co.list(Person);
+const ListOfFriends = co.list(MutuallyRecursivePerson);
 // #endregion

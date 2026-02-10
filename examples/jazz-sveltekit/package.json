@@ -1,7 +1,7 @@
 {
 	"name": "jazz-sveltekit",
 	"private": true,
-	"version": "0.0.49",
+	"version": "0.0.52",
 	"type": "module",
 	"packageManager": "pnpm@10.16.1",
 	"scripts": {

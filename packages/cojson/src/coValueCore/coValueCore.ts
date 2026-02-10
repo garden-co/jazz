@@ -42,7 +42,6 @@ import {
   Uniqueness,
   VerifiedState,
 } from "./verifiedState.js";
-import { SessionMap } from "./SessionMap.js";
 import {
   MergeCommit,
   BranchPointerCommit,
@@ -64,45 +63,6 @@ import {
   KnownStateSessions,
 } from "../knownState.js";
 import { safeParseJSON } from "../jsonStringify.js";
-
-export type ValidationValue =
-  | { isOk: true }
-  | {
-      isOk: false;
-      message: string;
-    };
-
-function validateUniqueness(uniqueness: Uniqueness): ValidationValue {
-  if (typeof uniqueness === "number" && !Number.isInteger(uniqueness)) {
-    return {
-      isOk: false,
-      message: "Uniqueness cannot be a non-integer number, got " + uniqueness,
-    };
-  }
-
-  if (Array.isArray(uniqueness)) {
-    return {
-      isOk: false,
-      message: "Uniqueness cannot be an array, got " + uniqueness,
-    };
-  }
-
-  if (typeof uniqueness === "object" && uniqueness !== null) {
-    for (let [key, value] of Object.entries(uniqueness)) {
-      if (typeof value !== "string") {
-        return {
-          isOk: false,
-          message:
-            "Uniqueness object values must be a string, got " +
-            value +
-            " for key " +
-            key,
-        };
-      }
-    }
-  }
-  return { isOk: true };
-}
 
 export function idforHeader(
   header: CoValueHeader,
@@ -137,13 +97,17 @@ export class VerifiedTransaction {
   changes: JsonValue[] | undefined;
   // The decoded meta information of the transaction
   meta: JsonObject | undefined;
-  isValidated: boolean = false;
   // Whether the transaction is valid, as per membership rules
   isValid: boolean = false;
   // The error message that caused the transaction to be invalid
   validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
+  // Transaction processing stage:
+  // - "to-validate": Transaction is pending validation on permissions checks
+  // - "validated": Transaction has been validated but not yet applied to content
+  // - "processed": Transaction has been validated and applied to content
+  stage: "to-validate" | "validated" | "processed" = "to-validate";
 
   constructor(
     coValueId: RawCoID,
@@ -214,18 +178,31 @@ export class VerifiedTransaction {
     return Boolean(this.isValid && this.changes);
   }
 
+  isProcessable(includeInvalidMetaTransactions: boolean): this is {
+    changes: JsonValue[];
+  } {
+    return Boolean(
+      this.changes && (includeInvalidMetaTransactions || this.isValid),
+    );
+  }
+
   markValid() {
+    const validityChanged = this.isValid === false;
     this.isValid = true;
     this.validationErrorMessage = undefined;
 
-    if (!this.isValidated) {
-      this.isValidated = true;
+    if (this.stage === "to-validate") {
+      this.stage = "validated";
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "processed" && validityChanged) {
       this.dispatchTransaction(this);
     }
   }
 
   markInvalid(errorMessage: string, attributes?: Record<string, JsonValue>) {
-    this.isValidated = true;
+    const validityChanged = this.isValid === true;
     this.isValid = false;
 
     this.validationErrorMessage = errorMessage;
@@ -237,6 +214,22 @@ export class VerifiedTransaction {
         ...attributes,
       });
     }
+
+    if (this.stage === "processed" && validityChanged) {
+      this.dispatchTransaction(this);
+    }
+
+    if (this.stage === "to-validate") {
+      this.stage = "validated";
+    }
+  }
+
+  markAsProcessed() {
+    this.stage = "processed";
+  }
+
+  markAsToValidate() {
+    this.stage = "to-validate";
   }
 }
 
@@ -586,36 +579,34 @@ export class CoValueCore {
     streamingKnownState?: KnownStateSessions,
     skipVerify?: boolean,
   ) {
-    if (!skipVerify) {
-      const validation = validateUniqueness(header.uniqueness);
-      if (!validation.isOk) {
-        logger.error("Invalid uniqueness", {
-          header,
-          errorMessage: validation.message,
-        });
-        return false;
-      }
-
-      const expectedId = idforHeader(header, this.node.crypto);
-
-      if (this.id !== expectedId) {
-        return false;
-      }
-    }
-
-    this.addDependencyFromHeader(header);
-
-    if (this._verified?.sessions.size) {
+    if (this._verified?.sessionCount) {
       throw new Error(
         "CoValueCore: provideHeader called on coValue with verified sessions present!",
       );
     }
-    this._verified = new VerifiedState(
-      this.id,
-      this.node.crypto,
-      header,
-      new SessionMap(this.id, this.node.crypto, streamingKnownState),
-    );
+
+    // Create VerifiedState - Rust validates uniqueness and id match unless skipVerify is true
+    try {
+      this._verified = new VerifiedState(
+        this.id,
+        this.node.crypto,
+        header,
+        streamingKnownState,
+        skipVerify,
+      );
+    } catch (e) {
+      // Rust validation failed (invalid uniqueness or id mismatch)
+      logger.error("Header validation failed", {
+        id: this.id,
+        header,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return false;
+    }
+
+    // Only add dependencies after successful validation
+    this.addDependencyFromHeader(header);
+
     // Clean up if transitioning from garbageCollected/onlyKnownState
     if (this.isAvailable()) {
       this.cleanupLastKnownState();
@@ -651,7 +642,7 @@ export class CoValueCore {
    */
   knownStateWithStreaming(): CoValueKnownState {
     if (this.verified) {
-      return this.verified.immutableKnownStateWithStreaming();
+      return this.verified.knownStateWithStreaming();
     }
 
     return this.knownState();
@@ -660,16 +651,12 @@ export class CoValueCore {
   /**
    * Returns the known state of the CoValue
    *
-   * The return value identity is going to be stable as long as the CoValue is not modified.
-   *
-   * On change the knownState is invalidated and a new object is returned.
-   *
    * For garbageCollected/onlyKnownState CoValues, returns the cached knownState.
    */
   knownState(): CoValueKnownState {
     // 1. If we have verified content in memory, use that (authoritative)
     if (this.verified) {
-      return this.verified.immutableKnownState();
+      return this.verified.knownState();
     }
 
     // 2. If we have last known state (GC'd or onlyKnownState), use that
@@ -730,7 +717,7 @@ export class CoValueCore {
 
     return {
       sessionID,
-      txIndex: this.verified.sessions.get(sessionID)?.transactions.length || 0,
+      txIndex: this.verified.getTransactionsCount(sessionID) || 0,
     };
   }
 
@@ -761,8 +748,7 @@ export class CoValueCore {
     let deleteTransaction: Transaction | undefined = undefined;
 
     if (isDeleteSessionID(sessionID)) {
-      const txCount =
-        this.verified.sessions.get(sessionID)?.transactions.length ?? 0;
+      const txCount = this.verified.getTransactionsCount(sessionID) ?? 0;
       if (txCount > 0 || newTransactions.length > 1) {
         return {
           value: true,
@@ -1051,6 +1037,20 @@ export class CoValueCore {
     }
   }
 
+  #isContentRebuildScheduled = false;
+  scheduleContentRebuild() {
+    if (!this._cachedContent || this.#isContentRebuildScheduled) {
+      return;
+    }
+
+    this.#isContentRebuildScheduled = true;
+
+    queueMicrotask(() => {
+      this.#isContentRebuildScheduled = false;
+      this._cachedContent?.rebuildFromCore();
+    });
+  }
+
   #isNotifyUpdatePaused = false;
   pauseNotifyUpdate() {
     this.#isNotifyUpdatePaused = true;
@@ -1319,7 +1319,7 @@ export class CoValueCore {
     // Store the validity of the transactions before resetting the parsed transactions
     const validityBeforeReset = new Array<boolean>(verifiedTransactions.length);
     this.verifiedTransactions.forEach((transaction, index) => {
-      transaction.isValidated = false;
+      transaction.markAsToValidate();
       validityBeforeReset[index] = transaction.isValidTransactionWithChanges();
     });
 
@@ -1327,6 +1327,7 @@ export class CoValueCore {
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
+    this.#fwwWinners.clear();
 
     this.parseNewTransactions(false);
 
@@ -1378,7 +1379,7 @@ export class CoValueCore {
 
     const isBranched = this.isBranched();
 
-    for (const [sessionID, sessionLog] of this.verified.sessions.entries()) {
+    for (const [sessionID, sessionLog] of this.verified.sessionEntries()) {
       const count = this.verifiedTransactionsKnownSessions[sessionID] ?? 0;
 
       for (
@@ -1427,8 +1428,13 @@ export class CoValueCore {
   }
 
   dispatchTransaction = (transaction: VerifiedTransaction) => {
-    if (!transaction.isValidated) {
+    if (transaction.stage === "to-validate") {
       this.toValidateTransactions.push(transaction);
+      return;
+    }
+
+    if (transaction.stage === "processed") {
+      this.scheduleContentRebuild();
       return;
     }
 
@@ -1450,6 +1456,8 @@ export class CoValueCore {
     determineValidTransactions(this);
     this.toValidateTransactions = [];
   }
+
+  #fwwWinners: Map<string, VerifiedTransaction> = new Map();
 
   /**
    * Parses the meta information of a transaction, and set the branchStart and mergeCommits.
@@ -1487,6 +1495,30 @@ export class CoValueCore {
     if ("merged" in transaction.meta) {
       const mergeCommit = transaction.meta as MergeCommit;
       this.mergeCommits.push(mergeCommit);
+    }
+
+    if ("fww" in transaction.meta) {
+      const fwwKey = transaction.meta.fww as string;
+      const currentWinner = this.#fwwWinners.get(fwwKey);
+
+      // First-writer-wins: keep the transaction with the smallest madeAt
+      // compareTransactions returns < 0 if transaction is earlier than currentWinner
+      if (
+        !currentWinner ||
+        this.compareTransactions(transaction, currentWinner) < 0
+      ) {
+        if (currentWinner) {
+          currentWinner.markInvalid(
+            `Transaction is not the first writer for fww key "${fwwKey}"`,
+          );
+        }
+
+        this.#fwwWinners.set(fwwKey, transaction);
+      } else {
+        transaction.markInvalid(
+          `Transaction is not the first writer for fww key "${fwwKey}"`,
+        );
+      }
     }
 
     // Check if the transaction has been merged from a branch
@@ -1570,7 +1602,7 @@ export class CoValueCore {
     from?: CoValueKnownState["sessions"];
     to?: CoValueKnownState["sessions"];
     knownTransactions?: Record<RawCoID, number>;
-
+    includeInvalidMetaTransactions?: boolean;
     // If true, the branch source transactions will be skipped. Used to gather the transactions for the merge operation.
     skipBranchSource?: boolean;
   }): DecryptedTransaction[] {
@@ -1589,6 +1621,11 @@ export class CoValueCore {
 
     const knownTransactions = options?.knownTransactions?.[this.id] ?? 0;
 
+    // Include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    // permission errors are still not included
+    const includeInvalidMetaTransactions =
+      options?.includeInvalidMetaTransactions ?? false;
+
     for (
       let i = knownTransactions;
       i < this.toProcessTransactions.length;
@@ -1596,7 +1633,7 @@ export class CoValueCore {
     ) {
       const transaction = this.toProcessTransactions[i]!;
 
-      if (!transaction.isValidTransactionWithChanges()) {
+      if (!transaction.isProcessable(includeInvalidMetaTransactions)) {
         continue;
       }
 
@@ -1613,6 +1650,7 @@ export class CoValueCore {
         continue;
       }
 
+      transaction.markAsProcessed();
       matchingTransactions.push(transaction);
     }
 
@@ -1623,6 +1661,7 @@ export class CoValueCore {
     // If this is a branch, we load the valid transactions from the source
     if (source && this.branchStart && !options?.skipBranchSource) {
       const sourceTransactions = source.getValidTransactions({
+        includeInvalidMetaTransactions,
         knownTransactions: options?.knownTransactions,
         to: this.branchStart,
         ignorePrivateTransactions: options?.ignorePrivateTransactions ?? false,
@@ -1781,6 +1820,9 @@ export class CoValueCore {
 
     // The transactions that have already been processed, used for the incremental builds of the content views
     knownTransactions?: Record<RawCoID, number>;
+
+    // Whether to include invalid transactions in the result (only transactions invalidated by metadata parsing are included e.g. init transactions)
+    includeInvalidMetaTransactions?: boolean;
   }): DecryptedTransaction[] {
     const allTransactions = this.getValidTransactions(options);
 
@@ -1903,7 +1945,7 @@ export class CoValueCore {
   }
 
   getTx(txID: TransactionID): Transaction | undefined {
-    return this.verified?.sessions.get(txID.sessionID)?.transactions[
+    return this.verified?.getSession(txID.sessionID)?.transactions[
       txID.txIndex
     ];
   }

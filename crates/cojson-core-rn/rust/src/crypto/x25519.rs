@@ -1,5 +1,5 @@
-use cojson_core::crypto::x25519;
 use super::ed25519::CryptoErrorUniffi;
+use cojson_core::crypto::x25519;
 
 /// Generate a new X25519 private key using secure random number generation.
 /// Returns 32 bytes of raw key material suitable for use with other X25519 functions.
@@ -24,7 +24,10 @@ pub fn x25519_public_key(private_key: &[u8]) -> Result<Vec<u8>, CryptoErrorUniff
 /// - `public_key`: 32 bytes of public key material
 /// Returns 32 bytes of shared secret material or throws an error if key exchange fails.
 #[uniffi::export]
-pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, CryptoErrorUniffi> {
+pub fn x25519_diffie_hellman(
+    private_key: &[u8],
+    public_key: &[u8],
+) -> Result<Vec<u8>, CryptoErrorUniffi> {
     x25519::x25519_diffie_hellman(private_key, public_key)
         .map(|shared_secret| shared_secret.into())
         .map_err(Into::into)
@@ -37,4 +40,3 @@ pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Result<Ve
 pub fn get_sealer_id(secret: String) -> Result<String, CryptoErrorUniffi> {
     x25519::get_sealer_id(&secret).map_err(Into::into)
 }
-

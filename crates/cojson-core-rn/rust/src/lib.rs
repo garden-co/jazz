@@ -7,6 +7,7 @@ pub mod hash {
 }
 
 pub mod crypto {
+    pub mod base64;
     pub mod ed25519;
     pub mod encrypt;
     pub mod seal;
@@ -14,6 +15,7 @@ pub mod crypto {
     pub mod x25519;
     pub mod xsalsa20;
 
+    pub use base64::*;
     pub use ed25519::*;
     pub use encrypt::*;
     pub use seal::*;
@@ -22,5 +24,5 @@ pub mod crypto {
     pub use xsalsa20::*;
 }
 
-pub mod session_log;
-pub use session_log::*;
+pub mod session_map;
+pub use session_map::*;

@@ -1,3 +1,4 @@
+import { CoValueUniqueness } from "cojson";
 import {
   Account,
   AnyZodOrCoValueSchema,
@@ -73,12 +74,16 @@ export class CoFeedSchema<
 
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner?: Group; validation?: LocalValidationMode } | Group,
+    options?:
+      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
+      | { owner?: Group; validation?: LocalValidationMode }
+      | Group,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
     options?:
+      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
       | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,
@@ -86,6 +91,7 @@ export class CoFeedSchema<
   create(
     init: CoFeedSchemaInit<T>,
     options?:
+      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
       | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,
@@ -193,6 +199,42 @@ export class CoFeedSchema<
 
   getCoValueClass(): typeof CoFeed {
     return this.coValueClass;
+  }
+
+  /**
+   * Get an existing unique CoFeed or create a new one if it doesn't exist.
+   *
+   * The provided value is only used when creating a new CoFeed.
+   *
+   * @example
+   * ```ts
+   * const feed = await MessageFeed.getOrCreateUnique({
+   *   value: [],
+   *   unique: ["messages", conversationId],
+   *   owner: group,
+   * });
+   * ```
+   *
+   * @param options The options for creating or loading the CoFeed.
+   * @returns Either an existing CoFeed (unchanged), or a new initialised CoFeed if none exists.
+   * @category Subscription & Loading
+   */
+  getOrCreateUnique<
+    const R extends RefsToResolve<
+      CoFeedInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(options: {
+    value: CoFeedSchemaInit<T>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
+  }): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(
+      // @ts-expect-error
+      withSchemaResolveQuery(options, this.resolveQuery),
+    );
   }
 
   optional(): CoOptionalSchema<this> {

@@ -1,5 +1,13 @@
-use wasm_bindgen::prelude::*;
 use cojson_core::hash::blake3 as blake3_crypto;
+use wasm_bindgen::prelude::*;
+
+/// Compute a short hash of a stable-stringified JSON value.
+/// The input should already be serialized using stableStringify on the JS side.
+/// Returns a string prefixed with "shortHash_z" followed by base58-encoded hash.
+#[wasm_bindgen(js_name = shortHash)]
+pub fn short_hash(value: String) -> String {
+    blake3_crypto::short_hash(&value)
+}
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from

@@ -1,4 +1,8 @@
-import { base64URLtoBytes, bytesToBase64url } from "./base64url.js";
+import {
+  base64URLtoBytes,
+  bytesToBase64url,
+  bytesToBase64,
+} from "./base64url.js";
 import { type RawCoValue } from "./coValue.js";
 import {
   CoValueCore,
@@ -23,10 +27,9 @@ import { RawCoPlainText, stringifyOpID } from "./coValues/coPlainText.js";
 import {
   BinaryStreamItem,
   BinaryStreamStart,
-  CoStreamItem,
   RawBinaryCoStream,
-  RawCoStream,
-} from "./coValues/coStream.js";
+} from "./coValues/binaryCoStream.js";
+import { CoStreamItem, RawCoStream } from "./coValues/coStream.js";
 import { EVERYONE, RawGroup } from "./coValues/group.js";
 import type { Everyone } from "./coValues/group.js";
 import {
@@ -58,7 +61,7 @@ import type {
 import type {
   BinaryCoStreamMeta,
   BinaryStreamInfo,
-} from "./coValues/coStream.js";
+} from "./coValues/binaryCoStream.js";
 import type { InviteSecret } from "./coValues/group.js";
 import { AgentSecret, textDecoder, textEncoder } from "./crypto/crypto.js";
 import type { AgentID, RawCoID, SessionID } from "./ids.js";
@@ -112,6 +115,7 @@ export const cojsonInternals = {
   expectGroup,
   base64URLtoBytes,
   bytesToBase64url,
+  bytesToBase64,
   parseJSON,
   stableStringify,
   getDependedOnCoValues,
@@ -229,6 +233,8 @@ export namespace CojsonInternalTypes {
   export type RawCoID = import("./ids.js").RawCoID;
   export type ProfileShape = import("./coValues/account.js").ProfileShape;
   export type SealerSecret = import("./crypto/crypto.js").SealerSecret;
+  export type SealerID = import("./crypto/crypto.js").SealerID;
+  export type SealedForGroup<T> = import("./crypto/crypto.js").SealedForGroup<T>;
   export type SignerID = import("./crypto/crypto.js").SignerID;
   export type SignerSecret = import("./crypto/crypto.js").SignerSecret;
   export type JsonObject = import("./jsonValue.js").JsonObject;

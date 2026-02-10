@@ -468,6 +468,9 @@ describe("extend", () => {
     const childGroup = node1.node.createGroup();
     childGroup.extend(parentGroup, "admin");
 
+    // Wait for childGroup to sync so node3 sees the groupSealer field
+    await childGroup.core.waitForSync();
+
     const sharedGroup = node3.node.createGroup();
 
     // Account3 does not have permissions over the childGroup being extended
@@ -484,6 +487,9 @@ describe("extend", () => {
     // Create a map owned by sharedGroup
     const testMap = sharedGroup.createMap();
     testMap.set("name", "Test");
+
+    // Wait for sharedGroup to sync so other nodes can resolve keys via groupSealer
+    await sharedGroup.core.waitForSync();
 
     // node1 should be able to access the map because it is admin of the childGroup
     const testMapOnNode1 = expectMap(
@@ -520,6 +526,9 @@ describe("extend", () => {
     const childGroup = node1.node.createGroup();
     childGroup.extend(parentGroup, "admin");
 
+    // Wait for childGroup to sync so node3 sees the groupSealer field
+    await childGroup.core.waitForSync();
+
     const sharedGroup = node3.node.createGroup();
 
     // Account3 does not have permissions over the childGroup being extended
@@ -538,9 +547,16 @@ describe("extend", () => {
     newParentGroup.addMember(account4OnNode1, "admin");
     childGroup.extend(newParentGroup);
 
+    // Wait for sharedGroup and childGroup updates to sync
+    await sharedGroup.core.waitForSync();
+    await childGroup.core.waitForSync();
+
     // Create a map owned by sharedGroup
     const testMap = sharedGroup.createMap();
     testMap.set("name", "Test");
+
+    // Wait for map to sync
+    await testMap.core.waitForSync();
 
     // Account4 should be able to access the map because it is admin of newParentGroup
     const testMapOnNode4 = expectMap(

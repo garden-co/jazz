@@ -6,6 +6,12 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
   private db: SQLiteDatabase | null = null;
   private dbName: string;
 
+  static withDB(db: SQLiteDatabase): ExpoSQLiteAdapter {
+    const adapter = new ExpoSQLiteAdapter();
+    adapter.db = db;
+    return adapter;
+  }
+
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
   }
@@ -56,13 +62,13 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
     await this.db.runAsync(sql, params?.map((p) => p as SQLiteBindValue) ?? []);
   }
 
-  public async transaction(callback: () => unknown) {
+  public async transaction(callback: (tx: ExpoSQLiteAdapter) => unknown) {
     if (!this.db) {
       throw new Error("Database not initialized");
     }
 
     await this.db.withTransactionAsync(async () => {
-      await callback();
+      await callback(ExpoSQLiteAdapter.withDB(this.db!));
     });
   }
 

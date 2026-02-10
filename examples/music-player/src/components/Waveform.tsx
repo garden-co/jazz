@@ -1,7 +1,8 @@
 import { MusicTrack, MusicTrackWaveform } from "@/1_schema";
-import { usePlayerCurrentTime } from "@/lib/audio/usePlayerCurrentTime";
+import { useAudioManager } from "@/lib/audio/AudioManager";
 import { cn } from "@/lib/utils";
 import { useCoState } from "jazz-tools/react";
+import { useSyncExternalStore } from "react";
 
 export function Waveform(props: {
   track: MusicTrack;
@@ -14,7 +15,11 @@ export function Waveform(props: {
     MusicTrackWaveform,
     track.$jazz.refs.waveform?.id,
   );
-  const currentTime = usePlayerCurrentTime();
+  const audioManager = useAudioManager();
+  const currentTime = useSyncExternalStore(
+    (callback) => audioManager.on("timeUpdate", callback),
+    () => audioManager.currentTime,
+  );
 
   if (!waveform.$isLoaded) {
     return (
@@ -30,7 +35,7 @@ export function Waveform(props: {
   const waveformData = waveform.data;
   const barCount = waveformData.length;
   const activeBar = props.showProgress
-    ? Math.ceil(barCount * (currentTime.value / duration))
+    ? Math.ceil(barCount * (currentTime / duration))
     : -1;
 
   return (

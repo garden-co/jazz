@@ -4,7 +4,8 @@ import { RawAccount } from "./coValues/account.js";
 import { RawCoList } from "./coValues/coList.js";
 import { RawCoMap } from "./coValues/coMap.js";
 import { RawCoPlainText } from "./coValues/coPlainText.js";
-import { RawBinaryCoStream, RawCoStream } from "./coValues/coStream.js";
+import { RawBinaryCoStream } from "./coValues/binaryCoStream.js";
+import { RawCoStream } from "./coValues/coStream.js";
 import { RawGroup } from "./coValues/group.js";
 
 export function coreToCoValue(

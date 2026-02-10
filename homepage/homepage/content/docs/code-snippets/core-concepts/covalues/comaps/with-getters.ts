@@ -14,7 +14,6 @@ const Project = co.map({
   },
 });
 
-// @ts-expect-error duplicated
 export type Project = co.loaded<typeof Project>;
 // #endregion
 
@@ -25,11 +24,9 @@ const ProjectWithTypedGetter = co.map({
   status: z.literal(["planning", "active", "completed"]),
   coordinator: co.optional(Member),
   // [!code ++:3]
-  get subProjects(): co.Optional<co.List<typeof Project>> {
-    return co.optional(co.list(Project));
+  get subProjects(): co.Optional<co.List<typeof ProjectWithTypedGetter>> {
+    return co.optional(co.list(ProjectWithTypedGetter));
   },
 });
-
-// @ts-expect-error duplicated
-export type Project = co.loaded<typeof Project>;
+export type ProjectWithTypedGetter = co.loaded<typeof ProjectWithTypedGetter>;
 // #endregion

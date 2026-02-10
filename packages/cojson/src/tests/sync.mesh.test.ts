@@ -89,12 +89,12 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "edge-france -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "edge-france -> core | CONTENT Group header: true new: After: 0 New: 3",
+        "edge-france -> storage | CONTENT Group header: true new: After: 0 New: 4",
+        "edge-france -> core | CONTENT Group header: true new: After: 0 New: 4",
         "edge-france -> storage | CONTENT Map header: true new: After: 0 New: 1",
         "edge-france -> core | CONTENT Map header: true new: After: 0 New: 1",
-        "core -> edge-france | KNOWN Group sessions: header/3",
-        "core -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "core -> edge-france | KNOWN Group sessions: header/4",
+        "core -> storage | CONTENT Group header: true new: After: 0 New: 4",
         "core -> edge-france | KNOWN Map sessions: header/1",
         "core -> storage | CONTENT Map header: true new: After: 0 New: 1",
         "client -> storage | LOAD Map sessions: empty",
@@ -103,16 +103,16 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "edge-italy -> storage | LOAD Map sessions: empty",
         "storage -> edge-italy | KNOWN Map sessions: empty",
         "edge-italy -> core | LOAD Map sessions: empty",
-        "core -> edge-italy | CONTENT Group header: true new: After: 0 New: 3",
+        "core -> edge-italy | CONTENT Group header: true new: After: 0 New: 4",
         "core -> edge-italy | CONTENT Map header: true new: After: 0 New: 1",
-        "edge-italy -> core | KNOWN Group sessions: header/3",
-        "edge-italy -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "edge-italy -> core | KNOWN Group sessions: header/4",
+        "edge-italy -> storage | CONTENT Group header: true new: After: 0 New: 4",
         "edge-italy -> core | KNOWN Map sessions: header/1",
         "edge-italy -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "edge-italy -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "edge-italy -> client | CONTENT Group header: true new: After: 0 New: 4",
         "edge-italy -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> edge-italy | KNOWN Group sessions: header/3",
-        "client -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> edge-italy | KNOWN Group sessions: header/4",
+        "client -> storage | CONTENT Group header: true new: After: 0 New: 4",
         "client -> edge-italy | KNOWN Map sessions: header/1",
         "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
       ]
@@ -153,18 +153,18 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "edge-france -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "edge-france -> core | CONTENT Group header: true new: After: 0 New: 3",
-        "edge-france -> storage | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "edge-france -> core | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "edge-france -> storage | CONTENT Group header: false new: After: 3 New: 2",
-        "edge-france -> core | CONTENT Group header: false new: After: 3 New: 2",
-        "core -> edge-france | KNOWN Group sessions: header/3",
-        "core -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "core -> edge-france | KNOWN ParentGroup sessions: header/5",
-        "core -> storage | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "core -> edge-france | KNOWN Group sessions: header/5",
-        "core -> storage | CONTENT Group header: false new: After: 3 New: 2",
+        "edge-france -> storage | CONTENT Group header: true new: After: 0 New: 4",
+        "edge-france -> core | CONTENT Group header: true new: After: 0 New: 4",
+        "edge-france -> storage | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "edge-france -> core | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "edge-france -> storage | CONTENT Group header: false new: After: 4 New: 2",
+        "edge-france -> core | CONTENT Group header: false new: After: 4 New: 2",
+        "core -> edge-france | KNOWN Group sessions: header/4",
+        "core -> storage | CONTENT Group header: true new: After: 0 New: 4",
+        "core -> edge-france | KNOWN ParentGroup sessions: header/6",
+        "core -> storage | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "core -> edge-france | KNOWN Group sessions: header/6",
+        "core -> storage | CONTENT Group header: false new: After: 4 New: 2",
         "edge-france -> storage | CONTENT Map header: true new: After: 0 New: 1",
         "edge-france -> core | CONTENT Map header: true new: After: 0 New: 1",
         "core -> edge-france | KNOWN Map sessions: header/1",
@@ -173,20 +173,20 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "edge-italy -> storage | LOAD Map sessions: empty",
         "storage -> edge-italy | KNOWN Map sessions: empty",
         "edge-italy -> core | LOAD Map sessions: empty",
-        "core -> edge-italy | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "core -> edge-italy | CONTENT Group header: true new: After: 0 New: 5",
+        "core -> edge-italy | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "core -> edge-italy | CONTENT Group header: true new: After: 0 New: 6",
         "core -> edge-italy | CONTENT Map header: true new: After: 0 New: 1",
-        "edge-italy -> core | KNOWN ParentGroup sessions: header/5",
-        "edge-italy -> storage | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "edge-italy -> core | KNOWN Group sessions: header/5",
-        "edge-italy -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "edge-italy -> core | KNOWN ParentGroup sessions: header/6",
+        "edge-italy -> storage | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "edge-italy -> core | KNOWN Group sessions: header/6",
+        "edge-italy -> storage | CONTENT Group header: true new: After: 0 New: 6",
         "edge-italy -> core | KNOWN Map sessions: header/1",
         "edge-italy -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "edge-italy -> client | CONTENT ParentGroup header: true new: After: 0 New: 5",
-        "edge-italy -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "edge-italy -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "edge-italy -> client | CONTENT Group header: true new: After: 0 New: 6",
         "edge-italy -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> edge-italy | KNOWN ParentGroup sessions: header/5",
-        "client -> edge-italy | KNOWN Group sessions: header/5",
+        "client -> edge-italy | KNOWN ParentGroup sessions: header/6",
+        "client -> edge-italy | KNOWN Group sessions: header/6",
         "client -> edge-italy | KNOWN Map sessions: header/1",
       ]
     `);
@@ -402,10 +402,10 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "client -> core | LOAD Map sessions: empty",
         "client -> another-server | LOAD Map sessions: empty",
         "core -> storage-of-client | CONTENT Map header: false new: After: 1 New: 1",
-        "another-server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "another-server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "another-server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> another-server | KNOWN Group sessions: header/3",
-        "client -> core | LOAD Group sessions: header/3",
+        "client -> another-server | KNOWN Group sessions: header/4",
+        "client -> core | LOAD Group sessions: header/4",
         "client -> another-server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -459,9 +459,9 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> another-server | LOAD Map sessions: empty",
-        "another-server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "another-server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "another-server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> another-server | KNOWN Group sessions: header/3",
+        "client -> another-server | KNOWN Group sessions: header/4",
         "client -> another-server | KNOWN Map sessions: header/1",
       ]
     `);
@@ -500,7 +500,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "edge -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "edge -> storage | CONTENT Group header: true new: After: 0 New: 6",
         "edge -> storage | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
         "edge -> storage | CONTENT Map header: false new: After: 21 New: 21",
         "edge -> storage | CONTENT Map header: false new: After: 42 New: 21",
@@ -550,11 +550,11 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "storage -> client | KNOWN Map sessions: empty",
         "client -> edge | LOAD Map sessions: empty",
         "edge -> storage | LOAD Map sessions: empty",
-        "storage -> edge | CONTENT Group header: true new: After: 0 New: 5",
-        "edge -> core | LOAD Group sessions: header/5",
+        "storage -> edge | CONTENT Group header: true new: After: 0 New: 6",
+        "edge -> core | LOAD Group sessions: header/6",
         "storage -> edge | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
         "edge -> core | LOAD Map sessions: header/100",
-        "edge -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "edge -> client | CONTENT Group header: true new: After: 0 New: 6",
         "edge -> client | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
         "storage -> edge | CONTENT Map header: true new: After: 21 New: 21",
         "edge -> client | CONTENT Map header: false new: After: 21 New: 21 expectContentUntil: header/100",
@@ -570,8 +570,8 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "core -> storage | GET_KNOWN_STATE Map",
         "storage -> core | GET_KNOWN_STATE_RESULT Map sessions: empty",
         "core -> edge | KNOWN Map sessions: empty",
-        "client -> edge | KNOWN Group sessions: header/5",
-        "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> edge | KNOWN Group sessions: header/6",
+        "client -> storage | CONTENT Group header: true new: After: 0 New: 6",
         "client -> edge | KNOWN Map sessions: header/21",
         "client -> storage | CONTENT Map header: true new: After: 0 New: 21",
         "client -> edge | KNOWN Map sessions: header/42",
@@ -582,14 +582,14 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "client -> storage | CONTENT Map header: false new: After: 63 New: 21",
         "client -> edge | KNOWN Map sessions: header/100",
         "client -> storage | CONTENT Map header: false new: After: 84 New: 16",
-        "edge -> core | CONTENT Group header: true new: After: 0 New: 5",
+        "edge -> core | CONTENT Group header: true new: After: 0 New: 6",
         "edge -> core | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
         "edge -> core | CONTENT Map header: false new: After: 21 New: 21",
         "edge -> core | CONTENT Map header: false new: After: 42 New: 21",
         "edge -> core | CONTENT Map header: false new: After: 63 New: 21",
         "edge -> core | CONTENT Map header: false new: After: 84 New: 16",
-        "core -> edge | KNOWN Group sessions: header/5",
-        "core -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "core -> edge | KNOWN Group sessions: header/6",
+        "core -> storage | CONTENT Group header: true new: After: 0 New: 6",
         "core -> edge | KNOWN Map sessions: header/21",
         "core -> storage | CONTENT Map header: true new: After: 0 New: 21",
         "core -> edge | KNOWN Map sessions: header/42",
@@ -604,5 +604,148 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     `);
 
     expect(mapOnClient.core.knownState()).toEqual(largeMap.core.knownState());
+  });
+
+  test("edge must subscribe to core when handling client LOAD with lazy loading", async () => {
+    // Topology: client1 -> edge -> core <- client2
+    //
+    // When edge uses lazy loading (getKnownStateFromStorage) to respond
+    // to a client's LOAD request with KNOWN, it MUST still subscribe to
+    // core by sending a LOAD request. Otherwise, edge won't receive
+    // future updates from core for that covalue.
+    //
+    // This test verifies that updates from client2 (connected to core)
+    // properly propagate to client1 (connected to edge).
+
+    // Setup: core server with storage
+    const core = setupTestNode();
+    core.addStorage({ ourName: "core" });
+
+    // Setup: edge server with storage, connected to core
+    // NOTE: Using persistent: false so that when edge reconnects after restart,
+    // core doesn't preserve the old subscription state (known states).
+    // This simulates a fresh connection where edge must explicitly subscribe.
+    const edge = setupTestNode();
+    edge.addStorage({ ourName: "edge" });
+    edge.connectToSyncServer({
+      ourName: "edge",
+      syncServerName: "core",
+      syncServer: core.node,
+      persistent: false,
+    });
+
+    // Setup: client1 connected to edge
+    const client1 = setupTestNode();
+    client1.connectToSyncServer({
+      ourName: "client1",
+      syncServerName: "edge",
+      syncServer: edge.node,
+    });
+
+    // Create covalue on core and sync to edge and client1
+    const group = core.node.createGroup();
+    group.addMember("everyone", "writer"); // Allow anyone to write
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+    await map.core.waitForSync();
+
+    // Client1 loads the covalue (syncs to edge storage)
+    const mapOnClient1 = await loadCoValueOrFail(client1.node, map.id);
+    expect(mapOnClient1.get("hello")).toEqual("world");
+
+    // Verify the states match
+    const client1KnownState = mapOnClient1.core.knownState();
+    const edgeStorageKnownState = edge.node.storage!.getKnownState(map.id);
+    expect(client1KnownState).toEqual(edgeStorageKnownState);
+
+    // Disconnect client1 (keeps data in memory)
+    client1.disconnect();
+
+    // Restart edge with a NEW session to ensure it's a completely fresh peer
+    // This is necessary because core tracks subscriptions by peer ID (agent+session),
+    // and we need edge to appear as a new peer that has never subscribed to the coValues.
+    const edgeStorage = edge.node.storage!;
+
+    // Disconnect old edge from core first
+    edge.disconnect();
+
+    const newEdge = edge.spawnNewSession();
+    newEdge.node.setStorage(edgeStorage);
+
+    newEdge.connectToSyncServer({
+      ourName: "edge2",
+      syncServerName: "core",
+      syncServer: core.node,
+      persistent: false,
+    });
+
+    // Replace edge reference for the rest of the test
+    const edge2 = newEdge;
+
+    SyncMessagesLog.clear();
+
+    // Client1 reconnects with existing data (same known state as edge's storage)
+    // This triggers the lazy loading path in handleLoad
+    client1.connectToSyncServer({
+      ourName: "client1",
+      syncServerName: "edge2",
+      syncServer: edge2.node,
+    });
+
+    await client1.node.syncManager.waitForAllCoValuesSync();
+
+    // Verify edge2 used lazy loading AND subscribed to core
+    // Key messages:
+    // - edge -> storage | GET_KNOWN_STATE (lazy loading)
+    // - edge2 -> client1 | KNOWN (responds with KNOWN, not CONTENT)
+    // - edge2 -> core | LOAD (subscribes to core for future updates)
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client1 -> edge2 | LOAD Group sessions: header/6",
+        "client1 -> edge2 | LOAD Map sessions: header/1",
+        "edge -> storage | GET_KNOWN_STATE Group",
+        "storage -> edge | GET_KNOWN_STATE_RESULT Group sessions: header/6",
+        "edge2 -> client1 | KNOWN Group sessions: header/6",
+        "edge2 -> core | LOAD Group sessions: header/6",
+        "edge -> storage | GET_KNOWN_STATE Map",
+        "storage -> edge | GET_KNOWN_STATE_RESULT Map sessions: header/1",
+        "edge2 -> client1 | KNOWN Map sessions: header/1",
+        "edge2 -> core | LOAD Map sessions: header/1",
+        "core -> edge2 | KNOWN Group sessions: header/6",
+      ]
+    `);
+
+    // IMPORTANT: Verify the coValue is NOT loaded into memory on edge yet.
+    // The lazy loading optimization means edge should only have the coValue
+    // in storage, not in memory, until actual content arrives.
+    const mapOnEdge = edge2.node.getCoValue(map.id);
+    expect(mapOnEdge.isAvailable()).toBe(false);
+
+    SyncMessagesLog.clear();
+
+    // Now client2 connects directly to core and makes an update
+    const client2 = setupTestNode();
+    client2.connectToSyncServer({
+      ourName: "client2",
+      syncServerName: "core",
+      syncServer: core.node,
+    });
+
+    const mapOnClient2 = await loadCoValueOrFail(client2.node, map.id);
+    mapOnClient2.set("hello", "updated by client2", "trusting");
+    await mapOnClient2.core.waitForSync();
+
+    // Wait for propagation: core -> edge2 -> client1
+    // Without the fix, this will timeout because edge2 never subscribed to core
+    await waitFor(() => mapOnClient1.get("hello") === "updated by client2");
+
+    // Verify edge2 now has the coValue in memory (received from core)
+    expect(mapOnEdge.isAvailable()).toBe(true);
+    expect(mapOnClient1.get("hello")).toEqual("updated by client2");
   });
 });
