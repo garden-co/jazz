@@ -374,10 +374,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     /// Ensure a client exists with the given session.
+    ///
+    /// A session is always required — callers must authenticate before
+    /// registering a client.
     pub fn ensure_client_with_session(
         &self,
         client_id: ClientId,
-        session: Option<Session>,
+        session: Session,
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.ensure_client_with_session(client_id, session);
@@ -399,6 +402,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.remove_client(client_id);
+        Ok(())
+    }
+
+    /// Promote a client to Admin role (full access, no ReBAC).
+    pub fn set_client_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_client_admin(client_id);
         Ok(())
     }
 

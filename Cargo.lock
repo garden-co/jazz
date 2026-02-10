@@ -2884,6 +2884,7 @@ dependencies = [
  "groove",
  "http-body-util",
  "jazz-rs",
+ "jsonwebtoken",
  "reqwest",
  "reqwest-eventsource",
  "serde",

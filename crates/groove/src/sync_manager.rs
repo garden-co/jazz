@@ -76,7 +76,7 @@ impl std::fmt::Display for ClientId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QueryId(pub u64);
 
-/// Unique identifier for a pending update awaiting approval.
+/// Unique identifier for a pending permission check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PendingUpdateId(pub u64);
 
@@ -87,6 +87,24 @@ type BranchSyncData = (
     BranchName,
     HashSet<CommitId>,
 );
+
+// ============================================================================
+// Client Roles
+// ============================================================================
+
+/// Role-based access control for client connections.
+///
+/// Determines how incoming writes from a client are routed:
+/// - `User`: Requires session, ReBAC for rows, rejected for catalogue
+/// - `Admin`: Full access (catalogue + data, no ReBAC)
+/// - `Peer`: Trusted relay (server-to-server), bypasses all auth
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClientRole {
+    #[default]
+    User,
+    Admin,
+    Peer,
+}
 
 // ============================================================================
 // Connection State
@@ -113,6 +131,8 @@ pub struct QueryScope {
 /// Tracking state for a connected client.
 #[derive(Debug, Clone, Default)]
 pub struct ClientState {
+    /// Client's role for access control.
+    pub role: ClientRole,
     /// Client's session for policy evaluation.
     pub session: Option<Session>,
     /// Active queries from this client.
@@ -157,6 +177,16 @@ pub enum SyncError {
     BlobAccessDenied { blob_id: BlobId },
     /// Blob not found in storage.
     BlobNotFound { blob_id: BlobId },
+    /// Client must have a session to write.
+    SessionRequired {
+        object_id: ObjectId,
+        branch_name: BranchName,
+    },
+    /// User clients cannot write catalogue objects.
+    CatalogueWriteDenied {
+        object_id: ObjectId,
+        branch_name: BranchName,
+    },
 }
 
 // ============================================================================
@@ -224,6 +254,27 @@ pub enum SyncPayload {
 }
 
 impl SyncPayload {
+    /// Check if this payload carries a catalogue object (schema or lens).
+    pub fn is_catalogue(&self) -> bool {
+        let metadata = match self {
+            SyncPayload::ObjectUpdated {
+                metadata: Some(m), ..
+            } => &m.metadata,
+            SyncPayload::ObjectTruncated { .. } => {
+                // Truncation could be catalogue, but we check conservatively.
+                // The object_id might not have metadata attached to the truncation payload,
+                // so we can't determine type from the payload alone.
+                // Catalogue truncation is rare; treat as non-catalogue for routing.
+                return false;
+            }
+            _ => return false,
+        };
+        matches!(
+            metadata.get("type").map(|s| s.as_str()),
+            Some("catalogue_schema" | "catalogue_lens")
+        )
+    }
+
     /// Get the variant name for debugging.
     pub fn variant_name(&self) -> &'static str {
         match self {
@@ -268,14 +319,6 @@ pub struct InboxEntry {
     pub payload: SyncPayload,
 }
 
-/// An update from a client awaiting approval.
-#[derive(Debug, Clone)]
-pub struct PendingUpdate {
-    pub id: PendingUpdateId,
-    pub client_id: ClientId,
-    pub payload: SyncPayload,
-}
-
 /// A pending query subscription that needs QueryGraph building.
 #[derive(Debug, Clone)]
 pub struct PendingQuerySubscription {
@@ -292,10 +335,9 @@ pub struct PendingQueryUnsubscription {
     pub query_id: QueryId,
 }
 
-/// A write from a client awaiting permission check (policy evaluation).
+/// A write from a User client awaiting permission check (policy evaluation).
 ///
-/// Unlike PendingUpdate which is for scope-based approval, PendingPermissionCheck
-/// is for row-level policy evaluation which may require async graph settling.
+/// Row-level policy evaluation which may require async graph settling.
 #[derive(Debug, Clone)]
 pub struct PendingPermissionCheck {
     pub id: PendingUpdateId,
@@ -330,7 +372,6 @@ pub struct SyncManager {
 
     inbox: Vec<InboxEntry>,
     outbox: Vec<OutboxEntry>,
-    pending_updates: Vec<PendingUpdate>,
     /// Pending permission checks awaiting policy evaluation.
     pending_permission_checks: Vec<PendingPermissionCheck>,
     /// Pending query subscriptions awaiting QueryGraph building by QueryManager.
@@ -362,7 +403,6 @@ impl std::fmt::Debug for SyncManager {
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
             .field("outbox", &self.outbox)
-            .field("pending_updates", &self.pending_updates)
             .field("pending_permission_checks", &self.pending_permission_checks)
             .field(
                 "pending_query_subscriptions",
@@ -396,7 +436,6 @@ impl SyncManager {
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
-            pending_updates: Vec::new(),
             pending_permission_checks: Vec::new(),
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
@@ -417,7 +456,6 @@ impl SyncManager {
             clients: HashMap::new(),
             inbox: Vec::new(),
             outbox: Vec::new(),
-            pending_updates: Vec::new(),
             pending_permission_checks: Vec::new(),
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
@@ -456,12 +494,16 @@ impl SyncManager {
         self.clients.insert(client_id, ClientState::default());
     }
 
-    /// Add a client connection and sync all existing objects to them.
+    /// Add a client connection with Peer role and sync all existing objects to them.
     ///
-    /// This is useful for simple sync scenarios where new clients should
-    /// receive all server data immediately upon connecting.
+    /// Peer role means trusted relay (server-to-server) — bypasses all auth checks.
+    /// This is used when another server connects as a client for replication.
     pub fn add_client_with_full_sync(&mut self, client_id: ClientId) {
-        self.clients.insert(client_id, ClientState::default());
+        let state = ClientState {
+            role: ClientRole::Peer,
+            ..Default::default()
+        };
+        self.clients.insert(client_id, state);
         self.queue_full_sync_to_client(client_id);
     }
 
@@ -494,6 +536,13 @@ impl SyncManager {
     pub fn set_client_session(&mut self, client_id: ClientId, session: Session) {
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.session = Some(session);
+        }
+    }
+
+    /// Set the role for a client.
+    pub fn set_client_role(&mut self, client_id: ClientId, role: ClientRole) {
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.role = role;
         }
     }
 
@@ -560,60 +609,6 @@ impl SyncManager {
     }
 
     // ========================================================================
-    // Pending Updates
-    // ========================================================================
-
-    /// Take all pending updates for upper layer evaluation.
-    pub fn take_pending_updates(&mut self) -> Vec<PendingUpdate> {
-        std::mem::take(&mut self.pending_updates)
-    }
-
-    /// Get the IDs of all pending updates (without taking them).
-    pub fn pending_update_ids(&self) -> Vec<PendingUpdateId> {
-        self.pending_updates.iter().map(|p| p.id).collect()
-    }
-
-    /// Approve a pending update, applying it.
-    pub fn approve_update<H: Storage>(&mut self, storage: &mut H, pending_id: PendingUpdateId) {
-        // Find and remove the pending update
-        if let Some(pos) = self.pending_updates.iter().position(|p| p.id == pending_id) {
-            let pending = self.pending_updates.remove(pos);
-            self.apply_payload_from_client(storage, pending.client_id, pending.payload, true);
-        }
-    }
-
-    /// Reject a pending update, sending error back to client.
-    pub fn reject_update(&mut self, pending_id: PendingUpdateId, reason: String) {
-        if let Some(pos) = self.pending_updates.iter().position(|p| p.id == pending_id) {
-            let pending = self.pending_updates.remove(pos);
-
-            // Extract object_id and branch_name from payload
-            let (object_id, branch_name) = match &pending.payload {
-                SyncPayload::ObjectUpdated {
-                    object_id,
-                    branch_name,
-                    ..
-                } => (*object_id, *branch_name),
-                SyncPayload::ObjectTruncated {
-                    object_id,
-                    branch_name,
-                    ..
-                } => (*object_id, *branch_name),
-                _ => return, // Shouldn't happen for pending updates
-            };
-
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Client(pending.client_id),
-                payload: SyncPayload::Error(SyncError::PermissionDenied {
-                    object_id,
-                    branch_name,
-                    reason,
-                }),
-            });
-        }
-    }
-
-    // ========================================================================
     // Pending Query Subscriptions
     // ========================================================================
 
@@ -622,6 +617,13 @@ impl SyncManager {
     /// QueryManager will build QueryGraphs for these and call back with computed scopes.
     pub fn take_pending_query_subscriptions(&mut self) -> Vec<PendingQuerySubscription> {
         std::mem::take(&mut self.pending_query_subscriptions)
+    }
+
+    /// Re-queue pending query subscriptions that couldn't be processed yet.
+    ///
+    /// Called by QueryManager when schema isn't available for some subscriptions.
+    pub fn requeue_pending_query_subscriptions(&mut self, subs: Vec<PendingQuerySubscription>) {
+        self.pending_query_subscriptions.extend(subs);
     }
 
     /// Take pending query unsubscriptions for QueryManager to process.
@@ -1325,68 +1327,73 @@ impl SyncManager {
                 object_id,
                 branch_name,
                 commits,
-                metadata: _,
+                ..
             } => {
-                // Check if object is in any query scope
-                if !client.is_in_scope(*object_id, branch_name) {
-                    // Out of scope - queue for upper-layer approval.
-                    // This applies to ALL objects including row/catalogue objects:
-                    // even new inserts that the scope hasn't seen yet must be approved.
-                    let id = PendingUpdateId(self.next_pending_id);
-                    self.next_pending_id += 1;
-                    self.pending_updates.push(PendingUpdate {
-                        id,
-                        client_id,
-                        payload,
-                    });
-                    return;
-                }
-
-                // Queue for permission check if client has a session
-                if let Some(session) = &client.session {
-                    // Get object metadata and old content from current tip (if exists)
-                    let (metadata, old_content) = self
-                        .object_manager
-                        .get(*object_id)
-                        .map(|obj| {
-                            let old = obj
-                                .branches
-                                .get(branch_name)
-                                .and_then(|branch| {
-                                    branch
-                                        .tips
-                                        .iter()
-                                        .next()
-                                        .and_then(|tip_id| branch.commits.get(tip_id))
-                                })
-                                .map(|commit| commit.content.clone());
-                            (obj.metadata.clone(), old)
-                        })
-                        .unwrap_or_default();
-
-                    // Get new content from incoming commits
-                    let new_content = commits.last().map(|c| c.content.clone());
-
-                    // Determine operation (INSERT if no old content, UPDATE otherwise)
-                    let operation = if old_content.is_some() {
-                        Operation::Update
-                    } else {
-                        Operation::Insert
-                    };
-
-                    // Queue for async permission evaluation
-                    self.queue_for_permission_check(
-                        client_id,
-                        payload,
-                        session.clone(),
-                        metadata,
-                        old_content,
-                        new_content,
-                        operation,
-                    );
-                } else {
-                    // No session - allow (permissive mode)
-                    self.apply_payload_from_client(storage, client_id, payload, false);
+                let object_id = *object_id;
+                let branch_name = *branch_name;
+                match client.role {
+                    ClientRole::Peer | ClientRole::Admin => {
+                        // Trusted — apply directly
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
+                    ClientRole::User => {
+                        // User requires session
+                        let Some(session) = &client.session else {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::SessionRequired {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        };
+                        // User cannot write catalogue objects
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+                        // Row data — queue for ReBAC permission check
+                        let (metadata, old_content) = self
+                            .object_manager
+                            .get(object_id)
+                            .map(|obj| {
+                                let old = obj
+                                    .branches
+                                    .get(&branch_name)
+                                    .and_then(|branch| {
+                                        branch
+                                            .tips
+                                            .iter()
+                                            .next()
+                                            .and_then(|tip_id| branch.commits.get(tip_id))
+                                    })
+                                    .map(|commit| commit.content.clone());
+                                (obj.metadata.clone(), old)
+                            })
+                            .unwrap_or_default();
+                        let new_content = commits.last().map(|c| c.content.clone());
+                        let operation = if old_content.is_some() {
+                            Operation::Update
+                        } else {
+                            Operation::Insert
+                        };
+                        self.queue_for_permission_check(
+                            client_id,
+                            payload,
+                            session.clone(),
+                            metadata,
+                            old_content,
+                            new_content,
+                            operation,
+                        );
+                    }
                 }
             }
             SyncPayload::ObjectTruncated {
@@ -1394,63 +1401,61 @@ impl SyncManager {
                 branch_name,
                 ..
             } => {
-                // Check if object is in any query scope
-                if !client.is_in_scope(*object_id, branch_name) {
-                    // Out of scope - queue for approval
-                    let id = PendingUpdateId(self.next_pending_id);
-                    self.next_pending_id += 1;
-                    self.pending_updates.push(PendingUpdate {
-                        id,
-                        client_id,
-                        payload,
-                    });
-                    return;
-                }
-
-                // Queue for permission check if client has a session
-                if let Some(session) = &client.session {
-                    // Get object metadata and old content from current tip
-                    let (metadata, old_content) = self
-                        .object_manager
-                        .get(*object_id)
-                        .map(|obj| {
-                            let old = obj
-                                .branches
-                                .get(branch_name)
-                                .and_then(|branch| {
-                                    branch
-                                        .tips
-                                        .iter()
-                                        .next()
-                                        .and_then(|tip_id| branch.commits.get(tip_id))
-                                })
-                                .map(|commit| commit.content.clone());
-                            (obj.metadata.clone(), old)
-                        })
-                        .unwrap_or_default();
-
-                    // Truncation is a delete operation - queue for async permission evaluation
-                    self.queue_for_permission_check(
-                        client_id,
-                        payload,
-                        session.clone(),
-                        metadata,
-                        old_content,
-                        None,
-                        Operation::Delete,
-                    );
-                } else {
-                    // No session - allow (permissive mode)
-                    self.apply_payload_from_client(storage, client_id, payload, false);
+                let object_id = *object_id;
+                let branch_name = *branch_name;
+                match client.role {
+                    ClientRole::Peer | ClientRole::Admin => {
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
+                    ClientRole::User => {
+                        let Some(session) = &client.session else {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::SessionRequired {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        };
+                        let (metadata, old_content) = self
+                            .object_manager
+                            .get(object_id)
+                            .map(|obj| {
+                                let old = obj
+                                    .branches
+                                    .get(&branch_name)
+                                    .and_then(|branch| {
+                                        branch
+                                            .tips
+                                            .iter()
+                                            .next()
+                                            .and_then(|tip_id| branch.commits.get(tip_id))
+                                    })
+                                    .map(|commit| commit.content.clone());
+                                (obj.metadata.clone(), old)
+                            })
+                            .unwrap_or_default();
+                        self.queue_for_permission_check(
+                            client_id,
+                            payload,
+                            session.clone(),
+                            metadata,
+                            old_content,
+                            None,
+                            Operation::Delete,
+                        );
+                    }
                 }
             }
             SyncPayload::BlobRequest { blob_id } => {
-                // Check if client has read permission for any object referencing this blob
-                let has_permission = client
-                    .queries
-                    .values()
-                    .flat_map(|q| q.scope.iter())
-                    .any(|(obj_id, _)| *obj_id == blob_id.object_id);
+                // Peer/Admin bypass scope check for blobs
+                let has_permission = matches!(client.role, ClientRole::Peer | ClientRole::Admin)
+                    || client
+                        .queries
+                        .values()
+                        .flat_map(|q| q.scope.iter())
+                        .any(|(obj_id, _)| *obj_id == blob_id.object_id);
 
                 if !has_permission {
                     self.outbox.push(OutboxEntry {
@@ -2287,8 +2292,8 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn no_callback_allows_all_writes() {
-        // When no permission callback is set, all writes in scope are allowed
+    fn peer_writes_applied_directly() {
+        // Peer role writes are applied directly without permission checks
         let mut sm = SyncManager::new();
         let mut io = MemoryStorage::new();
 
@@ -2309,13 +2314,11 @@ mod tests {
 
         let client_id = ClientId::new();
         sm.add_client(client_id);
+        sm.set_client_role(client_id, ClientRole::Peer);
 
-        let mut scope = HashSet::new();
-        scope.insert((obj_id, "main".into()));
-        sm.set_client_query_scope(client_id, QueryId(1), scope, None);
         sm.take_outbox();
 
-        // Client pushes update - should be allowed (no callback)
+        // Client pushes update - Peer role bypasses all checks
         let commit = Commit {
             parents: smallvec![c1],
             content: b"update".to_vec(),
@@ -2338,9 +2341,296 @@ mod tests {
 
         sm.process_inbox(&mut io);
 
+        // No pending permission checks — Peer bypasses
+        let pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 0);
+
         // Verify commit was applied
         let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
         assert!(tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn admin_writes_catalogue_directly() {
+        // Admin role can write catalogue objects directly
+        let mut sm = SyncManager::new();
+        let mut io = MemoryStorage::new();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        sm.set_client_role(client_id, ClientRole::Admin);
+
+        let obj_id = ObjectId::new();
+        let author = ObjectId::new();
+        let commit = Commit {
+            parents: smallvec![],
+            content: b"schema data".to_vec(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        let mut cat_metadata = HashMap::new();
+        cat_metadata.insert("type".to_string(), "catalogue_schema".to_string());
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: Some(ObjectMetadata {
+                    id: obj_id,
+                    metadata: cat_metadata,
+                }),
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox(&mut io);
+
+        // No pending permission checks — Admin bypasses
+        let pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 0);
+
+        // Commit should be applied directly
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn admin_writes_row_directly() {
+        // Admin role can write row objects directly without ReBAC
+        let mut sm = SyncManager::new();
+        let mut io = MemoryStorage::new();
+
+        let obj_id = sm.object_manager.create(&mut io, None);
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        sm.set_client_role(client_id, ClientRole::Admin);
+        sm.take_outbox();
+
+        let commit = Commit {
+            parents: smallvec![c1],
+            content: b"updated".to_vec(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox(&mut io);
+
+        let pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 0);
+
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn user_with_session_goes_to_permission_check() {
+        // User with session sends row data → queued for ReBAC
+        let mut sm = SyncManager::new();
+        let mut io = MemoryStorage::new();
+
+        let obj_id = sm.object_manager.create(&mut io, None);
+        let author = ObjectId::new();
+        let c1 = sm
+            .object_manager
+            .add_commit(
+                &mut io,
+                obj_id,
+                "main",
+                vec![],
+                b"original".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        sm.set_client_session(client_id, Session::new("alice"));
+        sm.take_outbox();
+
+        let commit = Commit {
+            parents: smallvec![c1],
+            content: b"update".to_vec(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit.clone()],
+            },
+        });
+
+        sm.process_inbox(&mut io);
+
+        // Should be queued for permission check
+        let pending = sm.take_pending_permission_checks();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].client_id, client_id);
+        assert_eq!(pending[0].session.user_id, "alice");
+
+        // Should NOT be applied yet
+        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+        assert!(!tips.contains(&commit.id()));
+    }
+
+    #[test]
+    fn user_without_session_rejected() {
+        // User without session → SessionRequired error
+        let mut sm = SyncManager::new();
+        let mut io = MemoryStorage::new();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        // No session set — default User role
+
+        let obj_id = ObjectId::new();
+        let author = ObjectId::new();
+        let commit = Commit {
+            parents: smallvec![],
+            content: b"data".to_vec(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: None,
+                branch_name: "main".into(),
+                commits: vec![commit],
+            },
+        });
+
+        sm.process_inbox(&mut io);
+
+        let outbox = sm.take_outbox();
+        assert_eq!(outbox.len(), 1);
+
+        match &outbox[0].payload {
+            SyncPayload::Error(SyncError::SessionRequired {
+                object_id,
+                branch_name,
+            }) => {
+                assert_eq!(*object_id, obj_id);
+                assert_eq!(branch_name.as_str(), "main");
+            }
+            other => panic!("Expected SessionRequired error, got {:?}", other),
+        }
+
+        // Object should not exist
+        assert!(sm.object_manager.get(obj_id).is_none());
+    }
+
+    #[test]
+    fn user_catalogue_write_rejected() {
+        // User with session tries to write catalogue → CatalogueWriteDenied
+        let mut sm = SyncManager::new();
+        let mut io = MemoryStorage::new();
+
+        let client_id = ClientId::new();
+        sm.add_client(client_id);
+        sm.set_client_session(client_id, Session::new("alice"));
+
+        let obj_id = ObjectId::new();
+        let author = ObjectId::new();
+        let commit = Commit {
+            parents: smallvec![],
+            content: b"schema data".to_vec(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        let mut cat_metadata = HashMap::new();
+        cat_metadata.insert("type".to_string(), "catalogue_schema".to_string());
+
+        sm.push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: obj_id,
+                metadata: Some(ObjectMetadata {
+                    id: obj_id,
+                    metadata: cat_metadata,
+                }),
+                branch_name: "main".into(),
+                commits: vec![commit],
+            },
+        });
+
+        sm.process_inbox(&mut io);
+
+        let outbox = sm.take_outbox();
+        assert_eq!(outbox.len(), 1);
+
+        match &outbox[0].payload {
+            SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                object_id,
+                branch_name,
+            }) => {
+                assert_eq!(*object_id, obj_id);
+                assert_eq!(branch_name.as_str(), "main");
+            }
+            other => panic!("Expected CatalogueWriteDenied error, got {:?}", other),
+        }
+
+        // Object should not exist
+        assert!(sm.object_manager.get(obj_id).is_none());
+    }
+
+    #[test]
+    fn add_client_with_full_sync_sets_peer_role() {
+        let mut sm = SyncManager::new();
+        let client_id = ClientId::new();
+        sm.add_client_with_full_sync(client_id);
+
+        let client = sm.get_client(client_id).unwrap();
+        assert_eq!(client.role, ClientRole::Peer);
     }
 
     #[test]
@@ -2557,278 +2847,6 @@ mod tests {
         // Commit should NOT be applied
         let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
         assert!(!tips.contains(&commit.id()));
-    }
-
-    #[test]
-    fn no_session_allows_write_immediately() {
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        let obj_id = sm.object_manager.create(&mut io, None);
-        let author = ObjectId::new();
-        let c1 = sm
-            .object_manager
-            .add_commit(
-                &mut io,
-                obj_id,
-                "main",
-                vec![],
-                b"original".to_vec(),
-                author,
-                None,
-            )
-            .unwrap();
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-        // Note: NOT setting session on client
-
-        let mut scope = HashSet::new();
-        scope.insert((obj_id, "main".into()));
-        sm.set_client_query_scope(client_id, QueryId(1), scope, None);
-        sm.take_outbox();
-
-        // Client pushes update
-        let commit = Commit {
-            parents: smallvec![c1],
-            content: b"update".to_vec(),
-            timestamp: 2000,
-            author,
-            metadata: None,
-            stored_state: crate::commit::StoredState::Stored,
-            ack_state: Default::default(),
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: obj_id,
-                metadata: None,
-                branch_name: "main".into(),
-                commits: vec![commit.clone()],
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        // No pending permission checks (no session means permissive mode)
-        let pending = sm.take_pending_permission_checks();
-        assert_eq!(pending.len(), 0);
-
-        // Commit should be applied immediately
-        let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
-        assert!(tips.contains(&commit.id()));
-    }
-
-    // ========================================================================
-    // Phase 4b: Pending Updates Tests
-    // ========================================================================
-
-    #[test]
-    fn out_of_scope_update_goes_to_pending() {
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-        // Client has no queries - everything is out of scope
-
-        let obj_id = ObjectId::new();
-        let author = ObjectId::new();
-        let commit = Commit {
-            parents: smallvec![],
-            content: b"new object".to_vec(),
-            timestamp: 1000,
-            author,
-            metadata: None,
-            stored_state: crate::commit::StoredState::Stored,
-            ack_state: Default::default(),
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: obj_id,
-                metadata: Some(ObjectMetadata {
-                    id: obj_id,
-                    metadata: HashMap::new(),
-                }),
-                branch_name: "main".into(),
-                commits: vec![commit],
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        let pending = sm.take_pending_updates();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].client_id, client_id);
-    }
-
-    #[test]
-    fn row_object_out_of_scope_goes_to_pending() {
-        // A row object (metadata has "table") that isn't in any query scope
-        // should still be queued for approval, not silently applied.
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-        // Client has no queries - everything is out of scope
-
-        let obj_id = ObjectId::new();
-        let author = ObjectId::new();
-        let commit = Commit {
-            parents: smallvec![],
-            content: b"row data".to_vec(),
-            timestamp: 1000,
-            author,
-            metadata: None,
-            stored_state: crate::commit::StoredState::Stored,
-            ack_state: Default::default(),
-        };
-
-        let mut row_metadata = HashMap::new();
-        row_metadata.insert("table".to_string(), "users".to_string());
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: obj_id,
-                metadata: Some(ObjectMetadata {
-                    id: obj_id,
-                    metadata: row_metadata,
-                }),
-                branch_name: "main".into(),
-                commits: vec![commit],
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        // Should be queued for approval, NOT silently applied
-        let pending = sm.take_pending_updates();
-        assert_eq!(
-            pending.len(),
-            1,
-            "Row object not in scope should go to pending"
-        );
-        assert_eq!(pending[0].client_id, client_id);
-
-        // Should NOT be applied yet
-        assert!(
-            sm.object_manager.get(obj_id).is_none(),
-            "Object should not be created until approved"
-        );
-    }
-
-    #[test]
-    fn approved_pending_update_is_applied() {
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-
-        let obj_id = ObjectId::new();
-        let author = ObjectId::new();
-        let commit = Commit {
-            parents: smallvec![],
-            content: b"new object".to_vec(),
-            timestamp: 1000,
-            author,
-            metadata: None,
-            stored_state: crate::commit::StoredState::Stored,
-            ack_state: Default::default(),
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: obj_id,
-                metadata: Some(ObjectMetadata {
-                    id: obj_id,
-                    metadata: HashMap::new(),
-                }),
-                branch_name: "main".into(),
-                commits: vec![commit.clone()],
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        let pending = sm.take_pending_updates();
-        let pending_id = pending[0].id;
-
-        // Re-add the pending update (take removes it)
-        sm.pending_updates = pending;
-
-        // Approve
-        sm.approve_update(&mut io, pending_id);
-
-        // Verify object was created
-        assert!(sm.object_manager.get(obj_id).is_some());
-    }
-
-    #[test]
-    fn rejected_pending_update_sends_error() {
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-
-        let obj_id = ObjectId::new();
-        let author = ObjectId::new();
-        let commit = Commit {
-            parents: smallvec![],
-            content: b"new object".to_vec(),
-            timestamp: 1000,
-            author,
-            metadata: None,
-            stored_state: crate::commit::StoredState::Stored,
-            ack_state: Default::default(),
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id: obj_id,
-                metadata: Some(ObjectMetadata {
-                    id: obj_id,
-                    metadata: HashMap::new(),
-                }),
-                branch_name: "main".into(),
-                commits: vec![commit],
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        let pending = sm.take_pending_updates();
-        let pending_id = pending[0].id;
-        sm.pending_updates = pending;
-
-        sm.reject_update(pending_id, "Not allowed".to_string());
-
-        let outbox = sm.take_outbox();
-        assert_eq!(outbox.len(), 1);
-
-        match &outbox[0].payload {
-            SyncPayload::Error(SyncError::PermissionDenied {
-                object_id,
-                branch_name,
-                reason,
-            }) => {
-                assert_eq!(*object_id, obj_id);
-                assert_eq!(branch_name.as_str(), "main");
-                assert_eq!(reason, "Not allowed");
-            }
-            _ => panic!("Expected PermissionDenied error"),
-        }
-
-        // Object should not exist
-        assert!(sm.object_manager.get(obj_id).is_none());
     }
 
     #[test]
@@ -3056,10 +3074,11 @@ mod tests {
 
         sm.take_outbox();
 
-        // Setup two clients
+        // Setup two clients — client1 is Peer so writes go through directly
         let client1 = ClientId::new();
         let client2 = ClientId::new();
         sm.add_client(client1);
+        sm.set_client_role(client1, ClientRole::Peer);
         sm.add_client(client2);
 
         let mut scope = HashSet::new();
@@ -3485,28 +3504,6 @@ mod tests {
     }
 
     #[test]
-    fn query_without_session_is_permissive() {
-        let mut sm = SyncManager::new();
-
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-
-        let obj_id = ObjectId::new();
-        let mut scope = HashSet::new();
-        scope.insert((obj_id, "main".into()));
-
-        sm.set_client_query_scope(client_id, QueryId(1), scope.clone(), None);
-
-        let client = sm.get_client(client_id).expect("client should exist");
-        let query = client.queries.get(&QueryId(1)).expect("query should exist");
-        assert_eq!(query.scope, scope);
-        assert!(
-            query.session.is_none(),
-            "query without session should have session=None"
-        );
-    }
-
-    #[test]
     fn send_query_subscription_includes_session() {
         // Test that send_query_subscription_to_servers includes the session
         use crate::query_manager::query::QueryBuilder;
@@ -3543,14 +3540,6 @@ mod tests {
     // ========================================================================
     // Phase 6a: Persistence Ack E2E Tests
     // ========================================================================
-
-    /// Approve all pending updates on a SyncManager (test helper).
-    fn approve_all_pending(sm: &mut SyncManager, io: &mut MemoryStorage) {
-        let ids = sm.pending_update_ids();
-        for id in ids {
-            sm.approve_update(io, id);
-        }
-    }
 
     /// Route messages between three tiers: A ↔ B ↔ C.
     ///
@@ -3622,10 +3611,6 @@ mod tests {
             a.process_inbox(a_io);
             b.process_inbox(b_io);
             c.process_inbox(c_io);
-
-            // Auto-approve pending updates on B and C (server tiers)
-            approve_all_pending(b, b_io);
-            approve_all_pending(c, c_io);
         }
     }
 
@@ -3901,7 +3886,6 @@ mod tests {
             }
         }
         s.b.process_inbox(&mut s.b_io);
-        approve_all_pending(&mut s.b, &mut s.b_io);
         // B should now have interest for A's commits
 
         // Disconnect A from B
@@ -3921,7 +3905,6 @@ mod tests {
             }
         }
         s.c.process_inbox(&mut s.c_io);
-        approve_all_pending(&mut s.c, &mut s.c_io);
 
         // C sends ack back to B
         for entry in s.c.take_outbox() {

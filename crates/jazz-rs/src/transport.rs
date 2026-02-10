@@ -100,9 +100,11 @@ impl ServerConnection {
     }
 
     /// Build headers for admin operations (catalogue sync).
+    ///
+    /// Includes admin secret AND session auth (JWT or backend) so the server
+    /// can both promote the client to Admin and bind a session.
     fn build_admin_headers(&self) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let mut headers = self.build_headers(None);
 
         if let Some(secret) = &self.auth.admin_secret
             && let Ok(secret_value) = HeaderValue::from_str(secret)
@@ -110,6 +112,15 @@ impl ServerConnection {
             headers.insert("X-Jazz-Admin-Secret", secret_value);
         }
 
+        headers
+    }
+
+    /// Build auth headers for the SSE EventSource connection.
+    ///
+    /// Same auth as `build_headers` but without Content-Type (SSE is text/event-stream).
+    pub fn build_sse_headers(&self) -> HeaderMap {
+        let mut headers = self.build_headers(None);
+        headers.remove(CONTENT_TYPE);
         headers
     }
 
