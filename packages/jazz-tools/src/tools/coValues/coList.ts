@@ -40,8 +40,6 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
-  CoListSchema,
-  AnyZodOrCoValueSchema,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
@@ -54,6 +52,7 @@ import {
   extractFieldElementFromUnionSchema,
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
+import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -135,13 +134,13 @@ export class CoList<out Item = any>
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
 
     if (options && "fromRaw" in options) {
+      const coListSchema = assertCoValueSchema(
+        this.constructor as typeof CoList,
+        "load",
+      );
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoListJazzApi(
-            proxy,
-            () => options.fromRaw,
-            (this.constructor as any).coValueSchema,
-          ),
+          value: new CoListJazzApi(proxy, () => options.fromRaw, coListSchema),
           enumerable: false,
         },
         $isLoaded: { value: true, enumerable: false },
@@ -186,13 +185,17 @@ export class CoList<out Item = any>
       | Account
       | Group,
   ) {
+    const coListSchema = assertCoValueSchema(
+      this as unknown as typeof CoList,
+      "create",
+    );
     const validationMode = resolveValidationMode(
       options && "validation" in options ? options.validation : undefined,
     );
 
-    if (this.coValueSchema && validationMode !== "loose") {
+    if (validationMode !== "loose") {
       executeValidation(
-        this.coValueSchema.getValidationSchema(),
+        coListSchema.getValidationSchema(),
         items,
         validationMode,
       ) as typeof items;

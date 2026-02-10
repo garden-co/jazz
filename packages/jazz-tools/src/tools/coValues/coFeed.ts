@@ -65,6 +65,7 @@ import {
   extractFieldElementFromUnionSchema,
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
+import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -216,15 +217,14 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   /** @internal */
   constructor(options: { fromRaw: RawCoStream }) {
     super();
+    const coFeedSchema = assertCoValueSchema(
+      this.constructor as typeof CoFeed,
+      "load",
+    );
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoFeedJazzApi(
-          this,
-          options.fromRaw,
-          // coValueSchema is defined in /implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.ts
-          (this.constructor as typeof CoFeed).coValueSchema,
-        ),
+        value: new CoFeedJazzApi(this, options.fromRaw, coFeedSchema),
         enumerable: false,
       },
     });
@@ -250,6 +250,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       | Account
       | Group,
   ) {
+    const coFeedSchema = assertCoValueSchema(
+      this as unknown as typeof CoFeed,
+      "create",
+    );
     const { owner, uniqueness, firstComesWins } =
       parseCoValueCreateOptions(options);
     const initMeta = firstComesWins ? { fww: "init" } : undefined;
@@ -265,12 +269,16 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 
       // Validate using the full schema - init is an array, so it will match the array branch
       // of the union (instanceof CoFeed | array of items)
-      const coValueSchema = (this as unknown as typeof CoFeed).coValueSchema;
-      if (validationMode !== "loose" && coValueSchema) {
-        const fullSchema = coValueSchema.getValidationSchema();
+      if (validationMode !== "loose") {
+        const fullSchema = coFeedSchema.getValidationSchema();
         executeValidation(fullSchema, init, validationMode) as typeof init;
       }
 
+      if (coFeedSchema.builtin !== "CoFeed") {
+        throw new Error(
+          `[schema-invariant] ${this.name || "CoFeed"}.create expected CoFeed schema, got ${coFeedSchema.builtin}.`,
+        );
+      }
       // @ts-expect-error - _schema is not defined on the class
       const itemDescriptor = this._schema[ItemsSym] as Schema;
 

@@ -1,16 +1,25 @@
 import {
   Account,
+  coField,
   CoMap,
   CoMapInit_DEPRECATED,
   CoValueClass,
   Group,
   Simplify,
   TypeSym,
-  coField,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
+import { createCoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
+import type { CoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
 
 /** @category Identity & Permissions */
 export class Profile extends CoMap {
+  static coValueSchema: CoreCoMapSchema = createCoreCoMapSchema({
+    name: z.string(),
+    inbox: z.optional(z.string()),
+    inboxInvite: z.optional(z.string()),
+  });
+
   readonly name = coField.string;
   readonly inbox? = coField.optional.string;
   readonly inboxInvite? = coField.optional.string;

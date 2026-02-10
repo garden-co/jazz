@@ -58,6 +58,9 @@ import {
   InstanceOfSchemaCoValuesMaybeLoaded,
   LoadedAndRequired,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
+import { createCoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
 
 export type AccountCreationProps = {
   name: string;
@@ -67,6 +70,17 @@ export type AccountCreationProps = {
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
   declare [TypeSym]: "Account";
+  static coValueSchema: CoreCoValueSchema = {
+    ...createCoreCoMapSchema({
+      profile: createCoreCoMapSchema({
+        name: z.string(),
+        inbox: z.optional(z.string()),
+        inboxInvite: z.optional(z.string()),
+      }),
+      root: createCoreCoMapSchema({}),
+    }),
+    builtin: "Account" as const,
+  };
 
   /**
    * Jazz methods for Accounts are inside this property.

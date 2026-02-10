@@ -65,6 +65,8 @@ import {
   extractFieldShapeFromUnionSchema,
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
+import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
+import { createCoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
 
 export type CoMapEdit<V> = {
   value?: V;
@@ -136,6 +138,9 @@ export class CoMap extends CoValueBase implements CoValue {
   /** @internal */
   static _schema: CoMapFieldSchema;
 
+  // TODO: we are keeping this default to avoid breaking too many tests, but it should be removed in the future
+  static coValueSchema: CoreCoMapSchema = createCoreCoMapSchema({});
+
   /** @internal */
   constructor(options: { fromRaw: RawCoMap } | undefined) {
     super();
@@ -143,13 +148,16 @@ export class CoMap extends CoValueBase implements CoValue {
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
 
     if (options && "fromRaw" in options) {
+      const coMapSchema = assertCoValueSchema(
+        this.constructor as typeof CoMap,
+        "load",
+      );
       Object.defineProperties(this, {
         $jazz: {
           value: new CoMapJazzApi(
             proxy,
             () => options.fromRaw,
-            // coValueSchema is defined in /implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.ts
-            (this.constructor as any).coValueSchema,
+            coMapSchema as CoreCoMapSchema,
           ),
           enumerable: false,
         },
@@ -191,10 +199,14 @@ export class CoMap extends CoValueBase implements CoValue {
       | Account
       | Group,
   ) {
+    const coMapSchema = assertCoValueSchema(
+      this as unknown as typeof CoMap,
+      "create",
+    );
     const instance = new this();
     return CoMap._createCoMap(
       instance,
-      this.coValueSchema as CoreCoMapSchema,
+      coMapSchema as CoreCoMapSchema,
       init,
       options,
     );
@@ -663,9 +675,16 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       return z.any();
     }
 
-    const objectValidation = extractFieldShapeFromUnionSchema(
-      this.coMapSchema.getValidationSchema(),
-    );
+    const fullSchema = this.coMapSchema.getValidationSchema();
+    let objectValidation: z.ZodObject | undefined;
+
+    try {
+      objectValidation = extractFieldShapeFromUnionSchema(fullSchema);
+    } catch {
+      // Base/core schemas may expose a non-union validation schema (e.g. z.any()).
+      // In those cases we keep legacy dynamic behavior and skip strict per-field validation.
+      return z.any();
+    }
 
     const fieldSchema =
       objectValidation.shape[key] ?? objectValidation.def.catchall;
