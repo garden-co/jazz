@@ -71,3 +71,40 @@ If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or
 By default, the example app uses [Jazz Cloud](https://dashboard.jazz.tools) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
 
 You can also run a local sync server by running `npx jazz-run sync`, and setting the `sync` parameter of `JazzReactProvider` in [./src/app.tsx](./src/app.tsx) to `{ peer: "ws://localhost:4200" }`.
+
+## Appendix: Jazz Features
+
+The below important Jazz-specific concepts are covered in this example:
+
+### [CoValues](https://jazz.tools/docs/react/core-concepts/covalues/overview)
+The app defines a rich schema using various `CoValue` types in [`src/schema.ts`](./src/schema.ts):
+- **[`CoMap`](https://jazz.tools/docs/react/core-concepts/covalues/comaps)**: Used for `Message`, `ImageAttachment`, `FileAttachment`, and the `root` account data.
+- **[`CoList`](https://jazz.tools/docs/react/core-concepts/covalues/colists)**: Used for the `Chat` (a list of messages).
+- **[`CoFeed`](https://jazz.tools/docs/react/core-concepts/covalues/cofeeds)**: Used for message `reactions`.
+- **[`CoPlainText`](https://jazz.tools/docs/react/core-concepts/covalues/cotexts)**: Used for collaborative message text.
+- **[`FileStream`](https://jazz.tools/docs/react/core-concepts/covalues/filestreams)**: Used for `FileAttachment`.
+- **[`ImageDefinition`](https://jazz.tools/docs/react/core-concepts/covalues/imagedef)**: Used for `ImageAttachment` and user profile avatars.
+- **[`CoRecord`](https://jazz.tools/docs/react/core-concepts/covalues/comaps)**: Used for the `Canvas` (a record of strokes) and the account's `chats` index.
+- **[`DiscriminatedUnion`](https://jazz.tools/docs/react/core-concepts/schemas/schemaunions)**: Used for the polymorphic `Attachment` type.
+
+### [Permissions & Sharing](https://jazz.tools/docs/react/permissions-and-sharing/overview)
+The app demonstrates Jazz's flexible permission system:
+- **[Groups](https://jazz.tools/docs/react/permissions-and-sharing/overview)**: Creating and managing groups for chats and attachments.
+- **[Schema-level Permissions](https://jazz.tools/docs/react/permissions-and-sharing/overview#defining-permissions-at-the-schema-level)**: Using `.withPermissions` on CoValue schemas to automate group creation and inheritance.
+- **[Public sharing](https://jazz.tools/docs/react/permissions-and-sharing/sharing)**: Chat and canvas values specifically add `everyone` as a `writer`.
+- **[Cascading permissions](https://jazz.tools/docs/react/permissions-and-sharing/cascading-permissions)**: Messages use `sameAsContainer` to inherit permissions from the `Chat` list.
+
+### [Accounts & Profiles](https://jazz.tools/docs/react/core-concepts/schemas/accounts-and-migrations)
+- **[Custom Account & Profile Schemas](https://jazz.tools/docs/react/core-concepts/schemas/accounts-and-migrations)**: Extending the base `Account` and `Profile` in `src/schema.ts`.
+- **[Migrations](https://jazz.tools/docs/react/core-concepts/schemas/accounts-and-migrations)**: Using `withMigration` to initialize account `root` structures.
+
+### [React Integration](https://jazz.tools/docs/react/api-reference)
+Implementation of Jazz hooks for real-time state and account management:
+- **[`useSuspenseAccount`](https://jazz.tools/docs/react/core-concepts/subscription-and-loading#subscribe-to-the-current-users-account)**: Fetching current user data with deep resolution.
+- **[`useSuspenseCoState`](https://jazz.tools/docs/react/core-concepts/subscription-and-loading#subscribe-to-covalues)**: Subscribing to collaborative state.
+- **[`useCoStates`](https://jazz.tools/docs/react/core-concepts/subscription-and-loading#loading-multiple-covalues-at-the-same-time)**: Batch loading multiple CoValues (messages) in the chat view.
+- **[`useIsAuthenticated` & `useLogOut`](https://jazz.tools/docs/react/key-features/authentication/overview)**: Managing authentication state in the header.
+
+### [Sync & Developer Tools](https://jazz.tools/docs/react/core-concepts/sync-and-storage)
+- **[Jazz Cloud Sync](https://jazz.tools/docs/react/core-concepts/sync-and-storage)**: Configured in `src/main.tsx` via `JazzReactProvider`.
+- **[Jazz Inspector](https://jazz.tools/docs/react/tooling-and-resources/inspector)**: Integrated for easy data inspection during development.

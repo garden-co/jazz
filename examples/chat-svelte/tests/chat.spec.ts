@@ -1,39 +1,81 @@
-import { ChatPage } from './pages/ChatPage';
-import { test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 
-test('chat works between two windows', async ({ page: marioPage, browser }) => {
-  await marioPage.goto('/');
-  const context = await browser.newContext();
-  const luigiPage = await context.newPage();
+test.describe('Chat App E2E', () => {
+  test('Complete User Flow', async ({ page }) => {
+    const messageEditor = page.locator('#messageEditor [contenteditable="true"]');
+    const sendButton = page.getByRole('button').filter({ has: page.getByTestId('send-message') });
+    const menuButton = page.getByRole('button').filter({ has: page.getByTestId('menu') });
 
-  await marioPage.waitForURL('/chat/**');
-  const roomUrl = marioPage.url();
-  await luigiPage.goto(roomUrl);
+    await test.step('Initial Load', async () => {
+      await page.goto('/');
+      await page.waitForURL('**/#/chat/*');
+      await expect(messageEditor).toBeVisible();
+      await expect(page.getByText('Hello world')).toBeVisible();
+    });
 
-  const marioChat = new ChatPage(marioPage);
-  const luigiChat = new ChatPage(luigiPage);
+    await test.step('Send a public message', async () => {
+      const messageText = 'Hello Public 2';
+      await messageEditor.fill(messageText);
+      await sendButton.click();
+      await expect(page.getByText(messageText)).toBeVisible();
+    });
 
+    await test.step('React to a message', async () => {
+      await page.getByText('Hello world').first().click();
+      await page.getByRole('menuitem', { name: /react/i }).hover();
+      await page.getByRole('button', { name: '❤️' }).click();
+      await expect(
+        page.locator('article').filter({ hasText: 'Hello world' }).getByText('❤️')
+      ).toBeVisible();
+    });
 
-  await marioChat.setUsername('Mario');
+    await test.step('Delete a message', async () => {
+      const msgText = 'Message to delete';
+      await messageEditor.fill(msgText);
+      await sendButton.click();
 
-  const message1ByMario = 'Hello Luigi, are you ready to save the princess?';
+      const messageBubble = page.locator('article', { hasText: msgText }).first();
+      await messageBubble.click();
 
-  await marioChat.sendMessage(message1ByMario);
-  await marioChat.expectMessageRow(message1ByMario);
+      await page.getByRole('menuitem', { name: /delete/i }).click();
+      await page
+        .getByRole('alertdialog')
+        .getByRole('button', { name: /yes, delete it/i })
+        .click();
 
-  const roomURL = marioPage.url();
-  await luigiPage.goto(roomURL);
+      await expect(page.getByText(msgText)).not.toBeVisible();
+    });
 
-  await luigiChat.setUsername('Luigi');
+    await test.step('Create public chat via List', async () => {
+      await menuButton.click();
+      await page.getByRole('menuitem', { name: /chat list/i }).click();
+      await page.getByRole('button', { name: /new chat/i }).click();
+      await expect(page).toHaveURL(/\/chat\//);
+      await expect(page.getByText('Hello world')).toBeVisible();
+    });
 
-  await luigiChat.expectMessageRow(message1ByMario);
+    let privateChatUrl = '';
+    await test.step('Create private chat', async () => {
+      await menuButton.click();
+      await page.getByRole('menuitem', { name: /chat list/i }).click();
+      await page.getByRole('button', { name: /new private chat/i }).click();
+      await expect(page).toHaveURL(/\/chat\//);
+      privateChatUrl = page.url();
 
-  const message2ByLuigi = "No, I'm not ready yet. I'm still trying to find the key to the castle.";
+      await messageEditor.fill('Secret Data');
+      await sendButton.click();
+      await expect(page.getByText('Secret Data')).toBeVisible();
+    });
 
-  await luigiChat.sendMessage(message2ByLuigi);
-  await luigiChat.expectMessageRow(message2ByLuigi);
+    await test.step('Logout and verify private chat access', async () => {
+      await menuButton.click({ force: true });
+      await page.getByRole('menuitem', { name: /profile/i }).click();
+      await page.getByRole('button', { name: /log out/i }).click();
+      await expect(page.locator('[role="dialog"]')).toBeHidden();
 
-  await marioChat.expectMessageRow(message1ByMario);
-  await luigiChat.expectMessageRow(message2ByLuigi);
-  await context.close();
+      await page.goto(privateChatUrl);
+      await expect(page.locator('body')).toContainText(/Something went wrong/i);
+      await expect(page.getByText('Secret Data')).not.toBeVisible();
+    });
+  });
 });
