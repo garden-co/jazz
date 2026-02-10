@@ -15,7 +15,6 @@ use axum::{
     routing::{get, post},
 };
 use futures::stream::Stream;
-use groove::sync_manager::SyncPayload;
 use jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
@@ -75,8 +74,18 @@ async fn events_handler(
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Register client with runtime and bind session at connection time
-    let _ = state.runtime.add_client(client_id, session);
+    // Require a valid session — reject SSE connections without authentication.
+    let session = match session {
+        Some(s) => s,
+        None => {
+            tracing::error!("SSE connection rejected: no session (client_id={}). Client must send auth headers.", client_id);
+            return Err((StatusCode::UNAUTHORIZED, "Session required for SSE connection. Provide a JWT token or backend secret.".to_string()));
+        }
+    };
+
+    // Ensure client is registered with session (idempotent — won't overwrite
+    // existing role if client was already registered by a /sync request).
+    let _ = state.runtime.ensure_client_with_session(client_id, session);
 
     // Subscribe to broadcast channel for this client's events
     let mut sync_rx = state.sync_broadcast.subscribe();
@@ -154,24 +163,9 @@ async fn events_handler(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-/// Check if a sync payload is for a catalogue object (schema or lens).
-fn is_catalogue_payload(payload: &SyncPayload) -> bool {
-    match payload {
-        SyncPayload::ObjectUpdated { metadata, .. } => {
-            if let Some(meta) = metadata
-                && let Some(type_str) = meta.metadata.get("type")
-            {
-                return type_str == "catalogue_schema" || type_str == "catalogue_lens";
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
 /// Push a sync payload to the server's inbox.
 ///
-/// Catalogue objects (schema/lens) require admin authentication.
+/// Admin clients (with valid admin secret) can write catalogue objects.
 /// Session is extracted from headers and bound to the client_id.
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
@@ -180,21 +174,33 @@ async fn sync_handler(
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
 
-    // Check if this is a catalogue object - requires admin auth
-    if is_catalogue_payload(&request.payload) {
+    // Check admin secret — if present and valid, promote client to Admin role
+    let is_admin = {
         let admin_secret = headers
             .get("X-Jazz-Admin-Secret")
             .and_then(|v| v.to_str().ok());
 
-        if let Err((status, msg)) = validate_admin_secret(admin_secret, &state.auth_config) {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        if admin_secret.is_some() {
+            if let Err((status, msg)) = validate_admin_secret(admin_secret, &state.auth_config) {
+                return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+            }
+            true
+        } else {
+            false
         }
-    }
+    };
 
     // Extract session from headers (JWT or backend impersonation)
     // Propagate auth errors (invalid JWT, wrong backend secret, etc.) as 401
     let session = match extract_session(&headers, &state.auth_config) {
-        Ok(s) => s,
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::error!("Sync request rejected: no session (client_id={}). Client must send auth headers.", request.client_id);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("Session required for sync. Provide a JWT token or backend secret.")),
+            ).into_response();
+        }
         Err((status, msg)) => {
             return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
@@ -210,6 +216,17 @@ async fn sync_handler(
             Json(ErrorResponse::internal(e.to_string())),
         )
             .into_response();
+    }
+
+    // Promote to Admin if admin secret was valid
+    if is_admin {
+        if let Err(e) = state.runtime.set_client_admin(request.client_id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
     }
 
     eprintln!(

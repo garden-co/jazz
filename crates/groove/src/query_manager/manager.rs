@@ -2078,6 +2078,7 @@ impl QueryManager {
     /// 3. Set the scope in SyncManager (which triggers initial sync)
     fn process_pending_query_subscriptions<H: Storage>(&mut self, storage: &mut H) {
         let pending = self.sync_manager.take_pending_query_subscriptions();
+        let mut deferred = Vec::new();
 
         for sub in pending {
             // Resolve schema: use self.schema if available, otherwise look up from known_schemas (server mode)
@@ -2098,7 +2099,11 @@ impl QueryManager {
                     .cloned();
                 match schema {
                     Some(s) => Arc::new(s),
-                    None => continue,
+                    None => {
+                        // Schema not available yet — re-queue for next process() call
+                        deferred.push(sub);
+                        continue;
+                    }
                 }
             };
 
@@ -2198,6 +2203,12 @@ impl QueryManager {
                     settled_once: false,
                 },
             );
+        }
+
+        // Re-queue subscriptions whose schema wasn't available yet
+        if !deferred.is_empty() {
+            self.sync_manager
+                .requeue_pending_query_subscriptions(deferred);
         }
     }
 

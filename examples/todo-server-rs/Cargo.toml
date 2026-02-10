@@ -29,3 +29,4 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 futures-util = "0.3"
 reqwest-eventsource = "0.6"
+jsonwebtoken = "9"

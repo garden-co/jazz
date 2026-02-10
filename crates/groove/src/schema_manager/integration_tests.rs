@@ -1649,16 +1649,9 @@ mod tests {
     // ========================================================================
 
     use crate::sync_manager::{
-        ClientId, Destination, InboxEntry, PersistenceTier, QueryId, ServerId, Source, SyncPayload,
+        ClientId, ClientRole, Destination, InboxEntry, PersistenceTier, QueryId, ServerId, Source,
+        SyncPayload,
     };
-
-    /// Approve all pending updates on a SyncManager (test helper).
-    fn approve_all_pending(sm: &mut SyncManager, storage: &mut MemoryStorage) {
-        let ids = sm.pending_update_ids();
-        for id in ids {
-            sm.approve_update(storage, id);
-        }
-    }
 
     /// E2E test: Two clients with same schema, server with empty schema.
     ///
@@ -1722,7 +1715,7 @@ mod tests {
         let client_b_id = ClientId::new();
         let server_id = ServerId::new();
 
-        // Server knows about both clients
+        // Server knows about both clients — Admin role for catalogue writes
         server
             .query_manager_mut()
             .sync_manager_mut()
@@ -1730,7 +1723,15 @@ mod tests {
         server
             .query_manager_mut()
             .sync_manager_mut()
+            .set_client_role(client_a_id, ClientRole::Admin);
+        server
+            .query_manager_mut()
+            .sync_manager_mut()
             .add_client(client_b_id);
+        server
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(client_b_id, ClientRole::Admin);
 
         // Clients know about the server - this triggers initial sync including catalogue objects
         client_a
@@ -1776,15 +1777,7 @@ mod tests {
                 payload: schema_msg.payload.clone(),
             });
 
-        // Server processes the inbox
-        server.process(&mut io_server);
-
-        // Approve pending updates (catalogue objects are out-of-scope for clients without queries)
-        approve_all_pending(
-            server.query_manager_mut().sync_manager_mut(),
-            &mut io_server,
-        );
-        // Re-process after approval to trigger catalogue processing
+        // Server processes the inbox (Admin role allows catalogue writes directly)
         server.process(&mut io_server);
 
         // === Server should now have the schema in known_schemas ===
@@ -1838,11 +1831,7 @@ mod tests {
         // Server processes
         server.process(&mut io_server);
 
-        // Approve pending row update and re-process for lazy activation
-        approve_all_pending(
-            server.query_manager_mut().sync_manager_mut(),
-            &mut io_server,
-        );
+        // Re-process for lazy activation (Admin clients bypass pending)
         server.process(&mut io_server);
 
         // === Verify the row was indexed on server ===
@@ -2268,6 +2257,10 @@ mod tests {
             .query_manager_mut()
             .sync_manager_mut()
             .add_client(client_id);
+        server
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(client_id, ClientRole::Admin);
         client
             .query_manager_mut()
             .sync_manager_mut()
@@ -2300,13 +2293,6 @@ mod tests {
             }
         }
 
-        server.process(&mut io_server);
-
-        // Approve pending updates (catalogue objects are out-of-scope for clients without queries)
-        approve_all_pending(
-            server.query_manager_mut().sync_manager_mut(),
-            &mut io_server,
-        );
         server.process(&mut io_server);
 
         // Process catalogue updates
@@ -2752,9 +2738,6 @@ mod tests {
             });
 
         // Server B processes (settles server sub → emits QuerySettled)
-        server_b.process(&mut io_b);
-        // Approve any pending updates
-        approve_all_pending(server_b.query_manager_mut().sync_manager_mut(), &mut io_b);
         server_b.process(&mut io_b);
 
         let outbox_b = server_b

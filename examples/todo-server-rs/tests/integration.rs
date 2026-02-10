@@ -515,6 +515,34 @@ struct TestServer {
 /// Test admin secret for catalogue sync.
 const TEST_ADMIN_SECRET: &str = "test-admin-secret-12345";
 
+/// Test HMAC secret for JWT validation.
+const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
+
+/// Generate a test JWT for the given user ID.
+fn make_test_jwt(user_id: &str) -> String {
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(serde::Serialize)]
+    struct Claims {
+        sub: String,
+        claims: serde_json::Value,
+        exp: u64,
+    }
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        claims: serde_json::json!({}),
+        exp,
+    };
+    let key = EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes());
+    encode(&Header::default(), &claims, &key).unwrap()
+}
+
 impl TestServer {
     /// Start a test server on the given port.
     async fn start(port: u16) -> Self {
@@ -536,6 +564,8 @@ impl TestServer {
                 data_dir.path().to_str().unwrap(),
                 "--admin-secret",
                 TEST_ADMIN_SECRET,
+                "--jwt-secret",
+                TEST_JWT_SECRET,
             ])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -640,7 +670,8 @@ async fn test_server_resync() {
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
 
     // 2. Create client with todos schema, add data
-    // This client has admin_secret so it can sync the catalogue (schema) to server
+    // This client has admin_secret so it can sync the catalogue (schema) to server.
+    // JWT token provides a session for the client's SSE and sync requests.
     {
         let context = AppContext {
             app_id: test_app_id,
@@ -648,7 +679,7 @@ async fn test_server_resync() {
             schema: test_schema(),
             server_url: server.base_url(),
             data_dir: data_path.clone(),
-            jwt_token: None,
+            jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: Some(TEST_ADMIN_SECRET.to_string()),
         };
@@ -677,8 +708,11 @@ async fn test_server_resync() {
     std::fs::remove_dir_all(&data_path).unwrap();
     std::fs::create_dir_all(&data_path).unwrap();
 
-    // 4. New client should resync from server via subscribe
-    // No admin_secret - this client relies on server already having schema from client 1
+    // 4. New client should resync from server via subscribe.
+    // No admin_secret — this client's local catalogue sync will be rejected by the
+    // server (CatalogueWriteDenied / SessionRequired), which is fine: the server
+    // already has the schema from Client 1. The JWT provides a session so the
+    // client can read data via QuerySubscription.
     {
         let context = AppContext {
             app_id: test_app_id,
@@ -686,9 +720,9 @@ async fn test_server_resync() {
             schema: test_schema(),
             server_url: server.base_url(),
             data_dir: data_path,
-            jwt_token: None,
+            jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
-            admin_secret: None, // Intentionally no admin - server should already have schema
+            admin_secret: None, // Intentionally no admin - server already has schema
         };
         let client = JazzClient::connect(context).await.unwrap();
 

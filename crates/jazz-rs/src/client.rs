@@ -160,11 +160,17 @@ impl JazzClient {
             let base_url = conn.base_url().to_string();
             let client_id_str = client_id.to_string();
             let runtime_for_sse = runtime.clone();
+            let sse_headers = conn.build_sse_headers();
 
             Some(tokio::spawn(async move {
+                let http_client = reqwest::Client::new();
                 loop {
                     let url = format!("{}/events?client_id={}", base_url, client_id_str);
-                    let mut es = EventSource::get(&url);
+                    let request_builder = http_client.get(&url).headers(sse_headers.clone());
+                    let Ok(mut es) = EventSource::new(request_builder) else {
+                        tracing::error!("Failed to create SSE EventSource (request not cloneable)");
+                        break;
+                    };
 
                     tracing::info!("Connecting to server SSE stream: {}", url);
 
