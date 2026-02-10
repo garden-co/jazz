@@ -190,6 +190,7 @@ export type StorageReconciliationLockRow = {
   key: string;
   holderSessionId: SessionID;
   acquiredAt: number;
+  /** deprecated - expiresAt is calculated based on acquiredAt now */
   expiresAt: number;
   releasedAt?: number;
   /** Offset up to which all batches have been acked; used to resume after interrupt. */

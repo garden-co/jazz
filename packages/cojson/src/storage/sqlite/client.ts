@@ -274,10 +274,17 @@ export class SQLiteClient
   getStorageReconciliationLock(
     key: string,
   ): StorageReconciliationLockRow | undefined {
-    return this.db.get<StorageReconciliationLockRow>(
+    const lockRow = this.db.get<StorageReconciliationLockRow>(
       "SELECT * FROM storageReconciliationLocks WHERE key = ?",
       [key],
     );
+    return lockRow
+      ? {
+          ...lockRow,
+          expiresAt:
+            lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS,
+        }
+      : undefined;
   }
 
   putStorageReconciliationLock(entry: StorageReconciliationLockRow): void {
@@ -377,14 +384,14 @@ export class SQLiteClient
         return;
       }
 
-      const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
       const lastProcessedOffset =
         lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
       this.putStorageReconciliationLock({
         key: lockKey,
         holderSessionId: sessionId,
         acquiredAt: now,
-        expiresAt,
+        // deprecated - expiresAt is calculated based on acquiredAt now
+        expiresAt: 0,
         lastProcessedOffset,
       });
       result = { acquired: true, lastProcessedOffset };

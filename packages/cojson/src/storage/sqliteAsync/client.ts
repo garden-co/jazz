@@ -160,10 +160,17 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
   async getStorageReconciliationLock(
     key: string,
   ): Promise<StorageReconciliationLockRow | undefined> {
-    return this.tx.get<StorageReconciliationLockRow>(
+    const lockRow = await this.tx.get<StorageReconciliationLockRow>(
       "SELECT * FROM storageReconciliationLocks WHERE key = ?",
       [key],
     );
+    return lockRow
+      ? {
+          ...lockRow,
+          expiresAt:
+            lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS,
+        }
+      : undefined;
   }
 
   async putStorageReconciliationLock(
@@ -414,14 +421,14 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
         return;
       }
 
-      const expiresAt = now + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
       const lastProcessedOffset =
         lockRow && !lockRow.releasedAt ? (lockRow.lastProcessedOffset ?? 0) : 0;
       await tx.putStorageReconciliationLock({
         key: lockKey,
         holderSessionId: sessionId,
         acquiredAt: now,
-        expiresAt,
+        // deprecated - expiresAt is calculated based on acquiredAt now
+        expiresAt: 0,
         lastProcessedOffset,
       });
       result = { acquired: true, lastProcessedOffset };

@@ -223,9 +223,17 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
   async getStorageReconciliationLock(
     key: string,
   ): Promise<StorageReconciliationLockRow | undefined> {
-    return this.run((tx) =>
+    const lockRow = await this.run((tx) =>
       tx.getObjectStore("storageReconciliationLocks").get(key),
     );
+    return lockRow
+      ? {
+          ...lockRow,
+          expiresAt:
+            lockRow.acquiredAt +
+            cojsonInternals.STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS,
+        }
+      : undefined;
   }
 
   async putStorageReconciliationLock(
@@ -460,7 +468,8 @@ export class IDBClient implements DBClientInterfaceAsync {
           key: lockKey,
           holderSessionId: sessionId,
           acquiredAt: now,
-          expiresAt: now + LOCK_TTL_MS,
+          // deprecated - expiresAt is calculated based on acquiredAt now
+          expiresAt: 0,
           lastProcessedOffset,
         });
         result = { acquired: true, lastProcessedOffset };
