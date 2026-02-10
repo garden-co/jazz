@@ -30,7 +30,7 @@ use groove::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::BfTreeStorage;
+use groove::storage::{BfTreeStorage, Storage};
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };

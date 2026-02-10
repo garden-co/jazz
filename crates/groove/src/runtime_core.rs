@@ -263,6 +263,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &self.storage
     }
 
+    /// Flush the storage to persistent medium.
+    pub fn flush_storage(&self) {
+        self.storage.flush();
+    }
+
     /// Consume RuntimeCore and return the Storage.
     /// Used for cold-start testing to transfer driver state.
     pub fn into_storage(self) -> S {
