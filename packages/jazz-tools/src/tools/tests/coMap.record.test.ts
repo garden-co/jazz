@@ -12,8 +12,9 @@ import { FileStream, Group, co, z } from "../exports.js";
 import { Loaded } from "../implementation/zodSchema/zodSchema.js";
 import { Account } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { assertLoaded, waitFor } from "./utils.js";
+import { assertLoaded, expectValidationError, waitFor } from "./utils.js";
 import { CoValueLoadingState, TypeSym } from "../internal.js";
+import { setDefaultValidationMode } from "../implementation/zodSchema/validationSettings.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -375,6 +376,234 @@ describe("CoMap.Record", async () => {
       expect(updates[1]?.pet1?.name).toEqual("Fido");
 
       expect(spy).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("nested CoValue validation mode propagation", () => {
+    test("create with nested CoValue - loose validation should not throw", () => {
+      const Dog = co.map({
+        age: z.number(),
+      });
+      const PersonRecord = co.record(z.string(), Dog);
+
+      // Should throw with default strict validation when age is a string
+      expectValidationError(() =>
+        PersonRecord.create({
+          john: { age: "12" as unknown as number },
+        }),
+      );
+
+      // Should not throw with loose validation even though age is invalid
+      expect(() =>
+        PersonRecord.create(
+          {
+            john: { age: "12" as unknown as number },
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+
+      const personRecord = PersonRecord.create(
+        {
+          john: { age: "12" as unknown as number },
+        },
+        { validation: "loose" },
+      );
+
+      // Verify the nested CoValue was created with invalid data
+      expect(personRecord.john).toBeDefined();
+      expect(personRecord.john?.age).toBe("12");
+    });
+
+    test("set with nested CoValue - loose validation should not throw", () => {
+      const Dog = co.map({
+        age: z.number(),
+      });
+      const PersonRecord = co.record(z.string(), Dog);
+
+      const personRecord = PersonRecord.create({
+        john: { age: 5 },
+      });
+
+      // Should throw with default strict validation
+      expectValidationError(() =>
+        personRecord.$jazz.set("john", {
+          age: "invalid" as unknown as number,
+        }),
+      );
+
+      // Should not throw with loose validation
+      expect(() =>
+        personRecord.$jazz.set(
+          "john",
+          {
+            age: "invalid" as unknown as number,
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+
+      // Verify the nested CoValue was created with invalid data
+      expect(personRecord.john?.age).toBe("invalid");
+    });
+
+    test("applyDiff with nested CoValue - loose validation should not throw", () => {
+      const Dog = co.map({
+        age: z.number(),
+      });
+      const PersonRecord = co.record(z.string(), Dog);
+
+      const personRecord = PersonRecord.create({
+        john: { age: 5 },
+      });
+
+      // Should throw with default strict validation
+      expectValidationError(() =>
+        personRecord.$jazz.applyDiff({
+          john: { age: "string" as unknown as number },
+        }),
+      );
+
+      // Should not throw with loose validation
+      expect(() =>
+        personRecord.$jazz.applyDiff(
+          {
+            john: { age: "string" as unknown as number },
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+
+      // Verify the nested CoValue was updated with invalid data
+      expect(personRecord.john?.age).toBe("string");
+    });
+
+    test("create with deeply nested CoValues - loose validation should not throw", () => {
+      const Collar = co.map({
+        size: z.number(),
+      });
+      const Dog = co.map({
+        age: z.number(),
+        collar: Collar,
+      });
+      const PersonRecord = co.record(z.string(), Dog);
+
+      // Should throw with strict validation when any nested field is invalid
+      expectValidationError(() =>
+        PersonRecord.create({
+          john: {
+            age: "12" as unknown as number,
+            collar: { size: 10 },
+          },
+        }),
+      );
+
+      expectValidationError(() =>
+        PersonRecord.create({
+          john: {
+            age: 12,
+            // @ts-expect-error - size should be number
+            collar: { size: "large" },
+          },
+        }),
+      );
+
+      // Should not throw with loose validation at any level
+      expect(() =>
+        PersonRecord.create(
+          {
+            john: {
+              age: "12" as unknown as number,
+              collar: { size: "large" as unknown as number },
+            },
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+
+      const personRecord = PersonRecord.create(
+        {
+          john: {
+            age: "12" as unknown as number,
+            collar: { size: "large" as unknown as number },
+          },
+        },
+        { validation: "loose" },
+      );
+
+      // Verify all levels were created with invalid data
+      expect(personRecord.john).toBeDefined();
+      expect(personRecord.john?.age).toBe("12");
+      expect(personRecord.john?.collar.size).toBe("large");
+    });
+
+    test("create with nested CoValue - strict validation explicitly set should throw", () => {
+      const Dog = co.map({
+        age: z.number(),
+      });
+      const PersonRecord = co.record(z.string(), Dog);
+
+      // Explicitly setting validation to strict should throw
+      expectValidationError(() =>
+        PersonRecord.create(
+          {
+            john: { age: "12" as unknown as number },
+          },
+          { validation: "strict" },
+        ),
+      );
+    });
+
+    test("global loose validation mode propagates to nested CoValues in all mutations", () => {
+      const Collar = co.map({
+        size: z.number(),
+      });
+      const Dog = co.map({
+        age: z.number(),
+        collar: Collar,
+      });
+      const PersonRecord = co.record(z.string(), Dog);
+
+      // Set global validation mode to loose
+      setDefaultValidationMode("loose");
+
+      try {
+        // Test 1: Create with deeply nested invalid data
+        const personRecord = PersonRecord.create({
+          john: {
+            age: "12" as unknown as number,
+            collar: { size: "large" as unknown as number },
+          },
+        });
+
+        // Verify all nested levels were created with invalid data
+        expect(personRecord.john).toBeDefined();
+        expect(personRecord.john?.age).toBe("12");
+        expect(personRecord.john?.collar.size).toBe("large");
+
+        // Test 2: Set with nested invalid data
+        personRecord.$jazz.set("john", {
+          age: "15" as unknown as number,
+          collar: { size: "medium" as unknown as number },
+        });
+
+        expect(personRecord.john?.age).toBe("15");
+        expect(personRecord.john?.collar.size).toBe("medium");
+
+        // Test 3: ApplyDiff with nested invalid data
+        personRecord.$jazz.applyDiff({
+          john: {
+            age: "20" as unknown as number,
+            collar: { size: "small" as unknown as number },
+          },
+        });
+
+        expect(personRecord.john?.age).toBe("20");
+        expect(personRecord.john?.collar.size).toBe("small");
+      } finally {
+        // Reset to strict mode
+        setDefaultValidationMode("strict");
+      }
     });
   });
 

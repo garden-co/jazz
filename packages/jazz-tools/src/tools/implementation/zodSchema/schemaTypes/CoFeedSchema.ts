@@ -75,7 +75,11 @@ export class CoFeedSchema<
   create(
     init: CoFeedSchemaInit<T>,
     options?:
-      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
       | { owner?: Group; validation?: LocalValidationMode }
       | Group,
   ): CoFeedInstance<T>;
@@ -83,7 +87,11 @@ export class CoFeedSchema<
   create(
     init: CoFeedSchemaInit<T>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
       | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,
@@ -91,7 +99,11 @@ export class CoFeedSchema<
   create(
     init: CoFeedSchemaInit<T>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
       | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,

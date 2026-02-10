@@ -1087,7 +1087,7 @@ describe("nested CoValue validation mode propagation", () => {
             collar: { size: "large" as unknown as number },
           },
         ],
-        { owner: me, validation: "loose" },
+        { validation: "loose" },
       ),
     ).not.toThrow();
 
