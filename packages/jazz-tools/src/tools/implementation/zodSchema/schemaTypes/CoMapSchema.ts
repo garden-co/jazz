@@ -86,6 +86,8 @@ export class CoMapSchema<
       );
     }
 
+    // since validation is not used on read, we can't validate already existing CoValues
+    // so we accept every CoMap instance
     this.#validationSchema = z.instanceof(CoMap).or(validationSchema);
     return this.#validationSchema;
   };

@@ -62,6 +62,8 @@ export class CoListSchema<
       return this.#validationSchema;
     }
 
+    // since validation is not used on read, we can't validate already existing CoValues
+    // so we accept every CoList instance
     this.#validationSchema = z
       .instanceof(CoList)
       .or(z.array(generateValidationSchemaFromItem(this.element)));

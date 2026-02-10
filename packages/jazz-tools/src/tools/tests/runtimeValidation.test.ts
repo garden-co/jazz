@@ -71,7 +71,7 @@ describe("runtime validation", () => {
   test("validates nested object schemas used as json fields", () => {
     const Settings = z
       .object({
-        theme: z.enum(["light", "dark"]).default("light"),
+        theme: z.enum(["light", "dark"]),
         notifications: z.boolean().optional(),
       })
       .strict();
