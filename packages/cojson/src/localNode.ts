@@ -137,6 +137,12 @@ export class LocalNode {
     );
   }
 
+  isCoValueInMemory(id: RawCoID) {
+    const state = this.coValues.get(id)?.loadingState;
+
+    return Boolean(state);
+  }
+
   getCoValue(id: RawCoID) {
     let entry = this.coValues.get(id);
 

@@ -432,10 +432,14 @@ export class SyncManager {
     batch: { id: RawCoID }[],
     callback: (entries: [RawCoID, string][]) => void,
   ): void {
-    const coValues = batch.map(({ id }) => this.local.getCoValue(id));
-    const pending = coValues.filter(
-      (coValue) => coValue.loadingState === "unknown",
-    );
+    const storage = this.local.storage;
+
+    if (!storage) {
+      callback([]);
+      return;
+    }
+
+    const pending = batch.filter(({ id }) => !this.local.isCoValueInMemory(id));
 
     if (pending.length === 0) {
       callback([]);
@@ -446,7 +450,7 @@ export class SyncManager {
     const entries: [RawCoID, string][] = [];
 
     for (const coValue of pending) {
-      coValue.getKnownStateFromStorage((storageKnownState) => {
+      storage.loadKnownState(coValue.id, (storageKnownState) => {
         if (storageKnownState) {
           entries.push([
             coValue.id,
@@ -962,25 +966,33 @@ export class SyncManager {
         continue;
       }
 
-      const maybeSendKnown = (knownState: CoValueKnownState | undefined) => {
+      const maybeSendLoadRequest = (
+        knownState: CoValueKnownState | undefined,
+      ) => {
         if (!knownState) {
-          this.handleLoadNotFound(coValueId, peer);
+          peer.trackToldKnownState(coValueId);
+          this.trySendToPeer(peer, {
+            action: "load",
+            id: coValueId,
+            header: false,
+            sessions: {},
+          });
         } else {
           const serverSessionsHash = this.hashKnownStateSessions(
             knownState.sessions,
           );
           if (serverSessionsHash !== clientSessionsHash) {
             peer.trackToldKnownState(coValueId);
-            this.trySendToPeer(peer, { action: "known", ...knownState });
+            this.trySendToPeer(peer, { action: "load", ...knownState });
           }
         }
         sendAckWhenDone();
       };
 
       if (coValue.isAvailable()) {
-        maybeSendKnown(coValue.knownState());
+        maybeSendLoadRequest(coValue.knownState());
       } else {
-        coValue.getKnownStateFromStorage(maybeSendKnown);
+        coValue.getKnownStateFromStorage(maybeSendLoadRequest);
       }
     }
 
