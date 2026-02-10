@@ -375,8 +375,8 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     offset: number,
   ): Promise<{ id: RawCoID }[]> {
     return this.db.query<{ id: RawCoID }>(
-      "SELECT id FROM coValues ORDER BY rowID LIMIT ? OFFSET ?",
-      [limit, offset],
+      "SELECT id FROM coValues WHERE rowID > ? ORDER BY rowID LIMIT ?",
+      [offset, limit],
     );
   }
 
