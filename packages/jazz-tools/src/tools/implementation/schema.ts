@@ -258,6 +258,23 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Schema = JsonEncoded | RefEncoded<CoValue> | EncodedAs<any>;
 
+export function isSchemaDescriptorValue(value: unknown): value is Schema {
+  if (value === "json") {
+    return true;
+  }
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  return (
+    ("encoded" in value &&
+      typeof (value as { encoded?: unknown }).encoded === "object") ||
+    ("ref" in value &&
+      "optional" in value &&
+      typeof (value as { ref?: unknown }).ref === "function")
+  );
+}
+
 export type SchemaFor<Field> = LoadedAndRequired<Field> extends CoValue
   ? RefEncoded<LoadedAndRequired<Field>>
   : LoadedAndRequired<Field> extends JsonValue

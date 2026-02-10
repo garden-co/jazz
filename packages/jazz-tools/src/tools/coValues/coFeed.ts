@@ -46,6 +46,7 @@ import {
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
+  isSchemaDescriptorValue,
   isRefEncoded,
   loadCoValueWithoutMe,
   parseCoValueCreateOptions,
@@ -129,7 +130,11 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     };
 
     cls._schema ||= {};
-    cls._schema[ItemsSym] = (item as any)[SchemaInit];
+    if (isSchemaDescriptorValue(item)) {
+      cls._schema[ItemsSym] = item;
+    } else {
+      cls._schema[ItemsSym] = (item as any)[SchemaInit];
+    }
 
     return cls;
   }

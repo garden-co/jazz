@@ -15,14 +15,12 @@ import {
   FileStream,
   FileStreamSchema,
   CoVectorSchema,
+  ItemsSym,
   PlainTextSchema,
   SchemaUnion,
   isCoValueClass,
-  Group,
   CoVector,
-  CoreCoMapSchema,
 } from "../../../internal.js";
-import { coField } from "../../schema.js";
 
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { RichTextSchema } from "../schemaTypes/RichTextSchema.js";
@@ -104,7 +102,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
           );
         }
         if (def.catchall) {
-          (this as any)[coField.items] = schemaFieldToCoFieldDef(
+          (this as any)[ItemsSym] = schemaFieldToCoFieldDef(
             def.catchall as SchemaField,
           );
         }
@@ -125,7 +123,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoList } | undefined) {
         super(options);
-        (this as any)[coField.items] = schemaFieldToCoFieldDef(
+        (this as any)[ItemsSym] = schemaFieldToCoFieldDef(
           element as SchemaField,
         );
       }
@@ -137,8 +135,8 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
     const coValueClass = CoFeed.Of(
-      schemaFieldToCoFieldDef(schema.element as SchemaField),
-    );
+      schemaFieldToCoFieldDef(schema.element as SchemaField) as any,
+    ) as typeof CoFeed;
     const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
     coValueClass.coValueSchema = coValueSchema;
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;

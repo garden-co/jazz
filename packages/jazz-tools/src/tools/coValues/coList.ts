@@ -33,6 +33,7 @@ import {
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
+  isSchemaDescriptorValue,
   isRefEncoded,
   loadCoValueWithoutMe,
   makeRefs,
@@ -1169,6 +1170,17 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       return Reflect.set(target, key, value, receiver);
     }
 
+    if (key === ItemsSym && isSchemaDescriptorValue(value)) {
+      const constructor = target.constructor as typeof CoList;
+
+      if (!constructor._schema) {
+        constructor._schema = {};
+      }
+
+      constructor._schema[ItemsSym] = value;
+      return true;
+    }
+
     if (key === ItemsSym && typeof value === "object" && SchemaInit in value) {
       const constructor = target.constructor as typeof CoList;
 
@@ -1187,6 +1199,21 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
     return Reflect.set(target, key, value, receiver);
   },
   defineProperty(target, key, descriptor) {
+    if (
+      descriptor.value &&
+      key === ItemsSym &&
+      isSchemaDescriptorValue(descriptor.value)
+    ) {
+      const constructor = target.constructor as typeof CoList;
+
+      if (!constructor._schema) {
+        constructor._schema = {};
+      }
+
+      constructor._schema[ItemsSym] = descriptor.value;
+      return true;
+    }
+
     if (
       descriptor.value &&
       key === ItemsSym &&

@@ -50,6 +50,7 @@ import {
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
+  isSchemaDescriptorValue,
   loadCoValue,
   loadCoValueWithoutMe,
   parseSubscribeRestArgs,
@@ -656,6 +657,16 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
     if (
       target instanceof Account &&
       (key === "profile" || key === "root") &&
+      isSchemaDescriptorValue(value)
+    ) {
+      (target.constructor as typeof Account)._schema ||= {};
+      (target.constructor as typeof Account)._schema[key] = value;
+      return true;
+    }
+
+    if (
+      target instanceof Account &&
+      (key === "profile" || key === "root") &&
       typeof value === "object" &&
       SchemaInit in value
     ) {
@@ -676,6 +687,15 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
     }
   },
   defineProperty(target, key, descriptor) {
+    if (
+      (key === "profile" || key === "root") &&
+      isSchemaDescriptorValue(descriptor.value)
+    ) {
+      (target.constructor as typeof Account)._schema ||= {};
+      (target.constructor as typeof Account)._schema[key] = descriptor.value;
+      return true;
+    }
+
     if (
       (key === "profile" || key === "root") &&
       typeof descriptor.value === "object" &&

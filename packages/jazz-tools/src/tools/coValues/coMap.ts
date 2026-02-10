@@ -46,6 +46,7 @@ import {
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
+  isSchemaDescriptorValue,
   isRefEncoded,
   loadCoValueWithoutMe,
   makeRefs,
@@ -1091,6 +1092,12 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     }
   },
   set(target, key, value, receiver) {
+    if (typeof key === "string" && isSchemaDescriptorValue(value)) {
+      (target.constructor as typeof CoMap)._schema ||= {};
+      (target.constructor as typeof CoMap)._schema[key] = value;
+      return true;
+    }
+
     if (
       typeof key === "string" &&
       typeof value === "object" &&
@@ -1113,6 +1120,13 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     throw Error("Cannot update a CoMap directly. Use `$jazz.set` instead.");
   },
   defineProperty(target, key, attributes) {
+    if ("value" in attributes && isSchemaDescriptorValue(attributes.value)) {
+      (target.constructor as typeof CoMap)._schema ||= {};
+      (target.constructor as typeof CoMap)._schema[key as string] =
+        attributes.value;
+      return true;
+    }
+
     if (
       "value" in attributes &&
       typeof attributes.value === "object" &&

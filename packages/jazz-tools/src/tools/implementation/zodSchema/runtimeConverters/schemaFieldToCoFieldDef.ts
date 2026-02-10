@@ -1,6 +1,8 @@
 import type { JsonValue } from "cojson";
 import {
+  type Schema,
   CoValueClass,
+  Encoders,
   isCoValueClass,
   schemaToRefPermissions,
   getDefaultRefPermissions,
@@ -11,7 +13,6 @@ import {
   type DiscriminableCoValueSchemas,
   type RefOnCreateCallback,
 } from "../../../internal.js";
-import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import {
   isUnionOfPrimitivesDeeply,
@@ -56,64 +57,60 @@ export type SchemaField =
   | z.core.$ZodDefault<z.core.$ZodType>
   | z.core.$ZodCatch<z.core.$ZodType>;
 
-function makeCodecCoField(
+function makeCodecSchema(
   codec: z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
-) {
-  return coField.optional.encoded({
-    encode: (value: any) => {
-      if (value === undefined) return undefined as unknown as JsonValue;
-      if (value === null) return null;
-      return codec._zod.def.reverseTransform(value, {
-        value,
-        issues: [],
-      }) as JsonValue;
+): Schema {
+  return {
+    encoded: {
+      encode: (value: any) => {
+        if (value === undefined) return undefined as unknown as JsonValue;
+        if (value === null) return null;
+        return codec._zod.def.reverseTransform(value, {
+          value,
+          issues: [],
+        }) as JsonValue;
+      },
+      decode: (value) => {
+        if (value === null) return null;
+        if (value === undefined) return undefined;
+        return codec._zod.def.transform(value, { value, issues: [] });
+      },
     },
-    decode: (value) => {
-      if (value === null) return null;
-      if (value === undefined) return undefined;
-      return codec._zod.def.transform(value, { value, issues: [] });
-    },
-  });
+  };
 }
 
-// CoFieldDefs are inherently type-unsafe. This type exists only for documentation purposes.
-type CoFieldDef = any;
-const schemaFieldCache = new WeakMap<SchemaField, CoFieldDef>();
+const schemaFieldCache = new WeakMap<SchemaField, Schema>();
 
-function cacheSchemaField(schema: SchemaField, value: CoFieldDef): CoFieldDef {
+function cacheSchemaField(schema: SchemaField, value: Schema): Schema {
   schemaFieldCache.set(schema, value);
   return value;
 }
 
-export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
+export function resolveSchemaField(schema: SchemaField): Schema {
   const cachedCoFieldDef = schemaFieldCache.get(schema);
   if (cachedCoFieldDef !== undefined) {
     return cachedCoFieldDef;
   }
 
   if (isCoValueClass(schema)) {
-    return cacheSchemaField(
-      schema,
-      coField.ref(schema, {
-        permissions: getDefaultRefPermissions(),
-      }),
-    );
+    return cacheSchemaField(schema, {
+      ref: schema,
+      optional: false,
+      permissions: getDefaultRefPermissions(),
+    });
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
-      return cacheSchemaField(
-        schema,
-        coField.ref(schema.getCoValueClass(), {
-          optional: true,
-          permissions: schemaFieldPermissions(schema),
-        }),
-      );
-    }
-    return cacheSchemaField(
-      schema,
-      coField.ref(schema.getCoValueClass(), {
+      return cacheSchemaField(schema, {
+        ref: schema.getCoValueClass(),
+        optional: true,
         permissions: schemaFieldPermissions(schema),
-      }),
-    );
+      });
+    }
+    return cacheSchemaField(schema, {
+      ref: schema.getCoValueClass(),
+      optional: false,
+      permissions: schemaFieldPermissions(schema),
+    });
   } else {
     if ("_zod" in schema) {
       const zodSchemaDef = schema._zod.def;
@@ -122,45 +119,41 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
         zodSchemaDef.type === "nullable"
       ) {
         const inner = zodSchemaDef.innerType as SchemaField;
-        const coFieldDef: any = schemaFieldToCoFieldDef(inner);
+        const resolved = resolveSchemaField(inner);
+        const innerZodType = inner as unknown as z.ZodTypeAny;
         if (
           zodSchemaDef.type === "nullable" &&
-          coFieldDef === coField.optional.Date
+          innerZodType?._zod?.def?.type === "date"
         ) {
-          // We do not currently have a way to encode null Date coFields.
-          // We only support encoding optional (i.e. Date | undefined) coFields.
           throw new Error("Nullable z.date() is not supported");
         }
-        // Primitive coField types support null and undefined as values,
-        // so we can just return the inner type here and rely on support
-        // for null/undefined at the type level
-        return cacheSchemaField(schema, coFieldDef);
+        return cacheSchemaField(schema, resolved);
       } else if (zodSchemaDef.type === "string") {
-        return cacheSchemaField(schema, coField.string);
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "number") {
-        return cacheSchemaField(schema, coField.number);
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "boolean") {
-        return cacheSchemaField(schema, coField.boolean);
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "null") {
-        return cacheSchemaField(schema, coField.null);
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "enum") {
-        return cacheSchemaField(schema, coField.string);
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "readonly") {
         return cacheSchemaField(
           schema,
-          schemaFieldToCoFieldDef(
+          resolveSchemaField(
             (schema as unknown as ZodReadonly).def.innerType as SchemaField,
           ),
         );
       } else if (zodSchemaDef.type === "date") {
-        return cacheSchemaField(schema, coField.optional.Date);
+        return cacheSchemaField(schema, { encoded: Encoders.OptionalDate });
       } else if (zodSchemaDef.type === "template_literal") {
-        return cacheSchemaField(schema, coField.string);
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "lazy") {
         // Mostly to support z.json()
         return cacheSchemaField(
           schema,
-          schemaFieldToCoFieldDef(
+          resolveSchemaField(
             (schema as unknown as ZodLazy).unwrap() as SchemaField,
           ),
         );
@@ -174,7 +167,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
 
         return cacheSchemaField(
           schema,
-          schemaFieldToCoFieldDef(
+          resolveSchemaField(
             (schema as unknown as ZodDefault | ZodCatch).def
               .innerType as SchemaField,
           ),
@@ -193,15 +186,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
         ) {
           throw new Error("z.literal() with bigint is not supported");
         }
-        return cacheSchemaField(
-          schema,
-          coField.literal(
-            ...(zodSchemaDef.values as Exclude<
-              (typeof zodSchemaDef.values)[number],
-              undefined | null | bigint
-            >[]),
-          ),
-        );
+        return cacheSchemaField(schema, "json");
       } else if (
         zodSchemaDef.type === "object" ||
         zodSchemaDef.type === "record" ||
@@ -209,10 +194,10 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
         zodSchemaDef.type === "tuple" ||
         zodSchemaDef.type === "intersection"
       ) {
-        return cacheSchemaField(schema, coField.json());
+        return cacheSchemaField(schema, "json");
       } else if (zodSchemaDef.type === "union") {
         if (isUnionOfPrimitivesDeeply(schema)) {
-          return cacheSchemaField(schema, coField.json());
+          return cacheSchemaField(schema, "json");
         } else {
           throw new Error(
             "z.union()/z.discriminatedUnion() of collaborative types is not supported. Use co.discriminatedUnion() instead.",
@@ -230,7 +215,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
         }
 
         try {
-          schemaFieldToCoFieldDef(zodSchemaDef.in as SchemaField);
+          resolveSchemaField(zodSchemaDef.in as SchemaField);
         } catch (error) {
           if (error instanceof Error) {
             error.message = `z.codec() is only supported if the input schema is already supported. ${error.message}`;
@@ -241,7 +226,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
 
         return cacheSchemaField(
           schema,
-          makeCodecCoField(
+          makeCodecSchema(
             schema as z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
           ),
         );
@@ -254,6 +239,10 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
       throw new Error(`Unsupported zod type: ${schema}`);
     }
   }
+}
+
+export function schemaFieldToCoFieldDef(schema: SchemaField): Schema {
+  return resolveSchemaField(schema);
 }
 
 function schemaFieldPermissions(schema: CoreCoValueSchema): RefPermissions {
