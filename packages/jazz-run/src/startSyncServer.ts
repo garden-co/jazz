@@ -3,10 +3,13 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { CryptoProvider, LocalNode } from "cojson";
 import { getBetterSqliteStorage } from "cojson-storage-sqlite";
+import { getFjallStorage } from "cojson-storage-fjall";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocketServer } from "ws";
 import { type SyncServer } from "./types.js";
+
+export type StorageEngine = "sqlite" | "fjall";
 
 export const startSyncServer = async ({
   host,
@@ -15,6 +18,7 @@ export const startSyncServer = async ({
   db,
   crypto,
   middleware,
+  storageEngine = "sqlite",
 }: {
   host: string | undefined;
   port: string | undefined;
@@ -22,6 +26,7 @@ export const startSyncServer = async ({
   db: string;
   crypto?: CryptoProvider;
   middleware?: (req: IncomingMessage, res: ServerResponse) => boolean;
+  storageEngine?: StorageEngine;
 }): Promise<SyncServer> => {
   crypto ??= await WasmCrypto.create();
 
@@ -46,9 +51,18 @@ export const startSyncServer = async ({
   );
 
   if (!inMemory) {
-    await mkdir(dirname(db), { recursive: true });
+    // For SQLite, ensure the parent directory exists (db is a file).
+    // For fjall, ensure the path itself exists as a directory (db is a directory).
+    if (storageEngine === "fjall") {
+      await mkdir(db, { recursive: true });
+    } else {
+      await mkdir(dirname(db), { recursive: true });
+    }
 
-    const storage = getBetterSqliteStorage(db);
+    const storage =
+      storageEngine === "fjall"
+        ? getFjallStorage(db)
+        : getBetterSqliteStorage(db);
 
     localNode.setStorage(storage);
   }

@@ -9,7 +9,11 @@ import {
 } from "cojson";
 
 import type { ParsedArgs } from "../../utils/args.ts";
-import { getFlagNumber, getFlagString } from "../../utils/args.ts";
+import {
+  getFlagNumber,
+  getFlagString,
+  getStorageEngine,
+} from "../../utils/args.ts";
 import { SEED_CONFIG_KEYS } from "../../schema.ts";
 import {
   initSeedContext,
@@ -25,6 +29,7 @@ import type { DurationSeedResult } from "./types.ts";
  */
 export async function seed(args: ParsedArgs): Promise<DurationSeedResult> {
   const dbPath = getFlagString(args, "db") ?? "./seed.db";
+  const storageEngine = getStorageEngine(args);
   const pdfPath = getFlagString(args, "pdf") ?? "./assets/sample.pdf";
   const items = getFlagNumber(args, "items") ?? 100;
 
@@ -38,7 +43,7 @@ export async function seed(args: ParsedArgs): Promise<DurationSeedResult> {
   const pdfBytes = pdfBuf.byteLength;
   const pdfName = basename(pdfPath);
 
-  const ctx = await initSeedContext(dbPath, "duration");
+  const ctx = await initSeedContext(dbPath, "duration", storageEngine);
   const { group, configMap } = ctx;
 
   const chunkSize = cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;

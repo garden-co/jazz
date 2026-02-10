@@ -12,6 +12,7 @@ napi = { version = "3.7.1", features = ["napi9", "serde-json"] }
 napi-derive = "3.4.1"
 serde_json = "1.0"
 cojson-core = { path = "../cojson-core" }
+cojson-storage-fjall = { path = "../cojson-storage-fjall" }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 getrandom = { version = "0.2", features = ["js"] }

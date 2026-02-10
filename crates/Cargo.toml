@@ -5,7 +5,8 @@ members = [
     "cojson-core",
     "cojson-core-wasm",
     "cojson-core-napi",
-    "cojson-core-rn/rust"
+    "cojson-core-rn/rust",
+    "cojson-storage-fjall"
 ]
 
 [workspace.dependencies]

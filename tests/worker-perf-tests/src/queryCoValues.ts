@@ -1,5 +1,9 @@
 import type { ParsedArgs } from "./utils/args.ts";
-import { getFlagNumber, getFlagString } from "./utils/args.ts";
+import {
+  getFlagNumber,
+  getFlagString,
+  getStorageEngine,
+} from "./utils/args.ts";
 import { readAllCoValues } from "./utils/sqliteCoValues.ts";
 
 function assertNonEmptyString(
@@ -17,7 +21,18 @@ export async function queryCoValues(args: ParsedArgs): Promise<void> {
     getFlagString(args, "db") ?? "./seed.db",
     "--db",
   );
+  const storageEngine = getStorageEngine(args);
   const limit = getFlagNumber(args, "limit");
+
+  if (storageEngine === "fjall") {
+    console.error(
+      "Warning: The query command currently only supports direct SQLite inspection.",
+    );
+    console.error(
+      "For fjall databases, use the seed config ID to load CoValues through the sync server.",
+    );
+    process.exit(1);
+  }
 
   const rows = readAllCoValues(dbPath);
   const out =

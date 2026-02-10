@@ -18,6 +18,7 @@
     "@opentelemetry/sdk-metrics": "^2.0.0",
     "better-sqlite3": "^12.2.0",
     "cojson": "workspace:*",
+    "cojson-storage-fjall": "workspace:*",
     "cojson-storage-sqlite": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "jazz-run": "workspace:*",

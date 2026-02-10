@@ -8,6 +8,7 @@ import {
   getFlagBoolean,
   getFlagNumber,
   getFlagString,
+  getStorageEngine,
 } from "../../utils/args.ts";
 import { parseMixSpec } from "../../utils/mix.ts";
 import { setupMetrics } from "../../metrics.ts";
@@ -39,6 +40,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     "--db",
   );
 
+  const storageEngine = getStorageEngine(args);
   const workerCount = getFlagNumber(args, "workers") ?? 8;
   const durationMs = getFlagNumber(args, "durationMs") ?? 60_000;
   const inflight = getFlagNumber(args, "inflight") ?? 4;
@@ -68,6 +70,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     db: dbPath,
     crypto: await NapiCrypto.create(),
     middleware: setupMetrics().middleware,
+    storageEngine,
   });
 
   const addr = server.address();
@@ -104,6 +107,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     JSON.stringify(
       {
         scenario: "duration",
+        storage: storageEngine,
         metrics: `http://${addr.address}:${addr.port}/metrics`,
         db: dbPath,
         peer,

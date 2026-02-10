@@ -1,14 +1,14 @@
 import { LocalNode, RawCoList, RawCoMap, type RawCoID } from "cojson";
 import { NapiCrypto } from "cojson/crypto/NapiCrypto";
-import { getBetterSqliteStorage } from "cojson-storage-sqlite";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WebSocket } from "ws";
 
 import type { ParsedArgs } from "../../utils/args.ts";
-import { getFlagString } from "../../utils/args.ts";
+import { getFlagString, getStorageEngine } from "../../utils/args.ts";
 import { readConfigId } from "../../utils/loadSeedConfig.ts";
 import {
   assertNonEmptyString,
+  createStorage,
   getConfigFilePath,
   sleep,
 } from "../../utils/seedHelpers.ts";
@@ -23,6 +23,7 @@ export async function push(args: ParsedArgs): Promise<void> {
     getFlagString(args, "db") ?? "./batch.db",
     "--db",
   );
+  const storageEngine = getStorageEngine(args);
   const peer = assertNonEmptyString(getFlagString(args, "peer"), "--peer");
 
   // Read the seed config ID from the config file
@@ -58,7 +59,7 @@ export async function push(args: ParsedArgs): Promise<void> {
   );
 
   // Attach local storage
-  const storage = getBetterSqliteStorage(dbPath);
+  const storage = createStorage(dbPath, storageEngine);
   node.setStorage(storage);
 
   // Connect to remote sync server

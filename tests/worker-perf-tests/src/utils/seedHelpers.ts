@@ -4,8 +4,10 @@ import { dirname } from "node:path";
 import { CoValueCore, LocalNode, type RawCoID } from "cojson";
 import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { getBetterSqliteStorage } from "cojson-storage-sqlite";
+import { getFjallStorage } from "cojson-storage-fjall";
 
 import { SEED_CONFIG_KEYS, type ScenarioType } from "../schema.ts";
+import type { StorageEngine } from "./args.ts";
 
 /**
  * Get the path to the config file for a database.
@@ -44,13 +46,33 @@ export type SeedResult = {
 };
 
 /**
+ * Create the appropriate storage instance based on the engine type.
+ */
+export function createStorage(
+  dbPath: string,
+  storageEngine: StorageEngine = "sqlite",
+) {
+  if (storageEngine === "fjall") {
+    return getFjallStorage(dbPath);
+  }
+  return getBetterSqliteStorage(dbPath);
+}
+
+/**
  * Initialize the seed context with a node, group, and config map.
  */
 export async function initSeedContext(
   dbPath: string,
   scenario: ScenarioType,
+  storageEngine: StorageEngine = "sqlite",
 ): Promise<SeedContext> {
-  await mkdir(dirname(dbPath), { recursive: true });
+  // For SQLite, ensure the parent directory exists (db is a file).
+  // For fjall, ensure the path itself exists as a directory (db is a directory).
+  if (storageEngine === "fjall") {
+    await mkdir(dbPath, { recursive: true });
+  } else {
+    await mkdir(dirname(dbPath), { recursive: true });
+  }
 
   const crypto = await NapiCrypto.create();
   const agentSecret = crypto.newRandomAgentSecret();
@@ -62,7 +84,7 @@ export async function initSeedContext(
     crypto,
   );
 
-  const storage = getBetterSqliteStorage(dbPath);
+  const storage = createStorage(dbPath, storageEngine);
   node.setStorage(storage);
 
   const group = node.createGroup();

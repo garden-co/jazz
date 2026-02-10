@@ -1,7 +1,11 @@
 import type { CoValueCore, RawCoID, RawCoList } from "cojson";
 
 import type { ParsedArgs } from "../../utils/args.ts";
-import { getFlagNumber, getFlagString } from "../../utils/args.ts";
+import {
+  getFlagNumber,
+  getFlagString,
+  getStorageEngine,
+} from "../../utils/args.ts";
 import { SEED_CONFIG_KEYS } from "../../schema.ts";
 import {
   initSeedContext,
@@ -17,6 +21,7 @@ import type { BatchSeedResult } from "./types.ts";
  */
 export async function seed(args: ParsedArgs): Promise<BatchSeedResult> {
   const dbPath = getFlagString(args, "db") ?? "./seed.db";
+  const storageEngine = getStorageEngine(args);
   const mapCount = getFlagNumber(args, "maps") ?? 100;
   const minSize = getFlagNumber(args, "minSize") ?? 100;
   const maxSize = getFlagNumber(args, "maxSize") ?? 1024;
@@ -28,7 +33,7 @@ export async function seed(args: ParsedArgs): Promise<BatchSeedResult> {
     throw new Error("--minSize must be <= --maxSize");
   }
 
-  const ctx = await initSeedContext(dbPath, "batch");
+  const ctx = await initSeedContext(dbPath, "batch", storageEngine);
   const { group, configMap } = ctx;
 
   // Create CoList to store the IDs

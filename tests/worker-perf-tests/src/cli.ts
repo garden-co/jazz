@@ -1,6 +1,6 @@
 import { duration, batch } from "./scenarios/index.ts";
 import { queryCoValues } from "./queryCoValues.ts";
-import { parseArgs } from "./utils/args.ts";
+import { parseArgs, getFlagString } from "./utils/args.ts";
 
 function usage(): string {
   return [
@@ -56,7 +56,8 @@ function usage(): string {
     "  --config-id <id>    - Config ID (required for remote mode)",
     "",
     "Common options:",
-    "  --db <path>         - Path to SQLite database (default: ./seed.db)",
+    "  --db <path>         - Path to database (default: ./seed.db)",
+    "  --storage <engine>  - Storage engine: sqlite or fjall (default: sqlite)",
     "  --workers <n>       - Number of worker threads (default: 8)",
     "  --host <host>       - Sync server host (default: 127.0.0.1)",
     "  --port <port>       - Sync server port (default: 4200)",
@@ -65,7 +66,8 @@ function usage(): string {
     "Notes:",
     "  - The seed command stores a SeedConfig CoValue containing all IDs",
     "  - The run command loads this CoValue to get the IDs before starting workers",
-    "  - The sync server uses the seeded SQLite DB as its persistence layer",
+    "  - The sync server uses the seeded DB as its persistence layer",
+    "  - Use --storage fjall to benchmark with the fjall LSM-tree engine instead of SQLite",
     "  - Remote mode: use --peer to connect to a remote sync server (no cache clearing)",
   ].join("\n");
 }
@@ -98,27 +100,36 @@ async function main() {
 
   // Combined prepare command - seeds both scenarios with 10k items
   if (cmd === "prepare") {
+    // Forward --storage flag if provided
+    const storageFlag = getFlagString(args, "storage");
+    const storageArgs = storageFlag ? ["--storage", storageFlag] : [];
+
+    // Use different path extensions: .db for SQLite (file), .fjall for fjall (directory)
+    const ext = storageFlag === "fjall" ? "fjall" : "db";
+
     console.log("=== Preparing duration scenario (10k items) ===");
     const durationArgs = parseArgs([
       "--db",
-      "./duration.db",
+      `./duration.${ext}`,
       "--items",
       "10000",
       "--pdf",
       "./assets/sample.pdf",
+      ...storageArgs,
     ]);
     await duration.seed(durationArgs);
 
     console.log("\n=== Preparing batch scenario (10k maps) ===");
     const batchArgs = parseArgs([
       "--db",
-      "./batch.db",
+      `./batch.${ext}`,
       "--maps",
       "15000",
       "--minSize",
       "100",
       "--maxSize",
       "1024",
+      ...storageArgs,
     ]);
     await batch.seed(batchArgs);
 
