@@ -95,9 +95,7 @@ fn decode_session_value(
 
     // sessionID is the part of the key after the 8-byte coValueRowID prefix
     let session_id = std::str::from_utf8(&key[8..])
-        .map_err(|e| {
-            FjallStorageError::DataCorruption(format!("Invalid UTF-8 in sessionID: {e}"))
-        })?
+        .map_err(|e| FjallStorageError::DataCorruption(format!("Invalid UTF-8 in sessionID: {e}")))?
         .to_string();
 
     Ok(SessionResult {
@@ -204,9 +202,7 @@ impl FjallStorage {
                 let row_id = decode_u64(&v[..8]);
                 let header_json = std::str::from_utf8(&v[8..])
                     .map_err(|e| {
-                        FjallStorageError::DataCorruption(format!(
-                            "Invalid UTF-8 in header: {e}"
-                        ))
+                        FjallStorageError::DataCorruption(format!("Invalid UTF-8 in header: {e}"))
                     })?
                     .to_string();
                 Ok(Some(CoValueResult {
@@ -235,11 +231,7 @@ impl FjallStorage {
 
     /// Upsert a CoValue. If header is None, just look up the existing rowID.
     /// Returns the rowID, or None if not found and no header provided.
-    pub fn upsert_co_value(
-        &self,
-        id: &str,
-        header_json: Option<&str>,
-    ) -> Result<Option<u64>> {
+    pub fn upsert_co_value(&self, id: &str, header_json: Option<&str>) -> Result<Option<u64>> {
         match header_json {
             None => self.get_co_value_row_id(id),
             Some(header) => {
@@ -283,11 +275,7 @@ impl FjallStorage {
         let val = self.session_by_cv_sid.get(&key)?;
         match val {
             None => Ok(None),
-            Some(v) => Ok(Some(decode_session_value(
-                &key,
-                &v,
-                co_value_row_id,
-            )?)),
+            Some(v) => Ok(Some(decode_session_value(&key, &v, co_value_row_id)?)),
         }
     }
 
@@ -367,12 +355,7 @@ impl FjallStorage {
     }
 
     /// Add a transaction to a session.
-    pub fn add_transaction(
-        &self,
-        session_row_id: u64,
-        idx: u32,
-        tx_json: &str,
-    ) -> Result<()> {
+    pub fn add_transaction(&self, session_row_id: u64, idx: u32, tx_json: &str) -> Result<()> {
         let key = encode_tx_key(session_row_id, idx);
         self.transactions.insert(key, tx_json.as_bytes())?;
         Ok(())
@@ -402,9 +385,7 @@ impl FjallStorage {
             }
             let signature = std::str::from_utf8(&value)
                 .map_err(|e| {
-                    FjallStorageError::DataCorruption(format!(
-                        "Invalid UTF-8 in signature: {e}"
-                    ))
+                    FjallStorageError::DataCorruption(format!("Invalid UTF-8 in signature: {e}"))
                 })?
                 .to_string();
             sigs.push(SignatureResult { idx, signature });
@@ -433,8 +414,7 @@ impl FjallStorage {
     pub fn mark_co_value_as_deleted(&self, co_value_id: &str) -> Result<()> {
         // Only insert if not already present (preserve Done status)
         if self.deleted.get(co_value_id.as_bytes())?.is_none() {
-            self.deleted
-                .insert(co_value_id.as_bytes(), &[0u8])?; // 0 = Pending
+            self.deleted.insert(co_value_id.as_bytes(), &[0u8])?; // 0 = Pending
         }
         Ok(())
     }
@@ -595,9 +575,7 @@ impl FjallStorage {
             if value.len() < SESSION_HEADER_SIZE {
                 continue;
             }
-            let session_id = std::str::from_utf8(&key[8..])
-                .unwrap_or("")
-                .to_string();
+            let session_id = std::str::from_utf8(&key[8..]).unwrap_or("").to_string();
             let last_idx = decode_u32(&value[8..12]);
             sessions.push((session_id, last_idx));
         }
@@ -622,7 +600,9 @@ mod tests {
     #[test]
     fn covalue_roundtrip() {
         let s = open_temp();
-        let row_id = s.upsert_co_value("co_abc", Some(r#"{"type":"comap"}"#)).unwrap();
+        let row_id = s
+            .upsert_co_value("co_abc", Some(r#"{"type":"comap"}"#))
+            .unwrap();
         assert!(row_id.is_some());
 
         let result = s.get_co_value("co_abc").unwrap().unwrap();
@@ -639,8 +619,14 @@ mod tests {
     #[test]
     fn upsert_idempotent() {
         let s = open_temp();
-        let id1 = s.upsert_co_value("co_x", Some(r#"{"type":"a"}"#)).unwrap().unwrap();
-        let id2 = s.upsert_co_value("co_x", Some(r#"{"type":"b"}"#)).unwrap().unwrap();
+        let id1 = s
+            .upsert_co_value("co_x", Some(r#"{"type":"a"}"#))
+            .unwrap()
+            .unwrap();
+        let id2 = s
+            .upsert_co_value("co_x", Some(r#"{"type":"b"}"#))
+            .unwrap()
+            .unwrap();
         // Should return same rowID, not overwrite
         assert_eq!(id1, id2);
         // Header should be the original
@@ -651,14 +637,22 @@ mod tests {
     #[test]
     fn session_crud() {
         let s = open_temp();
-        let cv_row = s.upsert_co_value("co_1", Some(r#"{"type":"comap"}"#)).unwrap().unwrap();
+        let cv_row = s
+            .upsert_co_value("co_1", Some(r#"{"type":"comap"}"#))
+            .unwrap()
+            .unwrap();
 
         // Add session
-        let ses_row = s.add_session_update(cv_row, "session_1", 5, "sig_abc", 100).unwrap();
+        let ses_row = s
+            .add_session_update(cv_row, "session_1", 5, "sig_abc", 100)
+            .unwrap();
         assert!(ses_row > 0);
 
         // Get single session
-        let session = s.get_single_co_value_session(cv_row, "session_1").unwrap().unwrap();
+        let session = s
+            .get_single_co_value_session(cv_row, "session_1")
+            .unwrap()
+            .unwrap();
         assert_eq!(session.last_idx, 5);
         assert_eq!(session.last_signature, "sig_abc");
         assert_eq!(session.bytes_since_last_signature, 100);
@@ -668,13 +662,18 @@ mod tests {
         assert_eq!(sessions.len(), 1);
 
         // Add another session
-        s.add_session_update(cv_row, "session_2", 3, "sig_def", 50).unwrap();
+        s.add_session_update(cv_row, "session_2", 3, "sig_def", 50)
+            .unwrap();
         let sessions = s.get_co_value_sessions(cv_row).unwrap();
         assert_eq!(sessions.len(), 2);
 
         // Update existing session
-        s.add_session_update(cv_row, "session_1", 10, "sig_ghi", 200).unwrap();
-        let session = s.get_single_co_value_session(cv_row, "session_1").unwrap().unwrap();
+        s.add_session_update(cv_row, "session_1", 10, "sig_ghi", 200)
+            .unwrap();
+        let session = s
+            .get_single_co_value_session(cv_row, "session_1")
+            .unwrap()
+            .unwrap();
         assert_eq!(session.last_idx, 10);
         assert_eq!(session.last_signature, "sig_ghi");
         // rowID should be preserved
@@ -689,7 +688,8 @@ mod tests {
 
         // Insert 10 transactions
         for i in 0..10u32 {
-            s.add_transaction(ses_row, i, &format!(r#"{{"idx":{i}}}"#)).unwrap();
+            s.add_transaction(ses_row, i, &format!(r#"{{"idx":{i}}}"#))
+                .unwrap();
         }
 
         // Query range [3, 7]
@@ -724,15 +724,24 @@ mod tests {
     #[test]
     fn deletion_workflow() {
         let s = open_temp();
-        let cv_row = s.upsert_co_value("co_del", Some(r#"{"type":"comap"}"#)).unwrap().unwrap();
+        let cv_row = s
+            .upsert_co_value("co_del", Some(r#"{"type":"comap"}"#))
+            .unwrap()
+            .unwrap();
 
         // Add a normal session and a delete session (ends with '$')
-        let ses_normal = s.add_session_update(cv_row, "normal_session", 3, "sig_n", 0).unwrap();
-        let _ses_delete = s.add_session_update(cv_row, "delete_session$", 1, "sig_d", 0).unwrap();
+        let ses_normal = s
+            .add_session_update(cv_row, "normal_session", 3, "sig_n", 0)
+            .unwrap();
+        let _ses_delete = s
+            .add_session_update(cv_row, "delete_session$", 1, "sig_d", 0)
+            .unwrap();
 
         // Add transactions to the normal session
-        s.add_transaction(ses_normal, 0, r#"{"data":"normal"}"#).unwrap();
-        s.add_transaction(ses_normal, 1, r#"{"data":"normal2"}"#).unwrap();
+        s.add_transaction(ses_normal, 0, r#"{"data":"normal"}"#)
+            .unwrap();
+        s.add_transaction(ses_normal, 1, r#"{"data":"normal2"}"#)
+            .unwrap();
 
         // Mark as deleted
         s.mark_co_value_as_deleted("co_del").unwrap();
@@ -776,21 +785,24 @@ mod tests {
             ("co_1", "peer_a", false),
             ("co_1", "peer_b", false),
             ("co_2", "peer_a", false),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         let ids = s.get_unsynced_co_value_ids().unwrap();
         assert!(ids.contains(&"co_1".to_string()));
         assert!(ids.contains(&"co_2".to_string()));
 
         // Mark co_1/peer_a as synced
-        s.track_co_values_sync_state(&[("co_1", "peer_a", true)]).unwrap();
+        s.track_co_values_sync_state(&[("co_1", "peer_a", true)])
+            .unwrap();
 
         // co_1 should still appear (peer_b still unsynced)
         let ids = s.get_unsynced_co_value_ids().unwrap();
         assert!(ids.contains(&"co_1".to_string()));
 
         // Mark co_1/peer_b as synced
-        s.track_co_values_sync_state(&[("co_1", "peer_b", true)]).unwrap();
+        s.track_co_values_sync_state(&[("co_1", "peer_b", true)])
+            .unwrap();
 
         // co_1 should no longer appear
         let ids = s.get_unsynced_co_value_ids().unwrap();
@@ -801,10 +813,8 @@ mod tests {
     #[test]
     fn stop_tracking_sync_state() {
         let s = open_temp();
-        s.track_co_values_sync_state(&[
-            ("co_1", "peer_a", false),
-            ("co_1", "peer_b", false),
-        ]).unwrap();
+        s.track_co_values_sync_state(&[("co_1", "peer_a", false), ("co_1", "peer_b", false)])
+            .unwrap();
 
         s.stop_tracking_sync_state("co_1").unwrap();
         let ids = s.get_unsynced_co_value_ids().unwrap();
@@ -814,7 +824,10 @@ mod tests {
     #[test]
     fn known_state() {
         let s = open_temp();
-        let cv_row = s.upsert_co_value("co_ks", Some(r#"{"type":"comap"}"#)).unwrap().unwrap();
+        let cv_row = s
+            .upsert_co_value("co_ks", Some(r#"{"type":"comap"}"#))
+            .unwrap()
+            .unwrap();
 
         s.add_session_update(cv_row, "s1", 5, "sig1", 0).unwrap();
         s.add_session_update(cv_row, "s2", 10, "sig2", 0).unwrap();
