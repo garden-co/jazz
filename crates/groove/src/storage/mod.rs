@@ -186,6 +186,9 @@ pub trait Storage {
 
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
+
+    /// Flush buffered data to persistent storage. No-op for in-memory storage.
+    fn flush(&self) {}
 }
 
 // ============================================================================

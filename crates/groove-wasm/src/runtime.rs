@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `MemoryStorage` provides synchronous storage (from groove::storage)
+//! - `BfTreeStorage` provides synchronous storage (from groove::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -31,7 +31,7 @@ use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::MemoryStorage;
+use groove::storage::BfTreeStorage;
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -57,7 +57,7 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<MemoryStorage, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>;
 
 // ============================================================================
 // WasmScheduler
@@ -146,7 +146,7 @@ impl SyncSender for JsSyncSender {
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps `Rc<RefCell<RuntimeCore<MemoryStorage, WasmScheduler, JsSyncSender>>>`.
+/// Wraps `Rc<RefCell<RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>>>`.
 /// All methods borrow the core, call RuntimeCore, and return.
 /// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
@@ -158,7 +158,7 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
-    /// Storage is synchronous (in-memory via MemoryStorage).
+    /// Storage is synchronous (in-memory via BfTreeStorage).
     ///
     /// # Arguments
     /// * `schema_json` - JSON-encoded schema definition
@@ -206,7 +206,9 @@ impl WasmRuntime {
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
         // Create components
-        let storage = MemoryStorage::new();
+        const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32MB
+        let storage = BfTreeStorage::memory(DEFAULT_CACHE_SIZE)
+            .map_err(|e| JsError::new(&format!("Storage init: {:?}", e)))?;
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
 
@@ -590,5 +592,88 @@ impl WasmRuntime {
         let schema = core.current_schema();
         let wasm_schema = WasmSchema::from(schema);
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
+    }
+
+    /// Flush all data to persistent storage (snapshot).
+    #[wasm_bindgen]
+    pub fn flush(&self) {
+        self.core.borrow().flush_storage();
+    }
+
+    /// Create a persistent WasmRuntime backed by OPFS.
+    ///
+    /// Opens two OPFS files: `{db_name}.bftree` (tree data) and
+    /// `{db_name}.wal` (write-ahead log). Handles fresh start and
+    /// crash recovery automatically.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openPersistent)]
+    pub async fn open_persistent(
+        schema_json: &str,
+        app_id: &str,
+        env: &str,
+        user_branch: &str,
+        db_name: &str,
+        tier: Option<String>,
+    ) -> Result<WasmRuntime, JsError> {
+        #[cfg(feature = "console_error_panic_hook")]
+        console_error_panic_hook::set_once();
+
+        // Parse schema
+        let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
+            .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
+
+        let schema: Schema = wasm_schema
+            .try_into()
+            .map_err(|e: String| JsError::new(&e))?;
+
+        // Parse optional tier
+        let persistence_tier = tier.as_deref().map(parse_tier).transpose()?;
+
+        // Create sync manager
+        let mut sync_manager = SyncManager::new();
+        if let Some(t) = persistence_tier {
+            sync_manager = sync_manager.with_tier(t);
+        }
+
+        // Create schema manager
+        let schema_manager = SchemaManager::new(
+            sync_manager,
+            schema,
+            AppId::from_name(app_id),
+            env,
+            user_branch,
+        )
+        .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
+
+        // Open OPFS files (async)
+        let tree_vfs = bf_tree::OpfsVfs::open(&format!("{}.bftree", db_name))
+            .await
+            .map_err(|e| JsError::new(&format!("OPFS tree: {:?}", e)))?;
+        let wal_vfs = bf_tree::OpfsVfs::open(&format!("{}.wal", db_name))
+            .await
+            .map_err(|e| JsError::new(&format!("OPFS WAL: {:?}", e)))?;
+
+        const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
+        let storage = BfTreeStorage::with_opfs(tree_vfs, wal_vfs, DEFAULT_CACHE_SIZE)
+            .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?;
+
+        let scheduler = WasmScheduler::new();
+        let sync_sender = JsSyncSender::new();
+
+        // Create RuntimeCore
+        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+
+        // Wrap in Rc<RefCell>
+        let core_rc = Rc::new(RefCell::new(core));
+
+        // Set the core_ref on the Scheduler
+        {
+            let mut core_guard = core_rc.borrow_mut();
+            core_guard
+                .scheduler_mut()
+                .set_core_ref(Rc::downgrade(&core_rc));
+        }
+
+        Ok(WasmRuntime { core: core_rc })
     }
 }

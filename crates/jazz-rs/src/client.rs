@@ -9,7 +9,7 @@ use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
-use groove::storage::BfTreeStorage;
+use groove::storage::{BfTreeStorage, Storage};
 use groove::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncManager};
 use groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use jazz_transport::ServerEvent;

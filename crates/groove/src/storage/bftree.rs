@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use bf_tree::{BfTree, Config, LeafInsertResult, LeafReadResult, ScanReturnField};
@@ -68,6 +69,7 @@ impl BfTreeStorage {
     ///
     /// If the file exists (from a previous snapshot), data is restored.
     /// Call `flush()` before drop to persist all data.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>, cache_size_bytes: usize) -> Result<Self, StorageError> {
         let path = path.as_ref();
         let mut config = Config::new(path, cache_size_bytes);
@@ -89,11 +91,23 @@ impl BfTreeStorage {
         Ok(Self { tree })
     }
 
-    /// Flush all data to disk (snapshot).
+    /// Open a persistent BfTreeStorage backed by OPFS (WASM only).
     ///
-    /// Must be called before drop to ensure persistence.
-    pub fn flush(&self) {
-        self.tree.snapshot();
+    /// Handles both fresh start and crash recovery (snapshot + WAL replay).
+    /// Requires pre-opened OpfsVfs handles (async open happens at caller).
+    #[cfg(target_arch = "wasm32")]
+    pub fn with_opfs(
+        tree_vfs: bf_tree::OpfsVfs,
+        wal_vfs: bf_tree::OpfsVfs,
+        cache_size_bytes: usize,
+    ) -> Result<Self, StorageError> {
+        let mut config = Config::default();
+        config.cb_size_byte(cache_size_bytes);
+        Self::configure(&mut config);
+
+        let tree = BfTree::open_with_opfs(tree_vfs, wal_vfs, config)
+            .map_err(|e| StorageError::IoError(format!("bf-tree OPFS: {:?}", e)))?;
+        Ok(Self { tree })
     }
 
     fn configure(config: &mut Config) {
@@ -690,6 +704,10 @@ impl Storage for BfTreeStorage {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    fn flush(&self) {
+        self.tree.snapshot();
     }
 }
 

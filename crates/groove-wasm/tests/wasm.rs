@@ -4,11 +4,11 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
+use groove_wasm::types::WasmValue;
 use groove_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
 
 #[wasm_bindgen_test]
@@ -74,12 +74,8 @@ fn test_query_builder_basic() {
 fn test_query_builder_with_filters() {
     let builder = WasmQueryBuilder::new("todos");
 
-    // Create a text value for filtering
-    let value = JsValue::from_serde(&serde_json::json!({
-        "type": "Boolean",
-        "value": true
-    }))
-    .unwrap();
+    // Create a boolean value for filtering
+    let value = serde_wasm_bindgen::to_value(&WasmValue::Boolean(true)).unwrap();
 
     let result = builder.branch("main").filter_eq("completed", value);
 
@@ -143,17 +139,8 @@ fn test_query_builder_join() {
 fn test_query_builder_or() {
     let builder = WasmQueryBuilder::new("todos");
 
-    let value1 = JsValue::from_serde(&serde_json::json!({
-        "type": "Text",
-        "value": "urgent"
-    }))
-    .unwrap();
-
-    let value2 = JsValue::from_serde(&serde_json::json!({
-        "type": "Boolean",
-        "value": true
-    }))
-    .unwrap();
+    let value1 = serde_wasm_bindgen::to_value(&WasmValue::Text("urgent".to_string())).unwrap();
+    let value2 = serde_wasm_bindgen::to_value(&WasmValue::Boolean(true)).unwrap();
 
     let result = builder.branch("main").filter_eq("priority", value1);
 
