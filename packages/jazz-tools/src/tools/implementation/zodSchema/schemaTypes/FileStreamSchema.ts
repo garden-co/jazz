@@ -34,9 +34,15 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   readonly builtin = "FileStream" as const;
   readonly resolveQuery = true as const;
 
+  #validationSchema: z.ZodType | undefined = undefined;
   #permissions: SchemaPermissions | null = null;
   getValidationSchema = () => {
-    return z.instanceof(FileStream);
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.instanceof(FileStream);
+    return this.#validationSchema;
   };
 
   /**

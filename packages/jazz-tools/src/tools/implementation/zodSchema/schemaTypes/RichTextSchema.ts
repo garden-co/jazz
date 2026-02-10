@@ -46,7 +46,16 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   constructor(private coValueClass: typeof CoRichText) {}
 
-  getValidationSchema = () => z.string().or(z.instanceof(CoRichText));
+  #validationSchema: z.ZodType | undefined = undefined;
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.string().or(z.instanceof(CoRichText));
+    return this.#validationSchema;
+  };
 
   create(text: string, options?: { owner: Group } | Group): CoRichText;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */

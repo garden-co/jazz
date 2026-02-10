@@ -97,15 +97,17 @@ export function executeValidation<T>(
     return value as T;
   }
 
-  if (mode === "warn") {
-    try {
-      return z.parse(schema, value);
-    } catch (error) {
-      console.warn("[Jazz] Validation warning:", error);
+  const result = z.safeParse(schema, value);
+
+  if (!result.success) {
+    if (mode === "warn") {
+      console.warn("[Jazz] Validation warning:", result.error);
       return value as T;
     }
+
+    // mode === "strict"
+    throw result.error;
   }
 
-  // mode === "strict"
-  return z.parse(schema, value);
+  return result.data;
 }

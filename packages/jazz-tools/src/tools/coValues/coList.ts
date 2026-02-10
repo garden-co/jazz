@@ -620,7 +620,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         CoListItem<L>
       >[];
     }
-    return this.unsafePush(...items);
+    return this.pushLoose(...items);
   }
 
   /**
@@ -630,7 +630,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    *
    * @category Content
    */
-  unsafePush(...items: CoFieldInit<CoListItem<L>>[]): number {
+  pushLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
     this.raw.appendItems(
       toRawItems(items, this.schema[ItemsSym], this.owner, "loose"),
       undefined,
@@ -654,7 +654,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         CoListItem<L>
       >[];
     }
-    return this.unsafeUnshift(...items);
+    return this.unshiftLoose(...items);
   }
 
   /**
@@ -664,7 +664,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    *
    * @category Content
    */
-  unsafeUnshift(...items: CoFieldInit<CoListItem<L>>[]): number {
+  unshiftLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
     for (const item of toRawItems(
       items as CoFieldInit<CoListItem<L>>[],
       this.schema[ItemsSym],
@@ -728,7 +728,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       >[];
     }
 
-    return this.unsafeSplice(start, deleteCount, ...items);
+    return this.spliceLoose(start, deleteCount, ...items);
   }
 
   /**
@@ -740,7 +740,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    *
    * @category Content
    */
-  unsafeSplice(
+  spliceLoose(
     start: number,
     deleteCount: number,
     ...items: CoFieldInit<CoListItem<L>>[]
@@ -888,7 +888,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     this.raw.core.pauseNotifyUpdate();
 
     for (const [from, to, insert] of patches.reverse()) {
-      this.unsafeSplice(from, to - from, ...insert);
+      this.spliceLoose(from, to - from, ...insert);
     }
 
     this.raw.core.resumeNotifyUpdate();

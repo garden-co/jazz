@@ -53,13 +53,21 @@ export class AccountSchema<
   shape: Shape;
   getDefinition: () => CoMapSchemaDefinition;
 
+  #validationSchema: z.ZodType | undefined = undefined;
+
   getValidationSchema = () => {
-    return z.instanceof(Account).or(
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.instanceof(Account).or(
       z.object({
         profile: this.shape.profile.getValidationSchema(),
         root: z.optional(this.shape.root.getValidationSchema()),
       }),
     );
+
+    return this.#validationSchema;
   };
 
   /**

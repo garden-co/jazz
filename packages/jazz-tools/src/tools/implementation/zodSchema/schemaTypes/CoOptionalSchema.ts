@@ -28,10 +28,17 @@ export class CoOptionalSchema<
   });
   readonly resolveQuery = true as const;
 
+  #validationSchema: z.ZodType | undefined = undefined;
+
   constructor(public readonly innerType: Shape) {}
 
   getValidationSchema = () => {
-    return z.optional(this.innerType.getValidationSchema());
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.optional(this.innerType.getValidationSchema());
+    return this.#validationSchema;
   };
 
   getCoValueClass(): ReturnType<

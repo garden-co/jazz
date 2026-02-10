@@ -36,7 +36,16 @@ export class GroupSchema implements CoreGroupSchema {
   readonly builtin = "Group" as const;
   readonly resolveQuery = true as const;
 
-  getValidationSchema = () => z.instanceof(Group);
+  #validationSchema: z.ZodType | undefined = undefined;
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.instanceof(Group);
+    return this.#validationSchema;
+  };
 
   getCoValueClass(): typeof Group {
     return Group;

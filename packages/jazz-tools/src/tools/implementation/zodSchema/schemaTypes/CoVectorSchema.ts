@@ -38,12 +38,19 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   readonly builtin = "CoVector" as const;
   readonly resolveQuery = true as const;
 
+  #validationSchema: z.ZodType | undefined = undefined;
   #permissions: SchemaPermissions | null = null;
   getValidationSchema = () => {
-    return z
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z
       .instanceof(CoVector)
       .or(z.instanceof(Float32Array))
       .or(z.array(z.number()));
+
+    return this.#validationSchema;
   };
 
   /**

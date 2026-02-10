@@ -55,9 +55,15 @@ export class CoDiscriminatedUnionSchema<
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
+  #validationSchema: z.ZodType | undefined = undefined;
+
   getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
     const { discriminator, options } = this.getDefinition();
-    return z.discriminatedUnion(
+    this.#validationSchema = z.discriminatedUnion(
       discriminator,
       // @ts-expect-error
       options.map((schema) => {
@@ -79,6 +85,8 @@ export class CoDiscriminatedUnionSchema<
         throw new Error("Invalid schema type");
       }),
     );
+
+    return this.#validationSchema;
   };
 
   /**

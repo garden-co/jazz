@@ -37,7 +37,15 @@ export class PlainTextSchema implements CorePlainTextSchema {
   readonly resolveQuery = true as const;
 
   #permissions: SchemaPermissions | null = null;
-  getValidationSchema = () => z.string().or(z.instanceof(CoPlainText));
+  #validationSchema: z.ZodType | undefined = undefined;
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    this.#validationSchema = z.string().or(z.instanceof(CoPlainText));
+    return this.#validationSchema;
+  };
 
   /**
    * Permissions to be used when creating or composing CoValues
