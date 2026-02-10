@@ -960,8 +960,11 @@ export class SyncManager {
     };
 
     for (const [coValueId, clientSessionsHash] of msg.values) {
-      const coValue = this.local.getCoValue(coValueId);
-      if (coValue.isErroredInPeer(peer.id)) {
+      // Avoid creating a new coValue object if it's not already in memory
+      const inMemoryCoValue = this.local.isCoValueInMemory(coValueId)
+        ? this.local.getCoValue(coValueId)
+        : undefined;
+      if (inMemoryCoValue?.isErroredInPeer(peer.id)) {
         sendAckWhenDone();
         continue;
       }
@@ -989,10 +992,15 @@ export class SyncManager {
         sendAckWhenDone();
       };
 
-      if (coValue.isAvailable()) {
-        maybeSendLoadRequest(coValue.knownState());
+      if (
+        inMemoryCoValue?.isAvailable() ||
+        inMemoryCoValue?.loadingState === "onlyKnownState"
+      ) {
+        maybeSendLoadRequest(inMemoryCoValue.knownState());
       } else {
-        coValue.getKnownStateFromStorage(maybeSendLoadRequest);
+        this.local.storage
+          ? this.local.storage.loadKnownState(coValueId, maybeSendLoadRequest)
+          : maybeSendLoadRequest(undefined);
       }
     }
 
