@@ -9,8 +9,9 @@ type ConstructorWithSchema<S extends CoreCoValueSchema = CoreCoValueSchema> = {
   coValueSchema?: S;
 };
 
-export function assertCoreCoValueSchema<C extends ConstructorWithSchema>(
+function assertCoreCoValueSchema<C extends ConstructorWithSchema>(
   constructor: C,
+  expectedSchemaType: string,
   operation: "create" | "load" | "resolve",
 ): NonNullable<C["coValueSchema"]> {
   const schema = constructor.coValueSchema;
@@ -21,6 +22,15 @@ export function assertCoreCoValueSchema<C extends ConstructorWithSchema>(
         `Attach a schema via co.map/co.list/co.feed/co.account before using this class.`,
     );
   }
+
+  if (schema.builtin !== expectedSchemaType) {
+    const className = constructor.name || "AnonymousCoValue";
+    throw new Error(
+      `[schema-invariant] ${className}.${operation} requires a ${expectedSchemaType} schema. ` +
+        `Got ${schema.builtin} instead.`,
+    );
+  }
+
   return schema as NonNullable<C["coValueSchema"]>;
 }
 
@@ -38,16 +48,7 @@ export function assertCoValueSchema<
   type: T,
   operation: "create" | "load" | "resolve",
 ): Extract<CoValueSchema, { builtin: T }> {
-  const schema = assertCoreCoValueSchema(constructor, operation);
-
-  if (schema.builtin !== type) {
-    const className = constructor.name || "AnonymousCoValue";
-
-    throw new Error(
-      `[schema-invariant] ${className}.${operation} requires a ${type} schema. ` +
-        `Attached schema is ${schema.builtin}.`,
-    );
-  }
+  const schema = assertCoreCoValueSchema(constructor, type, operation);
 
   return schema as Extract<CoValueSchema, { builtin: T }>;
 }

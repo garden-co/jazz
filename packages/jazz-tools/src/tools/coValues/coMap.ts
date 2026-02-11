@@ -839,15 +839,6 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       return this.descriptorCache.get(key);
     }
 
-    if (
-      this.coMapSchema.builtin !== "CoMap" &&
-      this.coMapSchema.builtin !== "Account"
-    ) {
-      throw new Error(
-        `[schema-invariant] ${this.coMap.constructor.name || "CoMap"}.resolve expected CoMap/Account schema, got ${this.coMapSchema.builtin}.`,
-      );
-    }
-
     const descriptorsSchema = this.coMapSchema.getDescriptorsSchema();
     const descriptor =
       descriptorsSchema.shape[key] ?? descriptorsSchema.catchall;

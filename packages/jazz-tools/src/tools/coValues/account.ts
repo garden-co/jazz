@@ -511,15 +511,6 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
 
     const accountSchema = this.coValueSchema;
 
-    if (
-      accountSchema.builtin !== "Account" &&
-      accountSchema.builtin !== "CoMap"
-    ) {
-      throw new Error(
-        `[schema-invariant] ${this.account.constructor.name || "Account"}.resolve expected Account/CoMap schema, got ${accountSchema.builtin}.`,
-      );
-    }
-
     const descriptor = accountSchema.getDescriptorsSchema().shape[key];
     if (descriptor) {
       this.descriptorCache.set(key, descriptor);

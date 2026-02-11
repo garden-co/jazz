@@ -619,18 +619,6 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * @internal
    */
   getItemsDescriptor(): Schema {
-    if (!this.coFeedSchema) {
-      throw new Error(
-        `[schema-invariant] ${this.coFeed.constructor.name || "CoFeed"} is missing coValueSchema.`,
-      );
-    }
-
-    if (this.coFeedSchema.builtin !== "CoFeed") {
-      throw new Error(
-        `[schema-invariant] ${this.coFeed.constructor.name || "CoFeed"}.resolve expected CoFeed schema, got ${this.coFeedSchema.builtin}.`,
-      );
-    }
-
     return this.coFeedSchema.getDescriptorsSchema();
   }
 }

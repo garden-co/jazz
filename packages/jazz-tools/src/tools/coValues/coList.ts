@@ -963,18 +963,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @internal
    */
   getItemsDescriptor(): Schema {
-    if (!this.coListSchema) {
-      throw new Error(
-        `[schema-invariant] ${this.coList.constructor.name || "CoList"} is missing coValueSchema.`,
-      );
-    }
-
-    if (this.coListSchema.builtin !== "CoList") {
-      throw new Error(
-        `[schema-invariant] ${this.coList.constructor.name || "CoList"}.resolve expected CoList schema, got ${this.coListSchema.builtin}.`,
-      );
-    }
-
     return this.coListSchema.getDescriptorsSchema();
   }
 
