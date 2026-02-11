@@ -3,7 +3,7 @@ import { SyncMessagesLog, setupTestNode } from "./testUtils.js";
 import { BatchMessage, NewContentMessage } from "../sync.js";
 import { SessionID } from "../exports.js";
 
-describe("LocalNode.withTransaction", () => {
+describe("LocalNode.unstable_withTransaction", () => {
   beforeEach(() => {
     SyncMessagesLog.clear();
   });
@@ -11,7 +11,7 @@ describe("LocalNode.withTransaction", () => {
   test("executes callback synchronously and returns result", async () => {
     const node = setupTestNode().node;
 
-    const result = await node.withTransaction(() => {
+    const result = await node.unstable_withTransaction(() => {
       return "test-result";
     });
 
@@ -22,9 +22,9 @@ describe("LocalNode.withTransaction", () => {
     const node = setupTestNode().node;
 
     await expect(
-      node.withTransaction(() => {
+      node.unstable_withTransaction(() => {
         // Try to start a nested transaction
-        return node.withTransaction(() => {
+        return node.unstable_withTransaction(() => {
           return "nested";
         });
       }),
@@ -34,7 +34,7 @@ describe("LocalNode.withTransaction", () => {
   test("cleans up transaction context on success", async () => {
     const node = setupTestNode().node;
 
-    await node.withTransaction(() => {
+    await node.unstable_withTransaction(() => {
       // Transaction context should be active here
       expect(node.getTransactionContext()).toBeDefined();
     });
@@ -48,7 +48,7 @@ describe("LocalNode.withTransaction", () => {
     const error = new Error("Test error");
 
     try {
-      await node.withTransaction(() => {
+      await node.unstable_withTransaction(() => {
         throw error;
       });
     } catch (e) {
@@ -73,7 +73,7 @@ describe("LocalNode.withTransaction", () => {
     // Start capturing messages
     const messagesBefore = SyncMessagesLog.messages.length;
 
-    await node.withTransaction(() => {
+    await node.unstable_withTransaction(() => {
       // Empty transaction - no mutations
     });
 
@@ -95,7 +95,7 @@ describe("LocalNode.withTransaction", () => {
     SyncMessagesLog.clear();
 
     // Create a CoMap within a transaction
-    const result = await node.withTransaction(() => {
+    const result = await node.unstable_withTransaction(() => {
       const map = group.createMap({ test: "value" });
       map.set("key1", "value1", "trusting");
       map.set("key2", "value2", "trusting");
@@ -192,7 +192,7 @@ describe("LocalNode.withTransaction", () => {
 
     SyncMessagesLog.clear();
 
-    await node.withTransaction(() => {
+    await node.unstable_withTransaction(() => {
       map.set("k1", "v1", "trusting");
       map.set("k2", "v2", "trusting");
     });
@@ -227,7 +227,7 @@ describe("LocalNode.withTransaction", () => {
     const group = node.createGroup();
     const map = group.createMap();
 
-    await node.withTransaction(() => {
+    await node.unstable_withTransaction(() => {
       map.set("key", "value", "trusting");
       // Value should be immediately visible in memory
       expect(map.get("key")).toBe("value");
@@ -243,7 +243,7 @@ describe("LocalNode.withTransaction", () => {
     const map = group.createMap();
 
     try {
-      await node.withTransaction(() => {
+      await node.unstable_withTransaction(() => {
         map.set("key1", "value1", "trusting");
         expect(map.get("key1")).toBe("value1");
 

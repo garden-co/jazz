@@ -616,7 +616,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
    *
    * @example
    * ```typescript
-   * await account.$jazz.withTransaction(() => {
+   * account.$jazz.unstable_withTransaction(() => {
    *   map1.set("key1", "value1");
    *   map2.set("key2", "value2");
    *   list.push(item);
@@ -625,8 +625,8 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
    *
    * @category Content
    */
-  async withTransaction<T>(callback: () => T): Promise<T> {
-    return this.localNode.withTransaction(callback);
+  async unstable_withTransaction<T>(callback: () => T): Promise<T> {
+    return this.localNode.unstable_withTransaction(callback);
   }
 
   /** @internal */

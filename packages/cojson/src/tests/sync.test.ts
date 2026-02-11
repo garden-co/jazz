@@ -198,7 +198,7 @@ test("transaction mutations are sent together in a single batch message", async 
 
   SyncMessagesLog.clear();
 
-  await node.withTransaction(() => {
+  await node.unstable_withTransaction(() => {
     map.set("key1", "value1", "trusting");
     map.set("key2", "value2", "trusting");
   });

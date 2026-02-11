@@ -150,7 +150,7 @@ export class LocalNode {
    *
    * @example
    * ```typescript
-   * await localNode.withTransaction(() => {
+   * await localNode.unstable_withTransaction(() => {
    *   coValue1.makeTransaction([change1], "trusting");
    *   coValue2.makeTransaction([change2], "trusting");
    * });
@@ -158,7 +158,7 @@ export class LocalNode {
    *
    * @category 3. Low-level
    */
-  async withTransaction<T>(callback: () => T): Promise<T> {
+  async unstable_withTransaction<T>(callback: () => T): Promise<T> {
     // Check for nested transactions
     if (this.transactionContext) {
       throw new Error("Nested transactions are not supported");

@@ -528,7 +528,7 @@ describe("createAs", () => {
   });
 });
 
-describe("account.withTransaction", () => {
+describe("account.unstable_withTransaction", () => {
   const TestMap = co.map({
     name: z.string(),
     value: z.number(),
@@ -539,7 +539,7 @@ describe("account.withTransaction", () => {
       isCurrentActiveAccount: true,
     });
 
-    const result = await account.$jazz.withTransaction(() => {
+    const result = await account.$jazz.unstable_withTransaction(() => {
       return "test-result";
     });
 
@@ -553,7 +553,7 @@ describe("account.withTransaction", () => {
 
     const map = TestMap.create({ name: "test", value: 0 }, { owner: account });
 
-    await account.$jazz.withTransaction(() => {
+    await account.$jazz.unstable_withTransaction(() => {
       map.$jazz.set("name", "updated");
       map.$jazz.set("value", 42);
 
@@ -579,7 +579,7 @@ describe("account.withTransaction", () => {
       { owner: clientAccount },
     );
 
-    await clientAccount.$jazz.withTransaction(() => {
+    await clientAccount.$jazz.unstable_withTransaction(() => {
       map1.$jazz.set("name", "map1-updated");
       map2.$jazz.set("name", "map2-updated");
     });
@@ -601,8 +601,8 @@ describe("account.withTransaction", () => {
     });
 
     await expect(
-      account.$jazz.withTransaction(() => {
-        return account.$jazz.withTransaction(() => {
+      account.$jazz.unstable_withTransaction(() => {
+        return account.$jazz.unstable_withTransaction(() => {
           return "nested";
         });
       }),
@@ -615,12 +615,12 @@ describe("account.withTransaction", () => {
     });
 
     // Should not throw and should complete quickly
-    await account.$jazz.withTransaction(() => {
+    await account.$jazz.unstable_withTransaction(() => {
       // Empty transaction
     });
   });
 
-  test("mutations outside withTransaction work normally (US-5)", async () => {
+  test("mutations outside unstable_withTransaction work normally (US-5)", async () => {
     const account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
     });
@@ -632,7 +632,7 @@ describe("account.withTransaction", () => {
     expect(map.name).toBe("outside");
 
     // Mutation inside transaction
-    await account.$jazz.withTransaction(() => {
+    await account.$jazz.unstable_withTransaction(() => {
       map.$jazz.set("value", 42);
     });
     expect(map.value).toBe(42);
@@ -651,7 +651,7 @@ describe("account.withTransaction", () => {
     const map2 = TestMap.create({ name: "map2", value: 2 }, { owner: account });
     const map3 = TestMap.create({ name: "map3", value: 3 }, { owner: account });
 
-    await account.$jazz.withTransaction(() => {
+    await account.$jazz.unstable_withTransaction(() => {
       map1.$jazz.set("name", "updated1");
       map1.$jazz.set("value", 10);
 
@@ -678,7 +678,7 @@ describe("account.withTransaction", () => {
 
     const map = TestMap.create({ name: "test", value: 0 }, { owner: account });
 
-    await account.$jazz.withTransaction(() => {
+    await account.$jazz.unstable_withTransaction(() => {
       map.$jazz.set("value", 1);
       map.$jazz.set("value", 2);
       map.$jazz.set("value", 3);
@@ -699,7 +699,7 @@ describe("account.withTransaction", () => {
     );
 
     // withTransaction should wait for persistence and sync
-    await clientAccount.$jazz.withTransaction(() => {
+    await clientAccount.$jazz.unstable_withTransaction(() => {
       map.$jazz.set("name", "synced");
       map.$jazz.set("value", 100);
     });
