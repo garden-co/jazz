@@ -30,14 +30,14 @@ Phase 6a added ack plumbing with no RuntimeCore API to consume it.
 
 ## Current Test Landscape
 
-| Layer | Tests | Purpose | E2E Level |
-|-------|-------|---------|-----------|
-| RuntimeCore | 20+ | Full-stack durability, sync, queries | High |
-| QueryManager | ~91 | CRUD, subscriptions, filtering, sorting | Medium (below RuntimeCore) |
-| ReBAC | 12 | Policy evaluation with realistic metadata | Medium |
-| SyncManager | 44+ | Protocol correctness (message routing) | Low (surgical) |
-| SchemaManager | 29+ | Schema versioning, lens transforms | Medium |
-| Browser E2E | 10+ | Real Chromium + WASM + Worker + OPFS | Very High |
+| Layer         | Tests | Purpose                                   | E2E Level                  |
+| ------------- | ----- | ----------------------------------------- | -------------------------- |
+| RuntimeCore   | 20+   | Full-stack durability, sync, queries      | High                       |
+| QueryManager  | ~91   | CRUD, subscriptions, filtering, sorting   | Medium (below RuntimeCore) |
+| ReBAC         | 12    | Policy evaluation with realistic metadata | Medium                     |
+| SyncManager   | 44+   | Protocol correctness (message routing)    | Low (surgical)             |
+| SchemaManager | 29+   | Schema versioning, lens transforms        | Medium                     |
+| Browser E2E   | 10+   | Real Chromium + WASM + Worker + OPFS      | Very High                  |
 
 ## Browser E2E Tests
 

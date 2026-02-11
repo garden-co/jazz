@@ -21,6 +21,7 @@ The spec described `ServerState.forwarded_queries` for tracking which queries ar
 The infrastructure exists (`PersistenceAck` with tier, `QuerySettled` with tier) but the full end-to-end flow — "subscription callback only fires when local query graph is settled on data confirmed by all upstream tiers" — needs verification of completeness.
 
 **Use cases:**
+
 - Initial data load requiring authoritative server state
 - Consistency-critical operations requiring server confirmation
 

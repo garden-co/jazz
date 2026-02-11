@@ -53,12 +53,12 @@ BlobId identifies a blob's association context: `(object_id, branch_name, commit
 
 ## Identifiers
 
-| Type        | Format   | Generation               |
-| ----------- | -------- | ------------------------ |
+| Type        | Format   | Generation                  |
+| ----------- | -------- | --------------------------- |
 | ObjectId    | UUIDv7   | `Uuid::now_v7()` (interned) |
-| BranchName  | String   | User-defined (interned)  |
-| CommitId    | [u8; 32] | BLAKE3 hash of commit    |
-| ContentHash | [u8; 32] | BLAKE3 hash of blob data |
+| BranchName  | String   | User-defined (interned)     |
+| CommitId    | [u8; 32] | BLAKE3 hash of commit       |
+| ContentHash | [u8; 32] | BLAKE3 hash of blob data    |
 
 > `crates/groove/src/object.rs:10-59` (ObjectId), `object.rs:79-124` (BranchName)
 
@@ -82,35 +82,35 @@ Central coordinator that maintains in-memory state and writes synchronously to S
 
 ### Public API — Object Management
 
-| Method | Purpose |
-|--------|---------|
-| `create()` | Create object with auto-generated ObjectId, sync to Storage |
-| `create_with_id()` | Create with deterministic ID (for index roots) |
-| `get()` | Return `Option<&Object>` from memory |
-| `get_or_load()` | Lazy cold-start: load from Storage if not in memory |
-| `receive_object()` | Accept pre-built object from sync layer |
+| Method             | Purpose                                                     |
+| ------------------ | ----------------------------------------------------------- |
+| `create()`         | Create object with auto-generated ObjectId, sync to Storage |
+| `create_with_id()` | Create with deterministic ID (for index roots)              |
+| `get()`            | Return `Option<&Object>` from memory                        |
+| `get_or_load()`    | Lazy cold-start: load from Storage if not in memory         |
+| `receive_object()` | Accept pre-built object from sync layer                     |
 
 > `crates/groove/src/object_manager.rs:168-260` (create, get, get_or_load), `607-623` (receive_object)
 
 ### Public API — Commit Operations
 
-| Method | Purpose |
-|--------|---------|
-| `add_commit()` | Create branch if parents empty, validate parents, update tips, sync to Storage, notify subscribers |
-| `replace_content()` | Special case for derived data (indices) — clears all commits, does NOT call Storage |
-| `receive_commit()` | Accept pre-built commit from sync, idempotent, sync to Storage |
-| `get_tip_ids()` / `get_tips()` / `get_commits()` | Read branch state |
+| Method                                           | Purpose                                                                                            |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `add_commit()`                                   | Create branch if parents empty, validate parents, update tips, sync to Storage, notify subscribers |
+| `replace_content()`                              | Special case for derived data (indices) — clears all commits, does NOT call Storage                |
+| `receive_commit()`                               | Accept pre-built commit from sync, idempotent, sync to Storage                                     |
+| `get_tip_ids()` / `get_tips()` / `get_commits()` | Read branch state                                                                                  |
 
 > `crates/groove/src/object_manager.rs:291-527` (add_commit through get_commits), `630-712` (receive_commit)
 
 ### Public API — Blob Operations
 
-| Method | Purpose |
-|--------|---------|
+| Method             | Purpose                                                                  |
+| ------------------ | ------------------------------------------------------------------------ |
 | `associate_blob()` | Compute BLAKE3 hash, deduplicate, store synchronously, track association |
-| `load_blob()` | Return blob data from Storage, cache in memory |
-| `put_blob()` | Simpler interface using associate_blob |
-| `get_blob()` | Return cached blob (does NOT load from Storage) |
+| `load_blob()`      | Return blob data from Storage, cache in memory                           |
+| `put_blob()`       | Simpler interface using associate_blob                                   |
+| `get_blob()`       | Return cached blob (does NOT load from Storage)                          |
 
 > `crates/groove/src/object_manager.rs:533-600` (associate_blob, load_blob), `718-739` (put_blob, get_blob)
 

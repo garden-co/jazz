@@ -15,6 +15,7 @@ parent_id: col.ref("todos").optional(),
 ```
 
 This means `.include()` usage is never demonstrated end-to-end. Update the example to show:
+
 - Schema with `col.ref()` (self-referential + cross-table)
 - Generated code with Include/Relations types
 - Application code using `.include({ parent: true })`

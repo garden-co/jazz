@@ -9,6 +9,7 @@ The critical design choice is that Storage is **synchronous**. The query engine 
 Synchronous, single-threaded interface (no Send + Sync bounds). All methods return results immediately — no Loading states, no async gaps.
 
 Operations:
+
 - **Objects**: `get_object()`, `put_object()`, `get_blob()`, `put_blob()`
 - **Indices**: `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`
 
@@ -27,9 +28,11 @@ HashMap-backed, used for tests and the browser main thread (acts as cache of wor
 bf-tree is our own B-tree key-value store, purpose-built for this use case. It supports both native (file-backed) and WASM (OPFS-backed) storage.
 
 The key insight is using composite keys so that B-tree range scans naturally give us index lookups:
+
 ```
 idx:{table}:{column}:{branch}:{encoded_value}:{row_id}
 ```
+
 A range scan over a prefix like `idx:todos:done:main:` returns all row IDs in the `done` index for the `todos` table on branch `main`. No separate index data structure needed — the B-tree IS the index.
 
 > `crates/groove/src/storage/bftree.rs`
@@ -84,9 +87,9 @@ WASM bindings exposing RuntimeCore via WasmRuntime. WasmScheduler uses `spawn_lo
 
 ## Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Index encoding | Composite keys in bf-tree | Range queries give index scans naturally |
-| Durability default | Fire-and-forget | Optimistic local-first; `_persisted()` variants for explicit durability |
-| Native architecture | Single process | No worker overhead needed |
-| Tab coordination | Single tab owns OPFS (leader election future) | `SyncAccessHandle` is an exclusive lock |
+| Decision            | Choice                                        | Rationale                                                               |
+| ------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
+| Index encoding      | Composite keys in bf-tree                     | Range queries give index scans naturally                                |
+| Durability default  | Fire-and-forget                               | Optimistic local-first; `_persisted()` variants for explicit durability |
+| Native architecture | Single process                                | No worker overhead needed                                               |
+| Tab coordination    | Single tab owns OPFS (leader election future) | `SyncAccessHandle` is an exclusive lock                                 |

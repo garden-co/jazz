@@ -31,17 +31,17 @@ Queries compile into a pipeline of nodes (`IndexScan → Materialize → Filter 
 
 ## Core Design Decisions
 
-| Decision | Details | Why |
-|----------|---------|-----|
-| Row = Object | Each row is a separate Jazz object; ObjectId = primary key | Rows inherit versioning, sync, and conflict resolution from the object layer for free |
-| Row format | Fixed fields first, then variable offsets, nullable 1-byte prefix | Comparison without deserialization — sort and filter operate on bytes |
-| Binary throughout | `Value` only at API boundary; internally `&[u8]` with `RowDescriptor` | Avoids allocation and type dispatch in the hot path |
-| Index-first | No table scans; every query starts with an index (`_id` for unfiltered) | Predictable performance; the `_id` index doubles as the row manifest |
-| Auto-index all columns | Every column gets a single-column index (zero-config) | Local-first databases are small enough that index overhead is negligible |
-| All indices persisted | Via `Storage` trait (MemoryStorage, BfTreeStorage) | Cold start loads indices, not all row data — fast startup |
-| No index rebuild | Incremental maintenance only; missing index = error | Indices are always consistent with data; no expensive rebuild path |
-| TupleDelta throughout | Unified delta type for progressive materialization | Each node transforms deltas without knowing what's upstream or downstream |
-| Branch-aware | Indices keyed by `(table, column, branch)`; queries specify target branch(es) | Schema versions use different branches — queries must address the right one |
+| Decision               | Details                                                                       | Why                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Row = Object           | Each row is a separate Jazz object; ObjectId = primary key                    | Rows inherit versioning, sync, and conflict resolution from the object layer for free |
+| Row format             | Fixed fields first, then variable offsets, nullable 1-byte prefix             | Comparison without deserialization — sort and filter operate on bytes                 |
+| Binary throughout      | `Value` only at API boundary; internally `&[u8]` with `RowDescriptor`         | Avoids allocation and type dispatch in the hot path                                   |
+| Index-first            | No table scans; every query starts with an index (`_id` for unfiltered)       | Predictable performance; the `_id` index doubles as the row manifest                  |
+| Auto-index all columns | Every column gets a single-column index (zero-config)                         | Local-first databases are small enough that index overhead is negligible              |
+| All indices persisted  | Via `Storage` trait (MemoryStorage, BfTreeStorage)                            | Cold start loads indices, not all row data — fast startup                             |
+| No index rebuild       | Incremental maintenance only; missing index = error                           | Indices are always consistent with data; no expensive rebuild path                    |
+| TupleDelta throughout  | Unified delta type for progressive materialization                            | Each node transforms deltas without knowing what's upstream or downstream             |
+| Branch-aware           | Indices keyed by `(table, column, branch)`; queries specify target branch(es) | Schema versions use different branches — queries must address the right one           |
 
 ## The `_id` Index as Row Manifest
 
@@ -51,7 +51,7 @@ The `_id` index for each table is the authoritative list of row ObjectIds. There
 
 **Cold start**: Load `_id` index → discover ObjectIds → load column indices → lazy-load row objects on demand via query. This means startup time is proportional to index size, not total data size.
 
-> `crates/groove/src/query_manager/manager.rs:534-549` (row_is_indexed checks _id)
+> `crates/groove/src/query_manager/manager.rs:534-549` (row_is_indexed checks \_id)
 
 ## Index Storage
 
@@ -81,11 +81,11 @@ TupleDelta: { added, removed, updated }
 
 ### Node Traits
 
-| Trait | Purpose | Implementations |
-|-------|---------|-----------------|
-| `SourceNode` | Read from external state | IndexScanNode |
-| `TransformNode` | Merge tuple sets | UnionNode |
-| `RowNode` | Process TupleDelta | MaterializeNode, FilterNode, SortNode, LimitOffsetNode, JoinNode, ArraySubqueryNode, OutputNode, PolicyFilterNode |
+| Trait           | Purpose                  | Implementations                                                                                                   |
+| --------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `SourceNode`    | Read from external state | IndexScanNode                                                                                                     |
+| `TransformNode` | Merge tuple sets         | UnionNode                                                                                                         |
+| `RowNode`       | Process TupleDelta       | MaterializeNode, FilterNode, SortNode, LimitOffsetNode, JoinNode, ArraySubqueryNode, OutputNode, PolicyFilterNode |
 
 > `crates/groove/src/query_manager/graph_nodes/mod.rs:36-83`
 
@@ -109,27 +109,27 @@ All nodes receive explicit branch names in constructor — no implicit "main" de
 
 Builder pattern with chaining:
 
-| Method | Purpose |
-|--------|---------|
-| `.branch()` / `.branches()` | Target branch(es) |
-| `.filter_eq/ne/lt/le/gt/ge/between()` | Conditions |
-| `.order_by()` / `.order_by_desc()` | Sorting |
-| `.limit()` / `.offset()` | Pagination |
-| `.select()` | Column projection |
-| `.alias()` | Table aliasing |
-| `.join()` / `.on()` | Equi-joins |
-| `.with_array()` | Correlated array subqueries (nestable) |
-| `.include_deleted()` | Include soft-deleted rows |
-| `.build()` | Produce `Query` struct |
+| Method                                | Purpose                                |
+| ------------------------------------- | -------------------------------------- |
+| `.branch()` / `.branches()`           | Target branch(es)                      |
+| `.filter_eq/ne/lt/le/gt/ge/between()` | Conditions                             |
+| `.order_by()` / `.order_by_desc()`    | Sorting                                |
+| `.limit()` / `.offset()`              | Pagination                             |
+| `.select()`                           | Column projection                      |
+| `.alias()`                            | Table aliasing                         |
+| `.join()` / `.on()`                   | Equi-joins                             |
+| `.with_array()`                       | Correlated array subqueries (nestable) |
+| `.include_deleted()`                  | Include soft-deleted rows              |
+| `.build()`                            | Produce `Query` struct                 |
 
 > `crates/groove/src/query_manager/query.rs:400-650`
 
 ## Deletion Semantics
 
-| Type | Content | Metadata | `_id_deleted` | Undeletable | Authoritative |
-|------|---------|----------|---------------|-------------|---------------|
-| Soft Delete | Preserved | `delete: soft` | Added | Yes | No |
-| Hard Delete | Empty | `delete: hard` | Removed | No | Yes (always wins) |
+| Type        | Content   | Metadata       | `_id_deleted` | Undeletable | Authoritative     |
+| ----------- | --------- | -------------- | ------------- | ----------- | ----------------- |
+| Soft Delete | Preserved | `delete: soft` | Added         | Yes         | No                |
+| Hard Delete | Empty     | `delete: hard` | Removed       | No          | Yes (always wins) |
 
 - `_id` index: live rows only
 - `_id_deleted` index: soft-deleted rows with preserved content
@@ -158,6 +158,7 @@ QueryManager supports dynamic schema activation without recreation — preserves
 ## Explicit Context Execution
 
 Two modes:
+
 - **Implicit** (`execute(query)`) — uses manager's schema context
 - **Explicit** (`execute_with_explicit_context(query, schema, context)`) — for servers
 

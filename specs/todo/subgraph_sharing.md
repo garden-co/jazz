@@ -43,6 +43,7 @@ For FK correlations, maintain per-correlation-value row sets incrementally. When
 ## Metrics to Track
 
 When optimizing, consider tracking:
+
 - Number of subgraph instances per query
 - Time in `reevaluate_all()` vs `process_with_context()`
 - Cache hit rate if memoization is added

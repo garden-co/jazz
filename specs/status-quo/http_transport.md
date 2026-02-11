@@ -26,11 +26,11 @@ The client opens a persistent `/events` SSE connection for receiving updates, an
 
 ## Endpoints
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/events` | GET | Binary streaming for push updates |
-| `/sync` | POST | Unified sync endpoint (all mutations, subscriptions, blobs) |
-| `/health` | GET | Health check |
+| Route     | Method | Description                                                 |
+| --------- | ------ | ----------------------------------------------------------- |
+| `/events` | GET    | Binary streaming for push updates                           |
+| `/sync`   | POST   | Unified sync endpoint (all mutations, subscriptions, blobs) |
+| `/health` | GET    | Health check                                                |
 
 Note: The original spec described separate endpoints (`/sync/subscribe`, `/sync/object`, etc.). These were consolidated into a single `/sync` endpoint that accepts polymorphic `SyncPayload` variants — simpler routing, unified auth/logging.
 
@@ -64,11 +64,11 @@ Server calls `ensure_client_with_session(client_id, session)` on connect.
 
 ### Event Types
 
-| Event | Purpose |
-|-------|---------|
-| `Connected` | Confirms connection, returns `connection_id` and `client_id` |
-| `SyncUpdate` | Push sync data (wraps `SyncPayload`) |
-| `Heartbeat` | Keep-alive every 30s |
+| Event        | Purpose                                                      |
+| ------------ | ------------------------------------------------------------ |
+| `Connected`  | Confirms connection, returns `connection_id` and `client_id` |
+| `SyncUpdate` | Push sync data (wraps `SyncPayload`)                         |
+| `Heartbeat`  | Keep-alive every 30s                                         |
 
 > `crates/jazz-cli/src/routes.rs:132-166`
 
@@ -82,11 +82,11 @@ Fixed 5s retry delay. Same client_id preserves server state. Server resumes from
 
 Three independent mechanisms, resolved in priority order:
 
-| Priority | Mechanism | Headers | Purpose |
-|----------|-----------|---------|---------|
-| 1 | Backend impersonation | `X-Jazz-Backend-Secret` + `X-Jazz-Session` | Backend apps impersonate users |
-| 2 | JWT | `Authorization: Bearer <JWT>` | Frontend/mobile clients |
-| 3 | No session | — | Anonymous (limited) |
+| Priority | Mechanism             | Headers                                    | Purpose                        |
+| -------- | --------------------- | ------------------------------------------ | ------------------------------ |
+| 1        | Backend impersonation | `X-Jazz-Backend-Secret` + `X-Jazz-Session` | Backend apps impersonate users |
+| 2        | JWT                   | `Authorization: Bearer <JWT>`              | Frontend/mobile clients        |
+| 3        | No session            | —                                          | Anonymous (limited)            |
 
 Admin auth (`X-Jazz-Admin-Secret`) required separately for catalogue sync operations.
 
@@ -101,6 +101,7 @@ Admin auth (`X-Jazz-Admin-Secret`) required separately for catalogue sync operat
 ## Broadcast Channel
 
 Server uses `tokio::sync::broadcast` for SSE routing:
+
 1. Runtime produces SyncOutbox entries
 2. Event processor sends `(client_id, payload)` to broadcast channel
 3. Each SSE stream filters for its `client_id`
@@ -113,10 +114,10 @@ Server uses `tokio::sync::broadcast` for SSE routing:
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `crates/jazz-cli/src/routes.rs` | Server endpoints (events, sync, health) |
-| `crates/jazz-cli/src/middleware/auth.rs` | Authentication middleware |
-| `crates/jazz-transport/src/lib.rs` | Shared types, frame encoding |
-| `crates/jazz-rs/src/client.rs` | Rust client (streaming, reconnection) |
-| `crates/jazz-rs/src/transport.rs` | Client-side HTTP transport |
+| File                                     | Purpose                                 |
+| ---------------------------------------- | --------------------------------------- |
+| `crates/jazz-cli/src/routes.rs`          | Server endpoints (events, sync, health) |
+| `crates/jazz-cli/src/middleware/auth.rs` | Authentication middleware               |
+| `crates/jazz-transport/src/lib.rs`       | Shared types, frame encoding            |
+| `crates/jazz-rs/src/client.rs`           | Rust client (streaming, reconnection)   |
+| `crates/jazz-rs/src/transport.rs`        | Client-side HTTP transport              |
