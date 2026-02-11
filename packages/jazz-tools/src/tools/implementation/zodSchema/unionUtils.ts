@@ -91,15 +91,13 @@ export function schemaUnionDiscriminatorFor(
         }
 
         if (match) {
-          const coValueSchema = hydrateCoreCoValueSchema(option as any);
-          const coValueClass = coValueSchema.getCoValueClass() as typeof CoMap;
-
           const dummyFieldNames = Array.from(allNestedRefKeys).filter(
             (key) => !optionDef.shape[key],
           );
 
           if (dummyFieldNames.length === 0) {
-            return coValueClass;
+            const coValueSchema = hydrateCoreCoValueSchema(option as any);
+            return coValueSchema.getCoValueClass() as typeof CoMap;
           }
 
           // Add schema-level dummy keys so deep-resolve keys shared by other union branches
@@ -112,14 +110,11 @@ export function schemaUnionDiscriminatorFor(
             augmentedShape[key] = z.optional(z.null());
           }
 
-          const augmentedSchema = createCoreCoMapSchema(
-            augmentedShape,
-            optionDef.catchall,
+          const augmentedSchema = hydrateCoreCoValueSchema(
+            createCoreCoMapSchema(augmentedShape, optionDef.catchall),
           );
 
-          return class extends coValueClass {
-            static override coValueSchema = augmentedSchema;
-          };
+          return augmentedSchema.getCoValueClass() as typeof CoMap;
         }
       }
 
