@@ -11,15 +11,15 @@
   "dependencies": {
     "jazz-tools": "workspace:*",
     "next": "15.5.8",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react": "catalog:react",
+    "react-dom": "catalog:react"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.10",
     "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
     "tailwindcss": "^4.1.10",
-    "typescript": "^5"
+    "typescript": "catalog:default"
   }
 }
