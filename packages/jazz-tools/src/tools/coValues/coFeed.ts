@@ -67,7 +67,6 @@ import {
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
-import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -279,9 +278,9 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
           `[schema-invariant] ${this.name || "CoFeed"}.create expected CoFeed schema, got ${coFeedSchema.builtin}.`,
         );
       }
-      const itemDescriptor = resolveSchemaField(
-        (coFeedSchema as CoreCoFeedSchema).element as any,
-      );
+      const itemDescriptor = (
+        coFeedSchema as CoreCoFeedSchema
+      ).getDescriptorsSchema();
 
       for (let index = 0; index < init.length; index++) {
         const item = init[index];
@@ -665,7 +664,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
       );
     }
 
-    return resolveSchemaField(this.coFeedSchema.element as any);
+    return this.coFeedSchema.getDescriptorsSchema();
   }
 }
 

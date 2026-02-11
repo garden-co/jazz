@@ -62,7 +62,6 @@ import {
 } from "../internal.js";
 import type { CoreAccountSchema } from "../implementation/zodSchema/schemaTypes/AccountSchema.js";
 import type { AccountSchema as HydratedAccountSchema } from "../implementation/zodSchema/schemaTypes/AccountSchema.js";
-import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
 
 export type AccountCreationProps = {
@@ -520,10 +519,8 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
       );
     }
 
-    const definition = accountSchema.getDefinition();
-    const field = definition.shape[key as keyof typeof definition.shape];
-    if (field) {
-      const descriptor = resolveSchemaField(field);
+    const descriptor = accountSchema.getDescriptorsSchema().shape[key];
+    if (descriptor) {
       this.descriptorCache.set(key, descriptor);
       return descriptor;
     }

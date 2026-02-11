@@ -19,6 +19,7 @@ import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, Loaded, ResolveQuery } from "../zodSchema.js";
 import {
   CoMapSchema,
+  CoMapDescriptorsSchema,
   CoreCoMapSchema,
   createCoreCoMapSchema,
 } from "./CoMapSchema.js";
@@ -51,6 +52,7 @@ export class AccountSchema<
   collaborative = true as const;
   builtin = "Account" as const;
   shape: Shape;
+  getDescriptorsSchema: () => CoMapDescriptorsSchema;
   getDefinition: () => CoMapSchemaDefinition;
 
   #validationSchema: z.ZodType | undefined = undefined;
@@ -82,6 +84,7 @@ export class AccountSchema<
     private coValueClass: typeof Account,
   ) {
     this.shape = coreSchema.shape;
+    this.getDescriptorsSchema = coreSchema.getDescriptorsSchema;
     this.getDefinition = coreSchema.getDefinition;
   }
 

@@ -50,7 +50,6 @@ import {
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
-import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -989,7 +988,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       );
     }
 
-    return resolveSchemaField(this.coListSchema.element as any);
+    return this.coListSchema.getDescriptorsSchema();
   }
 
   /**

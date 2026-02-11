@@ -64,7 +64,6 @@ import {
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
-import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export type CoMapEdit<V> = {
   value?: V;
@@ -860,10 +859,10 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       );
     }
 
-    const definition = this.coMapSchema.getDefinition();
-    const schemaField = definition.shape[key] ?? definition.catchall;
-    if (schemaField) {
-      const descriptor = resolveSchemaField(schemaField as any);
+    const descriptorsSchema = this.coMapSchema.getDescriptorsSchema();
+    const descriptor =
+      descriptorsSchema.shape[key] ?? descriptorsSchema.catchall;
+    if (descriptor) {
       this.descriptorCache.set(key, descriptor);
       return descriptor;
     }

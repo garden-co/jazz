@@ -32,6 +32,8 @@ import {
   CoValueClassOrSchema,
   CoValueSchemaFromCoreSchema,
 } from "../zodSchema.js";
+import { CoreCoListSchema } from "../schemaTypes/CoListSchema.js";
+import { CoreCoFeedSchema } from "../schemaTypes/CoFeedSchema.js";
 /**
  * A platform agnostic way to check if we're in development mode
  *
@@ -104,7 +106,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
-      static coValueSchema: CoreCoValueSchema;
+      static coValueSchema: CoreCoListSchema;
       constructor(options: { fromRaw: RawCoList } | undefined) {
         super(options);
       }
@@ -116,7 +118,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
     const coValueClass = class ZCoFeed extends CoFeed<any> {
-      static coValueSchema: CoreCoValueSchema;
+      static coValueSchema: CoreCoFeedSchema;
       constructor(options: { fromRaw: RawCoStream }) {
         super(options);
       }
