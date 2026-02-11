@@ -15,6 +15,7 @@ import {
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  type Schema,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -30,6 +31,7 @@ import {
 import { z } from "../zodReExport.js";
 import { generateValidationSchemaFromItem } from "./schemaValidators.js";
 import { type LocalValidationMode } from "../validationSettings.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -38,6 +40,7 @@ export class CoFeedSchema<
 {
   collaborative = true as const;
   builtin = "CoFeed" as const;
+  #descriptorsSchema: Schema | undefined = undefined;
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -71,6 +74,16 @@ export class CoFeedSchema<
     public element: T,
     private coValueClass: typeof CoFeed,
   ) {}
+
+  getDescriptorsSchema = (): Schema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    this.#descriptorsSchema = resolveSchemaField(this.element as any);
+
+    return this.#descriptorsSchema;
+  };
 
   create(
     init: CoFeedSchemaInit<T>,
@@ -295,10 +308,21 @@ export class CoFeedSchema<
 export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoreCoFeedSchema<T> {
+  let descriptorsSchema: Schema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoFeed" as const,
     element,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      descriptorsSchema = resolveSchemaField(element as any);
+
+      return descriptorsSchema;
+    },
     resolveQuery: true as const,
     getValidationSchema: () => z.any(),
   };
@@ -310,6 +334,7 @@ export interface CoreCoFeedSchema<
 > extends CoreCoValueSchema {
   builtin: "CoFeed";
   element: T;
+  getDescriptorsSchema: () => Schema;
 }
 
 export type CoFeedInstance<T extends AnyZodOrCoValueSchema> = CoFeed<

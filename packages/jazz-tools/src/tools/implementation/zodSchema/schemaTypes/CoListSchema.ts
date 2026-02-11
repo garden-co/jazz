@@ -14,6 +14,7 @@ import {
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  type Schema,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -31,6 +32,7 @@ import {
 import { z } from "../zodReExport.js";
 import { generateValidationSchemaFromItem } from "./schemaValidators.js";
 import type { LocalValidationMode } from "../validationSettings.js";
+import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -39,6 +41,7 @@ export class CoListSchema<
 {
   collaborative = true as const;
   builtin = "CoList" as const;
+  #descriptorsSchema: Schema | undefined = undefined;
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -74,6 +77,16 @@ export class CoListSchema<
     public element: T,
     private coValueClass: typeof CoList,
   ) {}
+
+  getDescriptorsSchema = (): Schema => {
+    if (this.#descriptorsSchema) {
+      return this.#descriptorsSchema;
+    }
+
+    this.#descriptorsSchema = resolveSchemaField(this.element as any);
+
+    return this.#descriptorsSchema;
+  };
 
   create(
     items: CoListSchemaInit<T>,
@@ -343,10 +356,21 @@ export class CoListSchema<
 export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoreCoListSchema<T> {
+  let descriptorsSchema: Schema | undefined;
+
   return {
     collaborative: true as const,
     builtin: "CoList" as const,
     element,
+    getDescriptorsSchema: () => {
+      if (descriptorsSchema) {
+        return descriptorsSchema;
+      }
+
+      descriptorsSchema = resolveSchemaField(element as any);
+
+      return descriptorsSchema;
+    },
     resolveQuery: true as const,
     getValidationSchema: () => z.any(),
   };
@@ -358,6 +382,7 @@ export interface CoreCoListSchema<
 > extends CoreCoValueSchema {
   builtin: "CoList";
   element: T;
+  getDescriptorsSchema: () => Schema;
 }
 
 export type CoListInstance<T extends AnyZodOrCoValueSchema> = CoList<
