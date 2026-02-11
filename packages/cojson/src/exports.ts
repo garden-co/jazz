@@ -68,16 +68,29 @@ import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
 import { isAccountRole } from "./permissions.js";
-import type { Peer, SyncMessage, SyncWhen } from "./sync.js";
+import type {
+  NewContentMessage,
+  Peer,
+  PeerID,
+  SyncMessage,
+  SyncWhen,
+} from "./sync.js";
 import {
   DisconnectedError,
   SyncManager,
   hwrServerPeerSelector,
 } from "./sync.js";
 import { setSyncStateTrackingBatchDelay } from "./UnsyncedCoValuesTracker.js";
-import { emptyKnownState } from "./knownState.js";
-
 import {
+  type CoValueKnownState,
+  emptyKnownState,
+  setSessionCounter,
+} from "./knownState.js";
+import { isDeleteSessionID } from "./ids.js";
+import { StoreQueue } from "./queue/StoreQueue.js";
+import {
+  createContentMessage,
+  exceedsRecommendedSize,
   getContentMessageSize,
   getTransactionSize,
   knownStateFromContent,
@@ -147,6 +160,11 @@ export const cojsonInternals = {
   WEBSOCKET_CONFIG,
   setMaxOutgoingMessagesChunkBytes,
   setMaxInFlightLoadsPerPeer,
+  createContentMessage,
+  exceedsRecommendedSize,
+  isDeleteSessionID,
+  setSessionCounter,
+  StoreQueue,
 };
 
 export {
@@ -185,6 +203,7 @@ export {
   SyncMessage,
   isRawCoID,
   emptyKnownState,
+  StoreQueue,
   RawCoPlainText,
   stringifyOpID,
   logger,
@@ -209,6 +228,9 @@ export type {
   PeerState,
   SyncWhen,
   CoValueHeader,
+  CoValueKnownState,
+  NewContentMessage,
+  PeerID,
 };
 
 export * from "./storage/index.js";

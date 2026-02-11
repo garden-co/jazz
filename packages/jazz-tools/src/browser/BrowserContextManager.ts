@@ -79,7 +79,8 @@ export class JazzBrowserContextManager<
     return (
       this.props.sync.when !== props.sync.when ||
       this.props.sync.peer !== props.sync.peer ||
-      this.props.guestMode !== props.guestMode
+      this.props.guestMode !== props.guestMode ||
+      this.props.storage !== props.storage
     );
   }
 }

@@ -2472,6 +2472,25 @@ importers:
         specifier: catalog:default
         version: 5.6.2
 
+  packages/cojson-storage-bftree:
+    dependencies:
+      cojson:
+        specifier: workspace:*
+        version: link:../cojson
+      cojson-core-wasm:
+        specifier: workspace:*
+        version: link:../../crates/cojson-core-wasm
+    devDependencies:
+      '@vitest/browser-playwright':
+        specifier: catalog:default
+        version: 4.0.16(msw@2.10.4(@types/node@24.3.0)(typescript@5.6.2))(playwright@1.50.1)(vite@6.3.5(@types/node@24.3.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1))(vitest@4.0.16)
+      typescript:
+        specifier: catalog:default
+        version: 5.6.2
+      vitest:
+        specifier: catalog:default
+        version: 4.0.16(@opentelemetry/api@1.9.0)(@types/node@24.3.0)(@vitest/browser-playwright@4.0.16)(@vitest/ui@4.0.16)(happy-dom@20.0.7)(jiti@2.6.1)(jsdom@25.0.1)(lightningcss@1.30.2)(msw@2.10.4(@types/node@24.3.0)(typescript@5.6.2))(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1)
+
   packages/cojson-storage-do-sqlite:
     dependencies:
       cojson:
@@ -2717,6 +2736,9 @@ importers:
       cojson:
         specifier: workspace:*
         version: link:../cojson
+      cojson-storage-bftree:
+        specifier: workspace:*
+        version: link:../cojson-storage-bftree
       cojson-storage-indexeddb:
         specifier: workspace:*
         version: link:../cojson-storage-indexeddb
@@ -30043,7 +30065,6 @@ snapshots:
       - msw
       - utf-8-validate
       - vite
-    optional: true
 
   '@vitest/browser-playwright@4.0.16(msw@2.10.4(@types/node@24.3.0)(typescript@5.9.2))(playwright@1.50.1)(vite@6.3.5(@types/node@24.3.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1))(vitest@4.0.16)':
     dependencies:
@@ -30149,7 +30170,6 @@ snapshots:
       - msw
       - utf-8-validate
       - vite
-    optional: true
 
   '@vitest/browser@4.0.16(msw@2.10.4(@types/node@24.3.0)(typescript@5.9.2))(vite@6.3.5(@types/node@24.3.0)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1))(vitest@4.0.16)':
     dependencies:
