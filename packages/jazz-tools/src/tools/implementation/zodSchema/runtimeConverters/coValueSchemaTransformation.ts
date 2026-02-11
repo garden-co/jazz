@@ -70,7 +70,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       `co.optional() of collaborative types is not supported as top-level schema: ${JSON.stringify(schema)}`,
     );
   } else if (schema.builtin === "CoMap") {
-    const coValueClass = class CoMap extends CoMapClass {};
+    const coValueClass = class _CoMap extends CoMapClass {};
     coValueClass.coValueSchema = new CoMapSchema(
       schema as any,
       coValueClass as any,
@@ -78,7 +78,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
 
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "Account") {
-    const coValueClass = class Account extends AccountClass {};
+    const coValueClass = class _Account extends AccountClass {};
     coValueClass.coValueSchema = new AccountSchema(
       schema as any,
       coValueClass as any,
@@ -87,25 +87,25 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
-    const coValueClass = class CoList extends CoListClass {};
+    const coValueClass = class _CoList extends CoListClass {};
     coValueClass.coValueSchema = new CoListSchema(element, coValueClass as any);
 
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
-    const coValueClass = class CoFeed extends CoFeedClass {};
+    const coValueClass = class _CoFeed extends CoFeedClass {};
     coValueClass.coValueSchema = new CoFeedSchema(
       schema.element,
       coValueClass as any,
     );
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {
-    const coValueClass = class FileStream extends FileStreamClass {};
+    const coValueClass = class _FileStream extends FileStreamClass {};
     coValueClass.coValueSchema = new FileStreamSchema(coValueClass as any);
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoVector") {
     const dimensions = schema.dimensions;
 
-    const coValueClass = class CoVector extends CoVectorClass {
+    const coValueClass = class _CoVector extends CoVectorClass {
       protected static requiredDimensionsCount = dimensions;
     };
     coValueClass.coValueSchema = new CoVectorSchema(
@@ -115,11 +115,11 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
 
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoPlainText") {
-    const coValueClass = class CoPlainText extends CoPlainTextClass {};
+    const coValueClass = class _CoPlainText extends CoPlainTextClass {};
     coValueClass.coValueSchema = new PlainTextSchema(coValueClass as any);
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoRichText") {
-    const coValueClass = class CoRichText extends CoRichTextClass {};
+    const coValueClass = class _CoRichText extends CoRichTextClass {};
     coValueClass.coValueSchema = new RichTextSchema(coValueClass as any);
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoDiscriminatedUnion") {
