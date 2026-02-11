@@ -1243,4 +1243,152 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
+
+    // ========================================================================
+    // Transaction Deserialization Tests
+    // ========================================================================
+
+    #[test]
+    fn test_transaction_deserialization_ignores_unknown_fields() {
+        use crate::core::session_log::Transaction;
+
+        // TrustingTransaction with extra unknown fields
+        // By default, serde silently ignores unknown fields
+        let json_with_extra_fields = r#"[{
+            "changes": "test_changes",
+            "madeAt": 1234567890,
+            "privacy": "trusting",
+            "unknownField": "should be ignored",
+            "anotherUnknown": 42,
+            "nestedUnknown": {"foo": "bar"}
+        }]"#;
+
+        let result: Result<Vec<Transaction>, _> = serde_json::from_str(json_with_extra_fields);
+
+        // Should succeed - unknown fields are silently ignored
+        assert!(
+            result.is_ok(),
+            "Deserialization should succeed with unknown fields, got error: {:?}",
+            result.err()
+        );
+
+        let transactions = result.unwrap();
+        assert_eq!(transactions.len(), 1);
+
+        // Verify the known fields were parsed correctly
+        match &transactions[0] {
+            Transaction::Trusting(tx) => {
+                assert_eq!(tx.changes, "test_changes");
+                assert_eq!(tx.made_at.as_u64(), Some(1234567890));
+                assert_eq!(tx.privacy, "trusting");
+                assert!(tx.meta.is_none());
+            }
+            Transaction::Private(_) => panic!("Expected TrustingTransaction"),
+        }
+    }
+
+    #[test]
+    fn test_private_transaction_deserialization_ignores_unknown_fields() {
+        use crate::core::session_log::Transaction;
+
+        // PrivateTransaction with extra unknown fields
+        let json_with_extra_fields = r#"[{
+            "encryptedChanges": "encrypted_Ubase64data",
+            "keyUsed": "keyID_z123",
+            "madeAt": 9876543210,
+            "privacy": "private",
+            "futureField": "some future data",
+            "version": 2
+        }]"#;
+
+        let result: Result<Vec<Transaction>, _> = serde_json::from_str(json_with_extra_fields);
+
+        // Should succeed - unknown fields are silently ignored
+        assert!(
+            result.is_ok(),
+            "Deserialization should succeed with unknown fields, got error: {:?}",
+            result.err()
+        );
+
+        let transactions = result.unwrap();
+        assert_eq!(transactions.len(), 1);
+
+        // Verify the known fields were parsed correctly
+        match &transactions[0] {
+            Transaction::Private(tx) => {
+                assert_eq!(tx.encrypted_changes.value, "encrypted_Ubase64data");
+                assert_eq!(tx.key_used.0, "keyID_z123");
+                assert_eq!(tx.made_at.as_u64(), Some(9876543210));
+                assert_eq!(tx.privacy, "private");
+                assert!(tx.meta.is_none());
+            }
+            Transaction::Trusting(_) => panic!("Expected PrivateTransaction"),
+        }
+    }
+
+    #[test]
+    fn test_transaction_roundtrip_drops_unknown_fields() {
+        use crate::core::session_log::Transaction;
+
+        // JSON with unknown fields
+        let json_with_extra = r#"{"changes":"data","madeAt":100,"privacy":"trusting","extra":"field"}"#;
+
+        // Parse it
+        let tx: Transaction = serde_json::from_str(json_with_extra).unwrap();
+
+        // Serialize it back - unknown fields should be dropped
+        let serialized = serde_json::to_string(&tx).unwrap();
+
+        // The serialized output should NOT contain the unknown field
+        assert!(
+            !serialized.contains("extra"),
+            "Unknown field 'extra' should be dropped during roundtrip, got: {}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("field"),
+            "Unknown field value should be dropped during roundtrip, got: {}",
+            serialized
+        );
+
+        // But known fields should be present
+        assert!(serialized.contains("changes"));
+        assert!(serialized.contains("madeAt"));
+        assert!(serialized.contains("privacy"));
+    }
+
+    #[test]
+    fn test_add_transactions_with_unknown_fields_in_json() {
+        // Test that add_transactions handles JSON with extra unknown fields
+        // This simulates a scenario where TypeScript sends transactions with
+        // fields that the Rust code doesn't know about (forward compatibility)
+        let mut session_map = create_test_session_map("co_test", TEST_HEADER);
+
+        // Transactions JSON with unknown fields - simulating future TypeScript version
+        let transactions_json_with_extras = r#"[{
+            "changes": "test_changes",
+            "madeAt": 1234567890,
+            "privacy": "trusting",
+            "futureFeature": "some data",
+            "newMetadata": {"version": 2}
+        }]"#;
+
+        // This should succeed without error
+        let result = session_map.add_transactions(
+            "test_session_z123",
+            Some("signer_z123"),
+            transactions_json_with_extras,
+            "sig_z123", // dummy signature
+            true,       // skip_verify since we're testing deserialization
+        );
+
+        assert!(
+            result.is_ok(),
+            "add_transactions should accept JSON with unknown fields, got error: {:?}",
+            result.err()
+        );
+
+        // Verify the transaction was added
+        assert_eq!(session_map.get_transaction_count("test_session_z123"), Some(1));
+    }
 }
