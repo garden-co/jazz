@@ -382,7 +382,7 @@ export class SyncManager {
         // This value becomes false when the last covalueid batch picked from the storage
         // is smaller than the batch size.
         if (lastBatchLength === batchSize) {
-          logger.info("Reconciliated CoValues in storage", {
+          logger.info("Reconciled CoValues in storage", {
             peerId: peer.id,
             completed: offset + batchSize,
             total: totalCoValueCount,

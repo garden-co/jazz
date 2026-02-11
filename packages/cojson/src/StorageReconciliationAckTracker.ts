@@ -1,5 +1,7 @@
 import { PeerState } from "./PeerState.js";
 
+const OUTGOING_QUEUE_POLL_INTERVAL_MS = 10;
+
 export class StorageReconciliationAckTracker {
   /**
    * Tracks pending reconcile acks: "batchId#peerId->offset".
@@ -43,21 +45,47 @@ export class StorageReconciliationAckTracker {
 
     let finished = false;
     let unsubscribeCloseListener: () => void = () => {};
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = () => {
       if (finished) {
         return false;
       }
       finished = true;
+      if (drainTimer !== undefined) {
+        clearTimeout(drainTimer);
+        drainTimer = undefined;
+      }
       unsubscribeCloseListener();
       return true;
     };
 
-    const onAck = () => {
-      if (!finish()) {
+    const waitForOutgoingQueueToDrain = () => {
+      if (finished) {
         return;
       }
-      callback();
+
+      if (peer.closed) {
+        onPeerClose();
+        return;
+      }
+
+      if (!peer.hasUnsentMessages) {
+        if (!finish()) {
+          return;
+        }
+        callback();
+        return;
+      }
+
+      drainTimer = setTimeout(
+        waitForOutgoingQueueToDrain,
+        OUTGOING_QUEUE_POLL_INTERVAL_MS,
+      );
+    };
+
+    const onAck = () => {
+      waitForOutgoingQueueToDrain();
     };
 
     const onPeerClose = () => {
