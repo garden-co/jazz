@@ -1,6 +1,6 @@
 # Architecture Specs
 
-Jazz2 is a local-first distributed SQL database. These specs document the architecture as implemented, with code references throughout.
+Jazz2 is a local-first distributed relational database. These specs document the architecture as implemented, with code references throughout.
 
 Read the status-quo specs in the order below — each builds on the ones before it.
 

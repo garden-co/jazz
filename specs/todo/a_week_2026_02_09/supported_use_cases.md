@@ -36,5 +36,5 @@ Explicit scoping lets us:
 
 - Focus example apps and docs on the sweet spot
 - Say "not yet" to feature requests that pull toward general-purpose DB territory
-- Set honest expectations (avoid the "SQL database" comparison trap)
+- Set honest expectations (avoid the "SQL database" comparison trap — Jazz is a relational database, not an SQL database)
 - Prioritize features that serve the core audience (collaboration, offline, sync)
