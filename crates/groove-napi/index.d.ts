@@ -38,7 +38,6 @@ export declare class NapiRuntime {
   onSyncMessageToSend(callback: (...args: any[]) => any): void;
   addServer(): void;
   addClient(): string;
-  addClientWithFullSync(): string;
   getSchema(): any;
   flush(): void;
 }

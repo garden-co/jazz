@@ -387,17 +387,6 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
-    /// Add a client connection and sync all data to them.
-    pub fn add_client_with_full_sync(
-        &self,
-        client_id: ClientId,
-        session: Option<Session>,
-    ) -> Result<(), RuntimeError> {
-        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.add_client_with_full_sync(client_id, session);
-        Ok(())
-    }
-
     /// Remove a client connection.
     pub fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;

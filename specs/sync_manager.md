@@ -159,12 +159,12 @@ struct OutboxEntry {
 fn add_server(&mut self, server_id: ServerId)
 fn remove_server(&mut self, server_id: ServerId)
 fn add_client(&mut self, client_id: ClientId)
-fn add_client_with_full_sync(&mut self, client_id: ClientId)
 fn remove_client(&mut self, client_id: ClientId)
+fn set_client_role(&mut self, client_id: ClientId, role: ClientRole)
 ```
 
 - Adding a server triggers full sync of all existing objects to that server
-- `add_client_with_full_sync()` queues all existing objects for the new client (used when SSE connects)
+- **Design decision: downward sync is always query-scoped.** Clients receive data ONLY via query subscriptions — there is no "full dump" path. Each tier holds a successively larger cache; pushing everything down defeats the purpose. Upward sync (client → server) pushes everything via `add_server()` + `queue_full_sync_to_server()`.
 
 ### Query Management (Clients)
 

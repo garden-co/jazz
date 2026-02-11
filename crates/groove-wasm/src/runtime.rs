@@ -572,15 +572,6 @@ impl WasmRuntime {
         client_id.0.to_string()
     }
 
-    /// Add a client connection with full sync (for test loopback).
-    #[wasm_bindgen(js_name = addClientWithFullSync)]
-    pub fn add_client_with_full_sync(&self) -> String {
-        let client_id = ClientId::new();
-        let mut core = self.core.borrow_mut();
-        core.add_client_with_full_sync(client_id, None);
-        client_id.0.to_string()
-    }
-
     // =========================================================================
     // Schema Access
     // =========================================================================

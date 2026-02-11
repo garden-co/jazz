@@ -852,16 +852,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
     }
 
-    /// Add a client connection and sync all data to them.
-    pub fn add_client_with_full_sync(&mut self, client_id: ClientId, session: Option<Session>) {
-        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
-        sm.add_client_with_full_sync(client_id);
-        if let Some(s) = session {
-            sm.set_client_session(client_id, s);
-        }
-        self.immediate_tick();
-    }
-
     /// Remove a client connection.
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.schema_manager
@@ -1071,7 +1061,7 @@ mod tests {
     // =========================================================================
 
     use crate::sync_manager::{
-        ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source,
+        ClientId, ClientRole, Destination, InboxEntry, PersistenceTier, ServerId, Source,
     };
 
     /// Three-tier RuntimeCore setup for durability tests.
@@ -1127,19 +1117,27 @@ mod tests {
         let c_server_for_b = ServerId::new();
 
         // Topology: A ↔ B ↔ C
-        b.schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .add_client_with_full_sync(a_client_of_b);
+        {
+            let sm = b
+                .schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut();
+            sm.add_client(a_client_of_b);
+            sm.set_client_role(a_client_of_b, ClientRole::Peer);
+        }
         a.schema_manager_mut()
             .query_manager_mut()
             .sync_manager_mut()
             .add_server(b_server_for_a);
 
-        c.schema_manager_mut()
-            .query_manager_mut()
-            .sync_manager_mut()
-            .add_client_with_full_sync(b_client_of_c);
+        {
+            let sm = c
+                .schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut();
+            sm.add_client(b_client_of_c);
+            sm.set_client_role(b_client_of_c, ClientRole::Peer);
+        }
         b.schema_manager_mut()
             .query_manager_mut()
             .sync_manager_mut()

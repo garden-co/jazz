@@ -97,9 +97,9 @@ GET /events?client_id=<uuid>
 When SSE connects, server:
 
 1. Parses `client_id` from query param (or generates new)
-2. Calls `add_client_with_full_sync(client_id, session)`
-3. Sends all existing data to new client
-4. Subscribes client to sync broadcast channel
+2. Calls `ensure_client_with_session(client_id, session)`
+3. Subscribes client to sync broadcast channel
+4. Client receives data only via query subscriptions (no full dump)
 
 ### Event Format
 
@@ -410,20 +410,18 @@ async fn handle_server_event(event: ServerEvent, runtime: &RuntimeHandle) {
 8. Local indices update, subscriptions react
 ```
 
-### New Client Full Sync
+### New Client Registration
 
 ```
 1. Client connects: GET /events?client_id=<new-uuid>
      ↓
-2. Server: add_client_with_full_sync(client_id, None)
+2. Server: ensure_client_with_session(client_id, session)
      ↓
-3. SyncManager queues all existing objects for this client
+3. Client subscribes to queries via POST /sync
      ↓
-4. Server sends SyncUpdate events for everything
+4. SyncManager sends matching data through query subscriptions
      ↓
-5. Client receives, indexes all data
-     ↓
-6. Client queries return complete results
+5. Client receives scoped data, indexes results
 ```
 
 ## Error Handling

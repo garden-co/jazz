@@ -15,10 +15,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use napi::threadsafe_function::{
-    ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode,
-};
 use napi::Env;
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
 use groove::object::ObjectId;
@@ -78,18 +76,15 @@ fn napi_value_to_groove(v: NapiValue) -> Result<Value, String> {
         NapiValue::Text(s) => Value::Text(s),
         NapiValue::Timestamp(t) => Value::Timestamp(t),
         NapiValue::Uuid(s) => {
-            let uuid =
-                uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {}", e))?;
+            let uuid = uuid::Uuid::parse_str(&s).map_err(|e| format!("Invalid UUID: {}", e))?;
             Value::Uuid(ObjectId::from_uuid(uuid))
         }
         NapiValue::Array(arr) => {
-            let converted: Result<Vec<_>, _> =
-                arr.into_iter().map(napi_value_to_groove).collect();
+            let converted: Result<Vec<_>, _> = arr.into_iter().map(napi_value_to_groove).collect();
             Value::Array(converted?)
         }
         NapiValue::Row(row) => {
-            let converted: Result<Vec<_>, _> =
-                row.into_iter().map(napi_value_to_groove).collect();
+            let converted: Result<Vec<_>, _> = row.into_iter().map(napi_value_to_groove).collect();
             Value::Row(converted?)
         }
         NapiValue::Null => Value::Null,
@@ -107,8 +102,7 @@ fn convert_updates(partial: HashMap<String, NapiValue>) -> napi::Result<Vec<(Str
     partial
         .into_iter()
         .map(|(k, v)| {
-            let groove_value =
-                napi_value_to_groove(v).map_err(napi::Error::from_reason)?;
+            let groove_value = napi_value_to_groove(v).map_err(napi::Error::from_reason)?;
             Ok((k, groove_value))
         })
         .collect()
@@ -302,8 +296,7 @@ fn parse_tier(tier: &str) -> napi::Result<PersistenceTier> {
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
-    serde_json::from_str(json)
-        .map_err(|e| napi::Error::from_reason(format!("Parse error: {}", e)))
+    serde_json::from_str(json).map_err(|e| napi::Error::from_reason(format!("Parse error: {}", e)))
 }
 
 // ============================================================================
@@ -458,9 +451,7 @@ impl NapiRuntime {
             // Create a noop JS function to wrap in a TSFN.
             // The TSFN callback closure does the real work (batched_tick).
             // The noop function receives the return value but ignores it.
-            let noop_fn = env.create_function_from_closure("__groove_tick", |_ctx| {
-                Ok(())
-            })?;
+            let noop_fn = env.create_function_from_closure("__groove_tick", |_ctx| Ok(()))?;
 
             let core_ref_for_tsfn = core_weak.clone();
             let flag_for_tsfn = scheduled_flag;
@@ -574,15 +565,14 @@ impl NapiRuntime {
     ) -> napi::Result<napi::JsObject> {
         let query = parse_query(&query_json)?;
 
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json).map_err(|e| {
+        let session =
+            if let Some(json) = session_json {
+                Some(serde_json::from_str::<Session>(&json).map_err(|e| {
                     napi::Error::from_reason(format!("Invalid session JSON: {}", e))
-                })?,
-            )
-        } else {
-            None
-        };
+                })?)
+            } else {
+                None
+            };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
@@ -618,10 +608,7 @@ impl NapiRuntime {
                     deferred.resolve(move |env| env.to_js_value(&json_rows));
                 }
                 Err(e) => {
-                    deferred.reject(napi::Error::from_reason(format!(
-                        "Query failed: {:?}",
-                        e
-                    )));
+                    deferred.reject(napi::Error::from_reason(format!("Query failed: {:?}", e)));
                 }
             }
         });
@@ -643,15 +630,14 @@ impl NapiRuntime {
     ) -> napi::Result<f64> {
         let query = parse_query(&query_json)?;
 
-        let session = if let Some(json) = session_json {
-            Some(
-                serde_json::from_str::<Session>(&json).map_err(|e| {
+        let session =
+            if let Some(json) = session_json {
+                Some(serde_json::from_str::<Session>(&json).map_err(|e| {
                     napi::Error::from_reason(format!("Invalid session JSON: {}", e))
-                })?,
-            )
-        } else {
-            None
-        };
+                })?)
+            } else {
+                None
+            };
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
@@ -664,18 +650,17 @@ impl NapiRuntime {
             })?;
 
         let callback = move |delta: SubscriptionDelta| {
-            let row_to_json =
-                |row: &groove::query_manager::types::Row,
-                 descriptor: &groove::query_manager::types::RowDescriptor|
-                 -> serde_json::Value {
-                    let values = decode_row(descriptor, &row.data)
-                        .map(|vals| vals.into_iter().map(NapiValue::from).collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    serde_json::json!({
-                        "id": row.id.uuid().to_string(),
-                        "values": values
-                    })
-                };
+            let row_to_json = |row: &groove::query_manager::types::Row,
+                               descriptor: &groove::query_manager::types::RowDescriptor|
+             -> serde_json::Value {
+                let values = decode_row(descriptor, &row.data)
+                    .map(|vals| vals.into_iter().map(NapiValue::from).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "id": row.id.uuid().to_string(),
+                    "values": values
+                })
+            };
 
             let descriptor = &delta.descriptor;
 
@@ -879,17 +864,6 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.add_client(client_id, None);
-        Ok(client_id.0.to_string())
-    }
-
-    #[napi(js_name = "addClientWithFullSync")]
-    pub fn add_client_with_full_sync(&self) -> napi::Result<String> {
-        let client_id = ClientId::new();
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.add_client_with_full_sync(client_id, None);
         Ok(client_id.0.to_string())
     }
 
