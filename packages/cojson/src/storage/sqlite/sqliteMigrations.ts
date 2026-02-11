@@ -57,6 +57,7 @@ export const migrations: Record<number, string[]> = {
       releasedAt INTEGER
     ) WITHOUT ROWID;`,
   ],
+  7: ["ALTER TABLE storageReconciliationLocks DROP COLUMN expiresAt;"],
 };
 
 type Migration = {

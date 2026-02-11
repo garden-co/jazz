@@ -274,17 +274,10 @@ export class SQLiteClient
   getStorageReconciliationLock(
     key: string,
   ): StorageReconciliationLockRow | undefined {
-    const lockRow = this.db.get<StorageReconciliationLockRow>(
+    return this.db.get<StorageReconciliationLockRow>(
       "SELECT * FROM storageReconciliationLocks WHERE key = ?",
       [key],
     );
-    return lockRow
-      ? {
-          ...lockRow,
-          expiresAt:
-            lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS,
-        }
-      : undefined;
   }
 
   putStorageReconciliationLock(entry: StorageReconciliationLockRow): void {
@@ -292,17 +285,15 @@ export class SQLiteClient
       key,
       holderSessionId,
       acquiredAt,
-      expiresAt,
       releasedAt,
       lastProcessedOffset,
     } = entry;
     this.db.run(
-      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?)`,
       [
         key,
         holderSessionId,
         acquiredAt,
-        expiresAt,
         releasedAt ?? null,
         lastProcessedOffset,
       ],
@@ -379,7 +370,10 @@ export class SQLiteClient
         result = { acquired: false, reason: "not_due" };
         return;
       }
-      if (lockRow && !lockRow.releasedAt && lockRow.expiresAt >= now) {
+      const expiresAt = lockRow
+        ? lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS
+        : 0;
+      if (lockRow && !lockRow.releasedAt && expiresAt >= now) {
         result = { acquired: false, reason: "lock_held" };
         return;
       }
@@ -390,8 +384,6 @@ export class SQLiteClient
         key: lockKey,
         holderSessionId: sessionId,
         acquiredAt: now,
-        // deprecated - expiresAt is calculated based on acquiredAt now
-        expiresAt: 0,
         lastProcessedOffset,
       });
       result = { acquired: true, lastProcessedOffset };

@@ -160,17 +160,10 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
   async getStorageReconciliationLock(
     key: string,
   ): Promise<StorageReconciliationLockRow | undefined> {
-    const lockRow = await this.tx.get<StorageReconciliationLockRow>(
+    return this.tx.get<StorageReconciliationLockRow>(
       "SELECT * FROM storageReconciliationLocks WHERE key = ?",
       [key],
     );
-    return lockRow
-      ? {
-          ...lockRow,
-          expiresAt:
-            lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS,
-        }
-      : undefined;
   }
 
   async putStorageReconciliationLock(
@@ -180,17 +173,15 @@ export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
       key,
       holderSessionId,
       acquiredAt,
-      expiresAt,
       releasedAt,
       lastProcessedOffset,
     } = entry;
     await this.tx.run(
-      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, expiresAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO storageReconciliationLocks (key, holderSessionId, acquiredAt, releasedAt, lastProcessedOffset) VALUES (?, ?, ?, ?, ?)`,
       [
         key,
         holderSessionId,
         acquiredAt,
-        expiresAt,
         releasedAt ?? null,
         lastProcessedOffset,
       ],
@@ -416,7 +407,10 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
         result = { acquired: false, reason: "not_due" };
         return;
       }
-      if (lockRow && !lockRow.releasedAt && lockRow.expiresAt >= now) {
+      const expiresAt = lockRow
+        ? lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS
+        : 0;
+      if (lockRow && !lockRow.releasedAt && expiresAt >= now) {
         result = { acquired: false, reason: "lock_held" };
         return;
       }
@@ -427,8 +421,6 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
         key: lockKey,
         holderSessionId: sessionId,
         acquiredAt: now,
-        // deprecated - expiresAt is calculated based on acquiredAt now
-        expiresAt: 0,
         lastProcessedOffset,
       });
       result = { acquired: true, lastProcessedOffset };
