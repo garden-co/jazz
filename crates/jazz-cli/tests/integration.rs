@@ -1,10 +1,14 @@
 //! E2E integration tests for jazz-cli server.
 //!
-//! These tests spawn the actual `jazz` binary and interact via HTTP/SSE.
+//! These tests spawn the actual `jazz` binary and interact via HTTP
+//! with binary length-prefixed streaming.
 
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use bytes::BytesMut;
+use futures::StreamExt;
+use jazz_transport::ServerEvent;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -113,6 +117,31 @@ fn get_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
+/// Read the next complete ServerEvent from a binary stream.
+async fn read_next_event(
+    body: &mut (impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin),
+    buffer: &mut BytesMut,
+) -> Option<ServerEvent> {
+    loop {
+        // Try to decode a frame from the buffer
+        if buffer.len() >= 4 {
+            let len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
+            if buffer.len() >= 4 + len {
+                let json = &buffer[4..4 + len];
+                let event: ServerEvent = serde_json::from_slice(json).ok()?;
+                let _ = buffer.split_to(4 + len);
+                return Some(event);
+            }
+        }
+
+        // Need more data
+        match body.next().await {
+            Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
+            _ => return None,
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_server_health_check() {
     let port = get_free_port();
@@ -132,150 +161,110 @@ async fn test_server_health_check() {
 }
 
 #[tokio::test]
-async fn test_sse_connection_receives_connected_event() {
-    use futures::StreamExt;
-    use reqwest_eventsource::{Event, EventSource};
-
+async fn test_stream_connection_receives_connected_event() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to SSE endpoint with JWT auth
-    let token = make_jwt("sse-test-user");
-    let builder = Client::new()
+    // Connect to events endpoint with JWT auth
+    let token = make_jwt("stream-test-user");
+    let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("Authorization", format!("Bearer {}", token));
-    let mut es = EventSource::new(builder).expect("create EventSource");
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .expect("connect to events");
+
+    assert!(response.status().is_success());
+
+    let mut body = response.bytes_stream();
+    let mut buffer = BytesMut::new();
 
     // First event should be Connected
-    let event = tokio::time::timeout(Duration::from_secs(5), es.next())
-        .await
-        .expect("timeout waiting for SSE event")
-        .expect("SSE stream ended")
-        .expect("SSE error");
+    let event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_next_event(&mut body, &mut buffer),
+    )
+    .await
+    .expect("timeout waiting for event")
+    .expect("no event received");
 
     match event {
-        Event::Message(msg) => {
-            let parsed: serde_json::Value =
-                serde_json::from_str(&msg.data).expect("parse SSE data");
-            assert_eq!(parsed["type"], "Connected");
-            assert!(parsed["connection_id"].is_number());
+        ServerEvent::Connected {
+            connection_id,
+            client_id,
+        } => {
+            assert!(connection_id.0 > 0);
+            assert!(!client_id.is_empty());
         }
-        Event::Open => {
-            // Try next event
-            let event = tokio::time::timeout(Duration::from_secs(5), es.next())
-                .await
-                .expect("timeout")
-                .expect("stream ended")
-                .expect("error");
-
-            if let Event::Message(msg) = event {
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&msg.data).expect("parse SSE data");
-                assert_eq!(parsed["type"], "Connected");
-            } else {
-                panic!("Expected Message event, got {:?}", event);
-            }
-        }
+        other => panic!("Expected Connected event, got {:?}", other.variant_name()),
     }
-
-    es.close();
 }
 
 #[tokio::test]
-async fn test_sse_heartbeat() {
-    use futures::StreamExt;
-    use reqwest_eventsource::{Event, EventSource};
-
+async fn test_stream_heartbeat() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    let token = make_jwt("sse-heartbeat-user");
-    let builder = Client::new()
+    let token = make_jwt("stream-heartbeat-user");
+    let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("Authorization", format!("Bearer {}", token));
-    let mut es = EventSource::new(builder).expect("create EventSource");
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .expect("connect to events");
 
-    // Skip Open event if present
-    let mut got_connected = false;
-    let mut got_heartbeat = false;
+    assert!(response.status().is_success());
+
+    let mut body = response.bytes_stream();
+    let mut buffer = BytesMut::new();
+
+    // Read the Connected event
+    let event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_next_event(&mut body, &mut buffer),
+    )
+    .await
+    .expect("timeout")
+    .expect("no event");
+
+    assert!(matches!(event, ServerEvent::Connected { .. }));
 
     // The heartbeat interval is 30s which is too long for a test.
-    // Instead, just verify we can receive the Connected event and the stream stays open.
-    // We'll check for heartbeat in a shorter window or skip this specific assertion.
-
-    let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(2) {
-        match tokio::time::timeout(Duration::from_millis(500), es.next()).await {
-            Ok(Some(Ok(Event::Open))) => continue,
-            Ok(Some(Ok(Event::Message(msg)))) => {
-                let parsed: serde_json::Value = serde_json::from_str(&msg.data).unwrap_or_default();
-                match parsed["type"].as_str() {
-                    Some("Connected") => got_connected = true,
-                    Some("Heartbeat") => got_heartbeat = true,
-                    _ => {}
-                }
-            }
-            Ok(Some(Err(e))) => panic!("SSE error: {:?}", e),
-            Ok(None) => break,
-            Err(_) => continue, // timeout, keep trying
-        }
-    }
-
-    assert!(got_connected, "Should receive Connected event");
-    // Heartbeat is every 30s, so we won't see it in 2s - that's OK
-    let _ = got_heartbeat;
-
-    es.close();
+    // Verify the Connected event was received and the stream stays open.
 }
 
 #[tokio::test]
-async fn test_sync_payload_broadcast_to_sse_client() {
-    use futures::StreamExt;
-    use reqwest_eventsource::{Event, EventSource};
-
+async fn test_sync_payload_broadcast_to_stream_client() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to SSE with JWT auth and get our client_id
-    let token = make_jwt("sse-broadcast-user");
-    let builder = Client::new()
+    // Connect to binary stream with JWT auth
+    let token = make_jwt("stream-broadcast-user");
+    let response = Client::new()
         .get(format!("{}/events", server.base_url()))
-        .header("Authorization", format!("Bearer {}", token));
-    let mut es = EventSource::new(builder).expect("create EventSource");
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .expect("connect to events");
 
-    // Wait for Connected event to verify SSE connection works
-    let connection_id = loop {
-        match tokio::time::timeout(Duration::from_secs(5), es.next()).await {
-            Ok(Some(Ok(Event::Open))) => continue,
-            Ok(Some(Ok(Event::Message(msg)))) => {
-                let parsed: serde_json::Value = serde_json::from_str(&msg.data).unwrap();
-                if parsed["type"] == "Connected" {
-                    break parsed["connection_id"].as_u64().unwrap_or(0);
-                }
-            }
-            Ok(Some(Err(e))) => panic!("SSE error: {:?}", e),
-            Ok(None) => panic!("Stream ended unexpectedly"),
-            Err(_) => panic!("Timeout waiting for Connected event"),
+    assert!(response.status().is_success());
+
+    let mut body = response.bytes_stream();
+    let mut buffer = BytesMut::new();
+
+    // Wait for Connected event to verify connection works
+    let event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_next_event(&mut body, &mut buffer),
+    )
+    .await
+    .expect("timeout waiting for Connected")
+    .expect("no event");
+
+    match event {
+        ServerEvent::Connected { connection_id, .. } => {
+            assert!(connection_id.0 > 0, "Should receive valid connection_id");
         }
-    };
-
-    assert!(connection_id > 0, "Should receive valid connection_id");
-
-    // The SSE routing is wired: when a SyncOutbox entry targets our ClientId,
-    // it gets broadcast through the channel and we receive it.
-    //
-    // However, pushing a sync payload via /sync doesn't automatically generate
-    // an outbox entry back to us - it processes the payload and may generate
-    // outbox entries to OTHER clients based on sync logic.
-    //
-    // For a full E2E test of the broadcast path, we'd need to:
-    // 1. Have the server generate an outbox entry targeting our ClientId
-    // 2. This happens when another client's changes need to sync to us
-    //
-    // For now, this test verifies:
-    // - SSE connection works
-    // - Connected event is received
-    // - The broadcast infrastructure is in place (verified by code review)
-
-    es.close();
+        other => panic!("Expected Connected, got {:?}", other.variant_name()),
+    }
 }

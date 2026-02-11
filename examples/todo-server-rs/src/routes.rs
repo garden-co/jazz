@@ -62,7 +62,7 @@ pub fn create_router() -> Router<Arc<AppState>> {
 /// Broadcast current todos to all SSE connections.
 async fn broadcast_todos(state: &AppState) {
     let query = QueryBuilder::new("todos").build();
-    if let Ok(rows) = state.client.query(query).await {
+    if let Ok(rows) = state.client.query(query, None).await {
         let todos: Vec<Todo> = rows
             .iter()
             .filter_map(|(id, values)| row_to_todo(*id, values))
@@ -100,7 +100,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
 /// List all todos.
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let query = QueryBuilder::new("todos").build();
-    match state.client.query(query).await {
+    match state.client.query(query, None).await {
         Ok(rows) => {
             let todos: Vec<Todo> = rows
                 .iter()
@@ -158,7 +158,7 @@ async fn create_todo(
 async fn get_todo(State(state): State<Arc<AppState>>, Path(id): Path<Uuid>) -> impl IntoResponse {
     let query = QueryBuilder::new("todos").build();
 
-    match state.client.query(query).await {
+    match state.client.query(query, None).await {
         Ok(rows) => {
             // Find the todo with matching id
             for (object_id, values) in &rows {
@@ -205,7 +205,7 @@ async fn update_todo(
     if updates.is_empty() {
         // No changes, fetch and return current
         let query = QueryBuilder::new("todos").build();
-        if let Ok(rows) = state.client.query(query).await {
+        if let Ok(rows) = state.client.query(query, None).await {
             for (oid, values) in &rows {
                 if *oid.uuid() == id {
                     if let Some(todo) = row_to_todo(*oid, values) {
@@ -228,7 +228,7 @@ async fn update_todo(
 
             // Re-fetch the updated todo
             let query = QueryBuilder::new("todos").build();
-            match state.client.query(query).await {
+            match state.client.query(query, None).await {
                 Ok(rows) => {
                     for (oid, values) in &rows {
                         if *oid.uuid() == id {
@@ -306,7 +306,7 @@ async fn todos_live(
     let query = QueryBuilder::new("todos").build();
     let initial_todos: Vec<Todo> = state
         .client
-        .query(query)
+        .query(query, None)
         .await
         .map(|rows| {
             rows.iter()

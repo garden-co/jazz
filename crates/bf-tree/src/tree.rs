@@ -1345,6 +1345,19 @@ impl BfTree {
             None
         }
     }
+
+    /// Flush the WAL buffer to ensure all buffered writes are persisted,
+    /// without taking a full snapshot.
+    #[cfg(target_arch = "wasm32")]
+    pub fn flush_wal(&self) {
+        if let Some(ref wal) = self.wal {
+            wal.flush();
+        }
+    }
+
+    /// No-op on native — WAL flushes synchronously.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn flush_wal(&self) {}
 }
 
 pub(crate) fn key_value_physical_size(key: &[u8], value: &[u8]) -> usize {

@@ -38,6 +38,8 @@ export interface Runtime {
   addServer(): void;
   addClient(): string;
   getSchema(): any;
+  setClientRole?(client_id: string, role: string): void;
+  onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
 }
 
 /**
@@ -177,7 +179,7 @@ export class SessionClient {
  */
 export class JazzClient {
   private runtime: Runtime;
-  private sseConnection: EventSource | null = null;
+  private streamAbortController: AbortController | null = null;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
 
@@ -440,6 +442,14 @@ export class JazzClient {
   }
 
   /**
+   * Get the underlying runtime (for WorkerBridge).
+   * @internal
+   */
+  getRuntime(): Runtime {
+    return this.runtime;
+  }
+
+  /**
    * Get the server URL (for SessionClient).
    * @internal
    */
@@ -495,10 +505,10 @@ export class JazzClient {
    * Shutdown the client and release resources.
    */
   async shutdown(): Promise<void> {
-    // Close SSE connection
-    if (this.sseConnection) {
-      this.sseConnection.close();
-      this.sseConnection = null;
+    // Abort stream connection
+    if (this.streamAbortController) {
+      this.streamAbortController.abort();
+      this.streamAbortController = null;
     }
 
     // Close driver if it supports it
@@ -509,26 +519,32 @@ export class JazzClient {
 
   private setupSync(serverUrl: string): void {
     // Set up outgoing message handler
-    this.runtime.onSyncMessageToSend((message: string) => {
-      this.sendSyncMessage(serverUrl, message);
+    this.runtime.onSyncMessageToSend((envelope: string) => {
+      // Envelope is now {destination, payload}
+      const parsed = JSON.parse(envelope);
+      const payload = parsed.payload;
+
+      // Only send server-bound messages
+      if (parsed.destination && "Server" in parsed.destination) {
+        this.sendSyncMessage(serverUrl, payload);
+      }
     });
 
-    // Connect to SSE endpoint for incoming messages
-    this.connectSSE(serverUrl);
+    // Connect to binary stream for incoming messages
+    this.connectStream(serverUrl);
 
     // Register server connection
     this.runtime.addServer();
   }
 
-  private async sendSyncMessage(serverUrl: string, message: string): Promise<void> {
+  private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
     try {
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
 
       // Check if this is a catalogue sync - add admin header
-      const parsed = JSON.parse(message);
-      if (this.isCataloguePayload(parsed)) {
+      if (this.isCataloguePayload(payload)) {
         if (this.context.adminSecret) {
           headers["X-Jazz-Admin-Secret"] = this.context.adminSecret;
         }
@@ -538,10 +554,16 @@ export class JazzClient {
         headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
       }
 
+      // Wrap payload in SyncPayloadRequest format
+      const body = JSON.stringify({
+        payload,
+        client_id: "00000000-0000-0000-0000-000000000000", // TODO: use real client_id
+      });
+
       const response = await fetch(`${serverUrl}/sync`, {
         method: "POST",
         headers,
-        body: message,
+        body,
       });
 
       if (!response.ok) {
@@ -556,44 +578,82 @@ export class JazzClient {
    * Check if a sync payload is for a catalogue object (schema or lens).
    */
   private isCataloguePayload(payload: {
-    payload?: { ObjectUpdated?: { metadata?: { metadata?: Record<string, string> } } };
+    ObjectUpdated?: { metadata?: { metadata?: Record<string, string> } };
   }): boolean {
-    const metadata = payload?.payload?.ObjectUpdated?.metadata?.metadata;
+    const metadata = payload?.ObjectUpdated?.metadata?.metadata;
     if (metadata) {
-      const type = metadata["type"];
-      return type === "catalogue_schema" || type === "catalogue_lens";
+      const type_ = metadata["type"];
+      return type_ === "catalogue_schema" || type_ === "catalogue_lens";
     }
     return false;
   }
 
-  private connectSSE(serverUrl: string): void {
-    const eventsUrl = `${serverUrl}/events`;
-    this.sseConnection = new EventSource(eventsUrl);
+  /**
+   * Connect to binary streaming endpoint for incoming messages.
+   *
+   * Uses length-prefixed binary frames over a long-lived HTTP response.
+   * Supports auth via Authorization header (unlike EventSource).
+   */
+  private async connectStream(serverUrl: string): Promise<void> {
+    const headers: Record<string, string> = {
+      Accept: "application/octet-stream",
+    };
+    if (this.context.jwtToken) {
+      headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
+    }
 
-    this.sseConnection.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
+    this.streamAbortController = new AbortController();
 
-        // Handle different event types
-        if (data.type === "SyncUpdate") {
-          // Pass the payload to the runtime
-          this.runtime.onSyncMessageReceived(JSON.stringify(data.payload));
-        }
-      } catch (e) {
-        console.error("SSE parse error:", e);
+    try {
+      const response = await fetch(`${serverUrl}/events`, {
+        headers,
+        signal: this.streamAbortController.signal,
+      });
+
+      if (!response.ok) {
+        console.error(`Stream connect failed: ${response.status}`);
+        setTimeout(() => this.connectStream(serverUrl), 5000);
+        return;
       }
-    };
 
-    this.sseConnection.onerror = (e) => {
-      console.error("SSE error:", e);
-      // Attempt to reconnect after a delay
-      setTimeout(() => {
-        if (this.sseConnection) {
-          this.sseConnection.close();
-          this.connectSSE(serverUrl);
+      const reader = response.body!.getReader();
+      let buffer = new Uint8Array(0);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Append chunk to buffer
+        const newBuffer = new Uint8Array(buffer.length + value.length);
+        newBuffer.set(buffer);
+        newBuffer.set(value, buffer.length);
+        buffer = newBuffer;
+
+        // Read complete frames
+        while (buffer.length >= 4) {
+          const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
+          if (buffer.length < 4 + len) break;
+          const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
+          buffer = buffer.slice(4 + len);
+          try {
+            const event = JSON.parse(json);
+            if (event.type === "SyncUpdate") {
+              this.runtime.onSyncMessageReceived(JSON.stringify(event.payload));
+            }
+          } catch (e) {
+            console.error("Stream parse error:", e);
+          }
         }
-      }, 5000);
-    };
+      }
+    } catch (e: any) {
+      if (e?.name === "AbortError") return; // Intentional shutdown
+      console.error("Stream error:", e);
+    }
+
+    // Reconnect after delay (unless aborted)
+    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
+      setTimeout(() => this.connectStream(serverUrl), 5000);
+    }
   }
 }
 
@@ -609,7 +669,8 @@ export type WasmModule = typeof import("groove-wasm");
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
 export async function loadWasmModule(): Promise<WasmModule> {
-  const wasmModule = await import("groove-wasm");
+  // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
+  const wasmModule: any = await import("groove-wasm");
 
   // In Node.js, we need to read the .wasm file and use initSync
   // In browsers, the default fetch-based init works
@@ -625,7 +686,9 @@ export async function loadWasmModule(): Promise<WasmModule> {
     );
     const wasmBytes = readFileSync(wasmPath);
     wasmModule.initSync(wasmBytes);
-  } else {
+  } else if (typeof wasmModule.default === "function") {
+    // In browsers without a bundler WASM plugin, call the init function.
+    // With vite-plugin-wasm, init happens at import time and default is not a function.
     await wasmModule.default();
   }
 

@@ -132,7 +132,7 @@ impl JsSyncSender {
 impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
-            if let Ok(json) = serde_json::to_string(&message.payload) {
+            if let Ok(json) = serde_json::to_string(&message) {
                 let js_value = JsValue::from_str(&json);
                 let _ = callback.call1(&JsValue::NULL, &js_value);
             }
@@ -247,6 +247,33 @@ impl WasmRuntime {
         Ok(())
     }
 
+    /// Called by JS when a sync message arrives from a client (not a server).
+    ///
+    /// # Arguments
+    /// * `client_id` - UUID string of the sending client
+    /// * `message_json` - JSON-encoded SyncPayload
+    #[wasm_bindgen(js_name = onSyncMessageReceivedFromClient)]
+    pub fn on_sync_message_received_from_client(
+        &self,
+        client_id: &str,
+        message_json: &str,
+    ) -> Result<(), JsError> {
+        let uuid = uuid::Uuid::parse_str(client_id)
+            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let payload: SyncPayload = serde_json::from_str(message_json)
+            .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
+
+        let entry = InboxEntry {
+            source: Source::Client(cid),
+            payload,
+        };
+
+        self.core.borrow_mut().park_sync_message(entry);
+        Ok(())
+    }
+
     /// Register a callback for outgoing sync messages.
     #[wasm_bindgen(js_name = onSyncMessageToSend)]
     pub fn on_sync_message_to_send(&self, callback: Function) {
@@ -303,7 +330,7 @@ impl WasmRuntime {
 
         let future = {
             let mut core = self.core.borrow_mut();
-            core.query_with_settled_tier(query, session, tier)
+            core.query(query, session, tier)
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
@@ -572,6 +599,37 @@ impl WasmRuntime {
         client_id.0.to_string()
     }
 
+    /// Set a client's role.
+    ///
+    /// # Arguments
+    /// * `client_id` - UUID string of the client
+    /// * `role` - One of "user", "admin", "peer"
+    #[wasm_bindgen(js_name = setClientRole)]
+    pub fn set_client_role(&self, client_id: &str, role: &str) -> Result<(), JsError> {
+        use groove::sync_manager::ClientRole;
+
+        let uuid = uuid::Uuid::parse_str(client_id)
+            .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let client_role = match role {
+            "user" => ClientRole::User,
+            "admin" => ClientRole::Admin,
+            "peer" => ClientRole::Peer,
+            _ => {
+                return Err(JsError::new(&format!(
+                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
+                    role
+                )));
+            }
+        };
+
+        self.core
+            .borrow_mut()
+            .set_client_role_by_name(cid, client_role);
+        Ok(())
+    }
+
     // =========================================================================
     // Schema Access
     // =========================================================================
@@ -589,6 +647,12 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn flush(&self) {
         self.core.borrow().flush_storage();
+    }
+
+    /// Flush only the WAL buffer to OPFS (not the snapshot).
+    #[wasm_bindgen(js_name = flushWal)]
+    pub fn flush_wal(&self) {
+        self.core.borrow().flush_wal();
     }
 
     /// Create a persistent WasmRuntime backed by OPFS.

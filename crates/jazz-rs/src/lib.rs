@@ -23,7 +23,7 @@
 //! let stream = client.subscribe(query).await?;
 //!
 //! // One-shot query
-//! let rows = client.query(query).await?;
+//! let rows = client.query(query, None).await?;
 //!
 //! // Mutations
 //! let id = client.create("users", vec![name]).await?;
@@ -49,6 +49,7 @@ pub use groove::query_manager::types::{
 };
 pub use groove::schema_manager::AppId;
 pub use groove::sync_manager::ClientId;
+pub use groove::sync_manager::PersistenceTier;
 pub use groove::sync_manager::ServerId;
 pub use jazz_transport::ServerEvent;
 
@@ -181,7 +182,7 @@ mod tests {
 
         // Query todos - now returns (ObjectId, Vec<Value>)
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1);
         let (id, values) = &results[0];
         assert_eq!(*id, row_id);
@@ -194,7 +195,7 @@ mod tests {
 
         // Query again to verify update
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[1], Value::Boolean(true));
 
@@ -203,7 +204,7 @@ mod tests {
 
         // Query should return empty (soft delete filters by default)
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 0);
     }
 
@@ -231,7 +232,7 @@ mod tests {
 
             // Verify it exists
             let query = QueryBuilder::new("todos").build();
-            let results = client.query(query).await.unwrap();
+            let results = client.query(query, None).await.unwrap();
             assert_eq!(results.len(), 1, "Should have created todo");
 
             client.shutdown().await.unwrap();
@@ -255,7 +256,7 @@ mod tests {
             // Query should return persisted data immediately - no retry needed
             // because one-shot queries now wait for pending local storage loads
             let query = QueryBuilder::new("todos").build();
-            let results = client.query(query).await.unwrap();
+            let results = client.query(query, None).await.unwrap();
 
             assert_eq!(results.len(), 1, "Todo should persist");
             assert_eq!(results[0].0, created_id);

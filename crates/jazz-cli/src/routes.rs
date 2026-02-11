@@ -1,6 +1,5 @@
 //! HTTP routes for the Jazz server.
 
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,13 +7,10 @@ use axum::{
     Router,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{
-        IntoResponse, Json,
-        sse::{Event, KeepAlive, Sse},
-    },
+    response::{IntoResponse, Json},
     routing::{get, post},
 };
-use futures::stream::Stream;
+use bytes::Bytes;
 use jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
@@ -28,7 +24,7 @@ use crate::middleware::auth::{extract_session, validate_admin_secret};
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
-        // SSE events endpoint
+        // Binary streaming events endpoint
         .route("/events", get(events_handler))
         // Unified sync endpoint - all client→server communication flows through here
         .route("/sync", post(sync_handler))
@@ -40,19 +36,34 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .with_state(state)
 }
 
-/// Query parameters for SSE events endpoint.
+/// Query parameters for events endpoint.
 #[derive(Debug, Deserialize)]
 struct EventsParams {
     /// Client-provided ID for reconnect support.
     client_id: Option<String>,
 }
 
-/// SSE events endpoint - clients connect here for all updates.
+/// Encode a ServerEvent as a length-prefixed binary frame.
+///
+/// Format: [4 bytes: u32 big-endian length][N bytes: JSON]
+fn encode_frame(event: &ServerEvent) -> Bytes {
+    let json = serde_json::to_vec(event).unwrap_or_default();
+    let len = (json.len() as u32).to_be_bytes();
+    let mut buf = Vec::with_capacity(4 + json.len());
+    buf.extend_from_slice(&len);
+    buf.extend_from_slice(&json);
+    Bytes::from(buf)
+}
+
+/// Binary streaming events endpoint - clients connect here for all updates.
+///
+/// Uses length-prefixed binary frames over a chunked HTTP response.
+/// Auth via Authorization header (JWT) or X-Jazz-Backend-Secret.
 async fn events_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Query(params): Query<EventsParams>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Parse client_id from query param - error if malformed, generate if missing
     let client_id = match params.client_id {
         Some(s) => groove::sync_manager::ClientId::parse(&s)
@@ -61,7 +72,6 @@ async fn events_handler(
     };
 
     // Extract session from headers (JWT or backend impersonation)
-    // Propagate auth errors (invalid JWT, wrong backend secret, etc.) as 401
     let session = match extract_session(&headers, &state.auth_config) {
         Ok(s) => s,
         Err((status, msg)) => {
@@ -74,17 +84,17 @@ async fn events_handler(
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Require a valid session — reject SSE connections without authentication.
+    // Require a valid session — reject connections without authentication.
     let session = match session {
         Some(s) => s,
         None => {
             tracing::error!(
-                "SSE connection rejected: no session (client_id={}). Client must send auth headers.",
+                "Stream connection rejected: no session (client_id={}). Client must send auth headers.",
                 client_id
             );
             return Err((
                 StatusCode::UNAUTHORIZED,
-                "Session required for SSE connection. Provide a JWT token or backend secret."
+                "Session required for event stream. Provide a JWT token or backend secret."
                     .to_string(),
             ));
         }
@@ -116,14 +126,14 @@ async fn events_handler(
     // Capture client_id string for stream
     let client_id_str = client_id.to_string();
 
-    // Create stream that emits events
+    // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
-        // Send connection ID and client ID first
+        // Send Connected frame
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
         };
-        yield Ok(Event::default().data(serde_json::to_string(&connected).unwrap_or_default()));
+        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
         // Heartbeat interval
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
@@ -137,12 +147,12 @@ async fn events_handler(
                             // Only emit if this is for our client
                             if target_client_id == client_id {
                                 let event = ServerEvent::SyncUpdate { payload: Box::new(payload) };
-                                yield Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default()));
+                                yield Ok(encode_frame(&event));
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             // We fell behind, continue
-                            tracing::warn!("SSE client {} lagged behind on sync updates", connection_id);
+                            tracing::warn!("Stream client {} lagged behind on sync updates", connection_id);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             // Channel closed, exit
@@ -153,7 +163,7 @@ async fn events_handler(
                 // Send periodic heartbeat
                 _ = heartbeat_interval.tick() => {
                     let heartbeat = ServerEvent::Heartbeat;
-                    yield Ok(Event::default().data(serde_json::to_string(&heartbeat).unwrap_or_default()));
+                    yield Ok(encode_frame(&heartbeat));
                 }
             }
         }
@@ -164,10 +174,15 @@ async fn events_handler(
             connections.remove(&connection_id_cleanup);
         }
         let _ = state_cleanup.runtime.remove_client(client_id_cleanup);
-        tracing::debug!("SSE connection {} closed, cleaned up", connection_id_cleanup);
+        tracing::debug!("Stream connection {} closed, cleaned up", connection_id_cleanup);
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", "application/octet-stream")
+        .header("Transfer-Encoding", "chunked")
+        .header("Cache-Control", "no-cache")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap())
 }
 
 /// Push a sync payload to the server's inbox.

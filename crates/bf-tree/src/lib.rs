@@ -135,9 +135,7 @@ pub mod wasm {
 
         /// Flush the WAL buffer to ensure all buffered writes are persisted.
         pub fn flush_wal(&self) {
-            if let Some(ref wal) = self.inner.wal {
-                wal.flush();
-            }
+            self.inner.flush_wal();
         }
 
         /// Scan keys in the range [start_key, end_key).
@@ -145,9 +143,11 @@ pub mod wasm {
         /// Returns a list of (key, value) pairs as a flat Vec of Vec<u8> pairs.
         /// Results are returned as [key1, value1, key2, value2, ...].
         pub fn scan_range(&self, start_key: &[u8], end_key: &[u8]) -> Vec<js_sys::Uint8Array> {
-            let scan_result = self
-                .inner
-                .scan_with_end_key(start_key, end_key, crate::ScanReturnField::KeyAndValue);
+            let scan_result = self.inner.scan_with_end_key(
+                start_key,
+                end_key,
+                crate::ScanReturnField::KeyAndValue,
+            );
             let mut scan_iter = match scan_result {
                 Ok(iter) => iter,
                 Err(_) => return Vec::new(),

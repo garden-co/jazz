@@ -4,16 +4,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::BytesMut;
 use futures::StreamExt;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
 use groove::storage::{BfTreeStorage, Storage};
-use groove::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source, SyncManager};
+use groove::sync_manager::{
+    ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
+};
 use groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
 use jazz_transport::ServerEvent;
-use reqwest_eventsource::{Event, EventSource};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::transport::{AuthConfig, ServerConnection};
@@ -36,8 +38,8 @@ pub struct JazzClient {
     subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<RowDelta>>>>,
     /// Next subscription handle ID.
     next_handle: std::sync::atomic::AtomicU64,
-    /// Handle for the SSE listener task.
-    sse_listener_task: Option<tokio::task::JoinHandle<()>>,
+    /// Handle for the stream listener task.
+    stream_listener_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// State for an active subscription.
@@ -155,63 +157,99 @@ impl JazzClient {
         let subscription_senders: Arc<RwLock<HashMap<RuntimeSubHandle, mpsc::Sender<RowDelta>>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        // Spawn SSE listener if connected to server
-        let sse_listener_task = if let Some(ref conn) = server_connection {
+        // Spawn binary stream listener if connected to server
+        let stream_listener_task = if let Some(ref conn) = server_connection {
             let base_url = conn.base_url().to_string();
             let client_id_str = client_id.to_string();
-            let runtime_for_sse = runtime.clone();
-            let sse_headers = conn.build_sse_headers();
+            let runtime_for_stream = runtime.clone();
+            let stream_headers = conn.build_stream_headers();
 
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
                 loop {
                     let url = format!("{}/events?client_id={}", base_url, client_id_str);
-                    let request_builder = http_client.get(&url).headers(sse_headers.clone());
-                    let Ok(mut es) = EventSource::new(request_builder) else {
-                        tracing::error!("Failed to create SSE EventSource (request not cloneable)");
-                        break;
-                    };
 
-                    tracing::info!("Connecting to server SSE stream: {}", url);
+                    tracing::info!("Connecting to server event stream: {}", url);
 
-                    while let Some(event_result) = es.next().await {
-                        match event_result {
-                            Ok(Event::Open) => {
-                                tracing::info!("SSE connection opened");
-                            }
-                            Ok(Event::Message(msg)) => {
-                                eprintln!(
-                                    "DEBUG [client SSE]: Received message: {}",
-                                    &msg.data[..std::cmp::min(200, msg.data.len())]
+                    match http_client
+                        .get(&url)
+                        .headers(stream_headers.clone())
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            if !response.status().is_success() {
+                                tracing::warn!(
+                                    "Event stream connection failed: {}",
+                                    response.status()
                                 );
-                                // Parse the server event from JSON data
-                                match serde_json::from_str::<ServerEvent>(&msg.data) {
-                                    Ok(server_event) => {
-                                        eprintln!(
-                                            "DEBUG [client SSE]: Parsed event: {:?}",
-                                            server_event.variant_name()
-                                        );
-                                        if let Err(e) =
-                                            handle_server_event(server_event, &runtime_for_sse)
-                                        {
-                                            tracing::warn!("Error handling server event: {}", e);
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                continue;
+                            }
+
+                            tracing::info!("Event stream connected");
+
+                            let mut body = response.bytes_stream();
+                            let mut buffer = BytesMut::new();
+
+                            while let Some(chunk_result) = body.next().await {
+                                match chunk_result {
+                                    Ok(chunk) => {
+                                        buffer.extend_from_slice(&chunk);
+
+                                        // Read complete frames from buffer
+                                        while buffer.len() >= 4 {
+                                            let len = u32::from_be_bytes(
+                                                buffer[..4].try_into().unwrap(),
+                                            )
+                                                as usize;
+                                            if buffer.len() < 4 + len {
+                                                break; // Incomplete frame
+                                            }
+                                            let json = &buffer[4..4 + len];
+
+                                            match serde_json::from_slice::<ServerEvent>(json) {
+                                                Ok(event) => {
+                                                    eprintln!(
+                                                        "DEBUG [client stream]: Parsed event: {:?}",
+                                                        event.variant_name()
+                                                    );
+                                                    if let Err(e) = handle_server_event(
+                                                        event,
+                                                        &runtime_for_stream,
+                                                    ) {
+                                                        tracing::warn!(
+                                                            "Error handling server event: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Failed to parse server event: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+
+                                            // Advance buffer past this frame
+                                            let _ = buffer.split_to(4 + len);
                                         }
                                     }
                                     Err(e) => {
-                                        tracing::warn!("Failed to parse server event: {}", e);
+                                        tracing::warn!("Stream chunk error: {}", e);
+                                        break;
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("SSE error: {}", e);
-                                es.close();
-                                break; // Exit inner loop to reconnect
-                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Event stream connection error: {}", e);
                         }
                     }
 
                     // Reconnect after delay
-                    tracing::info!("SSE disconnected, reconnecting in 5s...");
+                    tracing::info!("Event stream disconnected, reconnecting in 5s...");
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }))
@@ -226,7 +264,7 @@ impl JazzClient {
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscription_senders,
             next_handle: std::sync::atomic::AtomicU64::new(1),
-            sse_listener_task,
+            stream_listener_task,
         })
     }
 
@@ -279,10 +317,6 @@ impl JazzClient {
             senders.insert(runtime_handle, tx);
         }
 
-        // Subscriptions now flow through outbox automatically via subscribe_with_sync.
-        // The RuntimeCore.subscribe() -> QueryManager.subscribe_with_sync() path
-        // sends QuerySubscription to connected servers via the outbox.
-
         // Track subscription metadata
         {
             let mut subs = self.subscriptions.write().await;
@@ -291,7 +325,7 @@ impl JazzClient {
                 SubscriptionState {
                     query,
                     runtime_handle,
-                    server_query_id: None, // Server query ID not tracked separately anymore
+                    server_query_id: None,
                 },
             );
         }
@@ -299,13 +333,17 @@ impl JazzClient {
         Ok(SubscriptionStream::new(handle, rx))
     }
 
-    /// One-shot query.
+    /// One-shot query, optionally waiting for a settled tier.
     ///
     /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
-    pub async fn query(&self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+    pub async fn query(
+        &self,
+        query: Query,
+        settled_tier: Option<PersistenceTier>,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .runtime
-            .query(query, None)
+            .query(query, None, settled_tier)
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
@@ -359,20 +397,6 @@ impl JazzClient {
     }
 
     /// Create a session-scoped client for backend operations.
-    ///
-    /// This allows backend applications to perform operations as a specific user.
-    /// The session is used for policy evaluation on all operations.
-    ///
-    /// Operations go through the local runtime and sync to servers via the outbox,
-    /// just like regular operations. The session context flows with the data.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let user_session = Session::new("user-123");
-    /// let user_client = client.for_session(user_session);
-    /// let id = user_client.create("todos", vec![Value::Text("Buy milk".into())]).await?;
-    /// ```
     pub fn for_session(&self, session: Session) -> SessionClient<'_> {
         SessionClient {
             client: self,
@@ -381,13 +405,10 @@ impl JazzClient {
     }
 
     /// Shutdown the client and release resources.
-    ///
-    /// Aborts background tasks, flushes the runtime, and snapshots storage to disk.
     pub async fn shutdown(mut self) -> Result<()> {
-        // Abort SSE listener first (it holds TokioRuntime clone)
-        if let Some(handle) = self.sse_listener_task.take() {
+        // Abort stream listener first (it holds TokioRuntime clone)
+        if let Some(handle) = self.stream_listener_task.take() {
             handle.abort();
-            // Wait for abort to complete (ignore JoinError::Cancelled)
             let _ = handle.await;
         }
 
@@ -407,23 +428,12 @@ impl JazzClient {
 }
 
 /// Session-scoped client for backend operations.
-///
-/// Created by `JazzClient::for_session()`. Allows backend applications
-/// to perform operations as a specific user.
-///
-/// Operations go through the local runtime with the session context,
-/// then sync to the server via the outbox (same as regular operations).
-/// The session is used for policy evaluation.
 pub struct SessionClient<'a> {
     client: &'a JazzClient,
     session: Session,
 }
 
 impl<'a> SessionClient<'a> {
-    /// Create a new row in a table as this session's user.
-    ///
-    /// The session is used for policy evaluation. Changes sync to server
-    /// via the outbox with ObjectUpdated payloads.
     pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<ObjectId> {
         self.client
             .runtime
@@ -431,9 +441,6 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    /// Update a row as this session's user.
-    ///
-    /// The session is used for policy evaluation.
     pub async fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<()> {
         self.client
             .runtime
@@ -441,9 +448,6 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    /// Delete a row as this session's user.
-    ///
-    /// The session is used for policy evaluation.
     pub async fn delete(&self, object_id: ObjectId) -> Result<()> {
         self.client
             .runtime
@@ -451,23 +455,21 @@ impl<'a> SessionClient<'a> {
             .map_err(|e| JazzError::Write(e.to_string()))
     }
 
-    /// Query as this session's user.
-    ///
-    /// The session is used for policy evaluation (row-level filtering).
-    pub async fn query(&self, query: Query) -> Result<Vec<(ObjectId, Vec<Value>)>> {
+    pub async fn query(
+        &self,
+        query: Query,
+        settled_tier: Option<PersistenceTier>,
+    ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         let future = self
             .client
             .runtime
-            .query(query, Some(self.session.clone()))
+            .query(query, Some(self.session.clone()), settled_tier)
             .map_err(|e| JazzError::Query(e.to_string()))?;
         future
             .await
             .map_err(|e| JazzError::Query(format!("{:?}", e)))
     }
 
-    /// Subscribe to a query as this session's user.
-    ///
-    /// The session is used for policy evaluation (row-level filtering).
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
         self.client
             .subscribe_internal(query, Some(self.session.clone()))
@@ -483,14 +485,13 @@ fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<BfTreeStorage>
             client_id,
         } => {
             tracing::info!(
-                "SSE connected with id: {:?}, client_id: {}",
+                "Stream connected with id: {:?}, client_id: {}",
                 connection_id,
                 client_id
             );
             Ok(())
         }
         ServerEvent::SyncUpdate { payload } => {
-            // Push to local runtime inbox
             let entry = InboxEntry {
                 source: Source::Server(ServerId::default()),
                 payload: *payload,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::BfTreeStorage;
-use groove::sync_manager::{ClientId, Destination, SyncManager, SyncPayload};
+use groove::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
 use groove_tokio::TokioRuntime;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
@@ -49,7 +49,7 @@ pub async fn run(
     std::fs::create_dir_all(data_dir)?;
 
     // Create managers (server mode - no fixed current schema)
-    let sync_manager = SyncManager::new();
+    let sync_manager = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
     let schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
 
     // Create broadcast channel for SSE updates

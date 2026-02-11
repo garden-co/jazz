@@ -115,10 +115,10 @@ impl ServerConnection {
         headers
     }
 
-    /// Build auth headers for the SSE EventSource connection.
+    /// Build auth headers for the binary streaming connection.
     ///
-    /// Same auth as `build_headers` but without Content-Type (SSE is text/event-stream).
-    pub fn build_sse_headers(&self) -> HeaderMap {
+    /// Same auth as `build_headers` but without Content-Type.
+    pub fn build_stream_headers(&self) -> HeaderMap {
         let mut headers = self.build_headers(None);
         headers.remove(CONTENT_TYPE);
         headers
