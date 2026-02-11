@@ -2,7 +2,7 @@
 
 Strategy for transitioning the community from Jazz 1 to Jazz 2 with minimal pain.
 
-> First-week prep (repo swap, Discord setup) is in `../a_week_2026_02_09/jazz1_repo_swap.md`.
+> Repo swap plan is in `jazz1_repo_swap.md` (same directory).
 
 ## Branding
 
@@ -12,7 +12,7 @@ Strategy for transitioning the community from Jazz 1 to Jazz 2 with minimal pain
 
 ## Jazz 1 Support Plan
 
-- Repos are already separate (`jazz2` is this private repo; public `jazz` is Jazz 1) — swap them at launch (see `../a_week_2026_02_09/jazz1_repo_swap.md`)
+- Repos are already separate (`jazz2` is this private repo; public `jazz` is Jazz 1) — swap them at launch (see `jazz1_repo_swap.md`)
 - Keep infrastructure running (cost is manageable, maintenance distraction is the concern)
 - Scale down global coverage (fewer edge regions) to reduce complexity
 - Migrate infra to AWS to reduce operational burden
