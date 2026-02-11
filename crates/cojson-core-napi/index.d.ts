@@ -7,6 +7,29 @@ export declare class Blake3Hasher {
   clone(): Blake3Hasher
 }
 
+export declare class FjallStorageNapi {
+  /** Open or create a fjall storage database at the given path. */
+  constructor(path: string)
+  getCoValue(coValueId: string): Promise<unknown>
+  upsertCoValue(id: string, headerJson?: string | undefined | null): Promise<unknown>
+  getCoValueSessions(coValueRowId: number): Promise<unknown>
+  getSingleCoValueSession(coValueRowId: number, sessionId: string): Promise<unknown>
+  addSessionUpdate(coValueRowId: number, sessionId: string, lastIdx: number, lastSignature: string, bytesSinceLastSignature: number): Promise<unknown>
+  getNewTransactionInSession(sessionRowId: number, fromIdx: number, toIdx: number): Promise<unknown>
+  addTransaction(sessionRowId: number, idx: number, txJson: string): Promise<unknown>
+  getSignatures(sessionRowId: number, firstNewTxIdx: number): Promise<unknown>
+  addSignatureAfter(sessionRowId: number, idx: number, signature: string): Promise<unknown>
+  markCoValueAsDeleted(coValueId: string): Promise<unknown>
+  eraseCoValueButKeepTombstone(coValueId: string): Promise<unknown>
+  getAllCoValuesWaitingForDelete(): Promise<unknown>
+  trackCoValuesSyncState(updates: Array<NapiSyncUpdate>): Promise<unknown>
+  getUnsyncedCoValueIds(): Promise<unknown>
+  stopTrackingSyncState(coValueId: string): Promise<unknown>
+  getCoValueKnownState(coValueId: string): Promise<unknown>
+  /** Close the database, flushing all pending writes to disk. */
+  close(): void
+}
+
 export declare class SessionMap {
   /**
    * Create a new SessionMap for a CoValue.
@@ -201,6 +224,42 @@ export interface KnownState {
   id: string
   header: boolean
   sessions: Record<string, number>
+}
+
+export interface NapiCoValueResult {
+  rowId: number
+  headerJson: string
+}
+
+export interface NapiKnownStateResult {
+  id: string
+  sessions: Record<string, number>
+}
+
+export interface NapiSessionResult {
+  rowId: number
+  coValue: number
+  sessionId: string
+  lastIdx: number
+  lastSignature: string
+  bytesSinceLastSignature: number
+}
+
+export interface NapiSignatureResult {
+  idx: number
+  signature: string
+}
+
+export interface NapiSyncUpdate {
+  id: string
+  peerId: string
+  synced: boolean
+}
+
+export interface NapiTransactionResult {
+  ses: number
+  idx: number
+  tx: string
 }
 
 /**

@@ -71,6 +71,8 @@
         ".env*",
         "../cojson-core/src/**",
         "../cojson-core/Cargo.toml",
+        "../cojson-storage-fjall/src/**",
+        "../cojson-storage-fjall/Cargo.toml",
         "!node_modules/**",
         "!*.node",
         "!dist/**",

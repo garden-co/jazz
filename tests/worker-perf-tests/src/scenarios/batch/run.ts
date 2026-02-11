@@ -10,6 +10,7 @@ import {
   getFlagBoolean,
   getFlagNumber,
   getFlagString,
+  getStorageEngine,
 } from "../../utils/args.ts";
 import { setupMetrics } from "../../metrics.ts";
 import { calculateStats, minMedianMax } from "../../utils/stats.ts";
@@ -142,6 +143,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   const remotePeer = getFlagString(args, "peer");
   const isRemote = !!remotePeer;
 
+  const storageEngine = getStorageEngine(args);
   const workerCount = getFlagNumber(args, "workers") ?? 3;
   const runs = getFlagNumber(args, "runs") ?? 50;
   const mapsLimit = getFlagNumber(args, "maps");
@@ -172,6 +174,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     db: dbPath,
     crypto: await NapiCrypto.create(),
     middleware: setupMetrics().middleware,
+    storageEngine,
   });
 
   const addr = localServer.address();
@@ -217,6 +220,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       {
         scenario: "batch",
         mode: isRemote ? "remote" : "local",
+        storage: storageEngine,
         peer,
         metrics,
         workers: workerCount,

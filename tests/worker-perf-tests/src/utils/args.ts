@@ -12,8 +12,14 @@ export type ParsedArgs = {
  * We keep the existing `ParsedArgs` shape to avoid churn elsewhere.
  */
 export function parseArgs(argv: string[]): ParsedArgs {
+  // Strip bare `--` separators injected by package managers (pnpm/npm)
+  // when forwarding flags (e.g. `pnpm batch -- --storage fjall`).
+  // Node's parseArgs treats `--` as end-of-options, which would cause
+  // all subsequent flags to be silently ignored.
+  const filtered = argv.filter((a) => a !== "--");
+
   const res = nodeParseArgs({
-    args: argv,
+    args: filtered,
     allowPositionals: true,
     strict: true,
     options: {
@@ -39,6 +45,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
       // Scenario selection
       scenario: { type: "string" },
+
+      // Storage engine
+      storage: { type: "string" },
 
       // Batch benchmark scenario options
       maps: { type: "string" },
@@ -77,6 +86,22 @@ export function getFlagNumber(
   const n = Number(s);
   if (!Number.isFinite(n)) return;
   return n;
+}
+
+export type StorageEngine = "sqlite" | "fjall";
+
+/**
+ * Parse and validate the --storage flag.
+ * Defaults to "sqlite" if not provided.
+ */
+export function getStorageEngine(args: ParsedArgs): StorageEngine {
+  const raw = getFlagString(args, "storage") ?? "sqlite";
+  if (raw !== "sqlite" && raw !== "fjall") {
+    throw new Error(
+      `Invalid --storage value "${raw}". Must be "sqlite" or "fjall".`,
+    );
+  }
+  return raw;
 }
 
 export function getFlagBoolean(args: ParsedArgs, key: string): boolean {

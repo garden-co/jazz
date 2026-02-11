@@ -1,7 +1,11 @@
-# Database files
+# Database files (SQLite)
 *.db
 *.db-shm
 *.db-wal
 
+# Database directories (fjall)
+*.fjall/
+
 # Seed config files (contain CoValue IDs)
 *.db.config
+*.fjall.config

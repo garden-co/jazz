@@ -1,5 +1,4 @@
 use cojson_core::core::{CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl};
-use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -26,6 +25,9 @@ impl From<RustKnownState> for KnownState {
     }
   }
 }
+
+pub mod storage;
+pub use storage::*;
 
 pub mod hash {
   pub mod blake3;

@@ -74,6 +74,15 @@ const dbOption = Options.file("db")
   )
   .pipe(Options.withDefault(serverDefaults.db));
 
+const storageOption = Options.text("storage")
+  .pipe(Options.withAlias("s"))
+  .pipe(
+    Options.withDescription(
+      `The storage engine to use: "sqlite" or "fjall". Default is "sqlite".`,
+    ),
+  )
+  .pipe(Options.withDefault("sqlite"));
+
 const startSyncServerCommand = Command.make(
   "sync",
   {
@@ -81,11 +90,13 @@ const startSyncServerCommand = Command.make(
     port: portOption,
     inMemory: inMemoryOption,
     db: dbOption,
+    storage: storageOption,
   },
-  ({ host, port, inMemory, db }) => {
+  ({ host, port, inMemory, db, storage }) => {
     return Effect.gen(function* () {
+      const storageEngine = storage === "fjall" ? "fjall" : ("sqlite" as const);
       const server = yield* Effect.promise(() =>
-        startSyncServer({ host, port, inMemory, db }),
+        startSyncServer({ host, port, inMemory, db, storageEngine }),
       );
 
       const serverAddress = server.address();
