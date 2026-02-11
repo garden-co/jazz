@@ -64,7 +64,6 @@ import {
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
-import { createCoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
 import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export type CoMapEdit<V> = {
@@ -131,8 +130,7 @@ export class CoMap extends CoValueBase implements CoValue {
    */
   declare $jazz: CoMapJazzApi<this>;
 
-  // TODO: we are keeping this default to avoid breaking too many tests, but it should be removed in the future
-  static coValueSchema: CoreCoMapSchema = createCoreCoMapSchema({});
+  static coValueSchema?: CoreCoMapSchema;
 
   /** @internal */
   constructor(options: { fromRaw: RawCoMap } | undefined) {
@@ -375,38 +373,6 @@ export class CoMap extends CoValueBase implements CoValue {
 
     const initMeta = firstComesWins ? { fww: "init" } : undefined;
     return rawOwner.createMap(rawInit, null, "private", uniqueness, initMeta);
-  }
-
-  /**
-   * Declare a Record-like CoMap schema by extending `CoMap.Record(...)` and
-   * passing the catchall value schema. Keys are always `string`.
-   *
-   * @example
-   * ```ts
-   * import { co, z, CoMap } from "jazz-tools";
-   *
-   * const Fruit = co.map({ name: z.string() });
-   * const ColorToFruitMap = co.record(z.string(), Fruit)
-   *
-   * // assume we have map: ColorToFruitMap
-   * // and strawberry: Fruit
-   * map.$jazz.set("red", strawberry);
-   * ```
-   *
-   * @category Declaration
-   */
-  static Record<Value>(value: Value) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-    class RecordLikeCoMap extends CoMap {
-      static override coValueSchema: CoreCoMapSchema = createCoreCoMapSchema(
-        {},
-        value,
-      );
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-    interface RecordLikeCoMap extends Record<string, Value> {}
-
-    return RecordLikeCoMap;
   }
 
   /**

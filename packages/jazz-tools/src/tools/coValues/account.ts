@@ -60,10 +60,8 @@ import {
   InstanceOfSchemaCoValuesMaybeLoaded,
   LoadedAndRequired,
 } from "../internal.js";
-import { z } from "../implementation/zodSchema/zodReExport.js";
-import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
-import { createCoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
 import type { CoreAccountSchema } from "../implementation/zodSchema/schemaTypes/AccountSchema.js";
+import type { AccountSchema as HydratedAccountSchema } from "../implementation/zodSchema/schemaTypes/AccountSchema.js";
 import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
 
@@ -75,17 +73,7 @@ export type AccountCreationProps = {
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
   declare [TypeSym]: "Account";
-  static coValueSchema: CoreCoValueSchema = {
-    ...createCoreCoMapSchema({
-      profile: createCoreCoMapSchema({
-        name: z.string(),
-        inbox: z.optional(z.string()),
-        inboxInvite: z.optional(z.string()),
-      }),
-      root: createCoreCoMapSchema({}),
-    }),
-    builtin: "Account" as const,
-  };
+  static coValueSchema?: HydratedAccountSchema;
 
   /**
    * Jazz methods for Accounts are inside this property.
@@ -535,15 +523,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     const definition = accountSchema.getDefinition();
     const field = definition.shape[key as keyof typeof definition.shape];
     if (field) {
-      const normalizedField =
-        typeof field === "object" &&
-        field !== null &&
-        "collaborative" in field &&
-        !("getCoValueClass" in field)
-          ? hydrateCoreCoValueSchema(field as any)
-          : field;
-
-      const descriptor = resolveSchemaField(normalizedField as any);
+      const descriptor = resolveSchemaField(field);
       this.descriptorCache.set(key, descriptor);
       return descriptor;
     }

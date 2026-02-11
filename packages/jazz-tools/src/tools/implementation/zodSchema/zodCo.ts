@@ -31,7 +31,7 @@ import {
   createCoreCoDiscriminatedUnionSchema,
 } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
 import { CoOptionalSchema } from "./schemaTypes/CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
+import type { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
 import {
   RichTextSchema,
   createCoreCoRichTextSchema,

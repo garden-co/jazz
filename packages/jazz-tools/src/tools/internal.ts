@@ -61,4 +61,5 @@ export * from "./implementation/ContextManager.js";
 
 export * from "./subscribe/JazzError.js";
 
+import "./implementation/zodSchema/initializeBuiltinSchemas.js";
 import "./implementation/devtoolsFormatters.js";

@@ -39,11 +39,7 @@ import {
   subscribeToExistingCoValue,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
-import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
-import {
-  CoreCoListSchema,
-  createCoreCoListSchema,
-} from "../implementation/zodSchema/schemaTypes/CoListSchema.js";
+import { CoreCoListSchema } from "../implementation/zodSchema/schemaTypes/CoListSchema.js";
 import {
   executeValidation,
   resolveValidationMode,
@@ -82,30 +78,9 @@ export class CoList<out Item = any>
   extends Array<Item>
   implements ReadonlyArray<Item>, CoValue
 {
-  static coValueSchema?: CoreCoValueSchema;
+  static coValueSchema?: CoreCoListSchema;
   declare $jazz: CoListJazzApi<this>;
   declare $isLoaded: true;
-
-  /**
-   * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema.
-   *
-   * @example
-   * ```ts
-   * const Animal = co.map({ name: z.string() });
-   * class ColorList extends CoList.Of(z.string()) {}
-   * class AnimalList extends CoList.Of(Animal) {}
-   * ```
-   *
-   * @category Declaration
-   */
-  static Of<Item>(item: Item): typeof CoList<Item> {
-    // TODO: cache superclass for item class
-    return class CoListOf extends CoList<Item> {
-      static override coValueSchema = createCoreCoListSchema(
-        item as any,
-      ) as CoreCoListSchema;
-    };
-  }
 
   /**
    * @ignore
@@ -268,15 +243,6 @@ export class CoList<out Item = any>
     raw: RawCoList,
   ) {
     return new this({ fromRaw: raw });
-  }
-
-  /** @internal */
-  static schema<V extends CoList>(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    this: { new (...args: any): V } & typeof CoList,
-    def: { [ItemsSym]: CoFieldInit<V[number]> },
-  ) {
-    this.coValueSchema = createCoreCoListSchema(def[ItemsSym] as any);
   }
 
   /**
