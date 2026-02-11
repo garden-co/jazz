@@ -218,7 +218,8 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   constructor(options: { fromRaw: RawCoStream }) {
     super();
     const coFeedSchema = assertCoValueSchema(
-      this.constructor as typeof CoFeed,
+      this.constructor,
+      "CoFeed",
       "load",
     );
 
@@ -250,10 +251,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       | Account
       | Group,
   ) {
-    const coFeedSchema = assertCoValueSchema(
-      this as unknown as typeof CoFeed,
-      "create",
-    );
+    const coFeedSchema = assertCoValueSchema(this, "CoFeed", "create");
     const { owner, uniqueness, firstComesWins } =
       parseCoValueCreateOptions(options);
     const initMeta = firstComesWins ? { fww: "init" } : undefined;
@@ -274,11 +272,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         executeValidation(fullSchema, init, validationMode) as typeof init;
       }
 
-      if (coFeedSchema.builtin !== "CoFeed") {
-        throw new Error(
-          `[schema-invariant] ${this.name || "CoFeed"}.create expected CoFeed schema, got ${coFeedSchema.builtin}.`,
-        );
-      }
       // @ts-expect-error - _schema is not defined on the class
       const itemDescriptor = this._schema[ItemsSym] as Schema;
 
