@@ -292,7 +292,7 @@ impl SyncPayload {
 }
 
 /// Destination for an outbox entry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub enum Destination {
     Server(ServerId),
     Client(ClientId),
@@ -306,7 +306,7 @@ pub enum Source {
 }
 
 /// Outgoing message to be sent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OutboxEntry {
     pub destination: Destination,
     pub payload: SyncPayload,

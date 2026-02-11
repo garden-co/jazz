@@ -709,6 +709,10 @@ impl Storage for BfTreeStorage {
     fn flush(&self) {
         self.tree.snapshot();
     }
+
+    fn flush_wal(&self) {
+        self.tree.flush_wal();
+    }
 }
 
 // ============================================================================

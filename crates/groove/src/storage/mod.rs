@@ -189,6 +189,9 @@ pub trait Storage {
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}
+
+    /// Flush only the WAL buffer (not the snapshot). No-op for storage without WAL.
+    fn flush_wal(&self) {}
 }
 
 // ============================================================================

@@ -268,6 +268,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.storage.flush();
     }
 
+    /// Flush only the WAL buffer (not the full snapshot).
+    pub fn flush_wal(&self) {
+        self.storage.flush_wal();
+    }
+
     /// Consume RuntimeCore and return the Storage.
     /// Used for cold-start testing to transfer driver state.
     pub fn into_storage(self) -> S {
@@ -580,13 +585,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     // Queries
     // =========================================================================
 
-    /// Execute a one-shot query.
-    pub fn query(&mut self, query: Query, session: Option<Session>) -> QueryFuture {
-        self.query_with_settled_tier(query, session, None)
-    }
-
-    /// Execute a one-shot query with optional settled tier.
-    pub fn query_with_settled_tier(
+    /// Execute a one-shot query, optionally waiting for a settled tier.
+    pub fn query(
         &mut self,
         query: Query,
         session: Option<Session>,
@@ -867,6 +867,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .sync_manager_mut()
             .set_client_role(client_id, ClientRole::Admin);
+    }
+
+    /// Set a client's role.
+    pub fn set_client_role_by_name(
+        &mut self,
+        client_id: ClientId,
+        role: crate::sync_manager::ClientRole,
+    ) {
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_role(client_id, role);
     }
 
     // =========================================================================
@@ -1523,7 +1535,7 @@ mod tests {
         let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
         let id = s.a.insert("users", values, None).unwrap();
 
-        let mut future = s.a.query_with_settled_tier(Query::new("users"), None, None);
+        let mut future = s.a.query(Query::new("users"), None, None);
 
         let waker = noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);
@@ -1545,7 +1557,7 @@ mod tests {
         let id = s.a.insert("users", values, None).unwrap();
 
         let mut future =
-            s.a.query_with_settled_tier(Query::new("users"), None, Some(PersistenceTier::Worker));
+            s.a.query(Query::new("users"), None, Some(PersistenceTier::Worker));
 
         let waker = noop_waker();
         let mut cx = std::task::Context::from_waker(&waker);

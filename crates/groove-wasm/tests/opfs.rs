@@ -35,7 +35,8 @@ fn make_filter_query_json() -> String {
     r#"{
         "table": "todos",
         "disjuncts": [{"conditions": [{"Eq": {"column": "completed", "value": {"Boolean": true}}}]}]
-    }"#.to_string()
+    }"#
+    .to_string()
 }
 
 /// Helper to remove OPFS files. Ignores errors if files don't exist.
@@ -92,16 +93,10 @@ async fn opfs_crud_round_trip() {
     let db_name = "test_crud";
     cleanup_opfs(db_name).await;
 
-    let runtime = WasmRuntime::open_persistent(
-        test_schema_json(),
-        "test-app",
-        "dev",
-        "main",
-        db_name,
-        None,
-    )
-    .await
-    .unwrap();
+    let runtime =
+        WasmRuntime::open_persistent(test_schema_json(), "test-app", "dev", "main", db_name, None)
+            .await
+            .unwrap();
 
     // Insert a todo
     let id = insert_todo(&runtime, "Buy milk", false);
@@ -109,7 +104,13 @@ async fn opfs_crud_round_trip() {
 
     // Query
     let rows = query_todos(&runtime).await;
-    assert_eq!(rows.len(), 1, "Expected 1 todo, got {}: {:?}", rows.len(), rows);
+    assert_eq!(
+        rows.len(),
+        1,
+        "Expected 1 todo, got {}: {:?}",
+        rows.len(),
+        rows
+    );
 
     let values = rows[0]["values"].as_array().unwrap();
     assert_eq!(values[0]["value"], "Buy milk");
@@ -159,7 +160,12 @@ async fn opfs_persistence_across_reopen() {
         .unwrap();
 
         let rows = query_todos(&runtime).await;
-        assert_eq!(rows.len(), 3, "Expected 3 todos after reopen, got {}", rows.len());
+        assert_eq!(
+            rows.len(),
+            3,
+            "Expected 3 todos after reopen, got {}",
+            rows.len()
+        );
     }
 
     cleanup_opfs(db_name).await;
@@ -170,16 +176,10 @@ async fn opfs_index_operations() {
     let db_name = "test_index";
     cleanup_opfs(db_name).await;
 
-    let runtime = WasmRuntime::open_persistent(
-        test_schema_json(),
-        "test-app",
-        "dev",
-        "main",
-        db_name,
-        None,
-    )
-    .await
-    .unwrap();
+    let runtime =
+        WasmRuntime::open_persistent(test_schema_json(), "test-app", "dev", "main", db_name, None)
+            .await
+            .unwrap();
 
     // Insert todos with different completed states
     insert_todo(&runtime, "Done 1", true);
@@ -188,7 +188,12 @@ async fn opfs_index_operations() {
 
     // Query only completed todos
     let rows = query_todos_filtered(&runtime).await;
-    assert_eq!(rows.len(), 2, "Expected 2 completed todos, got {}", rows.len());
+    assert_eq!(
+        rows.len(),
+        2,
+        "Expected 2 completed todos, got {}",
+        rows.len()
+    );
 
     for row in &rows {
         let values = row["values"].as_array().unwrap();
@@ -204,16 +209,10 @@ async fn opfs_runtime_core_e2e() {
     let db_name = "test_e2e";
     cleanup_opfs(db_name).await;
 
-    let runtime = WasmRuntime::open_persistent(
-        test_schema_json(),
-        "test-app",
-        "dev",
-        "main",
-        db_name,
-        None,
-    )
-    .await
-    .unwrap();
+    let runtime =
+        WasmRuntime::open_persistent(test_schema_json(), "test-app", "dev", "main", db_name, None)
+            .await
+            .unwrap();
 
     // Insert
     let id = insert_todo(&runtime, "Original", false);

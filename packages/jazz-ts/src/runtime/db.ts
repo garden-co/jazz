@@ -12,6 +12,7 @@
 
 import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
+import { WorkerBridge } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
@@ -31,6 +32,12 @@ export interface DbConfig {
   env?: string;
   /** User branch name (default: "main") */
   userBranch?: string;
+  /** JWT token for server authentication */
+  jwtToken?: string;
+  /** Admin secret for catalogue sync */
+  adminSecret?: string;
+  /** Database name for OPFS persistence (browser only, default: appId) */
+  dbName?: string;
 }
 
 /**
@@ -87,6 +94,9 @@ export class Db {
   private clients = new Map<string, JazzClient>();
   private config: DbConfig;
   private wasmModule: WasmModule;
+  private workerBridge: WorkerBridge | null = null;
+  private worker: Worker | null = null;
+  private bridgeReady: Promise<void> | null = null;
 
   /**
    * Private constructor - use createDb() factory function.
@@ -106,26 +116,108 @@ export class Db {
   }
 
   /**
+   * Create a Db instance backed by a dedicated worker with OPFS persistence.
+   *
+   * The main thread runs an in-memory WASM runtime.
+   * The worker runs a persistent WASM runtime (OPFS).
+   * WorkerBridge wires them together via postMessage.
+   *
+   * @internal Use createDb() instead — it auto-detects browser.
+   */
+  static async createWithWorker(config: DbConfig): Promise<Db> {
+    const wasmModule = await loadWasmModule();
+    const db = new Db(config, wasmModule);
+
+    // Spawn dedicated worker
+    const worker = new Worker(new URL("../worker/groove-worker.ts", import.meta.url), {
+      type: "module",
+    });
+    db.worker = worker;
+
+    // Wait for worker to load WASM
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Worker WASM load timeout")), 15000);
+      const handler = (event: MessageEvent) => {
+        if (event.data.type === "ready") {
+          clearTimeout(timeout);
+          worker.removeEventListener("message", handler);
+          resolve();
+        } else if (event.data.type === "error") {
+          clearTimeout(timeout);
+          worker.removeEventListener("message", handler);
+          reject(new Error(event.data.message));
+        }
+      };
+      worker.addEventListener("message", handler);
+      worker.addEventListener("error", (e) => {
+        clearTimeout(timeout);
+        reject(new Error(`Worker load error: ${e.message}`));
+      });
+    });
+
+    return db;
+  }
+
+  /**
    * Get or create a JazzClient for the given schema.
    * Synchronous because WASM module is pre-loaded.
+   *
+   * In worker mode, the first call per schema also initializes the
+   * WorkerBridge (async). Subsequent calls are sync.
    */
   private getClient(schema: WasmSchema): JazzClient {
     // Use stringified schema as cache key
     const key = JSON.stringify(schema);
 
     if (!this.clients.has(key)) {
+      // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(this.wasmModule, {
         appId: this.config.appId,
         schema,
         driver: this.config.driver,
-        serverUrl: this.config.serverUrl,
+        // In worker mode, don't connect to server directly — worker handles it
+        serverUrl: this.worker ? undefined : this.config.serverUrl,
         env: this.config.env,
         userBranch: this.config.userBranch,
+        jwtToken: this.config.jwtToken,
+        adminSecret: this.config.adminSecret,
       });
+
+      // In worker mode, set up the bridge for this client
+      if (this.worker && !this.workerBridge) {
+        const bridge = new WorkerBridge(this.worker, client.getRuntime());
+        this.workerBridge = bridge;
+
+        // Initialize worker — store promise so async methods can await it
+        this.bridgeReady = bridge
+          .init({
+            schemaJson: JSON.stringify(schema),
+            appId: this.config.appId,
+            env: this.config.env ?? "dev",
+            userBranch: this.config.userBranch ?? "main",
+            dbName: this.config.dbName ?? this.config.appId,
+            serverUrl: this.config.serverUrl,
+            jwtToken: this.config.jwtToken,
+            adminSecret: this.config.adminSecret,
+          })
+          .then(() => {})
+          .catch((e) => console.error("Worker bridge init error:", e));
+      }
+
       this.clients.set(key, client);
     }
 
     return this.clients.get(key)!;
+  }
+
+  /**
+   * Wait for the worker bridge to be initialized (if in worker mode).
+   * No-op if not using a worker.
+   */
+  private async ensureBridgeReady(): Promise<void> {
+    if (this.bridgeReady) {
+      await this.bridgeReady;
+    }
   }
 
   /**
@@ -168,6 +260,7 @@ export class Db {
     tier: PersistenceTier,
   ): Promise<string> {
     const client = this.getClient(table._schema);
+    await this.ensureBridgeReady();
     const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
     return client.createPersisted(table._table, values, tier);
   }
@@ -208,6 +301,7 @@ export class Db {
     tier: PersistenceTier,
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    await this.ensureBridgeReady();
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     await client.updatePersisted(id, updates, tier);
   }
@@ -244,6 +338,7 @@ export class Db {
     tier: PersistenceTier,
   ): Promise<void> {
     const client = this.getClient(table._schema);
+    await this.ensureBridgeReady();
     await client.deletePersisted(id, tier);
   }
 
@@ -329,14 +424,36 @@ export class Db {
 
   /**
    * Shutdown the Db and release all resources.
-   * Closes all memoized JazzClient connections.
+   * Closes all memoized JazzClient connections and the worker.
    */
   async shutdown(): Promise<void> {
+    // Ensure bridge init has completed before sending shutdown —
+    // otherwise the worker may still be opening OPFS handles
+    await this.ensureBridgeReady();
+
+    // Shutdown worker bridge — waits for OPFS handles to be released
+    if (this.workerBridge && this.worker) {
+      await this.workerBridge.shutdown(this.worker);
+      this.workerBridge = null;
+    }
+
     for (const client of this.clients.values()) {
       await client.shutdown();
     }
     this.clients.clear();
+
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
   }
+}
+
+/**
+ * Check if running in a browser environment with Worker support.
+ */
+function isBrowser(): boolean {
+  return typeof Worker !== "undefined" && typeof window !== "undefined";
 }
 
 /**
@@ -344,6 +461,9 @@ export class Db {
  *
  * This is an **async** factory function that pre-loads the WASM module.
  * After creation, mutations (insert/update/deleteFrom) are synchronous.
+ *
+ * In browser environments, automatically uses a dedicated worker for
+ * OPFS persistence. In Node.js, uses in-memory storage.
  *
  * @param config Database configuration
  * @returns Promise resolving to Db instance ready for queries and mutations
@@ -357,5 +477,8 @@ export class Db {
  * ```
  */
 export async function createDb(config: DbConfig): Promise<Db> {
+  if (isBrowser()) {
+    return Db.createWithWorker(config);
+  }
   return Db.create(config);
 }

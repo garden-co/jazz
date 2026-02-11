@@ -15,7 +15,9 @@ use axum::response::sse::{Event, Sse};
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
-use jazz_rs::{AppContext, AppId, ColumnType, JazzClient, SchemaBuilder, TableSchema};
+use jazz_rs::{
+    AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
+};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -130,7 +132,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
 /// Broadcast current todos to all SSE connections.
 async fn broadcast_todos(state: &AppState) {
     let query = QueryBuilder::new("todos").build();
-    if let Ok(rows) = state.client.query(query).await {
+    if let Ok(rows) = state.client.query(query, None).await {
         let todos: Vec<Todo> = rows
             .iter()
             .filter_map(|(id, values)| row_to_todo(*id, values))
@@ -148,7 +150,7 @@ async fn todos_live(
     let query = QueryBuilder::new("todos").build();
     let initial_todos: Vec<Todo> = state
         .client
-        .query(query)
+        .query(query, None)
         .await
         .map(|rows| {
             rows.iter()
@@ -177,7 +179,7 @@ async fn todos_live(
 
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let query = QueryBuilder::new("todos").build();
-    match state.client.query(query).await {
+    match state.client.query(query, None).await {
         Ok(rows) => {
             let todos: Vec<Todo> = rows
                 .iter()
@@ -247,7 +249,7 @@ async fn update_todo(
         Ok(()) => {
             broadcast_todos(&state).await;
             let query = QueryBuilder::new("todos").build();
-            match state.client.query(query).await {
+            match state.client.query(query, None).await {
                 Ok(rows) => {
                     for (oid, values) in &rows {
                         if *oid.uuid() == id {
@@ -463,7 +465,7 @@ async fn test_local_persistence() {
 
         // Verify it exists
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
 
@@ -488,7 +490,7 @@ async fn test_local_persistence() {
 
         // Query todos - should have the one we created
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let results = client.query(query, None).await.unwrap();
 
         assert_eq!(
             results.len(),
@@ -695,7 +697,7 @@ async fn test_server_resync() {
 
         // Verify it exists locally
         let query = QueryBuilder::new("todos").build();
-        let results = client.query(query).await.unwrap();
+        let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
         // Wait for sync to server
@@ -708,7 +710,7 @@ async fn test_server_resync() {
     std::fs::remove_dir_all(&data_path).unwrap();
     std::fs::create_dir_all(&data_path).unwrap();
 
-    // 4. New client should resync from server via subscribe.
+    // 4. New client should resync from server via one-shot query with EdgeServer tier.
     // No admin_secret — this client's local catalogue sync will be rejected by the
     // server (CatalogueWriteDenied / SessionRequired), which is fine: the server
     // already has the schema from Client 1. The JWT provides a session so the
@@ -726,41 +728,18 @@ async fn test_server_resync() {
         };
         let client = JazzClient::connect(context).await.unwrap();
 
-        // Subscribe and wait for data to arrive from server
-        // The subscribe triggers the server to send matching data
+        // One-shot query with EdgeServer settled tier — waits for the server's
+        // QuerySettled response before resolving, ensuring synced data arrives.
         let query = QueryBuilder::new("todos").build();
-        eprintln!("DEBUG: Subscribing to todos query");
-        let mut stream = client.subscribe(query).await.unwrap();
-        eprintln!("DEBUG: Subscription created, waiting for data...");
+        let results = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.query(query, Some(PersistenceTier::EdgeServer)),
+        )
+        .await
+        .expect("Query with EdgeServer tier should resolve within 5s")
+        .expect("Query should succeed");
 
-        // Wait for first delta with any added rows (with timeout)
-        // This validates the subscribe-triggers-sync behavior
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(delta) = stream.next().await {
-                    eprintln!(
-                        "DEBUG: Received delta with {} added, {} removed",
-                        delta.added.len(),
-                        delta.removed.len()
-                    );
-                    // Check if we got any added rows (the sync worked)
-                    if !delta.added.is_empty() {
-                        return true;
-                    }
-                } else {
-                    eprintln!("DEBUG: Stream ended");
-                    // Stream ended
-                    return false;
-                }
-            }
-        })
-        .await;
-        eprintln!("DEBUG: Result = {:?}", result);
-
-        assert!(
-            result.is_ok() && result.unwrap(),
-            "Todo should resync from server via subscribe"
-        );
+        assert_eq!(results.len(), 1, "Todo should resync from server");
 
         client.shutdown().await.unwrap();
     }

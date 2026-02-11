@@ -4,7 +4,11 @@
 /// Adapted from https://github.com/m-ou-se/atomic-wait
 use crate::sync::atomic::AtomicU32;
 
-#[cfg(all(target_os = "linux", not(feature = "shuttle"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "linux",
+    not(feature = "shuttle"),
+    not(target_arch = "wasm32")
+))]
 mod platform {
     use core::sync::atomic::AtomicU32;
     #[inline]
@@ -65,7 +69,11 @@ mod platform {
     }
 }
 
-#[cfg(all(target_os = "macos", not(feature = "shuttle"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "macos",
+    not(feature = "shuttle"),
+    not(target_arch = "wasm32")
+))]
 /// We don't do anything for macOS, just to make sure it compiles and correct.
 mod platform {
     #[inline]
@@ -99,7 +107,11 @@ mod platform {
     }
 }
 
-#[cfg(all(target_os = "windows", not(feature = "shuttle"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    target_os = "windows",
+    not(feature = "shuttle"),
+    not(target_arch = "wasm32")
+))]
 mod platform {
     use core::sync::atomic::AtomicU32;
     use windows_sys::Win32::System::Threading::{

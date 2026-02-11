@@ -20,7 +20,6 @@
 //! - Safari 15.2+ (partial)
 //! - Edge 102+
 
-
 use wasm_bindgen::prelude::*;
 use web_sys::FileSystemSyncAccessHandle;
 
@@ -74,10 +73,9 @@ impl OpfsVfs {
 
         // Get synchronous access handle
         let sync_promise = file_handle.create_sync_access_handle();
-        let handle: FileSystemSyncAccessHandle =
-            wasm_bindgen_futures::JsFuture::from(sync_promise)
-                .await?
-                .unchecked_into();
+        let handle: FileSystemSyncAccessHandle = wasm_bindgen_futures::JsFuture::from(sync_promise)
+            .await?
+            .unchecked_into();
 
         let size = handle.get_size().map_err(|e| e)? as usize;
         Ok(Self {
@@ -130,10 +128,7 @@ impl VfsImpl for OpfsVfs {
         let new_size = offset + size;
 
         // Extend file if needed
-        let current_size = self
-            .handle
-            .get_size()
-            .expect("OPFS get_size failed") as usize;
+        let current_size = self.handle.get_size().expect("OPFS get_size failed") as usize;
         if current_size < new_size {
             self.handle
                 .truncate_with_u32(new_size as u32)

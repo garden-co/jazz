@@ -1,26 +1,30 @@
-//! HTTP/SSE transport protocol types for Jazz.
+//! Binary HTTP streaming transport protocol types for Jazz.
 //!
 //! This crate defines the wire format for communication between Jazz clients
-//! and servers over HTTP and Server-Sent Events (SSE).
+//! and servers over HTTP with length-prefixed binary streaming.
 //!
 //! # Protocol Overview
 //!
-//! - Clients connect to `/events` (SSE) for all subscription updates
+//! - Clients connect to `/events` for a long-lived binary stream (length-prefixed frames)
 //! - All client→server communication flows through a single `/sync` endpoint
 //! - Session is bound at connection time via HTTP headers
+//!
+//! # Wire Format
+//!
+//! Each frame: `[4 bytes: u32 big-endian length][N bytes: JSON-encoded ServerEvent]`
 //!
 //! # Endpoints
 //!
 //! | Route | Method | Description |
 //! |-------|--------|-------------|
-//! | `/events` | GET | SSE stream for all subscription updates |
+//! | `/events` | GET | Binary streaming for all subscription updates |
 //! | `/sync` | POST | Unified sync endpoint for all SyncPayload variants |
 
 use serde::{Deserialize, Serialize};
 
 use groove::sync_manager::{ClientId, QueryId, SyncPayload};
 
-/// Unique identifier for a client's SSE connection.
+/// Unique identifier for a client's streaming connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub u64);
 
@@ -42,10 +46,10 @@ pub struct SyncPayloadRequest {
 }
 
 // ============================================================================
-// Server -> Client Events (SSE)
+// Server -> Client Events
 // ============================================================================
 
-/// Event sent over SSE stream.
+/// Event sent over the binary streaming connection.
 ///
 /// Note: Query results are NOT sent here directly. The server syncs the
 /// underlying objects, and the client's local QueryManager handles query
@@ -164,24 +168,36 @@ impl ErrorResponse {
 }
 
 // ============================================================================
-// SSE Encoding Helpers
+// Binary Frame Encoding/Decoding Helpers
 // ============================================================================
 
 impl ServerEvent {
-    /// Encode as SSE data line.
+    /// Encode as a length-prefixed binary frame.
     ///
-    /// Returns a string in the format: `data: {json}\n\n`
-    pub fn to_sse_data(&self) -> String {
-        let json = serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string());
-        format!("data: {}\n\n", json)
+    /// Format: `[4 bytes: u32 big-endian length][N bytes: JSON]`
+    pub fn encode_frame(&self) -> Vec<u8> {
+        let json = serde_json::to_vec(self).unwrap_or_default();
+        let len = (json.len() as u32).to_be_bytes();
+        let mut buf = Vec::with_capacity(4 + json.len());
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(&json);
+        buf
     }
 
-    /// Parse from SSE data line.
+    /// Decode a single frame from a buffer.
     ///
-    /// Expects input in the format: `data: {json}` (without trailing newlines)
-    pub fn from_sse_data(line: &str) -> Option<Self> {
-        let json = line.strip_prefix("data: ")?;
-        serde_json::from_str(json).ok()
+    /// Returns `Some((event, bytes_consumed))` if a complete frame was available,
+    /// or `None` if the buffer doesn't contain a complete frame yet.
+    pub fn decode_frame(buf: &[u8]) -> Option<(Self, usize)> {
+        if buf.len() < 4 {
+            return None;
+        }
+        let len = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
+        if buf.len() < 4 + len {
+            return None;
+        }
+        let event: ServerEvent = serde_json::from_slice(&buf[4..4 + len]).ok()?;
+        Some((event, 4 + len))
     }
 }
 
@@ -190,25 +206,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_server_event_sse_encoding() {
+    fn test_server_event_frame_roundtrip() {
         let event = ServerEvent::Connected {
             connection_id: ConnectionId(42),
             client_id: "test-client-id".to_string(),
         };
 
-        let sse = event.to_sse_data();
-        assert!(sse.starts_with("data: "));
-        assert!(sse.ends_with("\n\n"));
-        assert!(sse.contains("Connected"));
-        assert!(sse.contains("42"));
-        assert!(sse.contains("test-client-id"));
+        let frame = event.encode_frame();
+        assert!(frame.len() > 4);
+
+        let (decoded, consumed) = ServerEvent::decode_frame(&frame).unwrap();
+        assert_eq!(consumed, frame.len());
+        assert!(matches!(decoded, ServerEvent::Connected { .. }));
     }
 
     #[test]
-    fn test_server_event_sse_decoding() {
-        let line = r#"data: {"type":"Heartbeat"}"#;
-        let event = ServerEvent::from_sse_data(line).unwrap();
-        assert!(matches!(event, ServerEvent::Heartbeat));
+    fn test_heartbeat_frame_roundtrip() {
+        let event = ServerEvent::Heartbeat;
+        let frame = event.encode_frame();
+
+        let (decoded, consumed) = ServerEvent::decode_frame(&frame).unwrap();
+        assert_eq!(consumed, frame.len());
+        assert!(matches!(decoded, ServerEvent::Heartbeat));
+    }
+
+    #[test]
+    fn test_decode_frame_incomplete() {
+        // Too short for length prefix
+        assert!(ServerEvent::decode_frame(&[0, 0]).is_none());
+
+        // Length says 100 bytes but only 4 available
+        let buf = [0, 0, 0, 100, 1, 2, 3, 4];
+        assert!(ServerEvent::decode_frame(&buf).is_none());
     }
 
     #[test]

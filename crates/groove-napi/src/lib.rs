@@ -370,7 +370,7 @@ impl SyncSender for NapiSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Ok(cb) = self.callback.lock()
             && let Some(ref tsfn) = *cb
-            && let Ok(json) = serde_json::to_string(&message.payload)
+            && let Ok(json) = serde_json::to_string(&message)
         {
             tsfn.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
         }
@@ -581,7 +581,7 @@ impl NapiRuntime {
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.query_with_settled_tier(query, session, tier)
+            core.query(query, session, tier)
         };
 
         // Create a deferred/promise pair
@@ -826,6 +826,33 @@ impl NapiRuntime {
         Ok(())
     }
 
+    /// Called by JS when a sync message arrives from a client (not a server).
+    #[napi(js_name = "onSyncMessageReceivedFromClient")]
+    pub fn on_sync_message_received_from_client(
+        &self,
+        client_id: String,
+        message_json: String,
+    ) -> napi::Result<()> {
+        let uuid = uuid::Uuid::parse_str(&client_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let payload: SyncPayload = serde_json::from_str(&message_json)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
+
+        let entry = InboxEntry {
+            source: Source::Client(cid),
+            payload,
+        };
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.park_sync_message(entry);
+        Ok(())
+    }
+
     #[napi(js_name = "onSyncMessageToSend")]
     pub fn on_sync_message_to_send(
         &self,
@@ -865,6 +892,35 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.add_client(client_id, None);
         Ok(client_id.0.to_string())
+    }
+
+    /// Set a client's role ("user", "admin", or "peer").
+    #[napi(js_name = "setClientRole")]
+    pub fn set_client_role(&self, client_id: String, role: String) -> napi::Result<()> {
+        use groove::sync_manager::ClientRole;
+
+        let uuid = uuid::Uuid::parse_str(&client_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
+        let cid = ClientId(uuid);
+
+        let client_role = match role.as_str() {
+            "user" => ClientRole::User,
+            "admin" => ClientRole::Admin,
+            "peer" => ClientRole::Peer,
+            _ => {
+                return Err(napi::Error::from_reason(format!(
+                    "Invalid role '{}'. Must be 'user', 'admin', or 'peer'.",
+                    role
+                )));
+            }
+        };
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.set_client_role_by_name(cid, client_role);
+        Ok(())
     }
 
     // =========================================================================
