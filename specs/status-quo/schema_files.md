@@ -58,6 +58,7 @@ jazz build [--schema-dir ./schema] [--ts]
 ```
 
 Algorithm:
+
 1. Load and validate all `schema_v*_*.sql` files (verify content hash matches filename)
 2. Validate sequential versions
 3. Compute hash of `current.sql`
@@ -80,6 +81,7 @@ table("todos", {
 ```
 
 Migration:
+
 ```typescript
 import { migrate, col } from "jazz-ts";
 
@@ -122,26 +124,26 @@ Only `current.sql`/`current.ts` can conflict in git, which is resolved by the de
 
 ## API Summary
 
-| Function | Location |
-|----------|----------|
-| `parse_schema(sql)` | `sql.rs:556` |
-| `parse_lens(sql)` | `sql.rs:582` |
-| `schema_to_sql(schema)` | `sql.rs:630` |
-| `lens_to_sql(transform)` | `sql.rs:656+` |
-| `SchemaDirectory` | `files.rs:105-372` |
-| `diff_schemas(old, new)` | `diff.rs:80` |
+| Function                            | Location           |
+| ----------------------------------- | ------------------ |
+| `parse_schema(sql)`                 | `sql.rs:556`       |
+| `parse_lens(sql)`                   | `sql.rs:582`       |
+| `schema_to_sql(schema)`             | `sql.rs:630`       |
+| `lens_to_sql(transform)`            | `sql.rs:656+`      |
+| `SchemaDirectory`                   | `files.rs:105-372` |
+| `diff_schemas(old, new)`            | `diff.rs:80`       |
 | `parse_versioned_schema_filename()` | `files.rs:379-414` |
-| `parse_migration_filename()` | `files.rs:422-492` |
+| `parse_migration_filename()`        | `files.rs:422-492` |
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `crates/groove/src/schema_manager/sql.rs` | SQL parsing/generation (700+ lines) |
-| `crates/groove/src/schema_manager/files.rs` | File convention API (940+ lines) |
-| `crates/groove/src/schema_manager/diff.rs` | Schema diffing (150+ lines) |
-| `crates/jazz-cli/src/commands/build.rs` | CLI build command (370+ lines) |
-| `packages/jazz-ts/src/cli.ts` | TypeScript CLI (195 lines) |
-| `packages/jazz-ts/src/dsl.ts` | TypeScript DSL (180+ lines) |
-| `packages/jazz-ts/src/sql-gen.ts` | TS → SQL generation |
-| `packages/jazz-ts/src/codegen/index.ts` | TS codegen (app.ts) |
+| File                                        | Purpose                             |
+| ------------------------------------------- | ----------------------------------- |
+| `crates/groove/src/schema_manager/sql.rs`   | SQL parsing/generation (700+ lines) |
+| `crates/groove/src/schema_manager/files.rs` | File convention API (940+ lines)    |
+| `crates/groove/src/schema_manager/diff.rs`  | Schema diffing (150+ lines)         |
+| `crates/jazz-cli/src/commands/build.rs`     | CLI build command (370+ lines)      |
+| `packages/jazz-ts/src/cli.ts`               | TypeScript CLI (195 lines)          |
+| `packages/jazz-ts/src/dsl.ts`               | TypeScript DSL (180+ lines)         |
+| `packages/jazz-ts/src/sql-gen.ts`           | TS → SQL generation                 |
+| `packages/jazz-ts/src/codegen/index.ts`     | TS codegen (app.ts)                 |

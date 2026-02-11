@@ -15,6 +15,7 @@ Currently, any client can push schema/lens objects to the server via catalogue s
 - Draft lenses could be pushed to cause server errors
 
 **Required:** Schema/lens pushes should require an **app admin token** separate from the normal session token. This token would:
+
 - Be issued to developers/operators, not end users
 - Be required for `type=catalogue_schema` and `type=catalogue_lens` objects
 - Be validated server-side before accepting catalogue updates
@@ -55,6 +56,7 @@ Catalogue tests call `process_catalogue_update()` directly rather than pumping t
 **Priority: Low**
 
 Two constructors with different behaviors:
+
 1. `QueryManager::new()` — auto-subscribes to all object updates
 2. `QueryManager::new_with_schema_context()` — does NOT auto-subscribe because `handle_object_update()` doesn't support multi-schema decoding
 

@@ -199,10 +199,9 @@ impl JazzClient {
 
                                         // Read complete frames from buffer
                                         while buffer.len() >= 4 {
-                                            let len = u32::from_be_bytes(
-                                                buffer[..4].try_into().unwrap(),
-                                            )
-                                                as usize;
+                                            let len =
+                                                u32::from_be_bytes(buffer[..4].try_into().unwrap())
+                                                    as usize;
                                             if buffer.len() < 4 + len {
                                                 break; // Incomplete frame
                                             }

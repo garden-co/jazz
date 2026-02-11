@@ -598,7 +598,6 @@ impl WasmRuntime {
         core.batched_tick();
     }
 
-
     /// Add a client connection (for server-side use in tests).
     #[wasm_bindgen(js_name = addClient)]
     pub fn add_client(&self) -> String {

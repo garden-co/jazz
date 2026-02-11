@@ -8,11 +8,11 @@ The central design problem: mutations need to be synchronous (the UI shouldn't w
 
 RuntimeCore is generic over three platform traits. This is how the same core logic runs on native (Tokio), browser (WASM), and tests (no-op) without any `#[cfg]` branching in the business logic:
 
-| Trait | Purpose | Implementations |
-|-------|---------|-----------------|
-| `Storage` | Synchronous data persistence (objects, blobs, indices) | MemoryStorage, BfTreeStorage |
-| `Scheduler` | Async batched_tick scheduling with debounce | TokioScheduler, WasmScheduler, NoopScheduler |
-| `SyncSender` | Network message dispatch | CallbackSyncSender, JsSyncSender, VecSyncSender |
+| Trait        | Purpose                                                | Implementations                                 |
+| ------------ | ------------------------------------------------------ | ----------------------------------------------- |
+| `Storage`    | Synchronous data persistence (objects, blobs, indices) | MemoryStorage, BfTreeStorage                    |
+| `Scheduler`  | Async batched_tick scheduling with debounce            | TokioScheduler, WasmScheduler, NoopScheduler    |
+| `SyncSender` | Network message dispatch                               | CallbackSyncSender, JsSyncSender, VecSyncSender |
 
 > `crates/groove/src/runtime_core.rs:216-237` (RuntimeCore definition)
 > `crates/groove/src/runtime_core.rs:47-61` (Scheduler and SyncSender traits)
@@ -79,6 +79,7 @@ Both platform implementations use a boolean flag to prevent overlapping batched_
 ## CRUD Operation Flow
 
 Each CRUD method (insert, update, delete) on RuntimeCore:
+
 1. Calls SchemaManager method (which synchronously persists via Storage)
 2. Calls `immediate_tick()` to settle subscriptions and queue sync messages
 3. batched_tick is scheduled to send queued sync messages
@@ -94,9 +95,9 @@ Tests use `NoopScheduler` (no-op scheduling) and `VecSyncSender` (collects messa
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `groove/src/runtime_core.rs` | RuntimeCore with immediate_tick/batched_tick |
-| `groove/src/storage/mod.rs` | Storage trait (replaces IoHandler for persistence) |
-| `groove-tokio/src/lib.rs` | TokioScheduler and TokioRuntime |
-| `groove-wasm/src/runtime.rs` | WasmScheduler and WasmRuntime |
+| File                         | Purpose                                            |
+| ---------------------------- | -------------------------------------------------- |
+| `groove/src/runtime_core.rs` | RuntimeCore with immediate_tick/batched_tick       |
+| `groove/src/storage/mod.rs`  | Storage trait (replaces IoHandler for persistence) |
+| `groove-tokio/src/lib.rs`    | TokioScheduler and TokioRuntime                    |
+| `groove-wasm/src/runtime.rs` | WasmScheduler and WasmRuntime                      |

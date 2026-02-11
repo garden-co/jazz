@@ -37,6 +37,7 @@ All operations are declarative and auto-invertible — the backward transform is
 > `crates/groove/src/schema_manager/lens.rs:24-55` (LensOp), `117-168` (LensTransform), `172-338` (Lens)
 
 Key properties:
+
 - `Lens::object_id()` uses UUIDv5(NAMESPACE_DNS, source_hash || target_hash) — deterministic
 - `translate_column()` for index lookups across schema versions
 - `apply()` transforms row values according to lens operations
@@ -56,6 +57,7 @@ Auto-generated lenses may contain **draft** operations — uncertain transformat
 Tracks current schema, environment, user branch, live schemas (reachable via lenses), and pending schemas (awaiting lens paths).
 
 Key capabilities:
+
 - `lens_path()` — BFS from source to current, multi-hop support
 - `validate()` — ensures no draft lenses in paths to live schemas
 - `try_activate_pending()` — activates pending schemas when lens paths become available
@@ -123,16 +125,17 @@ Update a row in an old schema branch: load → apply lens to current → apply u
 
 Schemas and lenses are themselves Jazz objects — they sync between nodes like any other data. When a client connects to a server, its schema and lens objects propagate through the normal sync protocol. The server discovers what schemas exist by observing these catalogue objects, and can then serve queries for any known schema version.
 
-| Type | ObjectId | Content | Key Metadata |
-|------|----------|---------|-------------|
-| Schema | UUIDv5(schema_hash) | Binary-encoded Schema | `type=catalogue_schema`, `app_id`, `schema_hash` |
-| Lens | UUIDv5(source \|\| target) | Binary-encoded LensTransform | `type=catalogue_lens`, `app_id`, `source_hash`, `target_hash` |
+| Type   | ObjectId                   | Content                      | Key Metadata                                                  |
+| ------ | -------------------------- | ---------------------------- | ------------------------------------------------------------- |
+| Schema | UUIDv5(schema_hash)        | Binary-encoded Schema        | `type=catalogue_schema`, `app_id`, `schema_hash`              |
+| Lens   | UUIDv5(source \|\| target) | Binary-encoded LensTransform | `type=catalogue_lens`, `app_id`, `source_hash`, `target_hash` |
 
 > `crates/groove/src/schema_manager/manager.rs:430-479` (persist_schema, persist_lens)
 
 ### Catalogue Processing
 
 `process_catalogue_update()` handles incoming schema/lens objects:
+
 - Verifies app_id match
 - Schemas: added to known_schemas, pending if no lens path yet
 - Lenses: registered, triggers pending schema activation
@@ -157,6 +160,7 @@ Deterministic encoding for schemas and lenses with version byte prefix for forwa
 ## Test Coverage
 
 29 context tests + E2E integration tests including:
+
 - `e2e_catalogue_sync_with_data_query`
 - `e2e_two_clients_server_schema_sync`
 - `copy_on_write_update`

@@ -9,6 +9,7 @@ Remaining gaps in test coverage.
 **Priority: Medium**
 
 Browser tests cover basic CRUD and persistence but lack:
+
 - Permission policies (ReBAC) in browser context
 - Multi-client scenarios (concurrent inserts, conflict resolution)
 - Scope-based access control
@@ -19,6 +20,7 @@ Browser tests cover basic CRUD and persistence but lack:
 **Priority: Low**
 
 No explicit RuntimeCore test that:
+
 1. Creates a schema
 2. Inserts a row through the client API (auto-generates realistic metadata)
 3. Verifies unauthorized clients can't access it
@@ -30,6 +32,7 @@ The bug is fixed via role-based auth, but a regression test at RuntimeCore level
 **Priority: Low**
 
 ~91 QueryManager tests remain at a level below RuntimeCore. Some are valuable for internal logic verification, but candidates for consolidation into E2E RuntimeCore scenarios include:
+
 - `insert_and_query()` patterns that could be E2E'd with actual message pumping
 - Basic CRUD tests that duplicate what RuntimeCore tests already cover
 

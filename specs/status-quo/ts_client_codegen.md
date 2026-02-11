@@ -15,16 +15,16 @@ schema/current.ts ──► jazz-ts build ──► schema/app.ts (generated)
 
 ## Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Schema source | WasmSchema JSON | Types already resolved, consistent with runtime |
-| Relations | `col.ref('table')` | All refs are UUIDs, simple syntax |
-| Relation naming | Strip `_id` suffix | `parent_id` → `.include({ parent })` |
-| Reverse relations | `tableViaColumn` | `blockersViaBlocking` — auto-derived |
-| Output | Single `schema/app.ts` | Simple imports, easy to understand |
-| Subscription shape | Full state + delta | `{ all, added, updated, removed }` |
-| DB interface | Generic + schema | `createDb(config)`, `db.all(query)` |
-| Mutations | Sync (WASM pre-loaded) | `createDb()` is async, mutations are sync |
+| Decision           | Choice                 | Rationale                                       |
+| ------------------ | ---------------------- | ----------------------------------------------- |
+| Schema source      | WasmSchema JSON        | Types already resolved, consistent with runtime |
+| Relations          | `col.ref('table')`     | All refs are UUIDs, simple syntax               |
+| Relation naming    | Strip `_id` suffix     | `parent_id` → `.include({ parent })`            |
+| Reverse relations  | `tableViaColumn`       | `blockersViaBlocking` — auto-derived            |
+| Output             | Single `schema/app.ts` | Simple imports, easy to understand              |
+| Subscription shape | Full state + delta     | `{ all, added, updated, removed }`              |
+| DB interface       | Generic + schema       | `createDb(config)`, `db.all(query)`             |
+| Mutations          | Sync (WASM pre-loaded) | `createDb()` is async, mutations are sync       |
 
 ## Part 1: Schema DSL Extension
 
@@ -141,16 +141,16 @@ The SubscriptionManager preserves object identity for unchanged items: if a new 
 
 ## Test Coverage
 
-| Suite | Tests | Scope |
-|-------|-------|-------|
-| sql-gen.test.ts | 11 | DSL to SQL generation |
-| codegen.test.ts | 45 | Schema reader, types, relations, query builders |
-| query-adapter.test.ts | 25 | Query translation |
-| row-transformer.test.ts | 16 | Row transformation |
-| value-converter.test.ts | 22 | Value conversion |
-| subscription-manager.test.ts | 10 | Delta management |
-| worker-bridge.test.ts | 10+ | Browser E2E (Worker + OPFS + sync) |
-| **Total** | **129+ unit + browser E2E** | |
+| Suite                        | Tests                       | Scope                                           |
+| ---------------------------- | --------------------------- | ----------------------------------------------- |
+| sql-gen.test.ts              | 11                          | DSL to SQL generation                           |
+| codegen.test.ts              | 45                          | Schema reader, types, relations, query builders |
+| query-adapter.test.ts        | 25                          | Query translation                               |
+| row-transformer.test.ts      | 16                          | Row transformation                              |
+| value-converter.test.ts      | 22                          | Value conversion                                |
+| subscription-manager.test.ts | 10                          | Delta management                                |
+| worker-bridge.test.ts        | 10+                         | Browser E2E (Worker + OPFS + sync)              |
+| **Total**                    | **129+ unit + browser E2E** |                                                 |
 
 ## Example Application
 

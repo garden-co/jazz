@@ -58,6 +58,7 @@ All relevant types (Query, Condition, Value, etc.) implement Serialize/Deseriali
 ## Client subscribe_with_sync()
 
 `subscribe_with_sync(query, session, settled_tier)`:
+
 1. Creates local subscription via `subscribe_with_session()`
 2. Sends `QuerySubscription` to all connected servers
 3. Returns `QuerySubscriptionId`
