@@ -44,6 +44,36 @@ export function getErrorMessage(error: unknown) {
 export class SQLiteTransactionAsync implements DBTransactionInterfaceAsync {
   constructor(private readonly tx: SQLiteDatabaseDriverAsync) {}
 
+  async upsertCoValue(
+    id: RawCoID,
+    header?: CoValueHeader,
+  ): Promise<number | undefined> {
+    if (!header) {
+      const row = await this.tx.get<{ rowID: number }>(
+        "SELECT rowID FROM coValues WHERE id = ?",
+        [id],
+      );
+      return row?.rowID;
+    }
+
+    const result = await this.tx.get<{ rowID: number }>(
+      `INSERT INTO coValues (id, header) VALUES (?, ?)
+       ON CONFLICT(id) DO NOTHING
+       RETURNING rowID`,
+      [id, JSON.stringify(header)],
+    );
+
+    if (!result) {
+      const row = await this.tx.get<{ rowID: number }>(
+        "SELECT rowID FROM coValues WHERE id = ?",
+        [id],
+      );
+      return row?.rowID;
+    }
+
+    return result.rowID;
+  }
+
   async getSingleCoValueSession(
     coValueRowId: number,
     sessionID: SessionID,
@@ -251,8 +281,8 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     }
 
     const result = await this.db.get<{ rowID: number }>(
-      `INSERT INTO coValues (id, header) VALUES (?, ?) 
-       ON CONFLICT(id) DO NOTHING 
+      `INSERT INTO coValues (id, header) VALUES (?, ?)
+       ON CONFLICT(id) DO NOTHING
        RETURNING rowID`,
       [id, JSON.stringify(header)],
     );
