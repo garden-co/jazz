@@ -16,7 +16,7 @@ import {
   FileStreamSchema,
   CoVectorSchema,
   PlainTextSchema,
-  SchemaUnion,
+  schemaUnionClassFromDiscriminator,
   isCoValueClass,
   CoVector,
 } from "../../../internal.js";
@@ -147,7 +147,9 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const coValueClass = CoRichText;
     return new RichTextSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoDiscriminatedUnion") {
-    const coValueClass = SchemaUnion.Of(schemaUnionDiscriminatorFor(schema));
+    const coValueClass = schemaUnionClassFromDiscriminator(
+      schemaUnionDiscriminatorFor(schema),
+    );
     const coValueSchema = new CoDiscriminatedUnionSchema(schema, coValueClass);
     return coValueSchema as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "Group") {

@@ -81,13 +81,6 @@ export class CoList<out Item = any>
   declare $jazz: CoListJazzApi<this>;
   declare $isLoaded: true;
 
-  /**
-   * @ignore
-   * @deprecated Use UPPERCASE `CoList.Of` instead! */
-  static of(..._args: never): never {
-    throw new Error("Can't use Array.of with CoLists");
-  }
-
   /** @category Type Helpers */
   declare [TypeSym]: "CoList";
   static {

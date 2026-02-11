@@ -113,26 +113,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static coValueSchema?: CoreCoValueSchema;
   declare $jazz: CoFeedJazzApi<this>;
 
-  /**
-   * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema.
-   *
-   * @example
-   * ```ts
-   * const Animal = co.map({ name: z.string() });
-   * class ColorFeed extends CoFeed.Of(z.string()) {}
-   * class AnimalFeed extends CoFeed.Of(Animal) {}
-   * ```
-   *
-   * @category Declaration
-   */
-  static Of<Item>(item: Item): typeof CoFeed<Item> {
-    return class CoFeedOf extends CoFeed<Item> {
-      static override coValueSchema = createCoreCoFeedSchema(
-        item as any,
-      ) as CoreCoFeedSchema;
-    };
-  }
-
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
   static {
