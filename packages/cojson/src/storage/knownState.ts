@@ -89,6 +89,20 @@ export class StorageKnownState {
       requests.add(req);
     });
   }
+
+  deleteKnownState(id: string) {
+    this.knownStates.delete(id);
+
+    for (const request of this.waitForSyncRequests.get(id) || []) {
+      request.resolve();
+    }
+    this.waitForSyncRequests.delete(id);
+  }
+
+  clear() {
+    this.knownStates.clear();
+    this.waitForSyncRequests.clear();
+  }
 }
 
 function isInSync(

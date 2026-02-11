@@ -564,11 +564,13 @@ export class StorageApiAsync implements StorageAPI {
 
   onCoValueUnmounted(id: RawCoID): void {
     this.inMemoryCoValues.delete(id);
+    this.knownStates.deleteKnownState(id);
   }
 
   close() {
     this.deletedCoValuesEraserScheduler?.dispose();
     this.inMemoryCoValues.clear();
+    this.knownStates.clear();
     return this.storeQueue.close();
   }
 }
