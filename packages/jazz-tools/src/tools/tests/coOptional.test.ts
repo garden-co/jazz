@@ -6,10 +6,11 @@ describe("co.optional", () => {
   beforeEach(async () => {
     await setupJazzTestSync();
 
-    await createJazzTestAccount({
+    const account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
       creationProps: { name: "Hermes Puggington" },
     });
+    account.$jazz.set("root", {});
   });
 
   test("can use co.optional with CoValue schemas as values", () => {

@@ -12,8 +12,6 @@ export * as z from "./implementation/zodSchema/zodReExport.js";
 
 export type { CoValue, ID } from "./internal.js";
 
-export { Encoders, coField } from "./internal.js";
-
 export { Inbox, InboxSender } from "./internal.js";
 
 export { Group } from "./internal.js";

@@ -16,7 +16,6 @@ import {
   RefsToResolveStrict,
   Resolved,
   Schema,
-  SchemaFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -27,13 +26,10 @@ import {
   AnonymousJazzAgent,
   ItemsSym,
   Ref,
-  SchemaInit,
   accessChildByKey,
-  coField,
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
-  isSchemaDescriptorValue,
   isRefEncoded,
   loadCoValueWithoutMe,
   makeRefs,
@@ -45,6 +41,10 @@ import {
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 import {
+  CoreCoListSchema,
+  createCoreCoListSchema,
+} from "../implementation/zodSchema/schemaTypes/CoListSchema.js";
+import {
   executeValidation,
   resolveValidationMode,
   type LocalValidationMode,
@@ -54,6 +54,7 @@ import {
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
+import { resolveSchemaField } from "../implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -81,20 +82,18 @@ export class CoList<out Item = any>
   extends Array<Item>
   implements ReadonlyArray<Item>, CoValue
 {
+  static coValueSchema?: CoreCoValueSchema;
   declare $jazz: CoListJazzApi<this>;
   declare $isLoaded: true;
 
   /**
-   * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.
+   * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema.
    *
    * @example
    * ```ts
-   * class ColorList extends CoList.Of(
-   *   coField.string
-   * ) {}
-   * class AnimalList extends CoList.Of(
-   *   coField.ref(Animal)
-   * ) {}
+   * const Animal = co.map({ name: z.string() });
+   * class ColorList extends CoList.Of(z.string()) {}
+   * class AnimalList extends CoList.Of(Animal) {}
    * ```
    *
    * @category Declaration
@@ -102,7 +101,9 @@ export class CoList<out Item = any>
   static Of<Item>(item: Item): typeof CoList<Item> {
     // TODO: cache superclass for item class
     return class CoListOf extends CoList<Item> {
-      [coField.items] = item;
+      static override coValueSchema = createCoreCoListSchema(
+        item as any,
+      ) as CoreCoListSchema;
     };
   }
 
@@ -121,10 +122,6 @@ export class CoList<out Item = any>
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
-  /** @internal */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static _schema: any;
-
   static get [Symbol.species]() {
     return Array;
   }
@@ -141,7 +138,11 @@ export class CoList<out Item = any>
       );
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoListJazzApi(proxy, () => options.fromRaw, coListSchema),
+          value: new CoListJazzApi(
+            proxy,
+            () => options.fromRaw,
+            coListSchema as CoreCoListSchema,
+          ),
           enumerable: false,
         },
         $isLoaded: { value: true, enumerable: false },
@@ -189,7 +190,7 @@ export class CoList<out Item = any>
     const coListSchema = assertCoValueSchema(
       this as unknown as typeof CoList,
       "create",
-    );
+    ) as CoreCoListSchema;
     const validationMode = resolveValidationMode(
       options && "validation" in options ? options.validation : undefined,
     );
@@ -208,17 +209,18 @@ export class CoList<out Item = any>
 
     Object.defineProperties(instance, {
       $jazz: {
-        value: new CoListJazzApi(instance, () => raw, this.coValueSchema),
+        value: new CoListJazzApi(instance, () => raw, coListSchema),
         enumerable: false,
       },
       $isLoaded: { value: true, enumerable: false },
     });
 
     const initMeta = firstComesWins ? { fww: "init" } : undefined;
+    const itemDescriptor = instance.$jazz.getItemsDescriptor();
     const raw = owner.$jazz.raw.createList(
       toRawItems(
         items,
-        instance.$jazz.schema[ItemsSym],
+        itemDescriptor,
         owner,
         firstComesWins,
         uniqueness?.uniqueness,
@@ -235,7 +237,7 @@ export class CoList<out Item = any>
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[] {
-    const itemDescriptor = this.$jazz.schema[ItemsSym] as Schema;
+    const itemDescriptor = this.$jazz.getItemsDescriptor();
     if (itemDescriptor === "json") {
       return this.$jazz.raw.asArray();
     } else if ("encoded" in itemDescriptor) {
@@ -272,10 +274,9 @@ export class CoList<out Item = any>
   static schema<V extends CoList>(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this: { new (...args: any): V } & typeof CoList,
-    def: { [ItemsSym]: V["$jazz"]["schema"][ItemsSym] },
+    def: { [ItemsSym]: CoFieldInit<V[number]> },
   ) {
-    this._schema ||= {};
-    Object.assign(this._schema, def);
+    this.coValueSchema = createCoreCoListSchema(def[ItemsSym] as any);
   }
 
   /**
@@ -590,7 +591,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
-    private coListSchema?: CoreCoValueSchema,
+    private coListSchema?: CoreCoListSchema,
   ) {
     super(coList);
   }
@@ -630,7 +631,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       >;
     }
 
-    const itemDescriptor = this.schema[ItemsSym];
+    const itemDescriptor = this.getItemsDescriptor();
     const rawValue = toRawItems(
       [value],
       itemDescriptor,
@@ -639,7 +640,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       undefined,
       options?.validation,
     )[0]!;
-    if (rawValue === null && !itemDescriptor.optional) {
+    if (
+      rawValue === null &&
+      isRefEncoded(itemDescriptor) &&
+      !itemDescriptor.optional
+    ) {
       throw new Error(`Cannot set required reference ${index} to undefined`);
     }
     this.raw.replace(index, rawValue);
@@ -673,7 +678,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     this.raw.appendItems(
       toRawItems(
         items,
-        this.schema[ItemsSym],
+        this.getItemsDescriptor(),
         this.owner,
         undefined,
         undefined,
@@ -713,7 +718,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   unshiftLoose(...items: CoFieldInit<CoListItem<L>>[]): number {
     for (const item of toRawItems(
       items as CoFieldInit<CoListItem<L>>[],
-      this.schema[ItemsSym],
+      this.getItemsDescriptor(),
       this.owner,
       undefined,
       undefined,
@@ -805,7 +810,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
     const rawItems = toRawItems(
       items as CoListItem<L>[],
-      this.schema[ItemsSym],
+      this.getItemsDescriptor(),
       this.owner,
       undefined,
       undefined,
@@ -918,7 +923,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    */
   applyDiff(result: CoFieldInit<CoListItem<L>>[]): L {
     const current = this.raw.asArray() as CoFieldInit<CoListItem<L>>[];
-    const comparator = isRefEncoded(this.schema[ItemsSym])
+    const comparator = isRefEncoded(this.getItemsDescriptor())
       ? (aIdx: number, bIdx: number) => {
           const oldCoValueId = (current[aIdx] as CoValue)?.$jazz?.id;
           const newCoValueId = (result[bIdx] as CoValue)?.$jazz?.id;
@@ -1005,8 +1010,20 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * Get the descriptor for the items in the `CoList`
    * @internal
    */
-  getItemsDescriptor(): Schema | undefined {
-    return this.schema[ItemsSym];
+  getItemsDescriptor(): Schema {
+    if (!this.coListSchema) {
+      throw new Error(
+        `[schema-invariant] ${this.coList.constructor.name || "CoList"} is missing coValueSchema.`,
+      );
+    }
+
+    if (this.coListSchema.builtin !== "CoList") {
+      throw new Error(
+        `[schema-invariant] ${this.coList.constructor.name || "CoList"}.resolve expected CoList schema, got ${this.coListSchema.builtin}.`,
+      );
+    }
+
+    return resolveSchemaField(this.coListSchema.element as any);
   }
 
   /**
@@ -1042,7 +1059,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       (idx) => this.raw.get(idx) as unknown as ID<CoValue>,
       () => Array.from({ length: this.raw.entries().length }, (_, idx) => idx),
       this.loadedAs,
-      (_idx) => this.schema[ItemsSym] as RefEncoded<CoValue>,
+      (_idx) => this.getItemsDescriptor() as RefEncoded<CoValue>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ) as any;
   }
@@ -1066,13 +1083,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   /** @internal */
   get raw(): RawCoList {
     return this.getRaw();
-  }
-
-  /** @internal */
-  get schema(): {
-    [ItemsSym]: SchemaFor<CoListItem<L>> | any;
-  } {
-    return (this.coList.constructor as typeof CoList)._schema;
   }
 }
 
@@ -1134,7 +1144,11 @@ function getCoListItemValue(target: CoList, key: string) {
     return undefined;
   }
 
-  const itemDescriptor: Schema = target.$jazz.schema[ItemsSym];
+  const itemDescriptor = target.$jazz.getItemsDescriptor();
+
+  if (!itemDescriptor) {
+    return undefined;
+  }
 
   if (itemDescriptor === "json") {
     return rawValue;
@@ -1170,28 +1184,6 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       return Reflect.set(target, key, value, receiver);
     }
 
-    if (key === ItemsSym && isSchemaDescriptorValue(value)) {
-      const constructor = target.constructor as typeof CoList;
-
-      if (!constructor._schema) {
-        constructor._schema = {};
-      }
-
-      constructor._schema[ItemsSym] = value;
-      return true;
-    }
-
-    if (key === ItemsSym && typeof value === "object" && SchemaInit in value) {
-      const constructor = target.constructor as typeof CoList;
-
-      if (!constructor._schema) {
-        constructor._schema = {};
-      }
-
-      constructor._schema[ItemsSym] = value[SchemaInit];
-      return true;
-    }
-
     if (!isNaN(+key)) {
       throw Error("Cannot update a CoList directly. Use `$jazz.set` instead.");
     }
@@ -1199,38 +1191,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
     return Reflect.set(target, key, value, receiver);
   },
   defineProperty(target, key, descriptor) {
-    if (
-      descriptor.value &&
-      key === ItemsSym &&
-      isSchemaDescriptorValue(descriptor.value)
-    ) {
-      const constructor = target.constructor as typeof CoList;
-
-      if (!constructor._schema) {
-        constructor._schema = {};
-      }
-
-      constructor._schema[ItemsSym] = descriptor.value;
-      return true;
-    }
-
-    if (
-      descriptor.value &&
-      key === ItemsSym &&
-      typeof descriptor.value === "object" &&
-      SchemaInit in descriptor.value
-    ) {
-      const constructor = target.constructor as typeof CoList;
-
-      if (!constructor._schema) {
-        constructor._schema = {};
-      }
-
-      constructor._schema[ItemsSym] = descriptor.value[SchemaInit];
-      return true;
-    } else {
-      return Reflect.defineProperty(target, key, descriptor);
-    }
+    return Reflect.defineProperty(target, key, descriptor);
   },
   has(target, key) {
     if (typeof key === "string" && !isNaN(+key)) {

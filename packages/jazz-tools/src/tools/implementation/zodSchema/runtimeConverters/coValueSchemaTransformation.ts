@@ -1,4 +1,4 @@
-import { RawCoList, RawCoMap } from "cojson";
+import { RawCoList, RawCoMap, RawCoStream } from "cojson";
 import {
   Account,
   AccountSchema,
@@ -15,7 +15,6 @@ import {
   FileStream,
   FileStreamSchema,
   CoVectorSchema,
-  ItemsSym,
   PlainTextSchema,
   SchemaUnion,
   isCoValueClass,
@@ -33,11 +32,6 @@ import {
   CoValueClassOrSchema,
   CoValueSchemaFromCoreSchema,
 } from "../zodSchema.js";
-import {
-  SchemaField,
-  schemaFieldToCoFieldDef,
-} from "./schemaFieldToCoFieldDef.js";
-
 /**
  * A platform agnostic way to check if we're in development mode
  *
@@ -96,16 +90,6 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoMap } | undefined) {
         super(options);
-        for (const [fieldName, fieldType] of Object.entries(def.shape)) {
-          (this as any)[fieldName] = schemaFieldToCoFieldDef(
-            fieldType as SchemaField,
-          );
-        }
-        if (def.catchall) {
-          (this as any)[ItemsSym] = schemaFieldToCoFieldDef(
-            def.catchall as SchemaField,
-          );
-        }
       }
     };
 
@@ -123,9 +107,6 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       static coValueSchema: CoreCoValueSchema;
       constructor(options: { fromRaw: RawCoList } | undefined) {
         super(options);
-        (this as any)[ItemsSym] = schemaFieldToCoFieldDef(
-          element as SchemaField,
-        );
       }
     };
 
@@ -134,10 +115,13 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
 
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
-    const coValueClass = CoFeed.Of(
-      schemaFieldToCoFieldDef(schema.element as SchemaField) as any,
-    ) as typeof CoFeed;
-    const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
+    const coValueClass = class ZCoFeed extends CoFeed<any> {
+      static coValueSchema: CoreCoValueSchema;
+      constructor(options: { fromRaw: RawCoStream }) {
+        super(options);
+      }
+    };
+    const coValueSchema = new CoFeedSchema(schema.element, coValueClass as any);
     coValueClass.coValueSchema = coValueSchema;
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {

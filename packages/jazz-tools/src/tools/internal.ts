@@ -24,7 +24,7 @@ export * from "./coValues/deepLoading.js";
 export * from "./implementation/anonymousJazzAgent.js";
 export * from "./implementation/activeAccountContext.js";
 export * from "./implementation/refs.js";
-export * from "./implementation/schema.js";
+export * from "./implementation/schemaRuntime.js";
 export * from "./subscribe/SubscriptionScope.js";
 export * from "./subscribe/types.js";
 export * from "./subscribe/index.js";

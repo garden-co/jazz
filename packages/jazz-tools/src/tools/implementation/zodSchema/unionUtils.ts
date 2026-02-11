@@ -8,7 +8,7 @@ import {
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
   SchemaUnionDiscriminator,
-  coField,
+  createCoreCoMapSchema,
 } from "../../internal.js";
 import {
   hydrateCoreCoValueSchema,
@@ -102,15 +102,23 @@ export function schemaUnionDiscriminatorFor(
             return coValueClass;
           }
 
-          // inject dummy fields
-          return class extends coValueClass {
-            constructor(...args: ConstructorParameters<typeof coValueClass>) {
-              super(...args);
+          // Add schema-level dummy keys so deep-resolve keys shared by other union branches
+          // are recognized without mutating instances at runtime.
+          const augmentedShape = {
+            ...optionDef.shape,
+          } as Record<string, AnyZodOrCoValueSchema>;
 
-              for (const key of dummyFieldNames) {
-                (this as any)[key] = coField.null;
-              }
-            }
+          for (const key of dummyFieldNames) {
+            augmentedShape[key] = z.optional(z.null());
+          }
+
+          const augmentedSchema = createCoreCoMapSchema(
+            augmentedShape,
+            optionDef.catchall,
+          );
+
+          return class extends coValueClass {
+            static override coValueSchema = augmentedSchema;
           };
         }
       }

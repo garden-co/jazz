@@ -1,6 +1,5 @@
 import {
   Account,
-  coField,
   CoMap,
   CoMapInit_DEPRECATED,
   CoValueClass,
@@ -20,9 +19,9 @@ export class Profile extends CoMap {
     inboxInvite: z.optional(z.string()),
   });
 
-  readonly name = coField.string;
-  readonly inbox? = coField.optional.string;
-  readonly inboxInvite? = coField.optional.string;
+  declare readonly name: string;
+  declare readonly inbox?: string;
+  declare readonly inboxInvite?: string;
 
   /**
    * Creates a new profile with the given initial values and owner.
