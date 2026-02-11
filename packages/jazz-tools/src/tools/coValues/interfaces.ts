@@ -41,8 +41,11 @@ import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoVal
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export interface CoValueClass<Value extends CoValue = CoValue> {
-  coValueSchema?: CoreCoValueSchema;
+export interface CoValueClass<
+  Value extends CoValue = CoValue,
+  Schema extends CoreCoValueSchema = CoreCoValueSchema,
+> {
+  coValueSchema?: Schema;
   /** @ignore */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   new (...args: any[]): Value;

@@ -144,11 +144,7 @@ export class CoMap extends CoValueBase implements CoValue {
       );
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoMapJazzApi(
-            proxy,
-            () => options.fromRaw,
-            coMapSchema as CoreCoMapSchema,
-          ),
+          value: new CoMapJazzApi(proxy, () => options.fromRaw, coMapSchema),
           enumerable: false,
         },
       });
@@ -194,12 +190,7 @@ export class CoMap extends CoValueBase implements CoValue {
       "create",
     );
     const instance = new this();
-    return CoMap._createCoMap(
-      instance,
-      coMapSchema as CoreCoMapSchema,
-      init,
-      options,
-    );
+    return CoMap._createCoMap(instance, coMapSchema, init, options);
   }
 
   /**

@@ -99,7 +99,7 @@ export class Account extends CoValueBase implements CoValue {
     const accountSchema = assertCoValueSchema(
       this.constructor as unknown as typeof Account,
       "create",
-    ) as CoreAccountSchema;
+    );
 
     Object.defineProperties(this, {
       [TypeSym]: { value: "Account", enumerable: false },

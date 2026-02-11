@@ -105,11 +105,7 @@ export class CoList<out Item = any>
       );
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoListJazzApi(
-            proxy,
-            () => options.fromRaw,
-            coListSchema as CoreCoListSchema,
-          ),
+          value: new CoListJazzApi(proxy, () => options.fromRaw, coListSchema),
           enumerable: false,
         },
         $isLoaded: { value: true, enumerable: false },
@@ -157,7 +153,7 @@ export class CoList<out Item = any>
     const coListSchema = assertCoValueSchema(
       this as unknown as typeof CoList,
       "create",
-    ) as CoreCoListSchema;
+    );
     const validationMode = resolveValidationMode(
       options && "validation" in options ? options.validation : undefined,
     );

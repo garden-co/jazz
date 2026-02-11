@@ -49,9 +49,9 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreFileStreamSchema,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
-import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 import {
   CoreCoFeedSchema,
   createCoreCoFeedSchema,
@@ -110,7 +110,7 @@ export { CoFeed as CoStream };
  * @category CoValues
  */
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
-  static coValueSchema?: CoreCoValueSchema;
+  static coValueSchema?: CoreCoFeedSchema;
   declare $jazz: CoFeedJazzApi<this>;
 
   /** @category Type Helpers */
@@ -199,11 +199,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoFeedJazzApi(
-          this,
-          options.fromRaw,
-          coFeedSchema as CoreCoFeedSchema,
-        ),
+        value: new CoFeedJazzApi(this, options.fromRaw, coFeedSchema),
         enumerable: false,
       },
     });
@@ -258,9 +254,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
           `[schema-invariant] ${this.name || "CoFeed"}.create expected CoFeed schema, got ${coFeedSchema.builtin}.`,
         );
       }
-      const itemDescriptor = (
-        coFeedSchema as CoreCoFeedSchema
-      ).getDescriptorsSchema();
+      const itemDescriptor = coFeedSchema.getDescriptorsSchema();
 
       for (let index = 0; index < init.length; index++) {
         const item = init[index];
@@ -876,6 +870,8 @@ export class FileStream extends CoValueBase implements CoValue {
 
   /** @category Type Helpers */
   declare [TypeSym]: "BinaryCoStream";
+
+  static coValueSchema?: CoreFileStreamSchema;
 
   constructor(
     options:
