@@ -120,6 +120,19 @@ describe("LocalNode.unstable_withTransaction", () => {
             {
               id: result,
               action: "content",
+              header: {
+                createdAt: expect.any(String),
+                uniqueness: expect.any(String),
+                type: "comap",
+                ruleset: { type: "ownedByGroup", group: group.id },
+                meta: null,
+              },
+              priority: 3,
+              new: expect.any(Object),
+            },
+            {
+              id: result,
+              action: "content",
               header: undefined,
               priority: 3,
               new: expect.any(Object),
@@ -146,7 +159,7 @@ describe("LocalNode.unstable_withTransaction", () => {
     ]);
 
     const coMapCreationMessage = (batchMessages[0]!.msg as BatchMessage)
-      .messages[0]!;
+      .messages[1]!;
 
     const coMapCreationMessageSealedId = Object.keys(
       coMapCreationMessage.new,
@@ -164,7 +177,7 @@ describe("LocalNode.unstable_withTransaction", () => {
     });
 
     const coMapSetKey1Message = (batchMessages[0]!.msg as BatchMessage)
-      .messages[1]!;
+      .messages[2]!;
 
     const coMapSetKey1MessageSealedId = Object.keys(
       coMapSetKey1Message.new,
@@ -210,10 +223,10 @@ describe("LocalNode.unstable_withTransaction", () => {
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
         "server -> client | LOAD Group sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN Group sessions: header/3",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN Group sessions: header/3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+        "server -> client | KNOWN Group sessions: header/4",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+        "server -> client | KNOWN Group sessions: header/4",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
         "server -> client | KNOWN Map sessions: header/2",
         "server -> client | KNOWN Map sessions: header/2",
