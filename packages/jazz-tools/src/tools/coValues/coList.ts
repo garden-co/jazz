@@ -100,7 +100,8 @@ export class CoList<out Item = any>
 
     if (options && "fromRaw" in options) {
       const coListSchema = assertCoValueSchema(
-        this.constructor as typeof CoList,
+        this.constructor,
+        "CoList",
         "load",
       );
       Object.defineProperties(this, {
@@ -150,10 +151,7 @@ export class CoList<out Item = any>
       | Account
       | Group,
   ) {
-    const coListSchema = assertCoValueSchema(
-      this as unknown as typeof CoList,
-      "create",
-    );
+    const coListSchema = assertCoValueSchema(this, "CoList", "create");
     const validationMode = resolveValidationMode(
       options && "validation" in options ? options.validation : undefined,
     );
@@ -545,7 +543,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
-    private coListSchema?: CoreCoListSchema,
+    private coListSchema: CoreCoListSchema,
   ) {
     super(coList);
   }

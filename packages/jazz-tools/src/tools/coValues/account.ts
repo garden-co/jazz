@@ -97,7 +97,8 @@ export class Account extends CoValueBase implements CoValue {
     );
 
     const accountSchema = assertCoValueSchema(
-      this.constructor as unknown as typeof Account,
+      this.constructor,
+      "Account",
       "create",
     );
 

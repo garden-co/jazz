@@ -139,7 +139,8 @@ export class CoMap extends CoValueBase implements CoValue {
 
     if (options && "fromRaw" in options) {
       const coMapSchema = assertCoValueSchema(
-        this.constructor as typeof CoMap,
+        this.constructor,
+        "CoMap",
         "load",
       );
       Object.defineProperties(this, {
@@ -185,10 +186,7 @@ export class CoMap extends CoValueBase implements CoValue {
       | Account
       | Group,
   ) {
-    const coMapSchema = assertCoValueSchema(
-      this as unknown as typeof CoMap,
-      "create",
-    );
+    const coMapSchema = assertCoValueSchema(this, "CoMap", "create");
     const instance = new this();
     return CoMap._createCoMap(instance, coMapSchema, init, options);
   }
