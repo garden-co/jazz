@@ -2,22 +2,28 @@
 
 Declarative permission policies with good DX for optimistic local-first writes.
 
+## Phasing
+
+- **MVP**: Sync settlement tracking — spec and implement "accepted by sync server" state on mutations. Declarative ReBAC policies already exist.
+- **Launch**: API design for exposing settlement state + developer recommendations for handling rejections, offline duration, pending UI patterns.
+
 ## Overview
 
 Permissions are enforced **on the server only**. Local writes are applied immediately as optimistic updates, then confirmed or rejected by the server after sync.
 
-### Permission Model
+### Permission Model (exists as ReBAC)
 
-Inspired by Postgres row-level security, but adapted for JWT-native auth:
+Declarative policies already exist. JWT-native auth allows policies to inspect token claims directly. The backend creates **scoped clients** per JWT — Jazz enforces permissions, not backend code.
 
-- Policies are declared per-table in the schema (not in backend code)
-- Policies can inspect the JWT token (claims, roles, groups) directly
-- The backend creates a **scoped client** for each request, acting as the user with that JWT — Jazz enforces permissions, not the backend code
-- This moves permission logic from imperative backend code into declarative, testable policies
+### MVP: Sync Settlement Tracking
 
-### Optimistic Update DX
+The immediate need is tracking whether a mutation has been accepted by the sync server:
 
-The key DX challenge: local writes succeed instantly, but the server may reject them.
+- Each mutation carries a settlement state (local → synced → accepted / rejected)
+- The sync protocol already has PersistenceAck — extend this to cover permission acceptance
+- Internal state only for MVP; API exposure comes at launch
+
+### Launch: Optimistic Update API & DX
 
 **Default behavior** (good for most apps):
 - Writes appear immediately in the local query results
