@@ -264,12 +264,6 @@ async fn sync_handler(
         }
     }
 
-    eprintln!(
-        "DEBUG [server /sync]: client_id={}, payload={}",
-        request.client_id,
-        request.payload.variant_name()
-    );
-
     let entry = InboxEntry {
         source: Source::Client(request.client_id),
         payload: request.payload,

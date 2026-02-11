@@ -199,7 +199,7 @@ impl WasmRuntime {
         let schema_manager = SchemaManager::new(
             sync_manager,
             schema,
-            AppId::from_name(app_id),
+            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id)),
             env,
             user_branch,
         )
@@ -225,6 +225,9 @@ impl WasmRuntime {
                 .scheduler_mut()
                 .set_core_ref(Rc::downgrade(&core_rc));
         }
+
+        // Persist schema to catalogue for server sync
+        core_rc.borrow_mut().persist_schema();
 
         Ok(WasmRuntime { core: core_rc })
     }
@@ -583,12 +586,18 @@ impl WasmRuntime {
     // =========================================================================
 
     /// Add a server connection.
+    ///
+    /// After adding the server, immediately flushes the outbox so that
+    /// catalogue sync messages (from queue_full_sync_to_server) are sent
+    /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
     pub fn add_server(&self) {
         let server_id = ServerId::new();
         let mut core = self.core.borrow_mut();
         core.add_server(server_id);
+        core.batched_tick();
     }
+
 
     /// Add a client connection (for server-side use in tests).
     #[wasm_bindgen(js_name = addClient)]
@@ -694,7 +703,7 @@ impl WasmRuntime {
         let schema_manager = SchemaManager::new(
             sync_manager,
             schema,
-            AppId::from_name(app_id),
+            AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id)),
             env,
             user_branch,
         )
@@ -728,6 +737,9 @@ impl WasmRuntime {
                 .scheduler_mut()
                 .set_core_ref(Rc::downgrade(&core_rc));
         }
+
+        // Persist schema to catalogue for server sync
+        core_rc.borrow_mut().persist_schema();
 
         Ok(WasmRuntime { core: core_rc })
     }
