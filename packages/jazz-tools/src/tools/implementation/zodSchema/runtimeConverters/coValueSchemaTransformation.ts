@@ -1,24 +1,23 @@
-import { RawCoList, RawCoMap, RawCoStream } from "cojson";
 import {
-  Account,
+  Account as AccountClass,
   AccountSchema,
   CoDiscriminatedUnionSchema,
-  CoFeed,
+  CoFeed as CoFeedClass,
   CoFeedSchema,
-  CoList,
+  CoList as CoListClass,
   CoListSchema,
-  CoMap,
+  CoMap as CoMapClass,
   CoMapSchema,
-  CoPlainText,
-  CoRichText,
+  CoPlainText as CoPlainTextClass,
+  CoRichText as CoRichTextClass,
   CoValueClass,
-  FileStream,
+  FileStream as FileStreamClass,
   FileStreamSchema,
   CoVectorSchema,
   PlainTextSchema,
   schemaUnionClassFromDiscriminator,
   isCoValueClass,
-  CoVector,
+  CoVector as CoVectorClass,
 } from "../../../internal.js";
 
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -32,20 +31,6 @@ import {
   CoValueClassOrSchema,
   CoValueSchemaFromCoreSchema,
 } from "../zodSchema.js";
-import { CoreCoListSchema } from "../schemaTypes/CoListSchema.js";
-import { CoreCoFeedSchema } from "../schemaTypes/CoFeedSchema.js";
-/**
- * A platform agnostic way to check if we're in development mode
- *
- * Works in Node.js and bundled code, falls back to false if process is not available
- */
-const isDev = (function () {
-  try {
-    return process.env.NODE_ENV === "development";
-  } catch {
-    return false;
-  }
-})();
 
 // Note: if you're editing this function, edit the `isAnyCoValueSchema`
 // function in `zodReExport.ts` as well
@@ -85,7 +70,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       `co.optional() of collaborative types is not supported as top-level schema: ${JSON.stringify(schema)}`,
     );
   } else if (schema.builtin === "CoMap") {
-    const coValueClass = class ZCoMap extends CoMap {};
+    const coValueClass = class CoMap extends CoMapClass {};
     coValueClass.coValueSchema = new CoMapSchema(
       schema as any,
       coValueClass as any,
@@ -93,7 +78,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
 
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "Account") {
-    const coValueClass = class ZAccount extends Account {};
+    const coValueClass = class Account extends AccountClass {};
     coValueClass.coValueSchema = new AccountSchema(
       schema as any,
       coValueClass as any,
@@ -102,25 +87,25 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
-    const coValueClass = class ZCoList extends CoList {};
+    const coValueClass = class CoList extends CoListClass {};
     coValueClass.coValueSchema = new CoListSchema(element, coValueClass as any);
 
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
-    const coValueClass = class ZCoFeed extends CoFeed<any> {};
+    const coValueClass = class CoFeed extends CoFeedClass {};
     coValueClass.coValueSchema = new CoFeedSchema(
       schema.element,
       coValueClass as any,
     );
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {
-    const coValueClass = class ZFileStream extends FileStream {};
+    const coValueClass = class FileStream extends FileStreamClass {};
     coValueClass.coValueSchema = new FileStreamSchema(coValueClass as any);
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoVector") {
     const dimensions = schema.dimensions;
 
-    const coValueClass = class CoVectorWithDimensions extends CoVector {
+    const coValueClass = class CoVector extends CoVectorClass {
       protected static requiredDimensionsCount = dimensions;
     };
     coValueClass.coValueSchema = new CoVectorSchema(
@@ -130,11 +115,11 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
 
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoPlainText") {
-    const coValueClass = class ZCoPlainText extends CoPlainText {};
+    const coValueClass = class CoPlainText extends CoPlainTextClass {};
     coValueClass.coValueSchema = new PlainTextSchema(coValueClass as any);
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoRichText") {
-    const coValueClass = class ZCoRichText extends CoRichText {};
+    const coValueClass = class CoRichText extends CoRichTextClass {};
     coValueClass.coValueSchema = new RichTextSchema(coValueClass as any);
     return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoDiscriminatedUnion") {
