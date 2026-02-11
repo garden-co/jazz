@@ -21,6 +21,7 @@ let mainClientId: string | null = null;
 let jwtToken: string | undefined;
 let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
+let serverClientId: string | null = null; // Client ID assigned by server (from Connected frame)
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
 
 function post(msg: WorkerToMainMessage): void {
@@ -86,10 +87,13 @@ async function handleInit(msg: InitMessage): Promise<void> {
       }
     });
 
-    // Connect to upstream server if URL provided
+    // Connect to upstream server if URL provided.
+    // IMPORTANT: connectStream first to set serverClientId, THEN addServer.
+    // addServer() flushes the outbox synchronously (including catalogue sync),
+    // and those POSTs need serverClientId to be set.
     if (msg.serverUrl) {
+      await connectStream(msg.serverUrl);
       runtime.addServer();
-      connectStream(msg.serverUrl);
     }
 
     // Drain any sync messages that arrived before init completed
@@ -126,7 +130,7 @@ async function sendToServer(serverUrl: string, payload: any): Promise<void> {
 
     const body = JSON.stringify({
       payload,
-      client_id: "00000000-0000-0000-0000-000000000000", // TODO: use real client_id
+      client_id: serverClientId ?? "00000000-0000-0000-0000-000000000000",
     });
 
     const response = await fetch(`${serverUrl}/sync`, {
@@ -152,7 +156,11 @@ function isCataloguePayload(payload: any): boolean {
   return false;
 }
 
-/** Connect to the server's binary streaming endpoint. */
+/**
+ * Connect to the server's binary streaming endpoint.
+ * Resolves once the Connected frame is received (serverClientId is set).
+ * Stream reading continues in the background after resolution.
+ */
 async function connectStream(serverUrl: string): Promise<void> {
   const headers: Record<string, string> = {
     Accept: "application/octet-stream",
@@ -176,42 +184,72 @@ async function connectStream(serverUrl: string): Promise<void> {
     }
 
     const reader = response.body!.getReader();
-    let buffer = new Uint8Array(0);
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    // Read frames in background, resolve once Connected is received
+    await new Promise<void>((resolveConnected) => {
+      let resolved = false;
+      let buffer = new Uint8Array(0);
 
-      // Append chunk to buffer
-      const newBuffer = new Uint8Array(buffer.length + value.length);
-      newBuffer.set(buffer);
-      newBuffer.set(value, buffer.length);
-      buffer = newBuffer;
-
-      // Read complete frames
-      while (buffer.length >= 4) {
-        const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
-        if (buffer.length < 4 + len) break;
-        const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
-        buffer = buffer.slice(4 + len);
+      const readLoop = async () => {
         try {
-          const event = JSON.parse(json);
-          if (event.type === "SyncUpdate" && runtime) {
-            runtime.onSyncMessageReceived(JSON.stringify(event.payload));
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Append chunk to buffer
+            const newBuffer = new Uint8Array(buffer.length + value.length);
+            newBuffer.set(buffer);
+            newBuffer.set(value, buffer.length);
+            buffer = newBuffer;
+
+            // Read complete frames
+            while (buffer.length >= 4) {
+              const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
+              if (buffer.length < 4 + len) break;
+              const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
+              buffer = buffer.slice(4 + len);
+              try {
+                const event = JSON.parse(json);
+                if (event.type === "Connected" && event.client_id) {
+                  serverClientId = event.client_id;
+                  if (!resolved) {
+                    resolved = true;
+                    resolveConnected();
+                  }
+                } else if (event.type === "SyncUpdate" && runtime) {
+                  runtime.onSyncMessageReceived(JSON.stringify(event.payload));
+                }
+              } catch (e) {
+                console.error("[worker] Stream parse error:", e);
+              }
+            }
           }
-        } catch (e) {
-          console.error("[worker] Stream parse error:", e);
+        } catch (e: any) {
+          if (e?.name === "AbortError") {
+            if (!resolved) {
+              resolved = true;
+              resolveConnected();
+            }
+            return;
+          }
+          console.error("[worker] Stream error:", e);
         }
-      }
-    }
+
+        // Reconnect unless aborted
+        if (streamAbortController && !streamAbortController.signal.aborted) {
+          setTimeout(() => connectStream(serverUrl), 5000);
+        }
+        if (!resolved) {
+          resolved = true;
+          resolveConnected();
+        }
+      };
+
+      readLoop();
+    });
   } catch (e: any) {
     if (e?.name === "AbortError") return;
-    console.error("[worker] Stream error:", e);
-  }
-
-  // Reconnect unless aborted
-  if (streamAbortController && !streamAbortController.signal.aborted) {
-    setTimeout(() => connectStream(serverUrl), 5000);
+    console.error("[worker] Stream connect error:", e);
   }
 }
 
@@ -227,14 +265,14 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       await handleInit(msg);
       break;
 
-    case "sync":
+    case "sync": {
       if (runtime && mainClientId) {
         runtime.onSyncMessageReceivedFromClient(mainClientId, msg.payload);
       } else {
-        // Buffer until init completes
         pendingSyncMessages.push(msg.payload);
       }
       break;
+    }
 
     case "update-auth":
       jwtToken = msg.jwtToken;

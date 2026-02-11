@@ -1074,6 +1074,7 @@ mod tests {
 
     use crate::sync_manager::{
         ClientId, ClientRole, Destination, InboxEntry, PersistenceTier, ServerId, Source,
+        SyncPayload,
     };
 
     /// Three-tier RuntimeCore setup for durability tests.
@@ -1673,6 +1674,64 @@ mod tests {
         assert!(
             final_count > initial_count,
             "Callback must fire synchronously after insert when index ready"
+        );
+    }
+
+    #[test]
+    fn test_persist_schema_then_add_server_sends_catalogue() {
+        // Mirror the WASM flow EXACTLY: NO immediate_tick before persist_schema
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-app");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+        let mut core = RuntimeCore::new(
+            schema_manager,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
+        // NO immediate_tick() here — matches WASM openPersistent flow
+
+        // persist_schema — creates catalogue object in ObjectManager
+        let schema_obj_id = core.persist_schema();
+
+        // add_server — should call queue_full_sync_to_server which includes the catalogue
+        let server_id = ServerId::new();
+        core.add_server(server_id);
+
+        // batched_tick — should flush catalogue to outbox → sync sender
+        core.batched_tick();
+
+        // Check that the catalogue was sent
+        let messages = core.sync_sender().take();
+        let catalogue_msg = messages.iter().find(|m| {
+            if let SyncPayload::ObjectUpdated {
+                object_id,
+                metadata,
+                ..
+            } = &m.payload
+            {
+                *object_id == schema_obj_id
+                    && metadata
+                        .as_ref()
+                        .and_then(|m| m.metadata.get("type"))
+                        .map(|t| t == "catalogue_schema")
+                        .unwrap_or(false)
+            } else {
+                false
+            }
+        });
+
+        assert!(
+            catalogue_msg.is_some(),
+            "Catalogue schema object should be in outbox after add_server + batched_tick. \
+             Messages found: {}",
+            messages
+                .iter()
+                .map(|m| format!("{:?}", m.payload))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 }

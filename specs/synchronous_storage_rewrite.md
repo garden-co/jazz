@@ -2089,7 +2089,7 @@ All tests run in a real browser via `@vitest/browser`. They exercise the full st
 
 6. **`server_sync_through_worker`** — Start a mock server (or use the real todo-server-rs). Main thread inserts. Assert: data reaches server via worker's HTTP POST. Server sends update → arrives at main thread via worker's SSE → worker sync.
 
-7. **`token_refresh`** — Send `update-auth` with new JWT. Assert: subsequent server requests use the new token.
+7. **`token_refresh`** — Send `update-auth` with new JWT. Assert: subsequent server requests use the new token. _(Deferred: the `update-auth` handler is wired in the worker, but the E2E test requires token expiry simulation and re-auth flow infrastructure that is out of scope for 8a.)_
 
 ### Open Questions (8a-specific)
 

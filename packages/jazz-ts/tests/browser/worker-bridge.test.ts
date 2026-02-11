@@ -10,6 +10,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -279,7 +280,66 @@ describe("Worker Bridge with OPFS", () => {
 
     unsub();
   });
+
+  // -------------------------------------------------------------------------
+  // 7. Server sync through worker
+  // -------------------------------------------------------------------------
+
+  it("syncs data between two clients through the server", async () => {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const token1 = await signJwt("user-a", JWT_SECRET);
+
+    const db1 = track(
+      await createDb({
+        appId: APP_ID,
+        dbName: uniqueDbName("sync-a"),
+        serverUrl,
+        jwtToken: token1,
+        adminSecret: ADMIN_SECRET,
+      }),
+    );
+
+    // Insert and wait for server-tier persistence ack
+    const id = await db1.insertPersisted(todos, { title: "Server-synced", done: false }, "edge");
+    expect(id).toBeTruthy();
+
+    // Query back from the server (edge-tier settlement)
+    const results = await db1.all(allTodos, "edge");
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0].title).toBe("Server-synced");
+  });
 });
+
+// ---------------------------------------------------------------------------
+// JWT helper (Web Crypto — works in browser)
+// ---------------------------------------------------------------------------
+
+function base64url(input: string | Uint8Array): string {
+  const str = typeof input === "string" ? btoa(input) : btoa(String.fromCharCode(...input));
+  return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+async function signJwt(sub: string, secret: string): Promise<string> {
+  const header = { alg: "HS256", typ: "JWT" };
+  const payload = {
+    sub,
+    claims: {},
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  };
+  const enc = new TextEncoder();
+  const headerB64 = base64url(JSON.stringify(header));
+  const payloadB64 = base64url(JSON.stringify(payload));
+  const data = enc.encode(`${headerB64}.${payloadB64}`);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, data);
+  return `${headerB64}.${payloadB64}.${base64url(new Uint8Array(sig))}`;
+}
 
 // ---------------------------------------------------------------------------
 // Polling helper

@@ -417,7 +417,7 @@ impl NapiRuntime {
         let schema_manager = SchemaManager::new(
             sync_manager,
             schema,
-            AppId::from_name(&app_id),
+            AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
             &groove_env,
             &user_branch,
         )
@@ -481,6 +481,9 @@ impl NapiRuntime {
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core_guard.scheduler_mut().set_core_ref(core_weak);
             core_guard.scheduler_mut().set_tsfn(tsfn);
+
+            // Persist schema to catalogue for server sync
+            core_guard.persist_schema();
         }
 
         Ok(NapiRuntime { core: core_arc })

@@ -11,11 +11,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
-export const TEST_PORT = 19876;
-export const JWT_SECRET = "test-jwt-secret-for-browser-tests";
-export const ADMIN_SECRET = "test-admin-secret-for-browser-tests";
-const APP_ID = "00000000-0000-0000-0000-000000000001";
+export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
 
 let serverProcess: ChildProcess | null = null;
 let dataDir: string | null = null;
