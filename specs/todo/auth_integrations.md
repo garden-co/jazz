@@ -11,6 +11,12 @@ The current auth is JWT-based with a shared secret. For production use, integrat
 
 The integration should map external user identities to jazz2 sessions and client roles.
 
+## Hosted Integration Plan
+
+- Auto-provision a WorkOS org per jazz app (via developer dashboard)
+- Offer hosted BetterAuth instance as a less vendor-locked alternative
+- See `developer_dashboard_billing.md` and `infra_and_dashboard.md` for the control plane
+
 ## Open Questions
 
 - Where does the auth boundary sit? (Middleware before jazz2, or built into the server?)

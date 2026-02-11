@@ -15,9 +15,21 @@ A set of example apps that serve as both documentation and integration tests:
 
 Each example should demonstrate: local-first offline, real-time sync, persistence, auth.
 
+## Launch-Ready Demos
+
+Some examples need to be **polished and demo-ready for the announcement post**, not just functional:
+
+- Show an app with a lot of data that loads instantly and looks good
+- Exercise "cool features" visually: real-time collaboration, offline → online transition, instant queries on large datasets
+- Consider embedding GIFs / videos of the apps directly in the blog post
+- These double as proof that Jazz handles real-world scale (see `benchmarks_and_performance.md`)
+
+Building complex, polished examples is more affordable now (AI-assisted UI) — this is a competitive advantage over other local-first tools.
+
 ## Open Questions
 
 - Which framework(s)? React, Next.js, Remix, plain HTML?
 - Monorepo examples vs. standalone template repos?
 - How to keep examples in sync with API changes (CI test them)?
 - Progressive complexity: starter → intermediate → advanced?
+- Which 1–2 examples are the launch heroes? (Kanban + chat? Gallery + editor?)
