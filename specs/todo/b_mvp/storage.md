@@ -2,11 +2,14 @@
 
 Remaining work for storage and platform bindings.
 
-> Status quo: [specs/status-quo/storage.md](../status-quo/storage.md)
+> Status quo: [specs/status-quo/storage.md](../../status-quo/storage.md)
 
-## Multi-Tab Leader Election
+## Phasing
 
-**Priority: Medium**
+- **MVP**: Multi-tab leader election, browser E2E verification
+- **Launch**: Compression strategy
+
+## MVP: Multi-Tab Leader Election
 
 Currently only single-tab OPFS access works (exclusive `SyncAccessHandle` lock). Need leader election so multiple tabs can coordinate:
 
@@ -14,9 +17,15 @@ Currently only single-tab OPFS access works (exclusive `SyncAccessHandle` lock).
 - Other tabs sync through the leader via BroadcastChannel or SharedWorker
 - Leader failover on tab close (accept potential loss — fire-and-forget semantics)
 
-## Compression Strategy
+## MVP: Browser E2E Verification
 
-**Priority: Medium**
+A comprehensive E2E suite beyond the current 10 browser tests would exercise:
+
+- Reload → Recovery from OPFS
+- Multi-tab coordination (once leader election is done)
+- Edge cases in worker bridge lifecycle
+
+## Launch: Compression Strategy
 
 Rely heavily on compression (LZ4 or zstd) since row data is mostly text:
 
@@ -26,13 +35,3 @@ Rely heavily on compression (LZ4 or zstd) since row data is mostly text:
 - Often faster than micro-optimizing integer types — fewer bytes = fewer cache misses + less I/O
 
 Needs benchmarking to choose between LZ4 (faster, lower ratio) and zstd (slower, better ratio). May use both: LZ4 for hot path, zstd for cold storage / wire.
-
-## Browser E2E Verification
-
-**Priority: Low**
-
-A comprehensive E2E suite beyond the current 10 browser tests would exercise:
-
-- Reload → Recovery from OPFS
-- Multi-tab coordination (once leader election is done)
-- Edge cases in worker bridge lifecycle

@@ -9,7 +9,7 @@ Stable client IDs let the server maintain sync cursors and reactive query subscr
 Need a strategy for when and how to clean up:
 
 - Sync cursors (last-seen sequence numbers per client)
-- Active query subscriptions
+- Active query subscriptions (note: QueryManager `server_subscriptions` not cleaned up on disconnect — see `query_sync_integration.md`)
 - Client role/session records
 - Any per-client caches or buffers
 
