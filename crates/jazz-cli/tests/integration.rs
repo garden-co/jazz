@@ -5,8 +5,34 @@
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+
+const JWT_SECRET: &str = "test-jwt-secret-for-integration";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtClaims {
+    sub: String,
+    claims: serde_json::Value,
+    exp: u64,
+}
+
+/// Create a JWT token for test authentication.
+fn make_jwt(user_id: &str) -> String {
+    let claims = JwtClaims {
+        sub: user_id.to_string(),
+        claims: serde_json::json!({"role": "user"}),
+        exp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600,
+    };
+    let key = EncodingKey::from_secret(JWT_SECRET.as_bytes());
+    encode(&Header::default(), &claims, &key).unwrap()
+}
 
 /// Test server handle - kills process on drop.
 struct TestServer {
@@ -33,6 +59,7 @@ impl TestServer {
                 "--data-dir",
                 data_dir.path().to_str().unwrap(),
             ])
+            .env("JAZZ_JWT_SECRET", JWT_SECRET)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -112,8 +139,12 @@ async fn test_sse_connection_receives_connected_event() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to SSE endpoint
-    let mut es = EventSource::get(format!("{}/events", server.base_url()));
+    // Connect to SSE endpoint with JWT auth
+    let token = make_jwt("sse-test-user");
+    let builder = Client::new()
+        .get(format!("{}/events", server.base_url()))
+        .header("Authorization", format!("Bearer {}", token));
+    let mut es = EventSource::new(builder).expect("create EventSource");
 
     // First event should be Connected
     let event = tokio::time::timeout(Duration::from_secs(5), es.next())
@@ -158,7 +189,11 @@ async fn test_sse_heartbeat() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    let mut es = EventSource::get(format!("{}/events", server.base_url()));
+    let token = make_jwt("sse-heartbeat-user");
+    let builder = Client::new()
+        .get(format!("{}/events", server.base_url()))
+        .header("Authorization", format!("Bearer {}", token));
+    let mut es = EventSource::new(builder).expect("create EventSource");
 
     // Skip Open event if present
     let mut got_connected = false;
@@ -201,8 +236,12 @@ async fn test_sync_payload_broadcast_to_sse_client() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to SSE and get our client_id
-    let mut es = EventSource::get(format!("{}/events", server.base_url()));
+    // Connect to SSE with JWT auth and get our client_id
+    let token = make_jwt("sse-broadcast-user");
+    let builder = Client::new()
+        .get(format!("{}/events", server.base_url()))
+        .header("Authorization", format!("Bearer {}", token));
+    let mut es = EventSource::new(builder).expect("create EventSource");
 
     // Wait for Connected event to verify SSE connection works
     let connection_id = loop {

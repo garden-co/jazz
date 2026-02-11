@@ -37,7 +37,6 @@ export interface Runtime {
   onSyncMessageToSend(callback: Function): void;
   addServer(): void;
   addClient(): string;
-  addClientWithFullSync(): string;
   getSchema(): any;
 }
 

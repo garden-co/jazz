@@ -78,8 +78,15 @@ async fn events_handler(
     let session = match session {
         Some(s) => s,
         None => {
-            tracing::error!("SSE connection rejected: no session (client_id={}). Client must send auth headers.", client_id);
-            return Err((StatusCode::UNAUTHORIZED, "Session required for SSE connection. Provide a JWT token or backend secret.".to_string()));
+            tracing::error!(
+                "SSE connection rejected: no session (client_id={}). Client must send auth headers.",
+                client_id
+            );
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Session required for SSE connection. Provide a JWT token or backend secret."
+                    .to_string(),
+            ));
         }
     };
 
@@ -190,37 +197,50 @@ async fn sync_handler(
         }
     };
 
-    // Extract session from headers (JWT or backend impersonation)
-    // Propagate auth errors (invalid JWT, wrong backend secret, etc.) as 401
-    let session = match extract_session(&headers, &state.auth_config) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            tracing::error!("Sync request rejected: no session (client_id={}). Client must send auth headers.", request.client_id);
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse::unauthorized("Session required for sync. Provide a JWT token or backend secret.")),
-            ).into_response();
-        }
-        Err((status, msg)) => {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-    };
-
-    // Ensure client is registered with session bound
-    if let Err(e) = state
-        .runtime
-        .ensure_client_with_session(request.client_id, session)
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
-        )
-            .into_response();
-    }
-
-    // Promote to Admin if admin secret was valid
+    // Admin-authenticated requests (server-to-server catalogue sync) don't need a session.
+    // Regular clients must provide JWT or backend secret.
     if is_admin {
+        if let Err(e) = state.runtime.add_client(request.client_id, None) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
         if let Err(e) = state.runtime.set_client_admin(request.client_id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
+    } else {
+        // Extract session from headers (JWT or backend impersonation)
+        let session = match extract_session(&headers, &state.auth_config) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::error!(
+                    "Sync request rejected: no session (client_id={}). Client must send auth headers.",
+                    request.client_id
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse::unauthorized(
+                        "Session required for sync. Provide a JWT token or backend secret.",
+                    )),
+                )
+                    .into_response();
+            }
+            Err((status, msg)) => {
+                return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+            }
+        };
+
+        // Ensure client is registered with session bound
+        if let Err(e) = state
+            .runtime
+            .ensure_client_with_session(request.client_id, session)
+        {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),

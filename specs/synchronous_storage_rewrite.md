@@ -894,7 +894,7 @@ pub fn persist_schema(&mut self) -> ObjectId
 
 `WasmRuntime::new()` now takes an optional `tier: Option<String>` parameter to set the node's persistence tier at construction time.
 
-New methods: `insertPersisted`, `updatePersisted`, `deletePersisted` (return `Promise`), `addClient`, `addClientWithFullSync`. `query` and `subscribe` accept optional `settled_tier` parameter.
+New methods: `insertPersisted`, `updatePersisted`, `deletePersisted` (return `Promise`), `addClient`. `query` and `subscribe` accept optional `settled_tier` parameter.
 
 #### Rust: TokioRuntime
 
@@ -1248,7 +1248,7 @@ packages/jazz-ts/
 
 1. Created `crates/groove-napi` with napi-rs boilerplate (Cargo.toml, build.rs, package.json)
 2. Wrapped `RuntimeCore<BfTreeStorage>` with `#[napi]` class (`NapiRuntime`)
-3. Exposed: `insert`, `update`, `delete`, `query`, `subscribe`, `unsubscribe`, `insertPersisted`, `updatePersisted`, `deletePersisted`, `onSyncMessageReceived`, `onSyncMessageToSend`, `addServer`, `addClient`, `addClientWithFullSync`, `getSchema`, `flush`
+3. Exposed: `insert`, `update`, `delete`, `query`, `subscribe`, `unsubscribe`, `insertPersisted`, `updatePersisted`, `deletePersisted`, `onSyncMessageReceived`, `onSyncMessageToSend`, `addServer`, `addClient`, `getSchema`, `flush`
 4. Module-level: `generateId()`, `currentTimestamp()`, `parseSchema()`
 5. Build system: `npx napi build --release` produces `.node` binary + `index.d.ts`
 6. Added `Runtime` interface to `jazz-ts` + `JazzClient.connectWithRuntime()` factory
@@ -1504,7 +1504,217 @@ These require the **Phase 8 worker architecture** which builds the JS bridge on 
 
 ## Phase 8: jazz-ts Worker Architecture
 
-**Goal**: Implement the main thread ↔ worker architecture in TypeScript.
+Split into two sub-phases:
+
+- **8a**: Single-tab worker bridge (worker spawning, postMessage protocol, OPFS persistence, server connection in worker)
+- **8b**: Multi-tab leader election, BroadcastChannel sync, follower failover
+
+### Key Decisions (Resolved)
+
+| Decision                | Choice                           | Rationale                                                                                                                                                                                                                                                                   |
+| ----------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Server connection**   | Worker only                      | Worker owns SSE + POST to upstream server. Main thread only talks to worker. Clean layering: main → worker → server.                                                                                                                                                        |
+| **Bridge model**        | Query-scoped sync                | Main thread WasmRuntime calls `addServer()` for worker. Worker calls `addClient()` for main thread. Data flows via query subscriptions through the standard sync protocol over postMessage.                                                                                 |
+| **Subscriptions**       | Local + sync                     | Main thread subscribes locally on its in-memory WasmRuntime. Data arrives via sync protocol from worker (like any upstream server). No special subscription forwarding.                                                                                                     |
+| **Worker entry point**  | TS file in jazz-ts               | `packages/jazz-ts/src/worker/groove-worker.ts` imports groove-wasm, loads WASM, opens OPFS, posts 'ready'.                                                                                                                                                                  |
+| **Client API**          | createDb() spawns worker         | Transparent — user never sees the worker directly. Existing Db/JazzClient API stays the same.                                                                                                                                                                               |
+| **Transport to server** | SSE + POST (same as today)       | Reuses existing server infrastructure (jazz-rs, jazz-cli). No server changes needed.                                                                                                                                                                                        |
+| **WASM loading**        | Worker loads its own copy        | Each side (main thread + worker) loads groove-wasm independently. TODO: share compiled WebAssembly.Module via postMessage for efficiency.                                                                                                                                   |
+| **Worker lifecycle**    | Dedicated Worker, dies with page | On reload, new worker spawns, reopens OPFS (data persisted via snapshot + WAL). Stateless between loads.                                                                                                                                                                    |
+| **Wire format**         | Typed wrapper messages           | Explicit TS types for all postMessage communication. Control messages (init, ready) and data (sync) are all typed.                                                                                                                                                          |
+| **Schema init**         | Main thread sends schema         | Schema JSON sent in the init message. Worker uses it to create `WasmRuntime.openPersistent()`.                                                                                                                                                                              |
+| **Persisted acks**      | Sync protocol handles it         | Main thread calls `insertPersisted()` locally. Worker persists → sends PersistenceAck via sync → main thread resolves promise. No special worker-level ack.                                                                                                                 |
+| **Trust model**         | Peer role, no local auth         | Worker registers main thread as `ClientRole::Peer` (via `addClient()` + `set_client_role(Peer)`). Bypasses all session/ReBAC checks. No full sync on connect — data flows on-demand via query subscriptions. Worker authenticates to upstream server on behalf of the user. |
+| **Session model**       | 1 worker per session             | JWT token sent in init message. Token refresh via `update-auth` message. Logout = tear down worker + spawn new one.                                                                                                                                                         |
+| **Testing**             | Vitest browser mode              | `@vitest/browser` with headless Chromium. Real browser APIs (Worker, OPFS).                                                                                                                                                                                                 |
+
+---
+
+## Phase 8a: Single-Tab Worker Bridge
+
+**Goal**: Main thread ↔ Dedicated Worker communication with OPFS persistence and upstream server sync. Single tab only (no multi-tab coordination).
+
+**Depends on**: Phase 7c-ii (groove-wasm OPFS integration).
+
+**After 8a**: Browser apps have real OPFS persistence. Data survives page reloads. Writes propagate: main thread → worker → server. Updates propagate: server → worker → main thread. `_persisted` variants resolve when worker acks.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        MAIN THREAD                           │
+│                                                              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │  WasmRuntime (BfTreeStorage::memory())              │     │
+│  │   - Sync mutations (insert/update/delete)           │     │
+│  │   - Local query subscriptions                       │     │
+│  │   - addServer() → treats worker as upstream         │     │
+│  └──────────────────────┬─────────────────────────────┘     │
+│                         │                                    │
+│  ┌──────────────────────┼─────────────────────────────┐     │
+│  │  WorkerBridge        │                              │     │
+│  │   - postMessage ↔ onSyncMessageToSend/Received     │     │
+│  │   - Lifecycle management (spawn, ready, shutdown)   │     │
+│  └──────────────────────┼─────────────────────────────┘     │
+│                         │ postMessage                        │
+└─────────────────────────┼────────────────────────────────────┘
+                          │
+┌─────────────────────────┼────────────────────────────────────┐
+│                  DEDICATED WORKER                             │
+│                         │                                    │
+│  ┌──────────────────────┼─────────────────────────────┐     │
+│  │  WasmRuntime (openPersistent → BfTreeStorage/OPFS)  │     │
+│  │   - addClient() + Peer role for main thread         │     │
+│  │   - Data flows on-demand via query subscriptions    │     │
+│  │   - Persists to OPFS (snapshot + WAL)               │     │
+│  │   - tier: "worker" → emits PersistenceAck           │     │
+│  └──────────────────────┬─────────────────────────────┘     │
+│                         │                                    │
+│  ┌──────────────────────┼─────────────────────────────┐     │
+│  │  Server Connection   │                              │     │
+│  │   - SSE to /events (incoming sync)                  │     │
+│  │   - POST to /sync (outgoing sync)                   │     │
+│  │   - JWT auth from init message                      │     │
+│  └──────────────────────┘─────────────────────────────┘     │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                          │
+                     SSE + POST
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │  Edge Server  │
+                  └───────────────┘
+```
+
+### Worker Protocol (postMessage types)
+
+```typescript
+// === Main Thread → Worker ===
+
+type MainToWorkerMessage = InitMessage | SyncToWorkerMessage | UpdateAuthMessage | ShutdownMessage;
+
+/** First message after worker posts 'ready'. Contains everything the worker needs. */
+interface InitMessage {
+  type: "init";
+  schemaJson: string;
+  appId: string;
+  env: string;
+  userBranch: string;
+  dbName: string; // OPFS database name
+  serverUrl?: string; // upstream server (SSE + POST)
+  jwtToken?: string; // for server auth
+  adminSecret?: string; // for catalogue sync
+}
+
+/** Sync protocol message from main thread's WasmRuntime outbox. */
+interface SyncToWorkerMessage {
+  type: "sync";
+  payload: string; // JSON-encoded sync payload
+}
+
+/** Token refresh — worker updates stored credentials for server requests. */
+interface UpdateAuthMessage {
+  type: "update-auth";
+  jwtToken: string;
+}
+
+/** Graceful shutdown — worker flushes (snapshot) and closes. */
+interface ShutdownMessage {
+  type: "shutdown";
+}
+
+// === Worker → Main Thread ===
+
+type WorkerToMainMessage = ReadyMessage | InitOkMessage | SyncToMainMessage | ErrorMessage;
+
+/** Worker has loaded WASM and is ready to receive init message. */
+interface ReadyMessage {
+  type: "ready";
+}
+
+/** Worker has opened OPFS, created runtime, registered main thread as client. Ready for sync. */
+interface InitOkMessage {
+  type: "init-ok";
+  clientId: string; // main thread's client ID in the worker's SyncManager
+}
+
+/** Sync protocol message from worker's WasmRuntime outbox (destined for main thread client). */
+interface SyncToMainMessage {
+  type: "sync";
+  payload: string; // JSON-encoded sync payload
+}
+
+/** Unrecoverable worker error. */
+interface ErrorMessage {
+  type: "error";
+  message: string;
+}
+```
+
+### Initialization Sequence
+
+```
+Main Thread                          Worker
+     │                                  │
+     │  new Worker("groove-worker.ts")  │
+     │ ─────────────────────────────► │
+     │                                  │
+     │                          load WASM module
+     │                          (import groove-wasm)
+     │                                  │
+     │   ◄─── { type: "ready" } ────── │
+     │                                  │
+     │  { type: "init",                 │
+     │    schemaJson, appId, env,       │
+     │    dbName, serverUrl, jwtToken } │
+     │ ─────────────────────────────► │
+     │                                  │
+     │                   openPersistent(schema, dbName, "worker")
+     │                   addClient() + set_client_role(Peer)
+     │                   onSyncMessageToSend(→ route by destination)
+     │                   if serverUrl: connectSSE() + addServer()
+     │                                  │
+     │  ◄── { type: "init-ok" } ──────  │
+     │                                  │
+     │  main runtime.addServer()
+     │  (worker is now main thread's upstream)
+     │                                  │
+     │  main subscribes to queries      │
+     │  ───── { type: "sync", ... } ──► │
+     │                                  │
+     │  ◄── { type: "sync", matching } ─│
+     │      (only data matching queries) │
+     │                                  │
+     ▼                                  ▼
+  [operational — sync protocol flows both ways,
+   data flows on-demand via query subscriptions]
+```
+
+**Key detail**: The worker does NOT sync everything on connect. The main thread subscribes to queries, and only matching data flows through the sync protocol — exactly like a normal client ↔ server relationship. The main thread's in-memory WasmRuntime is populated incrementally as queries are subscribed.
+
+### Trust & Session Model
+
+**Main thread → Worker**: The worker registers the main thread as a client via `addClient()` + `set_client_role(ClientRole::Peer)`. Peer role means:
+
+- No session required
+- No ReBAC permission checks
+- No catalogue write restrictions
+- All writes applied directly (trusted relay)
+
+`addClient()` registers the connection without syncing anything. Data flows on-demand: the main thread subscribes to queries, and the worker sends matching data through the normal sync protocol — exactly like any client ↔ server relationship. Downward sync is always query-scoped; there is no "full dump" path.
+
+This is correct because the main thread and worker are the same user in the same browser tab. The worker trusts the main thread unconditionally.
+
+**Worker → Upstream Server**: The worker acts as a regular client toward the server using the JWT token from the init message:
+
+- SSE requests include `Authorization: Bearer <jwt>` header
+- POST /sync requests include the same header
+- Catalogue sync uses `X-Jazz-Admin-Secret` header (if adminSecret provided)
+
+**One worker per session**: Each user session gets its own Dedicated Worker. If the user logs out and a different user logs in, the old worker is shut down and a new one is spawned. The OPFS database name should include the user identity to avoid data mixing (e.g., `dbName: "jazz-{appId}-{userId}"`).
+
+**Token refresh**: Main thread sends `{ type: "update-auth", jwtToken }` when the JWT token is refreshed. Worker stores the new token and uses it for subsequent HTTP requests. No reconnection needed — the SSE connection stays open (server-sent events don't re-authenticate per message).
 
 ### Package Structure
 
@@ -1512,63 +1722,419 @@ These require the **Phase 8 worker architecture** which builds the JS bridge on 
 packages/jazz-ts/
 ├── src/
 │   ├── worker/
-│   │   ├── groove-worker.ts    # Worker entry point
-│   │   ├── storage-opfs.ts     # OPFS storage implementation
-│   │   └── worker-protocol.ts  # Message types
+│   │   ├── groove-worker.ts    # Worker entry point (self-contained)
+│   │   └── worker-protocol.ts  # Shared message type definitions
 │   ├── runtime/
-│   │   ├── client.ts           # Main thread client (existing, modified)
-│   │   ├── worker-bridge.ts    # Main thread ↔ worker communication
-│   │   └── storage-memory.ts   # Memory storage for main thread
+│   │   ├── client.ts           # JazzClient (modified: spawns worker in browser)
+│   │   ├── db.ts               # Db (modified: createDb spawns worker)
+│   │   ├── worker-bridge.ts    # Main thread side: postMessage ↔ sync protocol
+│   │   ├── context.ts          # AppContext (mostly unchanged)
+│   │   └── ...existing files
 │   └── ...
 ```
 
-### Worker Protocol (over postMessage)
+### File-by-File Changes
+
+#### New: `packages/jazz-ts/src/worker/worker-protocol.ts`
+
+Shared type definitions for postMessage. Imported by both `groove-worker.ts` and `worker-bridge.ts`.
+
+Contains: `MainToWorkerMessage`, `WorkerToMainMessage`, and all sub-types as defined above.
+
+#### New: `packages/jazz-ts/src/worker/groove-worker.ts`
+
+Worker entry point. Self-contained — imports groove-wasm directly.
 
 ```typescript
-// Main thread → Worker
-type MainToWorkerMessage =
-  | { type: "sync"; payload: SyncPayload }
-  | { type: "query-register"; queryId: number; queryJson: string }
-  | { type: "query-unregister"; queryId: number }
-  | { type: "connect-upstream"; url: string };
+// groove-worker.ts (runs in Dedicated Worker context)
 
-// Worker → Main thread
-type WorkerToMainMessage =
-  | { type: "sync"; payload: SyncPayload }
-  | { type: "persistence-ack"; payload: PersistenceAck }
-  | { type: "query-settled"; queryId: number; tier: PersistenceTier }
-  | { type: "ready" }; // Worker initialized
+import init, { WasmRuntime } from "groove-wasm";
+import type { InitMessage, MainToWorkerMessage } from "./worker-protocol.js";
+
+let runtime: WasmRuntime | null = null;
+let jwtToken: string | undefined;
+let adminSecret: string | undefined;
+
+// 1. Load WASM on startup
+async function startup() {
+  await init(); // Initialize groove-wasm
+  self.postMessage({ type: "ready" });
+}
+
+// 2. Handle messages from main thread
+self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
+  const msg = event.data;
+
+  switch (msg.type) {
+    case "init":
+      await handleInit(msg);
+      break;
+    case "sync":
+      runtime!.onSyncMessageReceived(msg.payload);
+      break;
+    case "update-auth":
+      jwtToken = msg.jwtToken;
+      break;
+    case "shutdown":
+      runtime?.flush();
+      self.close();
+      break;
+  }
+};
+
+async function handleInit(msg: InitMessage) {
+  jwtToken = msg.jwtToken;
+  adminSecret = msg.adminSecret;
+
+  // Open persistent storage via OPFS
+  runtime = await WasmRuntime.openPersistent(
+    msg.schemaJson,
+    msg.appId,
+    msg.env,
+    msg.userBranch,
+    msg.dbName,
+    "worker", // tier
+  );
+
+  // Register main thread as trusted peer client (no full sync — on-demand via queries)
+  const mainClientId = runtime.addClient();
+  runtime.setClientRole(mainClientId, "peer");
+
+  // Bridge: worker sync outbox → postMessage to main thread
+  runtime.onSyncMessageToSend((syncJson: string) => {
+    // Parse to check destination — only forward client-bound messages to main thread,
+    // server-bound messages go to the HTTP transport
+    self.postMessage({ type: "sync", payload: syncJson });
+  });
+
+  // Connect to upstream server if URL provided
+  if (msg.serverUrl) {
+    connectToServer(msg.serverUrl);
+    runtime.addServer();
+  }
+}
+
+// SSE + POST server connection (moved from JazzClient)
+function connectToServer(serverUrl: string) {
+  // SSE for incoming server → worker sync
+  const sse = new EventSource(buildEventsUrl(serverUrl));
+  sse.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === "SyncUpdate") {
+      runtime!.onSyncMessageReceived(JSON.stringify(data.payload));
+    }
+  };
+  sse.onerror = () => {
+    setTimeout(() => connectToServer(serverUrl), 5000);
+  };
+
+  // POST for outgoing worker → server sync
+  // (onSyncMessageToSend callback routes server-bound messages here)
+}
+
+startup();
 ```
 
-### Initialization Flow
+**Note**: The `onSyncMessageToSend` callback receives ALL outbox messages — both those destined for the main thread (client) and those destined for the upstream server. The worker needs to route them:
+
+- Messages for client → `self.postMessage()`
+- Messages for server → HTTP POST to `/sync`
+
+This routing is based on the destination in the sync message (already encoded by SyncManager's outbox). The worker parses each message to check the destination. **TODO**: Consider adding a `destination` field to the WASM `onSyncMessageToSend` callback to avoid parsing.
+
+#### New: `packages/jazz-ts/src/runtime/worker-bridge.ts`
+
+Main thread side of the bridge. Connects a WasmRuntime's sync protocol to the worker via postMessage.
 
 ```typescript
-// jazz-ts/src/runtime/client.ts
+// worker-bridge.ts (runs on main thread)
 
-export async function createDb<S extends Schema>(options: DbOptions<S>): Promise<Db<S>> {
-  // 1. Spawn worker
-  const worker = new Worker(new URL("./worker/groove-worker.ts", import.meta.url));
+import type { MainToWorkerMessage, WorkerToMainMessage } from "../worker/worker-protocol.js";
+import type { Runtime } from "./client.js";
 
-  // 2. Wait for worker ready
-  await waitForMessage(worker, "ready");
+export class WorkerBridge {
+  private worker: Worker;
+  private runtime: Runtime;
 
-  // 3. Create main-thread groove with MemoryStorage
-  const mainGroove = new Groove(new MemoryStorage());
+  constructor(worker: Worker, runtime: Runtime) {
+    this.worker = worker;
+    this.runtime = runtime;
 
-  // 4. Connect main groove to worker as "upstream server"
-  const bridge = new WorkerBridge(worker, mainGroove);
+    // Worker → main thread: feed sync messages into main thread runtime
+    worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
+      const msg = event.data;
+      if (msg.type === "sync") {
+        this.runtime.onSyncMessageReceived(msg.payload);
+      } else if (msg.type === "error") {
+        console.error("Worker error:", msg.message);
+      }
+    };
 
-  // 5. Register initial queries, wait for settlement
-  await bridge.registerQuery(initialQuery, { settlement: "worker" });
+    // Main thread → worker: intercept outgoing sync messages
+    this.runtime.onSyncMessageToSend((syncJson: string) => {
+      this.worker.postMessage({ type: "sync", payload: syncJson } satisfies MainToWorkerMessage);
+    });
 
-  // 6. Return Db interface
-  return new Db(mainGroove, bridge);
+    // Tell main thread runtime that worker is its upstream server
+    this.runtime.addServer();
+  }
+
+  /** Send init message to worker (call after 'ready' received). */
+  init(options: {
+    schemaJson: string;
+    appId: string;
+    env: string;
+    userBranch: string;
+    dbName: string;
+    serverUrl?: string;
+    jwtToken?: string;
+    adminSecret?: string;
+  }): void {
+    this.worker.postMessage({ type: "init", ...options } satisfies MainToWorkerMessage);
+  }
+
+  /** Update JWT token in worker. */
+  updateAuth(jwtToken: string): void {
+    this.worker.postMessage({ type: "update-auth", jwtToken } satisfies MainToWorkerMessage);
+  }
+
+  /** Shutdown worker gracefully. */
+  shutdown(): void {
+    this.worker.postMessage({ type: "shutdown" } satisfies MainToWorkerMessage);
+  }
 }
 ```
 
-### Tab Coordination: Leader Election
+#### Modified: `packages/jazz-ts/src/runtime/db.ts`
 
-Multiple tabs share the same OPFS origin, but only ONE can hold the `FileSystemSyncAccessHandle` at a time. We use leader election:
+`createDb()` gains browser detection. In browser: spawns worker + uses WorkerBridge. In Node.js: unchanged (uses WASM directly or NapiRuntime).
+
+```typescript
+// In createDb():
+export async function createDb(config: DbConfig): Promise<Db> {
+  if (isBrowser()) {
+    return Db.createWithWorker(config);
+  } else {
+    return Db.create(config); // existing path (Node.js)
+  }
+}
+```
+
+New `Db.createWithWorker()` static method:
+
+```typescript
+static async createWithWorker(config: DbConfig): Promise<Db> {
+  const wasmModule = await loadWasmModule();
+  const db = new Db(config, wasmModule);
+
+  // 1. Spawn worker
+  const worker = new Worker(
+    new URL("../worker/groove-worker.js", import.meta.url),
+    { type: "module" }
+  );
+
+  // 2. Wait for ready
+  await waitForMessage(worker, "ready");
+
+  // 3. Create main-thread WasmRuntime (in-memory)
+  // (the getClient() path creates this — need to ensure it exists before bridge setup)
+
+  // 4. Set up bridge (per-schema client, or single client)
+  // The bridge connects the main thread runtime to the worker
+  // ... details depend on getClient() refactoring
+
+  // 5. Send init message
+  bridge.init({
+    schemaJson: JSON.stringify(config.schema),
+    appId: config.appId,
+    env: config.env ?? "dev",
+    userBranch: config.userBranch ?? "main",
+    dbName: `jazz-${config.appId}`,
+    serverUrl: config.serverUrl,
+    jwtToken: config.jwtToken,
+    adminSecret: config.adminSecret,
+  });
+
+  // 6. Wait for initial sync (worker sends full state)
+  // ... await first sync message arrival
+
+  return db;
+}
+```
+
+#### Modified: `packages/jazz-ts/src/runtime/client.ts`
+
+- `setupSync()` is **not called** in browser worker mode — the worker handles server connectivity
+- `JazzClient.connect()` stays for non-worker usage (Node.js, tests)
+- SSE/POST code remains in client.ts (worker's `groove-worker.ts` reimplements it in the worker context)
+
+#### Modified: `packages/jazz-ts/src/runtime/context.ts`
+
+Add `jwtToken` and `adminSecret` to `DbConfig` (currently only on `AppContext`). Or consolidate — `DbConfig` may absorb auth fields from `AppContext`.
+
+### Implementation Steps
+
+**Step 1: Worker protocol types**
+
+Create `worker-protocol.ts` with all message type definitions. Pure types, no runtime code.
+
+**Step 2: Worker entry point**
+
+Create `groove-worker.ts`:
+
+- WASM loading + `ready` post
+- Init handler: `openPersistent()`, `addClient()`, `onSyncMessageToSend()` routing
+- Sync message forwarding (main thread ↔ worker)
+- Server connection (SSE + POST) — moved from JazzClient
+- `update-auth` handler
+- `shutdown` handler with `flush()`
+
+**Step 3: WorkerBridge**
+
+Create `worker-bridge.ts`:
+
+- Worker spawn + ready wait
+- Init message sending
+- postMessage ↔ `onSyncMessageToSend`/`onSyncMessageReceived` wiring
+- `addServer()` call on main thread runtime
+
+**Step 4: Modify createDb()**
+
+- Browser detection (`typeof Worker !== "undefined"` or similar)
+- `createWithWorker()` factory: spawn worker → wait ready → create main thread runtime → bridge → init → wait for initial sync
+- Non-browser path unchanged
+
+**Step 5: Add `setClientRole()` to WasmRuntime (Rust change)**
+
+`WasmRuntime.addClient()` exists but returns a `String` client ID with `ClientRole::User` (default). The worker needs to upgrade the main thread to `Peer` role. Add:
+
+```rust
+#[wasm_bindgen(js_name = setClientRole)]
+pub fn set_client_role(&self, client_id: &str, role: &str) { ... }
+```
+
+Parse `role` from string ("user" | "admin" | "peer"). Call `core.set_client_role(ClientId(...), ClientRole::Peer)`.
+
+**Step 6: Fix JsSyncSender to include destination (Rust change)**
+
+Currently `JsSyncSender::send_sync_message()` only serializes `message.payload`, dropping `message.destination`. The worker needs both to route messages correctly. Change line 135 of `crates/groove-wasm/src/runtime.rs` from:
+
+```rust
+if let Ok(json) = serde_json::to_string(&message.payload) {
+```
+
+to:
+
+```rust
+if let Ok(json) = serde_json::to_string(&message) {
+```
+
+This requires `OutboxEntry` (or a wrapper struct) to derive `Serialize`. The JS callback now receives `{ "destination": ..., "payload": ... }`.
+
+Also update `NapiSyncSender` in `crates/groove-napi/src/lib.rs` for consistency (it likely has the same pattern).
+
+Update existing jazz-ts code that calls `onSyncMessageToSend` to handle the new envelope format (parse destination + payload instead of just payload).
+
+**Step 7: Outbox routing in worker**
+
+With destination included in the sync message JSON (from Step 6), the worker routes:
+
+- `destination: { "Client": ... }` → `self.postMessage({ type: "sync", ... })` to main thread
+- `destination: { "Server": ... }` or `"AllServers"` → HTTP POST to upstream `/sync`
+
+**Step 8: Browser tests (Vitest browser mode)**
+
+Set up `@vitest/browser` with headless Chromium:
+
+- `vitest.config.browser.ts` with `browser: { enabled: true, provider: 'playwright', name: 'chromium' }`
+- Test files in `packages/jazz-ts/tests/browser/`
+
+### Sync Message Routing Detail
+
+The worker runs a WasmRuntime that has both:
+
+- A **client** connection (the main thread, via `addClient()`)
+- A **server** connection (the upstream, via `addServer()`)
+
+`onSyncMessageToSend()` fires for outbox entries to BOTH destinations. After Step 5's fix, the callback receives JSON containing destination + payload. The worker parses this to route correctly.
+
+After the `JsSyncSender` fix (Step 5), the callback receives the full `OutboxEntry` JSON:
+
+```json
+{
+  "destination": { "Client": "<client_id>" } | { "Server": "<server_id>" } | "AllServers" | "AllClients",
+  "payload": { ... }
+}
+```
+
+Routing logic:
+
+- `destination: { "Client": ... }` or `"AllClients"` → `self.postMessage()` to main thread
+- `destination: { "Server": ... }` or `"AllServers"` → HTTP POST to upstream server
+- `"AllServers"` + `"AllClients"` (broadcast) → both
+
+### Tests (Vitest browser mode, headless Chromium)
+
+All tests run in a real browser via `@vitest/browser`. They exercise the full stack: main thread → worker → OPFS.
+
+1. **`worker_bridge_init`** — Spawn worker, wait for ready, send init, verify worker creates runtime. Assert: no errors, worker responds.
+
+2. **`worker_bridge_sync_round_trip`** — Main thread inserts a row. Assert: row arrives in worker (via sync). Worker's data includes the row.
+
+3. **`worker_bridge_query_after_sync`** — Main thread inserts, then queries locally. Assert: query returns the inserted row (data is in local in-memory runtime).
+
+4. **`persistence_across_reload`** — Insert rows. Shutdown worker (flush). Create new worker + bridge with same `dbName`. Assert: query returns previously inserted data (survived OPFS round-trip).
+
+5. **`persisted_variant_resolves`** — Call `insertPersisted(table, values, "worker")`. Assert: Promise resolves (worker acks via PersistenceAck in sync protocol).
+
+6. **`server_sync_through_worker`** — Start a mock server (or use the real todo-server-rs). Main thread inserts. Assert: data reaches server via worker's HTTP POST. Server sends update → arrives at main thread via worker's SSE → worker sync.
+
+7. **`token_refresh`** — Send `update-auth` with new JWT. Assert: subsequent server requests use the new token.
+
+### Open Questions (8a-specific)
+
+1. **Outbox routing (VERIFIED — NEEDS FIX)**: `JsSyncSender::send_sync_message()` (runtime.rs:135) serializes only `message.payload`, dropping `message.destination`. The worker cannot distinguish client-bound vs server-bound messages. Fix options: (a) serialize the full `OutboxEntry` (destination + payload) — simplest, (b) add separate callbacks per destination type. Option (a) is preferred — minimal change, and the worker parses JSON anyway.
+
+2. **Worker bundling**: `new URL("../worker/groove-worker.js", import.meta.url)` works with Vite. May need different patterns for webpack or unbundled ESM. Document the known-working bundlers.
+
+3. **Initial sync latency**: On cold start with large OPFS databases, the initial full sync from worker to main thread could be slow. May need streaming or pagination for Phase 8b or later.
+
+4. **Db.getClient() architecture**: Currently `Db` creates a JazzClient per schema (memoized). With the worker bridge, we need one worker but potentially multiple schemas. May need to rethink — likely one worker per Db instance, with schema sent once in init.
+
+### What Does NOT Work After 8a (Needs 8b)
+
+- Multi-tab coordination (leader election, BroadcastChannel)
+- Follower tabs (memory-only workers syncing through leader)
+- Leader failover on tab close
+- Shared OPFS across tabs
+
+### Verification
+
+```bash
+# Vitest browser tests (headless Chromium)
+pnpm test --filter jazz-ts -- --config vitest.config.browser.ts
+
+# Existing tests still pass
+pnpm test --filter jazz-ts
+pnpm test --filter groove-wasm   # WASM tests
+cargo test -p groove --features bftree
+
+# Example app works in browser
+cd examples/todo-ts-client && pnpm dev
+# → Open in Chrome, insert todos, reload page, todos persist
+```
+
+---
+
+## Phase 8b: Multi-Tab Coordination
+
+**Goal**: Leader election, BroadcastChannel sync, follower failover across browser tabs.
+
+**Depends on**: Phase 8a (single-tab worker bridge working).
+
+**After 8b**: Multiple tabs share the same OPFS database. Only the leader tab opens OPFS. Follower tabs sync through the leader. Leader failover on tab close.
+
+### Architecture
 
 ```
 Tab A (LEADER)                Tab B (FOLLOWER)           Tab C (FOLLOWER)
@@ -1576,8 +2142,8 @@ Tab A (LEADER)                Tab B (FOLLOWER)           Tab C (FOLLOWER)
       ▼                              ▼                          ▼
 ┌─────────────┐              ┌─────────────┐            ┌─────────────┐
 │ Worker A    │◄────────────►│ Worker B    │◄──────────►│ Worker C    │
-│ (has OPFS)  │  BroadcastCh │ (mem only)  │            │ (mem only)  │
-│ + WebSocket │              │             │            │             │
+│ (has OPFS)  │ BroadcastCh  │ (mem only)  │            │ (mem only)  │
+│ + SSE/POST  │              │             │            │             │
 └─────────────┘              └─────────────┘            └─────────────┘
       │
       ▼
@@ -1587,7 +2153,7 @@ Tab A (LEADER)                Tab B (FOLLOWER)           Tab C (FOLLOWER)
 **Leader responsibilities:**
 
 - Holds exclusive OPFS `SyncAccessHandle`
-- Maintains WebSocket to upstream server
+- Maintains SSE + POST to upstream server
 - Broadcasts changes to follower tabs via BroadcastChannel
 - Persists data from all tabs
 
@@ -1597,23 +2163,20 @@ Tab A (LEADER)                Tab B (FOLLOWER)           Tab C (FOLLOWER)
 - Sends writes to leader via BroadcastChannel
 - Receives updates from leader
 - No direct server connection
+- No OPFS access
 
 **Leader election protocol:**
 
 ```typescript
-// On worker startup
-const LEADER_KEY = "jazz-leader";
 const LEADER_HEARTBEAT_MS = 1000;
 const LEADER_TIMEOUT_MS = 3000;
 
 async function electLeader(): Promise<boolean> {
   const channel = new BroadcastChannel("jazz-leader-election");
 
-  // Try to claim leadership
   const myId = crypto.randomUUID();
   const claim = { type: "claim", id: myId, timestamp: Date.now() };
 
-  // Listen for competing claims
   let isLeader = true;
   channel.onmessage = (e) => {
     if (e.data.type === "claim" && e.data.timestamp < claim.timestamp) {
@@ -1628,13 +2191,9 @@ async function electLeader(): Promise<boolean> {
   await sleep(100); // Wait for competing claims
 
   if (isLeader) {
-    // Start heartbeat
     setInterval(() => {
       channel.postMessage({ type: "heartbeat", id: myId });
     }, LEADER_HEARTBEAT_MS);
-
-    // Open OPFS
-    await openOpfsStorage();
   }
 
   return isLeader;
@@ -1642,8 +2201,6 @@ async function electLeader(): Promise<boolean> {
 ```
 
 **Failover on leader tab close:**
-
-When leader tab closes unexpectedly:
 
 1. Heartbeat stops
 2. After `LEADER_TIMEOUT_MS`, followers detect leader loss
@@ -1655,20 +2212,26 @@ This is acceptable because:
 
 - Fire-and-forget is the default durability level
 - Users who need guarantees use `_persisted` variants
-- Simplest possible failover - no WAL replay complexity
+- Simplest possible failover — no WAL replay complexity
 
-### Expected test status after Phase 8
+### Tests (8b-specific)
 
-| Test                                       | Status    | Notes                                                         |
-| ------------------------------------------ | --------- | ------------------------------------------------------------- |
-| `examples/todo-ts-client`                  | **GREEN** | Full browser app: OPFS persistence, leader election, tab sync |
-| `jazz-ts::worker_bridge_*` (new)           | **GREEN** | Main thread ↔ worker postMessage protocol                     |
-| `jazz-ts::persistence_across_reload` (new) | **GREEN** | Write data, "reload" (re-init), data survives via OPFS        |
-| `jazz-ts::multi_tab_sync` (new)            | **GREEN** | Leader broadcasts to follower, both see same data             |
-| `jazz-ts::leader_failover` (new)           | **GREEN** | Leader tab closes, follower takes over, OPFS still works      |
-| `jazz-ts::persisted_variants` (new)        | **GREEN** | `createPersisted()` resolves on worker ack                    |
+1. **`multi_tab_sync`** — Leader broadcasts to follower, both see same data
+2. **`leader_failover`** — Leader tab closes, follower takes over, OPFS still works
+3. **`follower_writes_through_leader`** — Follower inserts data, leader persists it
 
-Only after Phase 8 does browser persistence work in a production-like setup (main thread ↔ worker bridge, OPFS, leader election). Phases 7a-7c prove each layer independently.
+### Expected test status after Phase 8b
+
+| Test                                      | Status    | Notes                                                         |
+| ----------------------------------------- | --------- | ------------------------------------------------------------- |
+| `examples/todo-ts-client`                 | **GREEN** | Full browser app: OPFS persistence, leader election, tab sync |
+| `jazz-ts::worker_bridge_*` (8a)           | **GREEN** | Main thread ↔ worker postMessage protocol                     |
+| `jazz-ts::persistence_across_reload` (8a) | **GREEN** | Write data, reload, data survives via OPFS                    |
+| `jazz-ts::multi_tab_sync` (8b)            | **GREEN** | Leader broadcasts to follower, both see same data             |
+| `jazz-ts::leader_failover` (8b)           | **GREEN** | Leader tab closes, follower takes over                        |
+| `jazz-ts::persisted_variants` (8a)        | **GREEN** | `createPersisted()` resolves on worker ack                    |
+
+Only after Phase 8b does browser persistence work in a full production-like setup (multi-tab, leader election, OPFS). Phase 8a handles the single-tab case.
 
 ---
 

@@ -494,19 +494,6 @@ impl SyncManager {
         self.clients.insert(client_id, ClientState::default());
     }
 
-    /// Add a client connection with Peer role and sync all existing objects to them.
-    ///
-    /// Peer role means trusted relay (server-to-server) — bypasses all auth checks.
-    /// This is used when another server connects as a client for replication.
-    pub fn add_client_with_full_sync(&mut self, client_id: ClientId) {
-        let state = ClientState {
-            role: ClientRole::Peer,
-            ..Default::default()
-        };
-        self.clients.insert(client_id, state);
-        self.queue_full_sync_to_client(client_id);
-    }
-
     /// Remove a client connection.
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
@@ -844,91 +831,6 @@ impl SyncManager {
         for (object_id, metadata, branch_name, tips) in to_sync {
             self.queue_tips_to_server(server_id, object_id, metadata, branch_name, tips);
         }
-    }
-
-    /// Queue all existing objects to sync to a new client.
-    ///
-    /// This is called when a client first connects to send them all known data.
-    /// For production, clients should use query subscriptions to scope what they receive.
-    fn queue_full_sync_to_client(&mut self, client_id: ClientId) {
-        // Collect all object/branch/tips we need to sync
-        let mut to_sync: Vec<BranchSyncData> = Vec::new();
-
-        for (object_id, object) in &self.object_manager.objects {
-            for (branch_name, branch) in &object.branches {
-                to_sync.push((
-                    *object_id,
-                    object.metadata.clone(),
-                    *branch_name,
-                    branch.tips.iter().copied().collect(),
-                ));
-            }
-        }
-
-        // Now queue messages
-        for (object_id, metadata, branch_name, tips) in to_sync {
-            self.queue_tips_to_client_full_sync(client_id, object_id, metadata, branch_name, tips);
-        }
-    }
-
-    /// Queue tips to a client during full sync (bypasses scope check).
-    fn queue_tips_to_client_full_sync(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
-    ) {
-        // Skip objects marked as nosync (local-only, e.g., index nodes)
-        if metadata.get("nosync").map(|v| v == "true").unwrap_or(false) {
-            return;
-        }
-
-        // Extract needed info without holding mutable borrow
-        let (include_metadata, already_sent) = {
-            let Some(client) = self.clients.get(&client_id) else {
-                return;
-            };
-            let include_metadata = !client.sent_metadata.contains(&object_id);
-            let already_sent = client
-                .sent_tips
-                .get(&(object_id, branch_name))
-                .cloned()
-                .unwrap_or_default();
-            (include_metadata, already_sent)
-        };
-
-        // Collect commits
-        let commits = self.collect_commits_to_send(object_id, &branch_name, &already_sent, &tips);
-
-        if commits.is_empty() && !include_metadata {
-            return;
-        }
-
-        // Now update client state
-        let client = self.clients.get_mut(&client_id).unwrap();
-        if include_metadata {
-            client.sent_metadata.insert(object_id);
-        }
-        client.sent_tips.insert((object_id, branch_name), tips);
-
-        self.outbox.push(OutboxEntry {
-            destination: Destination::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id,
-                metadata: if include_metadata {
-                    Some(ObjectMetadata {
-                        id: object_id,
-                        metadata,
-                    })
-                } else {
-                    None
-                },
-                branch_name,
-                commits,
-            },
-        });
     }
 
     /// Queue tips to a server, including metadata if first time.
@@ -2624,11 +2526,11 @@ mod tests {
     }
 
     #[test]
-    fn add_client_with_full_sync_sets_peer_role() {
+    fn add_client_then_set_peer_role() {
         let mut sm = SyncManager::new();
         let client_id = ClientId::new();
-        sm.add_client_with_full_sync(client_id);
-
+        sm.add_client(client_id);
+        sm.set_client_role(client_id, ClientRole::Peer);
         let client = sm.get_client(client_id).unwrap();
         assert_eq!(client.role, ClientRole::Peer);
     }
@@ -3640,12 +3542,12 @@ mod tests {
         let mut c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
 
         // A connects to B as server
-        // B adds A as client (with full sync for simplicity)
-        b.add_client_with_full_sync(a_client_of_b);
+        b.add_client(a_client_of_b);
+        b.set_client_role(a_client_of_b, ClientRole::Peer);
 
         // B connects to C as server
-        // C adds B as client (with full sync)
-        c.add_client_with_full_sync(b_client_of_c);
+        c.add_client(b_client_of_c);
+        c.set_client_role(b_client_of_c, ClientRole::Peer);
         b.add_server(c_server_for_b);
 
         ThreeTierSetup {
