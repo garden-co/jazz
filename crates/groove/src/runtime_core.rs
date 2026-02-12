@@ -235,6 +235,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
     ack_watchers: HashMap<CommitId, Vec<(PersistenceTier, oneshot::Sender<()>)>>,
+
+    /// Label for tracing (e.g. "worker", "edge", "client").
+    tier_label: &'static str,
 }
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
@@ -251,7 +254,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             next_subscription_handle: 0,
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
+            tier_label: "unknown",
         }
+    }
+
+    /// Set the tier label used in tracing spans.
+    pub fn set_tier_label(&mut self, label: &'static str) {
+        self.tier_label = label;
     }
 
     /// Get mutable reference to the Storage.
@@ -313,7 +322,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Call this after any mutation operation (insert, update, delete, etc.)
     /// to process the change and schedule any required I/O.
     pub fn immediate_tick(&mut self) -> TickOutput {
-        let _span = trace_span!("immediate_tick").entered();
+        let _span = trace_span!("immediate_tick", tier = self.tier_label).entered();
 
         // 1. Process logical updates (sync, subscriptions)
         self.schema_manager.process(&mut self.storage);
@@ -414,7 +423,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ///
     /// Each step is followed by an immediate_tick to process results.
     pub fn batched_tick(&mut self) {
-        let _span = debug_span!("batched_tick").entered();
+        let _span = debug_span!("batched_tick", tier = self.tier_label).entered();
 
         // 1. Send all outgoing sync messages
         let outbox = self
@@ -475,7 +484,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
-        trace!(source = ?message.source, payload = ?std::mem::discriminant(&message.payload), "parking sync message");
+        trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
         self.parked_sync_messages.push(message);
         self.scheduler.schedule_batched_tick();
     }

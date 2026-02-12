@@ -238,7 +238,8 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new();
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -771,7 +772,8 @@ impl WasmRuntime {
         let sync_sender = JsSyncSender::new();
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
