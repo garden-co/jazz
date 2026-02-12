@@ -9,6 +9,7 @@ members = [
   "crates/jazz-cli",
   "crates/jazz-rs",
   "crates/groove-napi",
+  "crates/wasm-tracing",
   "examples/todo-server-rs",
 ]
 exclude = ["crates/bf-tree/tests/wasm"]

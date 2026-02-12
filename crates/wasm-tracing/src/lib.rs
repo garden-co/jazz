@@ -75,6 +75,13 @@ extern "C" {
     fn error1(message: String);
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn error4(message1: String, message2: &str, message3: &str, message4: &str);
+
+    #[wasm_bindgen(js_namespace = console, js_name = groupCollapsed)]
+    fn group_collapsed1(label: String);
+    #[wasm_bindgen(js_namespace = console, js_name = groupCollapsed)]
+    fn group_collapsed4(label: String, style1: &str, style2: &str, style3: &str);
+    #[wasm_bindgen(js_namespace = console, js_name = groupEnd)]
+    fn group_end();
 }
 
 #[cfg(not(feature = "mark-with-rayon-thread-index"))]
