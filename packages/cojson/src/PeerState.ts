@@ -176,10 +176,6 @@ export class PeerState {
     return this.peer.persistent;
   }
 
-  get hasUnsentMessages() {
-    return this.peer.outgoing.hasUnsentMessages();
-  }
-
   pushOutgoingMessage(msg: SyncMessage) {
     this.peer.outgoing.push(msg);
   }

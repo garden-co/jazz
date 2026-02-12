@@ -5,30 +5,15 @@ import { ConnectedPeerChannel } from "../streamUtils.js";
 import { Peer } from "../sync.js";
 
 function createPeerState(id = "peer-1"): PeerState {
-  return createPeerStateWithChannels(id).peerState;
-}
-
-function createPeerStateWithChannels(id = "peer-1"): {
-  peerState: PeerState;
-  incoming: ConnectedPeerChannel;
-  outgoing: ConnectedPeerChannel;
-} {
-  const incoming = new ConnectedPeerChannel();
-  const outgoing = new ConnectedPeerChannel();
-
   const peer: Peer = {
     id,
     role: "server",
     persistent: true,
-    incoming,
-    outgoing,
+    incoming: new ConnectedPeerChannel(),
+    outgoing: new ConnectedPeerChannel(),
   };
 
-  return {
-    peerState: new PeerState(peer, undefined),
-    incoming,
-    outgoing,
-  };
+  return new PeerState(peer, undefined);
 }
 
 describe("StorageReconciliationAckTracker", () => {
@@ -58,36 +43,6 @@ describe("StorageReconciliationAckTracker", () => {
     tracker.handleAck("batch-1", peer.id);
 
     expect(onAck).toHaveBeenCalledTimes(1);
-  });
-
-  test("waits for peer outgoing queue to drain after ack before invoking callback", () => {
-    vi.useFakeTimers();
-
-    try {
-      const tracker = new StorageReconciliationAckTracker();
-      const { peerState, outgoing } = createPeerStateWithChannels("peer-1");
-      const onAck = vi.fn();
-
-      tracker.trackBatch("batch-1", peerState.id, 50);
-
-      // Queue an unsent message before waiting for ack.
-      outgoing.push("Disconnected");
-      expect(peerState.hasUnsentMessages).toBe(true);
-
-      tracker.waitForAck("batch-1", peerState, onAck);
-      tracker.handleAck("batch-1", peerState.id);
-
-      // Ack arrived, but callback should wait until unsent queue is empty.
-      vi.advanceTimersByTime(30);
-      expect(onAck).not.toHaveBeenCalled();
-
-      // Draining the outgoing channel clears buffered unsent messages.
-      outgoing.onMessage(() => {});
-      vi.advanceTimersByTime(10);
-      expect(onAck).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   test("invokes callback only once even if peer closes after ack", () => {

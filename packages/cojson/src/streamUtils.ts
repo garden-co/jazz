@@ -85,10 +85,6 @@ export class ConnectedPeerChannel
     this.listeners.add(callback);
   }
 
-  hasUnsentMessages(): boolean {
-    return this.buffer.length > 0;
-  }
-
   closed = false;
   closeListeners = new Set<() => void>();
   onClose(callback: () => void) {

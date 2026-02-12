@@ -109,7 +109,6 @@ export interface OutgoingPeerChannel {
   push: (msg: SyncMessage | DisconnectedError) => void;
   close: () => void;
   onClose: (callback: () => void) => void;
-  hasUnsentMessages: () => boolean;
 }
 
 export interface Peer {

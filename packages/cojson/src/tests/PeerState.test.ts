@@ -112,16 +112,4 @@ describe("PeerState", () => {
     expect(peerState.getKnownState("co_z1")).not.toEqual(optimisticState);
     expect(peerState.getOptimisticKnownState("co_z1")).toEqual(optimisticState);
   });
-
-  test("hasUnsentMessages should return true when there are unsent messages", () => {
-    const { peerState } = setup();
-    const message: SyncMessage = {
-      action: "load",
-      id: "co_ztest-id",
-      header: false,
-      sessions: {},
-    };
-    peerState.pushOutgoingMessage(message);
-    expect(peerState.hasUnsentMessages).toBe(true);
-  });
 });

@@ -176,10 +176,6 @@ export class BatchedOutgoingMessages
     this.batching = enabled;
   }
 
-  hasUnsentMessages(): boolean {
-    return this.queue.length > 0;
-  }
-
   private closeListeners = new Set<() => void>();
   onClose(callback: () => void) {
     this.closeListeners.add(callback);
