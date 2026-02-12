@@ -26,11 +26,13 @@ The immediate need is tracking whether a mutation has been accepted by the sync 
 ### Launch: Optimistic Update API & DX
 
 **Default behavior** (good for most apps):
+
 - Writes appear immediately in the local query results
 - If the server rejects, the write disappears (rollback)
 - Reactive queries update automatically on rollback
 
 **Explicit pending state** (for apps that need it):
+
 - Rows/mutations carry a settlement tier indicator
 - Developers can show "pending" / "confirmed" / "rejected" states in UI
 - Query filter: "only show confirmed rows" or "show all including pending"

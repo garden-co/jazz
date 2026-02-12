@@ -26,11 +26,11 @@ The client opens a persistent `/events` SSE connection for receiving updates, an
 
 ## Endpoints
 
-| Route     | Method | Description                                                 |
-| --------- | ------ | ----------------------------------------------------------- |
-| `/events` | GET    | Binary streaming for push updates                           |
-| `/sync`   | POST   | Unified sync endpoint (all mutations, subscriptions)        |
-| `/health` | GET    | Health check                                                |
+| Route     | Method | Description                                          |
+| --------- | ------ | ---------------------------------------------------- |
+| `/events` | GET    | Binary streaming for push updates                    |
+| `/sync`   | POST   | Unified sync endpoint (all mutations, subscriptions) |
+| `/health` | GET    | Health check                                         |
 
 Note: The original spec described separate endpoints (`/sync/subscribe`, `/sync/object`, etc.). These were consolidated into a single `/sync` endpoint that accepts polymorphic `SyncPayload` variants — simpler routing, unified auth/logging.
 

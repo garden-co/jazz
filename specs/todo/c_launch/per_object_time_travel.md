@@ -26,4 +26,4 @@ This is straightforward because the commit graph can be navigated directly — n
 
 ## Future: Full Point-in-Time Queries
 
-Querying *across* rows at a historical timestamp (e.g., "all todos as of last Tuesday") requires historical index support and is deferred. See `../d_later/point_in_time_queries.md`.
+Querying _across_ rows at a historical timestamp (e.g., "all todos as of last Tuesday") requires historical index support and is deferred. See `../d_later/point_in_time_queries.md`.

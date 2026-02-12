@@ -72,12 +72,13 @@ Ordered 1:N relationships as an array column with FK semantics. Each element is 
 ### 3. Policy Inheritance via FK Declarations
 
 Policies declared at the pointing side:
+
 ```
 -- "files referenced from todos inherit todo's policies"
 todos.image -> files : INHERIT POLICY
 ```
 
-At access time for a `files` row: collect all FK declarations across all tables that point at `files` and declare policy inheritance. For each, find rows that reference this file. OR the policies together — if *any* referencing row grants access, the file is accessible.
+At access time for a `files` row: collect all FK declarations across all tables that point at `files` and declare policy inheritance. For each, find rows that reference this file. OR the policies together — if _any_ referencing row grants access, the file is accessible.
 
 For `file_parts`, the chain is two hops: `todos.image → files` (inherit) + `files.parts → file_parts` (inherit). In most cases only a single table points at any given file, so the OR is trivial.
 
