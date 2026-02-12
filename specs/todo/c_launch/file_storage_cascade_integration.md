@@ -44,6 +44,7 @@ See `on_delete_cascade.md` for distributed refcounting semantics (eager soft del
 ## Migration from Phase 1
 
 Apps that manually delete files can:
+
 1. Add `ON DELETE CASCADE` to their FK declarations in schema.
 2. Remove manual file/file_parts deletion code.
 

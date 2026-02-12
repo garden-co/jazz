@@ -18,6 +18,7 @@ The `parts` array becomes a flat rope: ordered references to variable-size conte
 ## Update Workflow
 
 For Dropbox-like incremental editing:
+
 1. Re-chunk the modified region (FastCDC).
 2. New/changed chunks get new UUIDv5 IDs; unchanged chunks keep theirs.
 3. Update `parts` + `part_sizes` arrays.

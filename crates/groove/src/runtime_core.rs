@@ -1715,8 +1715,8 @@ mod tests {
                 *object_id == schema_obj_id
                     && metadata
                         .as_ref()
-                        .and_then(|m| m.metadata.get("type"))
-                        .map(|t| t == "catalogue_schema")
+                        .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                        .map(|t| t == crate::metadata::ObjectType::CatalogueSchema.as_str())
                         .unwrap_or(false)
             } else {
                 false
