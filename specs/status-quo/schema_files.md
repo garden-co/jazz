@@ -108,7 +108,7 @@ Uses side-effect collection (no export needed).
 Generates `app.ts` with TypeScript interfaces, init types, WhereInput types, and QueryBuilder classes.
 
 > `packages/jazz-ts/src/codegen/index.ts`
-> `examples/todo-ts-client/schema/app.ts` (generated output)
+> `examples/todo-client-localfirst-ts/schema/app.ts` (generated output)
 
 ## Schema Diff
 
