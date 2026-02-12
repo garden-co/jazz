@@ -1103,78 +1103,7 @@ impl QueryManager {
         storage: &mut H,
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
-        // Check for hard delete first
-        if self.is_hard_deleted(id) {
-            return Err(QueryError::RowHardDeleted(id));
-        }
-
-        // Get table name from object metadata
-        let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
-            .ok_or(QueryError::ObjectNotFound(id))?;
-
-        let table_name = TableName::new(&table);
-
-        // Check if already soft-deleted
-        if self.row_is_deleted(storage, &table, id) {
-            return Err(QueryError::RowAlreadyDeleted(id));
-        }
-
-        // Get old data from ObjectManager (for index removal and content preservation)
-        let (old_data, _) = self
-            .load_row_from_object(id)
-            .ok_or(QueryError::ObjectNotFound(id))?;
-
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.descriptor.clone();
-
-        // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Create delete metadata
-        let delete_metadata = soft_delete_metadata();
-
-        // Add commit with preserved content + delete: soft metadata
-        // Content is copied from previous tip so soft-deleted rows can still be read
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                old_data.clone(), // Preserve content for soft deletes
-                author,
-                Some(delete_metadata),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
-
-        // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
-
-        // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty(&table);
-        self.mark_row_deleted_in_subscriptions(&table, id);
-
-        Ok(DeleteHandle {
-            row_id: id,
-            delete_commit_id,
-        })
+        self.delete_with_session(storage, id, None)
     }
 
     /// Soft delete a row with session-based policy checking.
