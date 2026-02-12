@@ -25,6 +25,10 @@ Communicate tersely without losing precision or warmth.
 
 **E2E over unit tests.** Prefer high-level integration tests (SchemaManager, RuntimeCore) over internal-helper tests. Exception: tiny unit tests for isolated pure functions.
 
+**Tests should read like real usage.** Prefer realistic fixtures (domain-shaped objects/metadata) and human actor names (`alice`, `bob`, etc.) over generic placeholders (`obj1`, `client1`, `a`, `b`) unless the test is specifically about abstract graph mechanics.
+
+**Use ASCII flow sketches when valuable.** For tests with non-trivial causal flow (multi-client sync, branching/merging, permission pipelines), include a short ASCII-art graph/sequence comment showing the scenario being asserted.
+
 **Builds:** `pnpm build` (everything), `pnpm test` (everything), via turbo.
 
 ## Completion bias
