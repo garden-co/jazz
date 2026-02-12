@@ -3,8 +3,8 @@
 // CLI for jazz-ts schema tooling
 
 import { spawn } from "child_process";
-import { readdir, writeFile } from "fs/promises";
-import { join, basename } from "path";
+import { access, readdir, writeFile } from "fs/promises";
+import { join, basename, dirname } from "path";
 import { pathToFileURL } from "url";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
@@ -121,30 +121,78 @@ async function generateSqlForMigrationFile(tsFile: string): Promise<void> {
   console.log(`Generated: ${basename(bwdFile)}`);
 }
 
-async function runJazzBuild(jazzBin: string, schemaDir: string): Promise<void> {
-  return new Promise((resolve) => {
+/**
+ * Check if a path exists
+ */
+const pathExists = async (path: string): Promise<boolean> => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const findMonorepoJazzBinary = async (): Promise<string | null> => {
+  let currentDir = process.cwd();
+  while (true) {
+    const cargoTomlPath = join(currentDir, "Cargo.toml");
+    const monorepoJazzPath = join(currentDir, "target", "debug", "jazz");
+    if ((await pathExists(cargoTomlPath)) && (await pathExists(monorepoJazzPath))) {
+      return monorepoJazzPath;
+    }
+
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) {
+      return null;
+    }
+    currentDir = parentDir;
+  }
+};
+
+type JazzBuildResult = { type: "close"; code: number | null } | { type: "error"; error: Error };
+
+async function runJazzBuild(
+  jazzBin: string,
+  schemaDir: string,
+  searchJazzBinOnError: boolean = true,
+): Promise<void> {
+  const result: JazzBuildResult = await new Promise((resolve) => {
     console.log(`\nRunning: ${jazzBin} build --ts --schema-dir ${schemaDir}`);
     const child = spawn(jazzBin, ["build", "--ts", "--schema-dir", schemaDir], {
       stdio: "inherit",
     });
     child.on("close", (code) => {
-      if (code !== 0) {
-        console.warn(`jazz build exited with code ${code} (versioned schemas not generated)`);
-      }
-      resolve();
+      resolve({ type: "close", code });
     });
-    child.on("error", (err) => {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        console.warn(
-          `jazz binary not found at '${jazzBin}'. Use --jazz-bin to specify the path.\n` +
-            `Versioned schemas will not be generated.`,
-        );
-      } else {
-        console.warn(`jazz build failed: ${err.message}`);
-      }
-      resolve();
+    child.on("error", (error) => {
+      resolve({ type: "error", error });
     });
   });
+  if (result.type === "close") {
+    if (result.code !== 0) {
+      console.warn(`jazz build exited with code ${result.code} (versioned schemas not generated)`);
+    }
+    return;
+  }
+
+  const error = result.error as NodeJS.ErrnoException;
+  if (error.code === "ENOENT") {
+    const monorepoJazzPath = searchJazzBinOnError ? await findMonorepoJazzBinary() : null;
+    if (monorepoJazzPath) {
+      console.log(
+        `jazz binary not found at '${jazzBin}'. Using monorepo jazz binary at '${monorepoJazzPath}'`,
+      );
+      return runJazzBuild(monorepoJazzPath, schemaDir, false);
+    } else {
+      console.warn(
+        `jazz binary not found at '${jazzBin}'. Use --jazz-bin to specify the path.\n` +
+          `Versioned schemas will not be generated.`,
+      );
+    }
+  }
+
+  console.warn(`jazz build failed: ${error.message}`);
 }
 
 async function build(options: BuildOptions): Promise<void> {
