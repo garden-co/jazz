@@ -5,7 +5,7 @@
 use crate::sync::atomic::AtomicU32;
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "android"),
     not(feature = "shuttle"),
     not(target_arch = "wasm32")
 ))]
@@ -70,11 +70,12 @@ mod platform {
 }
 
 #[cfg(all(
-    target_os = "macos",
+    any(target_os = "macos", target_os = "ios"),
     not(feature = "shuttle"),
     not(target_arch = "wasm32")
 ))]
-/// We don't do anything for macOS, just to make sure it compiles and correct.
+/// No-op for Apple platforms. macOS/iOS have os_unfair_lock / __ulock_wait
+/// but the no-op is sufficient for now.
 mod platform {
     #[inline]
     pub fn wait(_a: &std::sync::atomic::AtomicU32, _expected: u32) {}

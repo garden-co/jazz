@@ -21,9 +21,12 @@ toml = "0.8.23"
 thread_local = "1.1.9"
 cfg-if = "=1.0.0"
 
-# Gate platform-specific dependencies to exclude WASM
+# io-uring is Linux-only (not available on Android/iOS)
 [target.'cfg(all(target_os = "linux", not(target_arch = "wasm32")))'.dependencies]
 io-uring = "0.6.4"
+
+# libc needed on Linux + Android for futex syscall in atomic_wait
+[target.'cfg(all(any(target_os = "linux", target_os = "android"), not(target_arch = "wasm32")))'.dependencies]
 libc = "0.2.155"
 #spdk-rs = { git = "https://github.com/openebs/spdk-rs.git", branch = "release/2.5", optional = true }
 #crossbeam-queue = { version = "0.3.11", optional = true }
