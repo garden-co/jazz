@@ -10,6 +10,9 @@ impl SyncManager {
     /// Call this after local writes to sync changes to connected servers.
     pub fn forward_update_to_servers(&mut self, object_id: ObjectId, branch_name: BranchName) {
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        if !server_ids.is_empty() {
+            tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
+        }
 
         let Some(object) = self.object_manager.get(object_id) else {
             return;

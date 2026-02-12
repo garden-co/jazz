@@ -8,6 +8,7 @@ use std::collections::HashSet;
 impl SyncManager {
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
+        tracing::trace!(source = ?entry.source, payload = ?std::mem::discriminant(&entry.payload), "processing inbox entry");
         match entry.source {
             Source::Server(server_id) => {
                 self.process_from_server(storage, server_id, entry.payload)
@@ -32,6 +33,7 @@ impl SyncManager {
                 branch_name,
                 commits,
             } => {
+                tracing::debug!(%object_id, %branch_name, commits = commits.len(), "server→ObjectUpdated");
                 let persisted =
                     self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
 
@@ -75,6 +77,7 @@ impl SyncManager {
                 confirmed_commits,
                 tier,
             } => {
+                tracing::debug!(%object_id, ?tier, commits = confirmed_commits.len(), "server→PersistenceAck");
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
@@ -107,6 +110,7 @@ impl SyncManager {
                 }
             }
             SyncPayload::QuerySettled { query_id, tier } => {
+                tracing::debug!(?query_id, ?tier, "server→QuerySettled");
                 // Queue for local QueryManager to process
                 self.pending_query_settled.push((query_id, tier));
 
@@ -137,8 +141,10 @@ impl SyncManager {
         payload: SyncPayload,
     ) {
         let Some(client) = self.clients.get(&client_id) else {
+            tracing::warn!(%client_id, "message from unknown client, ignoring");
             return;
         };
+        tracing::trace!(%client_id, role = ?client.role, payload = ?std::mem::discriminant(&payload), "client→payload");
 
         match &payload {
             SyncPayload::ObjectUpdated {

@@ -27,6 +27,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::channel::oneshot;
+use tracing::{debug, debug_span, info, trace, trace_span};
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -296,7 +297,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Persist the current schema to the catalogue for server sync.
     pub fn persist_schema(&mut self) -> ObjectId {
-        self.schema_manager.persist_schema(&mut self.storage)
+        let id = self.schema_manager.persist_schema(&mut self.storage);
+        info!(object_id = %id, "persisted schema to catalogue");
+        id
     }
 
     // =========================================================================
@@ -310,6 +313,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Call this after any mutation operation (insert, update, delete, etc.)
     /// to process the change and schedule any required I/O.
     pub fn immediate_tick(&mut self) -> TickOutput {
+        let _span = trace_span!("immediate_tick").entered();
+
         // 1. Process logical updates (sync, subscriptions)
         self.schema_manager.process(&mut self.storage);
 
@@ -409,12 +414,17 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ///
     /// Each step is followed by an immediate_tick to process results.
     pub fn batched_tick(&mut self) {
+        let _span = debug_span!("batched_tick").entered();
+
         // 1. Send all outgoing sync messages
         let outbox = self
             .schema_manager
             .query_manager_mut()
             .sync_manager_mut()
             .take_outbox();
+        if !outbox.is_empty() {
+            debug!(count = outbox.len(), "flushing outbox");
+        }
         for msg in outbox {
             self.sync_sender.send_sync_message(msg);
         }
@@ -430,6 +440,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .sync_manager_mut()
             .take_outbox();
+        if !outbox.is_empty() {
+            debug!(count = outbox.len(), "flushing post-process outbox");
+        }
         for msg in outbox {
             self.sync_sender.send_sync_message(msg);
         }
@@ -439,6 +452,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     fn handle_sync_messages(&mut self) {
         let messages = std::mem::take(&mut self.parked_sync_messages);
         let had_messages = !messages.is_empty();
+        if had_messages {
+            debug!(count = messages.len(), "processing parked sync messages");
+        }
         for msg in messages {
             self.push_sync_inbox(msg);
         }
@@ -459,6 +475,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
+        trace!(source = ?message.source, payload = ?std::mem::discriminant(&message.payload), "parking sync message");
         self.parked_sync_messages.push(message);
         self.scheduler.schedule_batched_tick();
     }
@@ -533,6 +550,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> Result<SubscriptionHandle, RuntimeError> {
+        let _span = debug_span!("subscribe", table = query.table.as_str()).entered();
         let query_sub_id = self
             .schema_manager
             .query_manager_mut()
@@ -541,6 +559,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         let handle = SubscriptionHandle(self.next_subscription_handle);
         self.next_subscription_handle += 1;
+        debug!(handle = handle.0, sub_id = query_sub_id.0, "subscribed");
 
         self.subscriptions.insert(
             handle,
@@ -592,6 +611,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> QueryFuture {
+        let _span = debug_span!("query", table = query.table.as_str(), ?settled_tier).entered();
         let (sender, receiver) = oneshot::channel();
 
         let sub_id = match self.schema_manager.query_manager_mut().subscribe_with_sync(
@@ -633,10 +653,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<Value>,
         session: Option<&Session>,
     ) -> Result<ObjectId, RuntimeError> {
+        let _span = debug_span!("insert", table).entered();
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        debug!(object_id = %result.row_id, "inserted");
         self.immediate_tick();
         Ok(result.row_id)
     }
@@ -648,6 +670,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
+        let _span = debug_span!("update", %object_id).entered();
         let (table, mut current_values) = self
             .schema_manager
             .query_manager_mut()
@@ -686,10 +709,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         object_id: ObjectId,
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
+        let _span = debug_span!("delete", %object_id).entered();
         self.schema_manager
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        debug!("deleted");
         self.immediate_tick();
         Ok(())
     }
@@ -808,6 +833,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Add a server connection.
     pub fn add_server(&mut self, server_id: ServerId) {
+        info!(%server_id, "adding server");
         self.schema_manager
             .query_manager_mut()
             .sync_manager_mut()
@@ -825,6 +851,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Add a client connection.
     pub fn add_client(&mut self, client_id: ClientId, session: Option<Session>) {
+        info!(%client_id, has_session = session.is_some(), "adding client");
         let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
         sm.add_client(client_id);
         if let Some(s) = session {
