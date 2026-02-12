@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "jazz-ts build && vite build",
+    "build": "jazz-ts build --jazz-bin ../../target/debug/jazz && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
