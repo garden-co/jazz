@@ -5,6 +5,10 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "target/**"]
     },
+    "build:crates": {
+      "dependsOn": ["^build:crates"],
+      "outputs": ["target/**", "pkg/**"]
+    },
     "test": {
       "dependsOn": ["build"],
       "cache": false
