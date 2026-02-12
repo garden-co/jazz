@@ -57,9 +57,6 @@ pub struct ArraySubqueryNode {
 
     /// Column index in outer row that provides correlation value.
     outer_correlation_col: usize,
-    /// Name for the array column in output (for debugging).
-    #[allow(dead_code)]
-    array_column_name: String,
 
     /// Per-outer-row state: outer_id → (correlation_value, array_result).
     /// We store the array result directly rather than SubgraphInstances
@@ -117,7 +114,6 @@ impl ArraySubqueryNode {
             subgraph_template,
             schema,
             outer_correlation_col,
-            array_column_name,
             instances: AHashMap::new(),
             current_tuples: AHashSet::new(),
             dirty: true,

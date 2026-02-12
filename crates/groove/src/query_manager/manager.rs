@@ -137,8 +137,6 @@ pub(crate) struct QuerySubscription {
     pub(crate) query: Query,
     /// Compiled query graph.
     pub(crate) graph: QueryGraph,
-    #[allow(dead_code)]
-    pub(crate) mode: SubscriptionMode,
     /// Branches to read from (updated on recompile).
     pub(crate) branches: Vec<String>,
     /// Session for policy filtering (if any).
@@ -152,14 +150,6 @@ pub(crate) struct QuerySubscription {
     pub(crate) settled_tier: Option<PersistenceTier>,
     /// Tiers that have confirmed settlement for this query.
     pub(crate) achieved_tiers: HashSet<PersistenceTier>,
-}
-
-/// Subscription mode (reserved for future use).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub enum SubscriptionMode {
-    Delta,
-    Full,
 }
 
 /// Update for a query subscription.
@@ -1671,7 +1661,6 @@ impl QueryManager {
             QuerySubscription {
                 query,
                 graph,
-                mode: SubscriptionMode::Delta,
                 branches,
                 session,
                 needs_recompile: false,
@@ -1736,7 +1725,6 @@ impl QueryManager {
             QuerySubscription {
                 query,
                 graph,
-                mode: SubscriptionMode::Delta,
                 branches,
                 session,
                 needs_recompile: false,
@@ -2760,88 +2748,6 @@ impl QueryManager {
     fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
         self.load_row_from_object_on_branch(object_id, "main")
             .map(|(content, _)| content)
-    }
-
-    /// Load a row's data from multiple branches, using LWW (last-writer-wins) to select
-    /// the branch with the highest timestamp when the same ObjectId exists on multiple branches.
-    ///
-    /// Returns the content and commit ID from the branch with the newest commit.
-    #[allow(dead_code)]
-    fn load_row_from_object_multi_branch(
-        &self,
-        row_id: ObjectId,
-        branches: &[String],
-    ) -> Option<(Vec<u8>, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
-
-        // Collect the newest tip from each branch
-        let mut best: Option<(u64, Vec<u8>, CommitId)> = None; // (timestamp, content, commit_id)
-
-        for branch_name in branches {
-            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                // Find the tip with the highest timestamp on this branch
-                for &tip_id in &branch.tips {
-                    if let Some(commit) = branch.commits.get(&tip_id) {
-                        match &best {
-                            None => {
-                                best = Some((commit.timestamp, commit.content.clone(), tip_id));
-                            }
-                            Some((best_ts, _, _)) if commit.timestamp > *best_ts => {
-                                best = Some((commit.timestamp, commit.content.clone(), tip_id));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        best.map(|(_, content, commit_id)| (content, commit_id))
-    }
-
-    /// Load a row's data from multiple branches with source branch info.
-    ///
-    /// Same as load_row_from_object_multi_branch but also returns which branch the data came from.
-    #[allow(dead_code)]
-    fn load_row_from_object_multi_branch_with_source(
-        &self,
-        row_id: ObjectId,
-        branches: &[String],
-    ) -> Option<(Vec<u8>, CommitId, String)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
-
-        // Collect the newest tip from each branch
-        let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
-
-        for branch_name in branches {
-            if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                for &tip_id in &branch.tips {
-                    if let Some(commit) = branch.commits.get(&tip_id) {
-                        match &best {
-                            None => {
-                                best = Some((
-                                    commit.timestamp,
-                                    commit.content.clone(),
-                                    tip_id,
-                                    branch_name.clone(),
-                                ));
-                            }
-                            Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                best = Some((
-                                    commit.timestamp,
-                                    commit.content.clone(),
-                                    tip_id,
-                                    branch_name.clone(),
-                                ));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        best.map(|(_, content, commit_id, branch)| (content, commit_id, branch))
     }
 
     /// Handle an object update from the global subscription.

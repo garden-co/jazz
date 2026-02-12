@@ -25,24 +25,14 @@ These stubs break real functionality:
 - **Nested array relation mapping** — `row-transformer.ts:70–77`: TODO to map nested arrays from array subqueries to relation names. Currently returns unnamed extra values.
 - **Token refresh doesn't reconnect** — `groove-worker.ts:277–280`: `update-auth` message updates `jwtToken` in memory but doesn't reconnect the stream, so the server still sees the old token.
 
-## 4. `#[allow(dead_code)]` Annotations (MEDIUM)
+## 4. ~~`#[allow(dead_code)]` Annotations~~ ✅
 
-36 explicit `#[allow(dead_code)]` annotations across the codebase:
+Removed all actionable dead code:
 
-**Should investigate and likely remove:**
+- **groove**: deleted `SubscriptionMode` enum + `mode` field, two unused `load_row_from_object_multi_branch*` methods, `array_column_name` field, `parse_object_id_hex` function
+- **jazz-rs**: removed blanket `#![allow(dead_code)]` from transport.rs, deleted `context` field from `JazzClient`, `query`/`server_query_id` from `SubscriptionState`, `handle` from `SubscriptionStream`, `connection_id` field + `connection_id()`/`has_backend_secret()` methods. Also fixed stringly-typed metadata in `is_catalogue_payload`.
 
-- `jazz-rs/src/transport.rs:3` — crate-level `#![allow(dead_code)]` blanket-suppresses the entire file
-- `jazz-rs/src/client.rs:33` — `context: AppContext` field stored but never read
-- `jazz-rs/src/lib.rs:125` — `handle: SubscriptionHandle` stored but never read
-- `groove/src/query_manager/manager.rs:137,155` — dead fields/types in query manager
-- `groove/src/query_manager/graph_nodes/array_subquery.rs:61` — dead field
-
-**Acceptable (external library, test utilities, benchmarks):**
-
-- `bf-tree/` internal utilities (13 annotations) — third-party-ish code, low priority
-- `jazz-cli/src/middleware/auth.rs` (4 annotations) — Axum extractors, consumed by tuple destructuring
-- `benches/common/` (6 annotations) — benchmark helpers, conditional usage
-- `jazz-cli/tests/` (2 annotations) — test utilities
+Remaining `#[allow(dead_code)]` are acceptable: bf-tree internals, Axum extractors, benchmark helpers, test utilities.
 
 ## 5. `delete()` vs `delete_with_session()` Duplication (LOW-MEDIUM)
 
