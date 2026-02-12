@@ -4,4 +4,5 @@ table("todos", {
   title: col.string(),
   done: col.boolean(),
   description: col.string().optional(),
+  parent: col.ref("todos").optional(),
 });
