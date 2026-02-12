@@ -184,7 +184,17 @@ impl ObjectManager {
         }
 
         // Load metadata
-        let metadata = storage.load_object_metadata(id).ok()??;
+        let metadata = match storage.load_object_metadata(id) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                tracing::trace!(%id, "get_or_load: no metadata in storage");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(%id, error = ?e, "get_or_load: storage error");
+                return None;
+            }
+        };
 
         // Build Object with branches
         let mut object = Object {
@@ -218,6 +228,9 @@ impl ObjectManager {
             }
         }
 
+        let branch_count = object.branches.len();
+        let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
+        tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
         self.objects.insert(id, object);
         self.objects.get(&id)
     }

@@ -455,6 +455,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         for msg in outbox {
             self.sync_sender.send_sync_message(msg);
         }
+
+        // Flush WAL so writes survive a hard kill (tab close, crash).
+        // This is cheap (append-only buffer → OPFS) vs snapshot which rewrites everything.
+        self.storage.flush_wal();
     }
 
     /// Apply parked sync messages and tick.
