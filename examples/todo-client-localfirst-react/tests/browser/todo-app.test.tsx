@@ -8,44 +8,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
-import { createDb, type QueryBuilder, type TableProxy } from "jazz-ts";
-import type { WasmSchema } from "jazz-ts";
 import { App } from "../../src/App.js";
 import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
-
-// ---------------------------------------------------------------------------
-// Schema helpers — for OPFS/server tests that operate outside React
-// ---------------------------------------------------------------------------
-
-const schema: WasmSchema = {
-  tables: {
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      ],
-    },
-  },
-};
-
-interface Todo {
-  id: string;
-  title: string;
-  done: boolean;
-}
-
-interface TodoInit {
-  title: string;
-  done: boolean;
-}
-
-const todos: TableProxy<Todo, TodoInit> = { _table: "todos", _schema: schema };
-
-const allTodos: QueryBuilder<Todo> = {
-  _table: "todos",
-  _schema: schema,
-  _build: () => JSON.stringify({ table: "todos", conditions: [], includes: {}, orderBy: [] }),
-};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,18 +63,23 @@ function typeInto(input: HTMLInputElement, value: string) {
 // ---------------------------------------------------------------------------
 
 describe("React Todo App E2E", () => {
-  let root: Root | null = null;
-  let container: HTMLDivElement | null = null;
+  const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
-  /** Mount the real App with a unique dbName. Returns the container element. */
-  async function mountApp(dbName: string): Promise<HTMLDivElement> {
+  /** Mount the real App. Returns the container element. */
+  async function mountApp(config: {
+    appId?: string;
+    dbName?: string;
+    serverUrl?: string;
+    jwtToken?: string;
+    adminSecret?: string;
+  }): Promise<HTMLDivElement> {
     const el = document.createElement("div");
     document.body.appendChild(el);
-    container = el;
+    const r = createRoot(el);
+    mounts.push({ root: r, container: el });
 
     await act(async () => {
-      root = createRoot(el);
-      root.render(<App config={{ appId: "test-app", dbName }} />);
+      r.render(<App config={{ appId: config.appId ?? "test-app", ...config }} />);
     });
 
     // Wait for JazzProvider to initialize and TodoList to render
@@ -123,16 +92,28 @@ describe("React Todo App E2E", () => {
     return el;
   }
 
+  /** Unmount a specific app instance (triggers JazzProvider shutdown). */
+  async function unmountApp(el: HTMLDivElement): Promise<void> {
+    const idx = mounts.findIndex((m) => m.container === el);
+    if (idx === -1) return;
+    const { root } = mounts[idx];
+    await act(async () => root.unmount());
+    el.remove();
+    mounts.splice(idx, 1);
+    // Give OPFS handles time to release
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
   afterEach(async () => {
-    if (root) {
-      // Unmounting triggers JazzProvider cleanup (db.shutdown)
-      await act(async () => root!.unmount());
-      root = null;
-    }
-    if (container) {
+    for (const { root, container } of mounts) {
+      try {
+        await act(async () => root.unmount());
+      } catch {
+        /* best effort */
+      }
       container.remove();
-      container = null;
     }
+    mounts.length = 0;
   });
 
   // -------------------------------------------------------------------------
@@ -140,7 +121,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders the app with an empty todo list", async () => {
-    const el = await mountApp(uniqueDbName("empty"));
+    const el = await mountApp({ dbName: uniqueDbName("empty") });
 
     expect(el.querySelector("h1")!.textContent).toBe("Todos");
     expect(el.querySelector("#todo-list")).toBeTruthy();
@@ -152,7 +133,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("adds a todo via the form", async () => {
-    const el = await mountApp(uniqueDbName("add"));
+    const el = await mountApp({ dbName: uniqueDbName("add") });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -178,7 +159,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("toggles a todo's done state via checkbox", async () => {
-    const el = await mountApp(uniqueDbName("toggle"));
+    const el = await mountApp({ dbName: uniqueDbName("toggle") });
 
     // Add a todo first
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -213,7 +194,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("deletes a todo via the delete button", async () => {
-    const el = await mountApp(uniqueDbName("delete"));
+    const el = await mountApp({ dbName: uniqueDbName("delete") });
 
     // Add a todo
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -245,7 +226,7 @@ describe("React Todo App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("renders multiple todos with correct state", async () => {
-    const el = await mountApp(uniqueDbName("multi"));
+    const el = await mountApp({ dbName: uniqueDbName("multi") });
 
     const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
     const form = input.closest("form")!;
@@ -272,46 +253,87 @@ describe("React Todo App E2E", () => {
   // 6. OPFS persistence across reload
   // -------------------------------------------------------------------------
 
-  it("persists data across shutdown and re-create (OPFS)", async () => {
+  it("persists todos across app unmount and remount (OPFS)", async () => {
     const dbName = uniqueDbName("opfs");
 
-    // First session: insert via raw Db
-    const db1 = await createDb({ appId: "test-app", dbName });
-    db1.insert(todos, { title: "Survive reload", done: true });
-    expect((await db1.all(allTodos)).length).toBe(1);
-    await db1.shutdown();
+    // First session: mount app, add a todo via the form
+    const el1 = await mountApp({ dbName });
+    const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
+    const form1 = input1.closest("form")!;
 
-    // Second session: mount the real app with same dbName, query at worker tier
-    const db2 = await createDb({ appId: "test-app", dbName });
-    const after = await db2.all(allTodos, "worker");
-    expect(after.length).toBe(1);
-    expect(after[0].title).toBe("Survive reload");
-    expect(after[0].done).toBe(true);
-    await db2.shutdown();
+    await act(async () => {
+      typeInto(input1, "Survive reload");
+      form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    await waitFor(
+      () => el1.querySelectorAll("#todo-list li").length === 1,
+      3000,
+      "Todo should appear in first session",
+    );
+
+    // Unmount (triggers db.shutdown, flushes OPFS)
+    await unmountApp(el1);
+
+    // Second session: remount with same dbName — OPFS data should load
+    const el2 = await mountApp({ dbName });
+
+    await waitFor(
+      () => el2.querySelectorAll("#todo-list li").length === 1,
+      5000,
+      "Todo should survive remount from OPFS",
+    );
+
+    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");
   });
 
   // -------------------------------------------------------------------------
-  // 7. Server sync
+  // 7. Server sync between two app instances
   // -------------------------------------------------------------------------
 
-  it("syncs data through the server", async () => {
+  it("syncs a todo between two app instances through the server", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const token = await signJwt("react-user-a", JWT_SECRET);
+    const token1 = await signJwt("react-user-a", JWT_SECRET);
+    const token2 = await signJwt("react-user-b", JWT_SECRET);
 
-    const db1 = await createDb({
+    // Mount two independent app instances connected to the same server
+    const el1 = await mountApp({
       appId: APP_ID,
-      dbName: uniqueDbName("sync"),
+      dbName: uniqueDbName("sync-a"),
       serverUrl,
-      jwtToken: token,
+      jwtToken: token1,
+      adminSecret: ADMIN_SECRET,
+    });
+    const el2 = await mountApp({
+      appId: APP_ID,
+      dbName: uniqueDbName("sync-b"),
+      serverUrl,
+      jwtToken: token2,
       adminSecret: ADMIN_SECRET,
     });
 
-    const id = await db1.insertPersisted(todos, { title: "Server-synced", done: false }, "edge");
-    expect(id).toBeTruthy();
+    // Add a todo in app 1 via the form
+    const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
+    const form1 = input1.closest("form")!;
 
-    const results = await db1.all(allTodos, "edge");
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0].title).toBe("Server-synced");
-    await db1.shutdown();
+    await act(async () => {
+      typeInto(input1, "Synced todo");
+      form1.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    await waitFor(
+      () => el1.querySelectorAll("#todo-list li").length === 1,
+      3000,
+      "Todo should appear in app 1",
+    );
+
+    // Wait for it to appear in app 2 via server sync
+    await waitFor(
+      () => el2.querySelectorAll("#todo-list li").length === 1,
+      10000,
+      "Todo should sync to app 2 through the server",
+    );
+
+    expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Synced todo");
   });
 });
