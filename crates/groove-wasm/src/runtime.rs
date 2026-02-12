@@ -165,6 +165,8 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    /// Label for tracing (e.g. "worker", "edge", or "client").
+    tier_label: &'static str,
 }
 
 #[wasm_bindgen]
@@ -192,7 +194,13 @@ impl WasmRuntime {
         console_error_panic_hook::set_once();
         init_tracing();
 
-        let _span = info_span!("WasmRuntime::new", app_id, env, user_branch).entered();
+        let tier_label = match tier.as_deref() {
+            Some("worker") => "worker",
+            Some("edge") => "edge",
+            Some("core") => "core",
+            _ => "client",
+        };
+        let _span = info_span!("WasmRuntime::new", tier = tier_label, app_id, env, user_branch).entered();
         info!("creating in-memory runtime");
 
         // Parse schema
@@ -246,7 +254,7 @@ impl WasmRuntime {
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
 
-        Ok(WasmRuntime { core: core_rc })
+        Ok(WasmRuntime { core: core_rc, tier_label })
     }
 
     /// Called by JS when a sync message arrives from the server.
@@ -255,7 +263,7 @@ impl WasmRuntime {
     /// * `message_json` - JSON-encoded SyncPayload
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
     pub fn on_sync_message_received(&self, message_json: &str) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::onSyncMessageReceived").entered();
+        let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
         let payload: SyncPayload = serde_json::from_str(message_json)
             .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
 
@@ -279,7 +287,7 @@ impl WasmRuntime {
         client_id: &str,
         message_json: &str,
     ) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::onSyncMessageReceivedFromClient", client_id).entered();
+        let _span = debug_span!("wasm::onSyncMessageReceivedFromClient", tier = self.tier_label, client_id).entered();
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
@@ -312,7 +320,7 @@ impl WasmRuntime {
     /// The new row's ObjectId as a UUID string.
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
-        let _span = debug_span!("wasm::insert", table).entered();
+        let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
         let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
         let groove_values: Vec<Value> = wasm_values
             .into_iter()
@@ -338,7 +346,7 @@ impl WasmRuntime {
         session_json: Option<String>,
         settled_tier: Option<String>,
     ) -> Result<js_sys::Promise, JsError> {
-        let _span = debug_span!("wasm::query").entered();
+        let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
         let session = if let Some(json) = session_json {
@@ -385,7 +393,7 @@ impl WasmRuntime {
     /// Update a row by ObjectId.
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::update", object_id).entered();
+        let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -411,7 +419,7 @@ impl WasmRuntime {
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
     pub fn delete(&self, object_id: &str) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::delete", object_id).entered();
+        let _span = debug_span!("wasm::delete", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -543,7 +551,7 @@ impl WasmRuntime {
         session_json: Option<String>,
         settled_tier: Option<String>,
     ) -> Result<f64, JsError> {
-        let _span = debug_span!("wasm::subscribe").entered();
+        let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
         let session = if let Some(json) = session_json {
@@ -616,7 +624,7 @@ impl WasmRuntime {
     /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
     pub fn add_server(&self) {
-        let _span = info_span!("wasm::addServer").entered();
+        let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
         let server_id = ServerId::new();
         let mut core = self.core.borrow_mut();
         core.add_server(server_id);
@@ -626,7 +634,7 @@ impl WasmRuntime {
     /// Add a client connection (for server-side use in tests).
     #[wasm_bindgen(js_name = addClient)]
     pub fn add_client(&self) -> String {
-        let _span = info_span!("wasm::addClient").entered();
+        let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
         let client_id = ClientId::new();
         info!(%client_id, "generated client id");
         let mut core = self.core.borrow_mut();
@@ -681,14 +689,14 @@ impl WasmRuntime {
     /// Flush all data to persistent storage (snapshot).
     #[wasm_bindgen]
     pub fn flush(&self) {
-        let _span = debug_span!("wasm::flush").entered();
+        let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
         self.core.borrow().flush_storage();
     }
 
     /// Flush only the WAL buffer to OPFS (not the snapshot).
     #[wasm_bindgen(js_name = flushWal)]
     pub fn flush_wal(&self) {
-        let _span = debug_span!("wasm::flushWal").entered();
+        let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
         self.core.borrow().flush_wal();
     }
 
@@ -711,7 +719,13 @@ impl WasmRuntime {
         console_error_panic_hook::set_once();
         init_tracing();
 
-        let _span = info_span!("WasmRuntime::openPersistent", app_id, env, user_branch, db_name).entered();
+        let tier_label = match tier.as_deref() {
+            Some("worker") => "worker",
+            Some("edge") => "edge",
+            Some("core") => "core",
+            _ => "client",
+        };
+        let _span = info_span!("WasmRuntime::openPersistent", tier = tier_label, app_id, env, user_branch, db_name).entered();
         info!("opening persistent OPFS runtime");
 
         // Parse schema
@@ -773,6 +787,6 @@ impl WasmRuntime {
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
 
-        Ok(WasmRuntime { core: core_rc })
+        Ok(WasmRuntime { core: core_rc, tier_label })
     }
 }
