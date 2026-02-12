@@ -1,0 +1,2007 @@
+use super::*;
+use crate::commit::Commit;
+use crate::query_manager::policy::Operation;
+use crate::storage::MemoryStorage;
+use smallvec::smallvec;
+
+// ========================================================================
+// Phase 1: Foundation Tests
+// ========================================================================
+
+#[test]
+fn can_create_sync_manager() {
+    let sm = SyncManager::new();
+    assert!(sm.servers.is_empty());
+    assert!(sm.clients.is_empty());
+}
+
+// ========================================================================
+// Phase 2: Server Sync Tests
+// ========================================================================
+
+#[test]
+fn add_server_receives_existing_objects() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create an object with a commit
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj_id,
+        "main",
+        vec![],
+        b"content".to_vec(),
+        author,
+        None,
+    );
+
+    // Add server
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    // Check outbox has the object update
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated {
+            object_id,
+            metadata,
+            branch_name,
+            commits,
+        } => {
+            assert_eq!(*object_id, obj_id);
+            assert!(metadata.is_some()); // First sync includes metadata
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+}
+
+#[test]
+fn local_commit_syncs_to_server() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    // Clear initial outbox
+    sm.take_outbox();
+
+    // Create object and commit
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let commit_id = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Manually trigger sync (in real usage, this would be called after local changes)
+    sm.forward_update_to_servers(obj_id, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated { commits, .. } => {
+            assert_eq!(commits.len(), 1);
+            assert_eq!(commits[0].id(), commit_id);
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+}
+
+#[test]
+fn remove_server_stops_sync() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+    sm.take_outbox();
+
+    sm.remove_server(server_id);
+
+    // Create new object
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj_id,
+        "main",
+        vec![],
+        b"content".to_vec(),
+        author,
+        None,
+    );
+
+    sm.forward_update_to_servers(obj_id, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.is_empty()); // No server to send to
+}
+
+#[test]
+fn commits_sent_in_causal_order() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+
+    // Create chain: c1 <- c2 <- c3
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+    let c2 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![c1],
+            b"c2".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+    let c3 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![c2],
+            b"c3".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add server - should receive all commits in order
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated { commits, .. } => {
+            assert_eq!(commits.len(), 3);
+            // Parents should come before children
+            assert_eq!(commits[0].id(), c1);
+            assert_eq!(commits[1].id(), c2);
+            assert_eq!(commits[2].id(), c3);
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+}
+
+// ========================================================================
+// Phase 3: Client Query Tests
+// ========================================================================
+
+#[test]
+fn client_with_query_receives_matching_objects() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create object
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj_id,
+        "main",
+        vec![],
+        b"content".to_vec(),
+        author,
+        None,
+    );
+
+    // Add client with query
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::ObjectUpdated { object_id, .. },
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(*object_id, obj_id);
+        }
+        _ => panic!("Expected ObjectUpdated to client"),
+    }
+}
+
+#[test]
+fn client_without_query_receives_nothing() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create object
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj_id,
+        "main",
+        vec![],
+        b"content".to_vec(),
+        author,
+        None,
+    );
+
+    // Add client without query
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.is_empty());
+}
+
+#[test]
+fn local_commit_in_scope_syncs_to_client() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Setup client with query
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox(); // Clear initial sync
+
+    // Add commit
+    let commit_id = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"content".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    sm.forward_update_to_clients(obj_id, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated { commits, .. } => {
+            assert!(commits.iter().any(|c| c.id() == commit_id));
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+}
+
+#[test]
+fn local_commit_out_of_scope_not_sent_to_client() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    // Client has query for obj1/main
+    let obj1 = sm.object_manager.create(&mut io, None);
+    let mut scope = HashSet::new();
+    scope.insert((obj1, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Create commit on different object
+    let obj2 = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj2,
+        "main",
+        vec![],
+        b"content".to_vec(),
+        author,
+        None,
+    );
+
+    sm.forward_update_to_clients(obj2, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.is_empty()); // obj2 not in client's scope
+}
+
+#[test]
+fn query_update_adds_scope_triggers_initial_sync() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create two objects
+    let obj1 = sm.object_manager.create(&mut io, None);
+    let obj2 = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let _ =
+        sm.object_manager
+            .add_commit(&mut io, obj1, "main", vec![], b"c1".to_vec(), author, None);
+    let _ =
+        sm.object_manager
+            .add_commit(&mut io, obj2, "main", vec![], b"c2".to_vec(), author, None);
+
+    // Client initially only has obj1
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let mut scope = HashSet::new();
+    scope.insert((obj1, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox(); // Clear obj1 sync
+
+    // Update query to also include obj2
+    let mut new_scope = HashSet::new();
+    new_scope.insert((obj1, "main".into()));
+    new_scope.insert((obj2, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), new_scope, None);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1); // Only obj2 (newly visible)
+
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated { object_id, .. } => {
+            assert_eq!(*object_id, obj2);
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+}
+
+#[test]
+fn query_removal_stops_future_updates() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Remove query by directly manipulating client state
+    sm.clients
+        .get_mut(&client_id)
+        .unwrap()
+        .queries
+        .remove(&QueryId(1));
+
+    // Add commit
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj_id,
+        "main",
+        vec![],
+        b"content".to_vec(),
+        author,
+        None,
+    );
+
+    sm.forward_update_to_clients(obj_id, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.is_empty()); // Client no longer in scope
+}
+
+// ========================================================================
+// ReBAC Permission Enforcement Tests
+// ========================================================================
+
+#[test]
+fn peer_writes_applied_directly() {
+    // Peer role writes are applied directly without permission checks
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+
+    sm.take_outbox();
+
+    // Client pushes update - Peer role bypasses all checks
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"update".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // No pending permission checks — Peer bypasses
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    // Verify commit was applied
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn admin_writes_catalogue_directly() {
+    // Admin role can write catalogue objects directly
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Admin);
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"schema data".to_vec(),
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // No pending permission checks — Admin bypasses
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    // Commit should be applied directly
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn admin_writes_row_directly() {
+    // Admin role can write row objects directly without ReBAC
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Admin);
+    sm.take_outbox();
+
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"updated".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn user_with_session_goes_to_permission_check() {
+    // User with session sends row data → queued for ReBAC
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+    sm.take_outbox();
+
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"update".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // Should be queued for permission check
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].client_id, client_id);
+    assert_eq!(pending[0].session.user_id, "alice");
+
+    // Should NOT be applied yet
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(!tips.contains(&commit.id()));
+}
+
+#[test]
+fn user_without_session_rejected() {
+    // User without session → SessionRequired error
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    // No session set — default User role
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"data".to_vec(),
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::Error(SyncError::SessionRequired {
+            object_id,
+            branch_name,
+        }) => {
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+        }
+        other => panic!("Expected SessionRequired error, got {:?}", other),
+    }
+
+    // Object should not exist
+    assert!(sm.object_manager.get(obj_id).is_none());
+}
+
+#[test]
+fn user_catalogue_write_rejected() {
+    // User with session tries to write catalogue → CatalogueWriteDenied
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"schema data".to_vec(),
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::Error(SyncError::CatalogueWriteDenied {
+            object_id,
+            branch_name,
+        }) => {
+            assert_eq!(*object_id, obj_id);
+            assert_eq!(branch_name.as_str(), "main");
+        }
+        other => panic!("Expected CatalogueWriteDenied error, got {:?}", other),
+    }
+
+    // Object should not exist
+    assert!(sm.object_manager.get(obj_id).is_none());
+}
+
+#[test]
+fn add_client_then_set_peer_role() {
+    let mut sm = SyncManager::new();
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    let client = sm.get_client(client_id).unwrap();
+    assert_eq!(client.role, ClientRole::Peer);
+}
+
+#[test]
+fn write_with_session_goes_to_pending_permission_checks() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    // Set session on client
+    if let Some(client) = sm.clients.get_mut(&client_id) {
+        client.session = Some(Session::new("user123"));
+    }
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Client tries to push update
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"new_content".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // Should be in pending permission checks
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session.user_id, "user123");
+    assert_eq!(pending[0].operation, Operation::Update);
+    assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+    assert_eq!(pending[0].new_content, Some(b"new_content".to_vec()));
+
+    // Commit should NOT be applied yet
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(!tips.contains(&commit.id()));
+}
+
+#[test]
+fn approve_permission_check_applies_write() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    // Set session on client
+    if let Some(client) = sm.clients.get_mut(&client_id) {
+        client.session = Some(Session::new("user123"));
+    }
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Client pushes update
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"allowed".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // Get pending check and approve it
+    let mut pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    let check = pending.remove(0);
+
+    sm.approve_permission_check(&mut io, check);
+
+    // Commit should now be applied
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn reject_permission_check_sends_error() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    // Set session on client
+    if let Some(client) = sm.clients.get_mut(&client_id) {
+        client.session = Some(Session::new("user123"));
+    }
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Client tries to push update
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"denied".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // Get pending check and reject it
+    let mut pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    let check = pending.remove(0);
+
+    sm.reject_permission_check(check, "access denied by policy".to_string());
+
+    // Should get permission denied error
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
+            assert_eq!(reason, "access denied by policy");
+        }
+        _ => panic!("Expected PermissionDenied error"),
+    }
+
+    // Commit should NOT be applied
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(!tips.contains(&commit.id()));
+}
+
+#[test]
+fn server_update_forwarded_to_matching_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Setup server
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+    sm.take_outbox();
+
+    // Setup client with query
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let obj_id = ObjectId::new();
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Server sends update
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"from server".to_vec(),
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: HashMap::new(),
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    // Client should receive forwarded update
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::ObjectUpdated { object_id, .. },
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(*object_id, obj_id);
+        }
+        _ => panic!("Expected ObjectUpdated to client"),
+    }
+}
+
+// ========================================================================
+// Integration Tests
+// ========================================================================
+
+#[test]
+fn client_update_forwarded_to_server_and_other_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Setup server
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    // Create object
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"initial".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    sm.take_outbox();
+
+    // Setup two clients — client1 is Peer so writes go through directly
+    let client1 = ClientId::new();
+    let client2 = ClientId::new();
+    sm.add_client(client1);
+    sm.set_client_role(client1, ClientRole::Peer);
+    sm.add_client(client2);
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client1, QueryId(1), scope.clone(), None);
+    sm.set_client_query_scope(client2, QueryId(1), scope, None);
+    sm.take_outbox();
+
+    // Client1 sends update
+    let commit = Commit {
+        parents: smallvec![c1],
+        content: b"from client1".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client1),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+
+    // Should have updates for: server + client2 (not client1)
+    assert_eq!(outbox.len(), 2);
+
+    let destinations: HashSet<_> = outbox.iter().map(|e| &e.destination).collect();
+    assert!(destinations.contains(&Destination::Server(server_id)));
+    assert!(destinations.contains(&Destination::Client(client2)));
+    assert!(!destinations.contains(&Destination::Client(client1)));
+}
+
+#[test]
+fn metadata_sent_only_once_per_destination() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create object BEFORE adding server
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [("key".to_string(), "value".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Now add server - should receive existing object with metadata
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    let outbox = sm.take_outbox();
+
+    // First message should have metadata
+    assert_eq!(outbox.len(), 1);
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated { metadata, .. } => {
+            assert!(metadata.is_some());
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+
+    // Add another commit (as child of c1)
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj_id,
+        "main",
+        vec![c1],
+        b"c2".to_vec(),
+        author,
+        None,
+    );
+
+    sm.forward_update_to_servers(obj_id, "main".into());
+
+    let outbox = sm.take_outbox();
+
+    // Second message should NOT have metadata
+    match &outbox[0].payload {
+        SyncPayload::ObjectUpdated { metadata, .. } => {
+            assert!(metadata.is_none());
+        }
+        _ => panic!("Expected ObjectUpdated"),
+    }
+}
+
+// ========================================================================
+// nosync Filtering Tests
+// ========================================================================
+
+#[test]
+fn nosync_object_not_synced_to_server() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create object with nosync: "true" metadata
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [(
+                crate::metadata::MetadataKey::NoSync.to_string(),
+                "true".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    sm.object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add server - should NOT receive the nosync object
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.is_empty(),
+        "nosync object should not be synced to server"
+    );
+}
+
+#[test]
+fn nosync_object_not_synced_to_client() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create object with nosync: "true" metadata
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [(
+                crate::metadata::MetadataKey::NoSync.to_string(),
+                "true".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    sm.object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add client with scope including the object
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.is_empty(),
+        "nosync object should not be synced to client"
+    );
+}
+
+#[test]
+fn nosync_object_update_not_forwarded_to_server() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create nosync object
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [(
+                crate::metadata::MetadataKey::NoSync.to_string(),
+                "true".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add server
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+    sm.take_outbox(); // Clear any initial sync messages
+
+    // Add another commit
+    sm.object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![c1],
+            b"c2".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Forward update to servers
+    sm.forward_update_to_servers(obj_id, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.is_empty(),
+        "nosync object update should not be forwarded to server"
+    );
+}
+
+#[test]
+fn nosync_object_truncation_not_forwarded_to_server() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create nosync object with some history
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [(
+                crate::metadata::MetadataKey::NoSync.to_string(),
+                "true".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+    let c2 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![c1],
+            b"c2".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add server
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+    sm.take_outbox(); // Clear any initial sync messages
+
+    // Forward truncation to servers (simulating what would happen after truncation)
+    // The nosync check should prevent any message from being sent
+    sm.forward_truncation_to_servers(obj_id, "main".into(), [c2].into_iter().collect());
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.is_empty(),
+        "nosync object truncation should not be forwarded to server"
+    );
+}
+
+#[test]
+fn nosync_object_truncation_not_forwarded_to_client() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create nosync object with some history
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [(
+                crate::metadata::MetadataKey::NoSync.to_string(),
+                "true".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+    let c2 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![c1],
+            b"c2".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add client with scope including the object
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+    sm.set_client_query_scope(client_id, QueryId(1), scope, None);
+    sm.take_outbox(); // Clear any initial sync messages
+
+    // Forward truncation to clients (simulating what would happen after truncation)
+    // The nosync check should prevent any message from being sent
+    sm.forward_truncation_to_clients(obj_id, "main".into(), [c2].into_iter().collect());
+
+    let outbox = sm.take_outbox();
+    assert!(
+        outbox.is_empty(),
+        "nosync object truncation should not be forwarded to client"
+    );
+}
+
+#[test]
+fn regular_object_still_syncs_to_server() {
+    // Ensure regular objects without nosync still sync properly
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    // Create object WITHOUT nosync metadata
+    let obj_id = sm.object_manager.create(
+        &mut io,
+        Some(
+            [("key".to_string(), "value".to_string())]
+                .into_iter()
+                .collect(),
+        ),
+    );
+    let author = ObjectId::new();
+    sm.object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"c1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    // Add server - should receive the object
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1, "regular object should sync to server");
+}
+
+// ========================================================================
+// Session Propagation Tests
+// ========================================================================
+
+#[test]
+fn set_query_scope_stores_session() {
+    let mut sm = SyncManager::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let obj_id = ObjectId::new();
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, "main".into()));
+
+    let session = Session::new("alice");
+    sm.set_client_query_scope(client_id, QueryId(1), scope.clone(), Some(session));
+
+    let client = sm.get_client(client_id).expect("client should exist");
+    let query = client.queries.get(&QueryId(1)).expect("query should exist");
+    assert_eq!(query.scope, scope);
+    assert!(query.session.is_some());
+    assert_eq!(query.session.as_ref().unwrap().user_id, "alice");
+}
+
+#[test]
+fn send_query_subscription_includes_session() {
+    // Test that send_query_subscription_to_servers includes the session
+    use crate::query_manager::query::QueryBuilder;
+
+    let mut sm = SyncManager::new();
+
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+    sm.take_outbox();
+
+    let query = QueryBuilder::new("users").branch("main").build();
+    let session = Session::new("alice");
+
+    sm.send_query_subscription_to_servers(QueryId(1), query.clone(), Some(session.clone()));
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0].payload {
+        SyncPayload::QuerySubscription {
+            query_id,
+            query: sent_query,
+            session: sent_session,
+        } => {
+            assert_eq!(*query_id, QueryId(1));
+            assert_eq!(sent_query.table, query.table);
+            assert!(sent_session.is_some());
+            assert_eq!(sent_session.as_ref().unwrap().user_id, "alice");
+        }
+        _ => panic!("Expected QuerySubscription"),
+    }
+}
+
+// ========================================================================
+// Phase 6a: Persistence Ack E2E Tests
+// ========================================================================
+
+/// Route messages between three tiers: A ↔ B ↔ C.
+///
+/// A is a client of B, B is a client of C.
+/// Pumps until no messages remain or 10 rounds (whichever comes first).
+/// Auto-approves pending updates on B and C (simulates permissive server).
+fn pump_messages_3tier(
+    a: &mut SyncManager,
+    b: &mut SyncManager,
+    c: &mut SyncManager,
+    a_io: &mut MemoryStorage,
+    b_io: &mut MemoryStorage,
+    c_io: &mut MemoryStorage,
+    a_client_of_b: ClientId,
+    b_server_for_a: ServerId,
+    b_client_of_c: ClientId,
+    c_server_for_b: ServerId,
+) {
+    for _ in 0..10 {
+        let mut any_messages = false;
+
+        // A outbox → B inbox (A sends to server b_server_for_a → B receives from client a_client_of_b)
+        for entry in a.take_outbox() {
+            if entry.destination == Destination::Server(b_server_for_a) {
+                any_messages = true;
+                b.push_inbox(InboxEntry {
+                    source: Source::Client(a_client_of_b),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        // B outbox → route to A or C
+        for entry in b.take_outbox() {
+            match &entry.destination {
+                Destination::Client(cid) if *cid == a_client_of_b => {
+                    any_messages = true;
+                    a.push_inbox(InboxEntry {
+                        source: Source::Server(b_server_for_a),
+                        payload: entry.payload,
+                    });
+                }
+                Destination::Server(sid) if *sid == c_server_for_b => {
+                    any_messages = true;
+                    c.push_inbox(InboxEntry {
+                        source: Source::Client(b_client_of_c),
+                        payload: entry.payload,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // C outbox → B inbox
+        for entry in c.take_outbox() {
+            if entry.destination == Destination::Client(b_client_of_c) {
+                any_messages = true;
+                b.push_inbox(InboxEntry {
+                    source: Source::Server(c_server_for_b),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        if !any_messages && a.inbox.is_empty() && b.inbox.is_empty() && c.inbox.is_empty() {
+            break;
+        }
+
+        a.process_inbox(a_io);
+        b.process_inbox(b_io);
+        c.process_inbox(c_io);
+    }
+}
+
+/// Setup helper: creates A ↔ B ↔ C topology.
+/// Returns (a, b, c, a_io, b_io, c_io, ids...).
+struct ThreeTierSetup {
+    a: SyncManager,
+    b: SyncManager,
+    c: SyncManager,
+    a_io: MemoryStorage,
+    b_io: MemoryStorage,
+    c_io: MemoryStorage,
+    a_client_of_b: ClientId,
+    b_server_for_a: ServerId,
+    b_client_of_c: ClientId,
+    c_server_for_b: ServerId,
+}
+
+fn setup_3tier() -> ThreeTierSetup {
+    let a_client_of_b = ClientId::new();
+    let b_server_for_a = ServerId::new();
+    let b_client_of_c = ClientId::new();
+    let c_server_for_b = ServerId::new();
+
+    let a = SyncManager::new();
+    let mut b = SyncManager::new().with_tier(PersistenceTier::Worker);
+    let mut c = SyncManager::new().with_tier(PersistenceTier::EdgeServer);
+
+    // A connects to B as server
+    b.add_client(a_client_of_b);
+    b.set_client_role(a_client_of_b, ClientRole::Peer);
+
+    // B connects to C as server
+    c.add_client(b_client_of_c);
+    c.set_client_role(b_client_of_c, ClientRole::Peer);
+    b.add_server(c_server_for_b);
+
+    ThreeTierSetup {
+        a,
+        b,
+        c,
+        a_io: MemoryStorage::new(),
+        b_io: MemoryStorage::new(),
+        c_io: MemoryStorage::new(),
+        a_client_of_b,
+        b_server_for_a,
+        b_client_of_c,
+        c_server_for_b,
+    }
+}
+
+fn make_test_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
+    Commit {
+        parents: parents.into(),
+        content: content.to_vec(),
+        timestamp: 1000,
+        author: ObjectId::from_uuid(uuid::Uuid::nil()),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    }
+}
+
+#[test]
+fn persistence_ack_direct() {
+    let mut s = setup_3tier();
+
+    // Create object on A and add commit
+    let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+    let commit = make_test_commit(b"hello", vec![]);
+    let commit_id = commit.id();
+    let _ =
+        s.a.object_manager
+            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+    s.a.add_server(s.b_server_for_a);
+    s.a.forward_update_to_servers(obj_id, "main".into());
+
+    pump_messages_3tier(
+        &mut s.a,
+        &mut s.b,
+        &mut s.c,
+        &mut s.a_io,
+        &mut s.b_io,
+        &mut s.c_io,
+        s.a_client_of_b,
+        s.b_server_for_a,
+        s.b_client_of_c,
+        s.c_server_for_b,
+    );
+
+    // A should have received a PersistenceAck from B (tier=Worker)
+    // Check A's processed state — the ack was processed by A's process_inbox
+    // Since A has no tier, it doesn't re-emit, but it should have received the ack
+    // Let's check: the ack was delivered to A's inbox and processed.
+    // Since A processes PersistenceAck from server, it stores it in io and updates in-memory.
+    let a_commit =
+        s.a.object_manager
+            .get_commit_mut(obj_id, &"main".into(), commit_id);
+    assert!(a_commit.is_some(), "Commit should exist on A");
+    assert!(
+        a_commit
+            .unwrap()
+            .ack_state
+            .confirmed_tiers
+            .contains(&PersistenceTier::Worker),
+        "A should have received Worker ack from B"
+    );
+}
+
+#[test]
+fn persistence_ack_relay() {
+    let mut s = setup_3tier();
+
+    // Create object on A
+    let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+    let commit = make_test_commit(b"hello-relay", vec![]);
+    let commit_id = commit.id();
+    let _ =
+        s.a.object_manager
+            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+    s.a.add_server(s.b_server_for_a);
+    s.a.forward_update_to_servers(obj_id, "main".into());
+
+    pump_messages_3tier(
+        &mut s.a,
+        &mut s.b,
+        &mut s.c,
+        &mut s.a_io,
+        &mut s.b_io,
+        &mut s.c_io,
+        s.a_client_of_b,
+        s.b_server_for_a,
+        s.b_client_of_c,
+        s.c_server_for_b,
+    );
+
+    // A should have received EdgeServer ack (relayed through B from C)
+    let a_commit =
+        s.a.object_manager
+            .get_commit_mut(obj_id, &"main".into(), commit_id)
+            .expect("Commit should exist on A");
+    assert!(
+        a_commit
+            .ack_state
+            .confirmed_tiers
+            .contains(&PersistenceTier::EdgeServer),
+        "A should have received EdgeServer ack relayed through B"
+    );
+}
+
+#[test]
+fn persistence_ack_both_tiers() {
+    let mut s = setup_3tier();
+
+    let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+    let commit = make_test_commit(b"hello-both", vec![]);
+    let commit_id = commit.id();
+    let _ =
+        s.a.object_manager
+            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+    s.a.add_server(s.b_server_for_a);
+    s.a.forward_update_to_servers(obj_id, "main".into());
+
+    pump_messages_3tier(
+        &mut s.a,
+        &mut s.b,
+        &mut s.c,
+        &mut s.a_io,
+        &mut s.b_io,
+        &mut s.c_io,
+        s.a_client_of_b,
+        s.b_server_for_a,
+        s.b_client_of_c,
+        s.c_server_for_b,
+    );
+
+    let a_commit =
+        s.a.object_manager
+            .get_commit_mut(obj_id, &"main".into(), commit_id)
+            .expect("Commit should exist on A");
+    assert!(
+        a_commit
+            .ack_state
+            .confirmed_tiers
+            .contains(&PersistenceTier::Worker),
+        "Should have Worker ack from B"
+    );
+    assert!(
+        a_commit
+            .ack_state
+            .confirmed_tiers
+            .contains(&PersistenceTier::EdgeServer),
+        "Should have EdgeServer ack from C"
+    );
+}
+
+#[test]
+fn persistence_ack_idempotent() {
+    let mut s = setup_3tier();
+
+    let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+    let commit = make_test_commit(b"idempotent", vec![]);
+    let commit_id = commit.id();
+    let _ =
+        s.a.object_manager
+            .receive_commit(&mut s.a_io, obj_id, "main", commit.clone());
+    s.a.add_server(s.b_server_for_a);
+    s.a.forward_update_to_servers(obj_id, "main".into());
+
+    // Pump once
+    pump_messages_3tier(
+        &mut s.a,
+        &mut s.b,
+        &mut s.c,
+        &mut s.a_io,
+        &mut s.b_io,
+        &mut s.c_io,
+        s.a_client_of_b,
+        s.b_server_for_a,
+        s.b_client_of_c,
+        s.c_server_for_b,
+    );
+
+    // Send the same commit again — should not panic
+    s.a.forward_update_to_servers(obj_id, "main".into());
+
+    pump_messages_3tier(
+        &mut s.a,
+        &mut s.b,
+        &mut s.c,
+        &mut s.a_io,
+        &mut s.b_io,
+        &mut s.c_io,
+        s.a_client_of_b,
+        s.b_server_for_a,
+        s.b_client_of_c,
+        s.c_server_for_b,
+    );
+
+    // Still has acks
+    let a_commit =
+        s.a.object_manager
+            .get_commit_mut(obj_id, &"main".into(), commit_id)
+            .expect("Commit should exist on A");
+    assert!(
+        a_commit
+            .ack_state
+            .confirmed_tiers
+            .contains(&PersistenceTier::Worker)
+    );
+}
+
+#[test]
+fn persistence_ack_cleanup_on_disconnect() {
+    let mut s = setup_3tier();
+
+    // A creates and sends a commit to B
+    let obj_id = s.a.object_manager.create(&mut s.a_io, None);
+    let commit = make_test_commit(b"disconnect-test", vec![]);
+    let _ =
+        s.a.object_manager
+            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+    s.a.add_server(s.b_server_for_a);
+    s.a.forward_update_to_servers(obj_id, "main".into());
+
+    // Pump A→B only (one round)
+    for entry in s.a.take_outbox() {
+        if entry.destination == Destination::Server(s.b_server_for_a) {
+            s.b.push_inbox(InboxEntry {
+                source: Source::Client(s.a_client_of_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    s.b.process_inbox(&mut s.b_io);
+    // B should now have interest for A's commits
+
+    // Disconnect A from B
+    s.b.remove_client(s.a_client_of_b);
+
+    // C acks arrive at B — should not crash when trying to relay to disconnected A
+    // Forward B→C and let C ack back
+    for entry in s.b.take_outbox() {
+        match &entry.destination {
+            Destination::Server(sid) if *sid == s.c_server_for_b => {
+                s.c.push_inbox(InboxEntry {
+                    source: Source::Client(s.b_client_of_c),
+                    payload: entry.payload,
+                });
+            }
+            _ => {}
+        }
+    }
+    s.c.process_inbox(&mut s.c_io);
+
+    // C sends ack back to B
+    for entry in s.c.take_outbox() {
+        if entry.destination == Destination::Client(s.b_client_of_c) {
+            s.b.push_inbox(InboxEntry {
+                source: Source::Server(s.c_server_for_b),
+                payload: entry.payload,
+            });
+        }
+    }
+    // Should not panic — A's interest was cleaned up
+    s.b.process_inbox(&mut s.b_io);
+
+    // B should not have any outbox entries for the disconnected client
+    let outbox = s.b.take_outbox();
+    for entry in &outbox {
+        if let Destination::Client(cid) = &entry.destination {
+            assert_ne!(
+                *cid, s.a_client_of_b,
+                "Should not relay to disconnected client"
+            );
+        }
+    }
+}
+
+#[test]
+fn persistence_ack_survives_reload() {
+    let mut io = MemoryStorage::new();
+
+    let obj_id = ObjectId::new();
+    io.create_object(obj_id, HashMap::new()).unwrap();
+
+    let commit = make_test_commit(b"persist-test", vec![]);
+    let commit_id = commit.id();
+    io.append_commit(obj_id, &"main".into(), commit).unwrap();
+
+    // Store ack tier
+    io.store_ack_tier(commit_id, PersistenceTier::EdgeServer)
+        .unwrap();
+
+    // Load branch and verify ack_state is populated
+    let loaded = io
+        .load_branch(obj_id, &"main".into())
+        .unwrap()
+        .expect("Branch should exist");
+
+    assert_eq!(loaded.commits.len(), 1);
+    assert!(
+        loaded.commits[0]
+            .ack_state
+            .confirmed_tiers
+            .contains(&PersistenceTier::EdgeServer),
+        "Loaded commit should have EdgeServer ack"
+    );
+}
+
+#[test]
+fn ack_state_does_not_affect_commit_id_sync() {
+    // Verify that commits with different ack_state have the same ID
+    // (complementary to the unit test in commit.rs)
+    let mut ack_state = crate::commit::CommitAckState::default();
+    ack_state
+        .confirmed_tiers
+        .insert(PersistenceTier::CoreServer);
+
+    let commit1 = make_test_commit(b"same-content", vec![]);
+    let mut commit2 = make_test_commit(b"same-content", vec![]);
+    commit2.ack_state = ack_state;
+
+    assert_eq!(commit1.id(), commit2.id());
+}

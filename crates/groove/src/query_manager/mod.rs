@@ -2,12 +2,16 @@ pub mod encoding;
 pub mod graph;
 pub mod graph_nodes;
 pub mod index;
+pub mod indices;
 pub mod manager;
 pub mod policy;
 pub mod policy_graph;
 pub mod query;
+pub mod server_queries;
 pub mod session;
+pub mod subscriptions;
 pub mod types;
+pub mod writes;
 
 pub use encoding::*;
 pub use graph::*;
