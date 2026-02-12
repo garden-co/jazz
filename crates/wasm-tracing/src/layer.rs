@@ -6,9 +6,8 @@ use tracing_log::NormalizeEvent as _;
 use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
 use crate::{
-    debug1, debug4, error1, error4, group_collapsed1, group_collapsed4, group_end, log1, log4,
-    mark, mark_name, measure, prelude::*, recorder::StringRecorder, thread_display_suffix, warn1,
-    warn4,
+    debug1, debug4, error1, error4, log1, log4, mark, mark_name, measure, prelude::*,
+    recorder::StringRecorder, thread_display_suffix, warn1, warn4,
 };
 
 #[doc = r#"
@@ -195,31 +194,29 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
                     .get::<StringRecorder>()
                     .map(|r| r.to_string())
                     .unwrap_or_default();
-                let label = format!(
-                    "\"{}\"{}{}",
+                let message = format!("▶ \"{}\"{}{}",
                     meta.name(),
                     thread_display_suffix(),
                     fields,
                 );
                 if self.config.color {
-                    group_collapsed4(
-                        format!("%c{}%c {}", level, label),
-                        level.color(),
-                        "color: inherit",
-                        "",
+                    log_with_color(
+                        format!("%c{}%c {}", level, message),
+                        level,
+                        self.config.use_console_methods,
                     );
                 } else {
-                    group_collapsed1(format!("{} {}", level, label));
+                    log(
+                        format!("{} {}", level, message),
+                        level,
+                        self.config.use_console_methods,
+                    );
                 }
             }
         }
     }
 
     fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        if self.config.console_group_spans {
-            group_end();
-        }
-
         if !self.config.report_logs_in_timings {
             return;
         }

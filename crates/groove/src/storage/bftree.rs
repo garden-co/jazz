@@ -106,7 +106,27 @@ impl BfTreeStorage {
 
         let tree = BfTree::open_with_opfs(tree_vfs, wal_vfs, config)
             .map_err(|e| StorageError::IoError(format!("bf-tree OPFS: {:?}", e)))?;
-        Ok(Self { tree })
+        let storage = Self { tree };
+        storage.log_key_stats();
+        Ok(storage)
+    }
+
+    /// Log key statistics after opening storage (for debugging persistence).
+    fn log_key_stats(&self) {
+        let count_prefix =
+            |pfx: &str| -> usize { self.tree_scan_keys(pfx).map(|v| v.len()).unwrap_or(0) };
+        let obj_count = count_prefix("obj:");
+        let idx_count = count_prefix("idx:");
+        let ack_count = count_prefix("ack:");
+        tracing::info!(obj_count, idx_count, ack_count, "BfTreeStorage opened");
+        // If there are index keys, log a sample
+        if idx_count > 0 {
+            if let Ok(keys) = self.tree_scan_keys("idx:") {
+                for key in keys.iter().take(5) {
+                    tracing::debug!(key, "sample index key");
+                }
+            }
+        }
     }
 
     fn configure(config: &mut Config) {
@@ -579,6 +599,7 @@ impl Storage for BfTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         let key = Self::index_entry_key(table, column, branch, value, row_id);
+        tracing::trace!(table, column, branch, %row_id, %key, "index_insert");
         // Sentinel byte — bf-tree requires non-empty values; existence is the signal
         self.tree_insert(&key, &[0x01])
     }
@@ -673,12 +694,24 @@ impl Storage for BfTreeStorage {
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         let prefix = Self::index_prefix(table, column, branch);
+        tracing::trace!(table, column, branch, %prefix, "index_scan_all");
         match self.tree_scan_keys(&prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
+            Ok(keys) => {
+                let ids: Vec<ObjectId> = keys
+                    .iter()
+                    .filter_map(|k| parse_uuid_from_index_key(k))
+                    .collect();
+                tracing::trace!(
+                    prefix_matches = keys.len(),
+                    parsed_ids = ids.len(),
+                    "index_scan_all result"
+                );
+                ids
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "index_scan_all error");
+                Vec::new()
+            }
         }
     }
 

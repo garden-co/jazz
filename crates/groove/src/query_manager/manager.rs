@@ -557,7 +557,12 @@ impl QueryManager {
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj = om.get_or_load(id, storage_ref, branches)?;
+                let obj = om.get_or_load(id, storage_ref, branches);
+                if obj.is_none() {
+                    tracing::trace!(%id, "row_loader: object not found");
+                    return None;
+                }
+                let obj = obj?;
                 // Find the newest commit across all subscription branches (LWW)
                 // Also track which branch it came from for schema transformation
                 let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
@@ -616,6 +621,14 @@ impl QueryManager {
             };
 
             let delta = subscription.graph.settle(storage_ref, row_loader);
+            if !delta.added.is_empty() || !delta.removed.is_empty() {
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = delta.added.len(),
+                    removed = delta.removed.len(),
+                    "settle delta"
+                );
+            }
 
             let tier_satisfied = match &subscription.settled_tier {
                 None => true, // No tier requirement → immediate (current behavior)
