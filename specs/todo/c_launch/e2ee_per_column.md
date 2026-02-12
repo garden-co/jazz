@@ -13,10 +13,10 @@ E2EE is applied at the column level, not the row or table level:
 
 ## Design Constraints
 
-- **Server sees**: encrypted blob size, unencrypted column values, row structure
+- **Server sees**: encrypted data size, unencrypted column values, row structure
 - **Server cannot see**: encrypted column values
 - **Encrypted columns cannot be**: indexed, filtered, sorted, or compressed by the server
-- **Trade-off**: encrypted files/blobs are more expensive (no compression, no dedup on server)
+- **Trade-off**: encrypted files are more expensive (no compression, no dedup on server)
 
 ## Key Management
 
@@ -32,6 +32,6 @@ Jazz 1's E2EE key management (based on ownership groups) was complex and made mi
 - Which encryption algorithm? (AES-GCM, XChaCha20-Poly1305?)
 - Key derivation: from user password, device key, or external KMS?
 - How does E2EE interact with schema lenses? (Encrypted columns can't be transformed server-side)
-- Can the sync server enforce upload limits on encrypted blobs without seeing content?
+- Can the sync server enforce upload limits on encrypted data without seeing content?
 - Migration path from Jazz 1 E2EE (different key model entirely)
 - Column-level granularity vs. "encrypted table" shorthand for tables where all data columns are encrypted?

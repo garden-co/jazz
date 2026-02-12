@@ -1,7 +1,7 @@
 //! BfTree-backed Storage implementation.
 //!
 //! Uses a single bf-tree instance with key-encoded namespaces for all data:
-//! objects, commits, blobs, ack tiers, and indices.
+//! objects, commits, ack tiers, and indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
@@ -9,7 +9,6 @@
 //! "obj:{uuid}:meta"                                       → JSON metadata
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
-//! "blob:{hex_hash}"                                       → raw bytes
 //! "ack:{commit_hex}"                                      → JSON HashSet<PersistenceTier>
 //! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
 //! ```
@@ -26,7 +25,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 use crate::sync_manager::PersistenceTier;
 
-use super::{ContentHash, LoadedBranch, Storage, StorageError, encode_value};
+use super::{LoadedBranch, Storage, StorageError, encode_value};
 
 // ============================================================================
 // Constants
@@ -142,10 +141,6 @@ impl BfTreeStorage {
     /// Prefix for scanning all commits of a branch.
     fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
         format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
-    }
-
-    fn blob_key(hash: ContentHash) -> String {
-        format!("blob:{}", hex::encode(hash.0))
     }
 
     fn ack_key(commit_id: CommitId) -> String {
@@ -550,25 +545,6 @@ impl Storage for BfTreeStorage {
     }
 
     // ================================================================
-    // Blob storage
-    // ================================================================
-
-    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
-        let key = Self::blob_key(hash);
-        self.tree_insert(&key, data)
-    }
-
-    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
-        let key = Self::blob_key(hash);
-        self.tree_read(&key)
-    }
-
-    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
-        let key = Self::blob_key(hash);
-        self.tree_delete(&key)
-    }
-
-    // ================================================================
     // Persistence ack storage
     // ================================================================
 
@@ -861,20 +837,6 @@ mod tests {
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
         assert_eq!(loaded.commits[0].content, b"second");
-    }
-
-    #[test]
-    fn bftree_blob_roundtrip() {
-        let mut storage = test_storage();
-
-        let hash = ContentHash([42u8; 32]);
-        let data = b"hello world";
-
-        storage.store_blob(hash, data).unwrap();
-        assert_eq!(storage.load_blob(hash).unwrap(), Some(data.to_vec()));
-
-        storage.delete_blob(hash).unwrap();
-        assert_eq!(storage.load_blob(hash).unwrap(), None);
     }
 
     #[test]

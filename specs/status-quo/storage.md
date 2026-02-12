@@ -10,7 +10,7 @@ Synchronous, single-threaded interface (no Send + Sync bounds). All methods retu
 
 Operations:
 
-- **Objects**: `get_object()`, `put_object()`, `get_blob()`, `put_blob()`
+- **Objects**: `create_object()`, `load_object_metadata()`, `load_branch()`, `append_commit()`, `delete_commit()`, `set_branch_tails()`
 - **Indices**: `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`
 
 > `crates/groove/src/storage/mod.rs:67-195` (trait definition)
