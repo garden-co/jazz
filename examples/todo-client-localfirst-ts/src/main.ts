@@ -1,5 +1,5 @@
 import { createDb, type DbConfig, type Db } from "jazz-ts";
-import { app, type Todo } from "../schema/app.js";
+import { app } from "../schema/app.js";
 
 export async function startApp(
   container: HTMLElement,
@@ -35,9 +35,9 @@ export async function startApp(
   list.id = "todo-list";
   container.appendChild(list);
 
-  // Render function
-  function render(todos: Todo[]) {
-    list.innerHTML = todos
+  // Subscribe to all todos
+  db.subscribeAll(app.todos, ({ all }) => {
+    list.innerHTML = all
       .map(
         (t) => `
       <li class="${t.done ? "done" : ""}">
@@ -50,10 +50,7 @@ export async function startApp(
     `,
       )
       .join("");
-  }
-
-  // Subscribe to all todos
-  db.subscribeAll<Todo>(app.todos, ({ all }) => render(all));
+  });
 
   // Add todo form
   form.addEventListener("submit", (e) => {
@@ -72,7 +69,7 @@ export async function startApp(
     if (!id) return;
 
     if (target.classList.contains("toggle")) {
-      const todo = await db.one<Todo>(app.todos.where({ id }));
+      const todo = await db.one(app.todos.where({ id }));
       if (todo) {
         db.update(app.todos, id, { done: !todo.done });
       }
