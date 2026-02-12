@@ -40,12 +40,10 @@
     </style>
   </head>
   <body>
-    <h1>Todos</h1>
-    <form id="add-form">
-      <input type="text" id="title-input" placeholder="What needs to be done?" required />
-      <button type="submit">Add</button>
-    </form>
-    <ul id="todo-list"></ul>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="app"></div>
+    <script type="module">
+      import { startApp } from "/src/main.ts";
+      startApp(document.getElementById("app"));
+    </script>
   </body>
 </html>

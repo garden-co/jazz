@@ -1,17 +1,42 @@
-import { createDb } from "jazz-ts";
+import { createDb, type DbConfig, type Db } from "jazz-ts";
 import { app, type Todo } from "../schema/app.js";
 
-async function main() {
-  // Create Db (pre-loads WASM, uses in-memory storage)
+export async function startApp(
+  container: HTMLElement,
+  config?: Partial<DbConfig>,
+): Promise<{ db: Db; destroy: () => Promise<void> }> {
   const db = await createDb({
     appId: "todo-client-example",
     env: "dev",
     userBranch: "main",
+    ...config,
   });
+
+  // Build DOM
+  const h1 = document.createElement("h1");
+  h1.textContent = "Todos";
+  container.appendChild(h1);
+
+  const form = document.createElement("form");
+  form.id = "add-form";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "title-input";
+  input.placeholder = "What needs to be done?";
+  input.required = true;
+  const btn = document.createElement("button");
+  btn.type = "submit";
+  btn.textContent = "Add";
+  form.appendChild(input);
+  form.appendChild(btn);
+  container.appendChild(form);
+
+  const list = document.createElement("ul");
+  list.id = "todo-list";
+  container.appendChild(list);
 
   // Render function
   function render(todos: Todo[]) {
-    const list = document.getElementById("todo-list")!;
     list.innerHTML = todos
       .map(
         (t) => `
@@ -31,9 +56,8 @@ async function main() {
   db.subscribeAll<Todo>(app.todos, ({ all }) => render(all));
 
   // Add todo form
-  document.getElementById("add-form")!.addEventListener("submit", (e) => {
+  form.addEventListener("submit", (e) => {
     e.preventDefault();
-    const input = document.getElementById("title-input") as HTMLInputElement;
     db.insert(app.todos, {
       title: input.value,
       done: false,
@@ -42,7 +66,7 @@ async function main() {
   });
 
   // Event delegation for toggle and delete
-  document.getElementById("todo-list")!.addEventListener("click", async (e) => {
+  list.addEventListener("click", async (e) => {
     const target = e.target as HTMLElement;
     const id = target.dataset.id;
     if (!id) return;
@@ -56,6 +80,12 @@ async function main() {
       db.deleteFrom(app.todos, id);
     }
   });
-}
 
-main().catch(console.error);
+  return {
+    db,
+    destroy: async () => {
+      await db.shutdown();
+      container.innerHTML = "";
+    },
+  };
+}
