@@ -1024,7 +1024,44 @@ describe("full storage reconciliation", () => {
       expect(lock.acquired).toBe(true);
     });
 
-    test("if reconciliation is interrupted, it is not run again until the lock TTL expires", async () => {
+    test("if reconciliation is interrupted, it won't be started by another client until the lock TTL expires", async () => {
+      cojsonInternals.setStorageReconciliationInterval(0);
+      cojsonInternals.setStorageReconciliationLockTTL(100);
+
+      const syncServer = createTestNode();
+      let client = createTestNode({ enableFullStorageReconciliation: true });
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      const group = client.createGroup();
+      await group.core.waitForSync();
+
+      connectToSyncServer(client, syncServer, false);
+
+      // Kill the node before the reconciliation completes
+      client.gracefulShutdown();
+
+      const anotherClient = createTestNode({
+        enableFullStorageReconciliation: true,
+      });
+      anotherClient.setStorage(storage);
+      connectToSyncServer(anotherClient, syncServer, false);
+
+      const lockResult =
+        await tryAcquireStorageReconciliationLock(anotherClient);
+      expect(lockResult.acquired).toBe(false);
+      if (!lockResult.acquired) {
+        expect(lockResult.reason).toBe("lock_held");
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const lockResult2 =
+        await tryAcquireStorageReconciliationLock(anotherClient);
+      expect(lockResult2.acquired).toBe(true);
+    });
+
+    test("if reconciliation is interrupted, it can be resumed by the same client", async () => {
       cojsonInternals.setStorageReconciliationInterval(0);
       cojsonInternals.setStorageReconciliationLockTTL(100);
 
@@ -1042,15 +1079,7 @@ describe("full storage reconciliation", () => {
       client.gracefulShutdown();
 
       const lockResult = await tryAcquireStorageReconciliationLock(client);
-      expect(lockResult.acquired).toBe(false);
-      if (!lockResult.acquired) {
-        expect(lockResult.reason).toBe("lock_held");
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      const lockResult2 = await tryAcquireStorageReconciliationLock(client);
-      expect(lockResult2.acquired).toBe(true);
+      expect(lockResult.acquired).toBe(true);
     });
   });
 });
