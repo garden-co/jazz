@@ -15,6 +15,7 @@ import {
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
   type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -90,36 +91,12 @@ export class CoListSchema<
 
   create(
     items: CoListSchemaInit<T>,
-    options?:
-      | {
-          owner?: Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: "strict" | "loose";
-        }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoListInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     items: CoListSchemaInit<T>,
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | Account
-      | Group,
-  ): CoListInstance<T>;
-  create(
-    items: CoListSchemaInit<T>,
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoListInstance<T>;
   create(items: any, options?: any): CoListInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(

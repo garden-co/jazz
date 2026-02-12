@@ -50,6 +50,7 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   CoreFileStreamSchema,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
@@ -216,15 +217,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?:
-      | {
-          owner?: Account | Group;
-          validation?: LocalValidationMode;
-          unique?: CoValueUniqueness["uniqueness"];
-          firstComesWins?: boolean;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
     const coFeedSchema = assertCoValueSchema(this, "CoFeed", "create");
     const { owner, uniqueness, firstComesWins } =

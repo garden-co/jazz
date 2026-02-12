@@ -21,6 +21,7 @@ import {
   withSchemaPermissions,
   isCoValueSchema,
   type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -146,24 +147,12 @@ export class CoMapSchema<
 
   create(
     init: CoMapSchemaInit<Shape>,
-    options?:
-      | {
-          owner?: Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoMapSchemaInit<Shape>,
-    options?:
-      | {
-          owner?: Owner;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | Owner,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   create(init: any, options?: any) {
     const optionsWithPermissions = withSchemaPermissions(

@@ -37,6 +37,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoListSchema } from "../implementation/zodSchema/schemaTypes/CoListSchema.js";
@@ -141,15 +142,7 @@ export class CoList<out Item = any>
   static create<L extends CoList>(
     this: CoValueClass<L>,
     items: L[number][],
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          firstComesWins?: boolean;
-          validation?: LocalValidationMode;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
     const coListSchema = assertCoValueSchema(this, "CoList", "create");
     const validationMode = resolveValidationMode(

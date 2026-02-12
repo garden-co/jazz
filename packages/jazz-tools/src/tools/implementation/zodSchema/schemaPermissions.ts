@@ -1,4 +1,11 @@
-import { Account, Group, TypeSym, type GroupRole } from "../../internal.js";
+import {
+  Account,
+  CoValueCreateOptions,
+  CoValueCreateOptionsInternal,
+  Group,
+  TypeSym,
+  type GroupRole,
+} from "../../internal.js";
 
 /**
  * Defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.

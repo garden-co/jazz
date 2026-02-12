@@ -30,6 +30,7 @@ import {
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   inspect,
+  LocalValidationMode,
 } from "../internal.js";
 import type {
   BranchDefinition,
@@ -470,17 +471,37 @@ export function isAnonymousAgentInstance(
   return TypeSym in instance && instance[TypeSym] === "Anonymous";
 }
 
+export type CoValueCreateOptions<
+  MoreOptions extends object = {},
+  Owner extends Group | Account = Group,
+> =
+  | undefined
+  | Owner
+  | ((
+      | {
+          owner: Owner;
+          // we want to have explicit owner if unique is provided
+          unique: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
+      | {
+          owner?: Owner;
+          unique?: undefined;
+          validation?: LocalValidationMode;
+        }
+    ) &
+      MoreOptions);
+
+export type CoValueCreateOptionsInternal = CoValueCreateOptions<
+  {
+    onCreate?: OnCreateCallback;
+    firstComesWins?: boolean;
+  },
+  Account | Group
+>;
+
 export function parseCoValueCreateOptions(
-  options:
-    | {
-        owner?: Account | Group;
-        unique?: CoValueUniqueness["uniqueness"];
-        onCreate?: OnCreateCallback;
-        firstComesWins?: boolean;
-      }
-    | Account
-    | Group
-    | undefined,
+  options: CoValueCreateOptionsInternal,
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;

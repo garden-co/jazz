@@ -52,6 +52,7 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   CoreCoMapSchema,
+  CoValueCreateOptionsInternal,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
@@ -177,14 +178,7 @@ export class CoMap extends CoValueBase implements CoValue {
   static create<M extends CoMap>(
     this: CoValueClass<M>,
     init: Simplify<CoMapInit_DEPRECATED<M>>,
-    options?:
-      | {
-          owner?: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ) {
     const coMapSchema = assertCoValueSchema(this, "CoMap", "create");
     const instance = new this();
@@ -251,15 +245,7 @@ export class CoMap extends CoValueBase implements CoValue {
     instance: M,
     schema: CoreCoMapSchema,
     init: Simplify<CoMapInit_DEPRECATED<M>>,
-    options?:
-      | {
-          owner?: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-          firstComesWins?: boolean;
-        }
-      | Account
-      | Group,
+    options?: CoValueCreateOptionsInternal,
   ): M {
     const validationMode = resolveValidationMode(
       options && "validation" in options ? options.validation : undefined,
