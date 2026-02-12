@@ -873,7 +873,17 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    *
    * @category Content
    */
-  applyDiff(result: CoFieldInit<CoListItem<L>>[]): L {
+  applyDiff(
+    result: CoFieldInit<CoListItem<L>>[],
+    options?: { validation?: LocalValidationMode },
+  ): L {
+    const validationMode = resolveValidationMode(options?.validation);
+    if (validationMode !== "loose" && this.coListSchema) {
+      const schema = z.array(this.getItemSchema());
+      executeValidation(schema, result, validationMode) as CoFieldInit<
+        CoListItem<L>
+      >[];
+    }
     const current = this.raw.asArray() as CoFieldInit<CoListItem<L>>[];
     const comparator = isRefEncoded(this.getItemsDescriptor())
       ? (aIdx: number, bIdx: number) => {

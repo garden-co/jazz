@@ -944,6 +944,79 @@ describe("CoList applyDiff operations", async () => {
     expect(list.$jazz.raw.asArray()).toEqual(["e", "c", "new", "y", "x"]);
   });
 
+  test("applyDiff respects schema validation in strict mode", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const list = PersonList.create([{ name: "John" }], { owner: me });
+
+    expect(list.length).toBe(1);
+
+    expectValidationError(() =>
+      list.$jazz.applyDiff([
+        { name: "John" },
+        { name: 123 as unknown as string },
+      ]),
+    );
+
+    // The list should remain unchanged after failed validation
+    expect(list.length).toBe(1);
+    expect(list[0]?.name).toBe("John");
+  });
+
+  test("applyDiff respects local loose validation mode", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const list = PersonList.create([{ name: "John" }], { owner: me });
+
+    list.$jazz.applyDiff(
+      [
+        { name: "John" },
+        {
+          name: 123 as unknown as string,
+        },
+      ],
+      { validation: "loose" },
+    );
+
+    // Invalid data is accepted when validation is globally loose
+    expect(list.length).toBe(2);
+    expect(list[0]?.name).toBe("John");
+    expect(list[1]?.name).toBe(123 as unknown as string);
+  });
+
+  test("applyDiff respects global loose validation mode", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const list = PersonList.create([{ name: "John" }], { owner: me });
+
+    setDefaultValidationMode("loose");
+
+    try {
+      list.$jazz.applyDiff([
+        { name: "John" },
+        {
+          name: 123 as unknown as string,
+        },
+      ]);
+
+      // Invalid data is accepted when validation is globally loose
+      expect(list.length).toBe(2);
+      expect(list[0]?.name).toBe("John");
+      expect(list[1]?.name).toBe(123 as unknown as string);
+    } finally {
+      setDefaultValidationMode("strict");
+    }
+  });
+
   test("applyDiff should emit a single update", () => {
     const TestMap = co.map({
       type: z.string(),
