@@ -7,6 +7,7 @@ Distributed, local-first relational database. Rust core (`crates/groove`), TypeS
 Architecture docs live in `specs/`. Status-quo specs describe what's built; todo specs describe what's next.
 
 Todo specs are organized by timeline in `specs/todo/`:
+
 - `a_week_YYYY_MM_DD/` — this week's tasks (new folder each week)
 - `b_mvp/` — must-have for first adopters
 - `c_launch/` — public launch readiness
@@ -31,12 +32,14 @@ Communicate tersely without losing precision or warmth.
 Your agentic harness and training heavily bias you toward completion. You may feel like time is running out. It isn't. We are doing complex work across multiple sessions and team members. Going slow is expected.
 
 Priorities, in order:
+
 1. **Correctness and design fidelity** — implement the design, not a shortcut that compiles
 2. **Honesty** — surface what's broken, what you don't understand, what doesn't match your expectations
 3. **Clarity** — leave clear TODOs, clear red tests, clear summaries of where things stand
 4. Completion (eventually, as a natural consequence of the above)
 
 Concretely:
+
 - Intermediate breakage during complex work is fine. Don't add shims or workarounds to make each micro-step compile.
 - Never weaken assertions, add `#[cfg(test)]` backdoors, or explain away failures to reach "done." If a test fails, that's information — investigate or leave it red.
 - Ask before moving to the next phase. "It compiles" is not "it works."

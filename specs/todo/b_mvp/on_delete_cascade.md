@@ -7,12 +7,14 @@ Cascading deletes for foreign key relationships, built on the existing soft/hard
 Uses the two-phase delete system already in place (see `../status-quo/query_manager.md`):
 
 **Soft delete cascade:**
+
 1. Parent row is soft-deleted (content preserved, `delete: soft` metadata, moved to `_id_deleted` index).
 2. Force-traverse all FK references with `ON DELETE CASCADE` — find child rows that reference this parent.
 3. Apply soft delete to each child (potentially waiting for data to load from storage/sync).
 4. Soft-deleted children can be restored if the parent is restored (undelete).
 
 **Hard delete cascade:**
+
 1. Parent row is hard-deleted (content truncated, `delete: hard` metadata).
 2. Same FK traversal — find all children.
 3. Hard delete (truncate) each child.
@@ -57,6 +59,7 @@ Whether to maintain a materialized refcount (for performance) or compute it on d
 ## Distributed Considerations
 
 **Concurrent edit vs delete:** Peer A deletes parent, Peer B updates child — the delete wins because:
+
 - Soft delete: child gets soft-deleted during cascade traversal. If the delete is reversed (undelete), B's update is preserved.
 - Hard delete: child gets truncated. Hard delete is authoritative and always wins.
 
