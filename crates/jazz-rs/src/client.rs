@@ -54,7 +54,7 @@ impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
-    /// 1. Open local RocksDB storage
+    /// 1. Open local BfTree storage
     /// 2. Initialize the runtime
     /// 3. Connect to the server (if URL provided)
     /// 4. Start syncing

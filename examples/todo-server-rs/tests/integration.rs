@@ -469,7 +469,7 @@ async fn test_local_persistence() {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
 
-        // Shutdown client to release RocksDB
+        // Shutdown client to release storage
         client.shutdown().await.unwrap();
         row_id
     };
