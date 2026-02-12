@@ -3,7 +3,7 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
-    "build": "turbo run build",
+    "build": "turbo run build:crates && turbo run build",
     "test": "turbo run test"
   },
   "devDependencies": {

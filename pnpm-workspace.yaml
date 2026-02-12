@@ -2,7 +2,7 @@ packages:
   - packages/*
   - examples/*
   - crates
-  - crates/groove-wasm/pkg
+  - crates/groove-wasm
   - crates/groove-napi
 
 ignoredBuiltDependencies:
