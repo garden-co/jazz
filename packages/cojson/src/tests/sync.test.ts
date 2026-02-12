@@ -35,6 +35,10 @@ beforeEach(async () => {
   });
 });
 
+afterEach(() => {
+  SyncMessagesLog.clear();
+});
+
 test("If we add a client peer, but it never subscribes to a coValue, it won't get any messages", async () => {
   const node = nodeWithRandomAgentAndSessionID();
 
@@ -191,37 +195,31 @@ test("transaction mutations are sent together in a single batch message", async 
   const { node, connectToSyncServer } = setupTestNode();
   connectToSyncServer();
 
-  const group = node.createGroup();
-  const map = group.createMap();
-  map.set("initial", "value", "trusting");
-  await map.core.waitForSync();
+  const [group, map] = await node.unstable_withTransaction(() => {
+    const group = node.createGroup();
+    const map = group.createMap();
+    map.set("initial", "value", "trusting");
 
-  SyncMessagesLog.clear();
-
-  await node.unstable_withTransaction(() => {
     map.set("key1", "value1", "trusting");
     map.set("key2", "value2", "trusting");
+
+    return [group, map];
   });
 
   await map.core.waitForSync();
 
-  const clientToServerBatchMessages = SyncMessagesLog.messages.filter(
-    (message) =>
-      message.from === "client" &&
-      message.to === "server" &&
-      message.msg.action === "batch",
-  );
+  const simplified = SyncMessagesLog.getMessages({
+    Group: group.core,
+    Map: map.core,
+  });
 
-  const expectedBatchMessageCount = 1;
-  expect(clientToServerBatchMessages).toHaveLength(expectedBatchMessageCount);
-
-  const batchMessage = clientToServerBatchMessages[0]!.msg as BatchMessage;
-  const expectedMutationCount = 2;
-  expect(batchMessage.messages).toHaveLength(expectedMutationCount);
-  expect(batchMessage.messages.map((message) => message.id)).toEqual([
-    map.id,
-    map.id,
-  ]);
+  expect(simplified).toMatchInlineSnapshot(`
+    [
+      "client -> server | BATCH [Group, Map]",
+      "server -> client | KNOWN Group sessions: header/4",
+      "server -> client | KNOWN Map sessions: header/3",
+    ]
+  `);
 });
 
 describe("sync - extra tests", () => {

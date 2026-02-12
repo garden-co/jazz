@@ -86,7 +86,7 @@ describe("LocalNode.unstable_withTransaction", () => {
     // Set up a sync server first
     setupTestNode({ isSyncServer: true });
     const { node, connectToSyncServer } = setupTestNode();
-    const { peer } = connectToSyncServer();
+    connectToSyncServer();
 
     // Create a group to test mutations
     const group = node.createGroup();
@@ -130,40 +130,20 @@ describe("LocalNode.unstable_withTransaction", () => {
               priority: 3,
               new: expect.any(Object),
             },
-            {
-              id: result,
-              action: "content",
-              header: undefined,
-              priority: 3,
-              new: expect.any(Object),
-            },
-            // key1
-            {
-              id: result,
-              action: "content",
-              header: undefined,
-              priority: 3,
-              new: expect.any(Object),
-            },
-            // key2
-            {
-              id: result,
-              action: "content",
-              header: undefined,
-              priority: 3,
-              new: expect.any(Object),
-            },
           ],
         },
       },
     ]);
 
     const coMapCreationMessage = (batchMessages[0]!.msg as BatchMessage)
-      .messages[1]!;
+      .messages[0]!;
 
     const coMapCreationMessageSealedId = Object.keys(
       coMapCreationMessage.new,
     )[0] as SessionID;
+
+    // message.new contains an object with shape {'sealer_xyz/signer_abc': transaction}
+    // we just get the first key
     expect(
       coMapCreationMessage.new[coMapCreationMessageSealedId],
     ).toStrictEqual({
@@ -173,29 +153,21 @@ describe("LocalNode.unstable_withTransaction", () => {
         expect.objectContaining({
           privacy: "private",
         }),
-      ],
-    });
-
-    const coMapSetKey1Message = (batchMessages[0]!.msg as BatchMessage)
-      .messages[2]!;
-
-    const coMapSetKey1MessageSealedId = Object.keys(
-      coMapSetKey1Message.new,
-    )[0] as SessionID;
-    expect(coMapSetKey1Message.new[coMapSetKey1MessageSealedId]).toStrictEqual({
-      after: 1,
-      lastSignature: expect.any(String),
-      newTransactions: [
         expect.objectContaining({
+          changes: expect.stringContaining('"key1"'),
           privacy: "trusting",
-          changes: '[{"op":"set","key":"key1","value":"value1"}]',
+          madeAt: expect.any(Number),
+        }),
+        expect.objectContaining({
+          changes: expect.stringContaining('"key2"'),
+          privacy: "trusting",
+          madeAt: expect.any(Number),
         }),
       ],
     });
   });
 
   test("emits a single batch SyncMessage for transaction mutations", async () => {
-    // Set up a sync server first
     setupTestNode({ isSyncServer: true });
     const { node, connectToSyncServer } = setupTestNode();
     connectToSyncServer();
@@ -203,6 +175,8 @@ describe("LocalNode.unstable_withTransaction", () => {
     const group = node.createGroup();
     const map = group.createMap();
 
+    // wait previous messages to be processed
+    await new Promise((resolve) => setTimeout(resolve, 0));
     SyncMessagesLog.clear();
 
     await node.unstable_withTransaction(() => {
@@ -217,19 +191,7 @@ describe("LocalNode.unstable_withTransaction", () => {
 
     expect(simplified).toMatchInlineSnapshot(`
       [
-        "client -> server | BATCH [Map, Map]",
-        "server -> client | KNOWN CORRECTION Map sessions: empty",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | KNOWN CORRECTION Map sessions: empty",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | LOAD Group sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
-        "server -> client | KNOWN Group sessions: header/4",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 4",
-        "server -> client | KNOWN Group sessions: header/4",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | KNOWN Map sessions: header/2",
-        "server -> client | KNOWN Map sessions: header/2",
+        "client -> server | BATCH [Map]",
         "server -> client | KNOWN Map sessions: header/2",
       ]
     `);

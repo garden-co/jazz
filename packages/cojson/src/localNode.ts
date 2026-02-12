@@ -42,6 +42,7 @@ import { canBeBranched } from "./coValueCore/branching.js";
 import { connectedPeers } from "./streamUtils.js";
 import { CoValueKnownState, emptyKnownState } from "./knownState.js";
 import { TransactionContext } from "./transactionContext.js";
+import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -176,9 +177,21 @@ export class LocalNode {
       // Get buffered messages
       const messages = this.transactionContext.getPendingMessages();
 
-      if (messages.length > 0) {
-        // Flush to storage and sync atomically
-        await this.syncManager.syncAtomicBatch(messages);
+      if (this.transactionContext.messageCount > 0) {
+        await new Promise<void>((resolve, reject) => {
+          // Create a queue to batch multiple transactions on the same CoValue
+          const queue = new LocalTransactionsSyncQueue((contents) => {
+            // Flush to storage and sync atomically
+            this.syncManager
+              .syncAtomicBatch(contents)
+              .then(resolve)
+              .catch(reject);
+          });
+
+          for (const [coValue, knownStateBefore] of messages) {
+            queue.syncTransaction(coValue, knownStateBefore);
+          }
+        });
       }
 
       // Always clean up transaction context
@@ -546,16 +559,8 @@ export class LocalNode {
     const transactionContext = this.getTransactionContext();
 
     if (transactionContext?.isActive()) {
-      // TODO: keeping the knownStateBefore can dedupe multiple changes into a single transaction
-      // as done in syncLocalTransaction
-
       // Buffer the message instead of syncing immediately
-      const content = coValue.verified.newContentSince(emptyKnownState(id));
-      if (content) {
-        for (const msg of content) {
-          transactionContext.bufferMessage(msg);
-        }
-      }
+      transactionContext.bufferMessage(coValue.verified, emptyKnownState(id));
       // Don't sync now - will be done when transaction completes
     } else {
       this.syncManager.syncLocalTransaction(

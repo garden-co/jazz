@@ -1,44 +1,40 @@
-import type { NewContentMessage } from "./sync.js";
-import type { RawCoID } from "./ids.js";
+import type { VerifiedState } from "./coValueCore/verifiedState.js";
+import type { CoValueKnownState } from "./knownState.js";
 
 /**
  * TransactionContext manages the state of an active atomic transaction.
  *
  * When a transaction is active, mutations are applied immediately to memory
- * but their NewContentMessages are buffered instead of being synced immediately.
+ * but the information required to build their NewContentMessages is buffered
+ * instead of being synced immediately.
  * After the transaction callback completes, all buffered messages are:
- * - Stored atomically in a single IndexedDB transaction
+ * - Processed inside LocalTransactionsSyncQueue to build the NewContentMessages
+ * - Stored atomically in a single storage transaction
  * - Sent to sync servers in a single BatchMessage
  *
  * The presence of a TransactionContext is treated as the "active" signal.
  * The callback is synchronous, so no other code can run during the transaction window.
  */
 export class TransactionContext {
-  private pendingMessages: NewContentMessage[] = [];
-  private pendingCoValues: Set<RawCoID> = new Set();
+  private pendingMessages: [VerifiedState, CoValueKnownState][] = [];
 
   /**
-   * Buffer a NewContentMessage for later atomic persistence and sync.
+   * Buffer the information required to build a NewContentMessage for later atomic persistence and sync.
    * Messages are stored in order and will be processed as a batch.
    */
-  bufferMessage(msg: NewContentMessage): void {
-    this.pendingMessages.push(msg);
-    this.pendingCoValues.add(msg.id);
+  bufferMessage(
+    coValue: VerifiedState,
+    knownStateBefore: CoValueKnownState,
+  ): void {
+    this.pendingMessages.push([coValue, knownStateBefore]);
   }
 
   /**
    * Get all buffered messages in order.
    * The order is preserved per CoValue for correct replay.
    */
-  getPendingMessages(): NewContentMessage[] {
+  getPendingMessages() {
     return this.pendingMessages;
-  }
-
-  /**
-   * Get the set of unique CoValue IDs affected by this transaction.
-   */
-  getCoValueIds(): Set<RawCoID> {
-    return this.pendingCoValues;
   }
 
   /**
@@ -55,7 +51,6 @@ export class TransactionContext {
    */
   clear(): void {
     this.pendingMessages = [];
-    this.pendingCoValues.clear();
   }
 
   /**

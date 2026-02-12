@@ -1150,11 +1150,17 @@ export class SyncManager {
     }
   }
 
-  private syncQueue = new LocalTransactionsSyncQueue((content) =>
-    this.syncContent(content),
+  private syncQueue = new LocalTransactionsSyncQueue((contents) =>
+    this.syncContents(contents),
   );
   syncLocalTransaction = this.syncQueue.syncTransaction;
   trackDirtyCoValues = this.syncQueue.trackDirtyCoValues;
+
+  private syncContents(contents: NewContentMessage[]) {
+    for (const content of contents) {
+      this.syncContent(content);
+    }
+  }
 
   private syncContent(content: NewContentMessage) {
     const coValue = this.local.getCoValue(content.id);
