@@ -52,3 +52,23 @@ Open questions:
 
 - permissions
   - DX around optimistic updates is crucial
+
+
+- re-evaluate other storage backends
+- storage & object manager need benchmarks to de-risk perf
+  - validate full obj snapshots vs delta commits
+- design & define when and how merges happen
+  - intent hard to extract from snapshot diffing?
+    - multi parents?
+  - how often do we commit in real apps?
+    - mostly relevant for real-time text and canvas editing & presence
+
+- new stub: what does minimal CI look like? -> first tests -> Gio
+
+- double check that examples persist IRL
+
+- let frameworks do the patch merging
+  - provide granular runes, signals, etc
+  - explore useReducer vs useSyncExternalStore
+    - transitions, suspense, etc.
+
