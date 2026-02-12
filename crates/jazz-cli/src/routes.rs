@@ -196,7 +196,7 @@ async fn sync_handler(
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
-    tracing::info!(client_id = %request.client_id, payload = ?std::mem::discriminant(&request.payload), "sync request");
+    tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
 
     // Check admin secret — if present and valid, promote client to Admin role
     let is_admin = {

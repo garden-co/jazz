@@ -8,7 +8,7 @@ use std::collections::HashSet;
 impl SyncManager {
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
-        tracing::trace!(source = ?entry.source, payload = ?std::mem::discriminant(&entry.payload), "processing inbox entry");
+        tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
         match entry.source {
             Source::Server(server_id) => {
                 self.process_from_server(storage, server_id, entry.payload)
@@ -144,7 +144,7 @@ impl SyncManager {
             tracing::warn!(%client_id, "message from unknown client, ignoring");
             return;
         };
-        tracing::trace!(%client_id, role = ?client.role, payload = ?std::mem::discriminant(&payload), "client→payload");
+        tracing::trace!(%client_id, role = ?client.role, payload = payload.variant_name(), "client→payload");
 
         match &payload {
             SyncPayload::ObjectUpdated {
