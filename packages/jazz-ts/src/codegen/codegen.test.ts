@@ -562,6 +562,8 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export class TodoQueryBuilder<I extends Record<string, never> = {}>");
+    expect(output).toContain("declare readonly _rowType: Todo;");
+    expect(output).toContain("declare readonly _initType: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
     expect(output).toContain("orderBy(column: keyof Todo");
     expect(output).toContain("limit(n: number)");

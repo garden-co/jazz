@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useDb, useAll } from "jazz-react";
-import { app, type Todo } from "../schema/app.js";
+import { app } from "../schema/app.js";
 
 export function TodoList() {
   const db = useDb();
-  const todos = useAll<Todo>(app.todos);
+  const todos = useAll(app.todos);
   const [title, setTitle] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -12,14 +12,6 @@ export function TodoList() {
     if (!title.trim()) return;
     db.insert(app.todos, { title: title.trim(), done: false });
     setTitle("");
-  };
-
-  const handleToggle = (todo: Todo) => {
-    db.update(app.todos, todo.id, { done: !todo.done });
-  };
-
-  const handleDelete = (id: string) => {
-    db.deleteFrom(app.todos, id);
   };
 
   return (
@@ -40,12 +32,12 @@ export function TodoList() {
             <input
               type="checkbox"
               checked={todo.done}
-              onChange={() => handleToggle(todo)}
+              onChange={() => db.update(app.todos, todo.id, { done: !todo.done })}
               className="toggle"
             />
             <span>{todo.title}</span>
             {todo.description && <small>{todo.description}</small>}
-            <button className="delete-btn" onClick={() => handleDelete(todo.id)}>
+            <button className="delete-btn" onClick={() => db.deleteFrom(app.todos, todo.id)}>
               &times;
             </button>
           </li>
