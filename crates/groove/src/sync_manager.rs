@@ -419,22 +419,7 @@ impl Default for SyncManager {
 
 impl SyncManager {
     pub fn new() -> Self {
-        Self {
-            object_manager: ObjectManager::new(),
-            servers: HashMap::new(),
-            clients: HashMap::new(),
-            inbox: Vec::new(),
-            outbox: Vec::new(),
-            pending_permission_checks: Vec::new(),
-            pending_query_subscriptions: Vec::new(),
-            pending_query_unsubscriptions: Vec::new(),
-            next_pending_id: 0,
-            my_tier: None,
-            commit_interest: HashMap::new(),
-            query_origin: HashMap::new(),
-            pending_query_settled: Vec::new(),
-            received_acks: Vec::new(),
-        }
+        Self::with_object_manager(ObjectManager::new())
     }
 
     /// Create with an existing ObjectManager.

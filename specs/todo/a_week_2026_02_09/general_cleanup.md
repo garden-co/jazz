@@ -38,11 +38,9 @@ Remaining `#[allow(dead_code)]` are acceptable: bf-tree internals, Axum extracto
 
 Done. `delete()` now delegates to `delete_with_session(…, None)`, matching `insert()` and `update()`. Removed ~70 duplicate lines. Also fixed a latent bug: `delete()` was missing the `forward_update_to_servers` call that `delete_with_session()` had.
 
-## 6. SyncManager Constructor Duplication (LOW)
+## 6. ~~SyncManager Constructor Duplication~~ ✅
 
-`sync_manager.rs` has `new()` (line 432) and `with_object_manager()` (line 452) that repeat 14 identical field initializations. Only `object_manager` differs.
-
-Action: have `new()` call `with_object_manager(ObjectManager::new())`.
+Done. `new()` now delegates to `with_object_manager(ObjectManager::new())`.
 
 ## 7. Test Quality Issues (LOW)
 
