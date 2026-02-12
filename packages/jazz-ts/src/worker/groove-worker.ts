@@ -7,6 +7,7 @@
  */
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
+import { sendSyncPayload, readBinaryFrames } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -114,46 +115,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
 /** POST a sync payload to the upstream server. */
 async function sendToServer(serverUrl: string, payload: any): Promise<void> {
-  try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-
-    // Check if catalogue payload → admin header
-    if (isCataloguePayload(payload)) {
-      if (adminSecret) {
-        headers["X-Jazz-Admin-Secret"] = adminSecret;
-      }
-    } else if (jwtToken) {
-      headers["Authorization"] = `Bearer ${jwtToken}`;
-    }
-
-    const body = JSON.stringify({
-      payload,
-      client_id: serverClientId ?? "00000000-0000-0000-0000-000000000000",
-    });
-
-    const response = await fetch(`${serverUrl}/sync`, {
-      method: "POST",
-      headers,
-      body,
-    });
-
-    if (!response.ok) {
-      console.error("[worker] Sync POST error:", response.statusText);
-    }
-  } catch (e) {
-    console.error("[worker] Sync POST error:", e);
-  }
-}
-
-function isCataloguePayload(payload: any): boolean {
-  const metadata = payload?.ObjectUpdated?.metadata?.metadata;
-  if (metadata) {
-    const t = metadata["type"];
-    return t === "catalogue_schema" || t === "catalogue_lens";
-  }
-  return false;
+  await sendSyncPayload(
+    serverUrl,
+    payload,
+    { jwtToken, adminSecret, clientId: serverClientId ?? undefined },
+    "[worker] ",
+  );
 }
 
 /**
@@ -188,48 +155,30 @@ async function connectStream(serverUrl: string): Promise<void> {
     // Read frames in background, resolve once Connected is received
     await new Promise<void>((resolveConnected) => {
       let resolved = false;
-      let buffer = new Uint8Array(0);
+
+      const resolve = () => {
+        if (!resolved) {
+          resolved = true;
+          resolveConnected();
+        }
+      };
 
       const readLoop = async () => {
         try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            // Append chunk to buffer
-            const newBuffer = new Uint8Array(buffer.length + value.length);
-            newBuffer.set(buffer);
-            newBuffer.set(value, buffer.length);
-            buffer = newBuffer;
-
-            // Read complete frames
-            while (buffer.length >= 4) {
-              const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
-              if (buffer.length < 4 + len) break;
-              const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
-              buffer = buffer.slice(4 + len);
-              try {
-                const event = JSON.parse(json);
-                if (event.type === "Connected" && event.client_id) {
-                  serverClientId = event.client_id;
-                  if (!resolved) {
-                    resolved = true;
-                    resolveConnected();
-                  }
-                } else if (event.type === "SyncUpdate" && runtime) {
-                  runtime.onSyncMessageReceived(JSON.stringify(event.payload));
-                }
-              } catch (e) {
-                console.error("[worker] Stream parse error:", e);
-              }
-            }
-          }
+          await readBinaryFrames(
+            reader,
+            {
+              onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
+              onConnected: (clientId) => {
+                serverClientId = clientId;
+                resolve();
+              },
+            },
+            "[worker] ",
+          );
         } catch (e: any) {
           if (e?.name === "AbortError") {
-            if (!resolved) {
-              resolved = true;
-              resolveConnected();
-            }
+            resolve();
             return;
           }
           console.error("[worker] Stream error:", e);
@@ -239,10 +188,7 @@ async function connectStream(serverUrl: string): Promise<void> {
         if (streamAbortController && !streamAbortController.signal.aborted) {
           setTimeout(() => connectStream(serverUrl), 5000);
         }
-        if (!resolved) {
-          resolved = true;
-          resolveConnected();
-        }
+        resolve();
       };
 
       readLoop();
