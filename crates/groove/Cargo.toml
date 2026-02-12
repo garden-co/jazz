@@ -8,8 +8,9 @@ default = []
 bftree = ["bf-tree"]
 
 [dependencies]
-bf-tree = { path = "../bf-tree", optional = true }
+bf-tree = { path = "../bf-tree", optional = true, features = ["tracing"] }
 futures = "0.3"
+tracing = "0.1"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }
 blake3 = "1"
 hex = "0.4"
