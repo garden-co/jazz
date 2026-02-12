@@ -170,13 +170,12 @@ fn compute_memory_breakdown(core: &RuntimeCore<MemoryStorage>) -> MemoryBreakdow
     let qm = core.schema_manager().query_manager();
 
     // Get ObjectManager memory breakdown via SyncManager
-    let (row_objects, index_objects, blobs, subscriptions, outbox_inbox, om_total) =
+    let (row_objects, index_objects, subscriptions, outbox_inbox, om_total) =
         qm.sync_manager().object_manager.memory_size();
 
     let object_manager = ObjectManagerMemory {
         row_objects,
         index_objects,
-        blobs,
         subscriptions,
         outbox_inbox,
         total: om_total,

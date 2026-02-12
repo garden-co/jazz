@@ -43,22 +43,13 @@ An immutable node in the branch DAG. Identified by BLAKE3 hash of its content (p
 
 > `crates/groove/src/commit.rs:33-48` (struct), `commit.rs:52-86` (CommitId computation)
 
-### Blob
-
-Content-addressed binary data. Identified by BLAKE3 hash. Deduplicated across all commits.
-
-BlobId identifies a blob's association context: `(object_id, branch_name, commit_id, content_hash)`.
-
-> `crates/groove/src/object_manager.rs:62-68`
-
 ## Identifiers
 
-| Type        | Format   | Generation                  |
-| ----------- | -------- | --------------------------- |
-| ObjectId    | UUIDv7   | `Uuid::now_v7()` (interned) |
-| BranchName  | String   | User-defined (interned)     |
-| CommitId    | [u8; 32] | BLAKE3 hash of commit       |
-| ContentHash | [u8; 32] | BLAKE3 hash of blob data    |
+| Type       | Format   | Generation                  |
+| ---------- | -------- | --------------------------- |
+| ObjectId   | UUIDv7   | `Uuid::now_v7()` (interned) |
+| BranchName | String   | User-defined (interned)     |
+| CommitId   | [u8; 32] | BLAKE3 hash of commit       |
 
 > `crates/groove/src/object.rs:10-59` (ObjectId), `object.rs:79-124` (BranchName)
 
@@ -70,7 +61,7 @@ All persistence is **synchronous** via the `Storage` trait. There are no request
 - `MemoryStorage`: `crates/groove/src/storage/mod.rs:321-553`
 - `BfTreeStorage`: `crates/groove/src/storage/bftree.rs` (persistent B-tree pages via OPFS/disk)
 
-Key Storage methods: `append_commit()`, `store_blob()`, `load_blob()`, `delete_commit()`, `set_branch_tails()`, `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`.
+Key Storage methods: `append_commit()`, `delete_commit()`, `set_branch_tails()`, `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`.
 
 All ObjectManager write operations call Storage synchronously — no eventual consistency within a single node.
 
@@ -103,20 +94,9 @@ Central coordinator that maintains in-memory state and writes synchronously to S
 
 > `crates/groove/src/object_manager.rs:291-527` (add_commit through get_commits), `630-712` (receive_commit)
 
-### Public API — Blob Operations
-
-| Method             | Purpose                                                                  |
-| ------------------ | ------------------------------------------------------------------------ |
-| `associate_blob()` | Compute BLAKE3 hash, deduplicate, store synchronously, track association |
-| `load_blob()`      | Return blob data from Storage, cache in memory                           |
-| `put_blob()`       | Simpler interface using associate_blob                                   |
-| `get_blob()`       | Return cached blob (does NOT load from Storage)                          |
-
-> `crates/groove/src/object_manager.rs:533-600` (associate_blob, load_blob), `718-739` (put_blob, get_blob)
-
 ### Public API — Branch Truncation
 
-`truncate_branch()` validates tails, checks all tips are descendants of some tail, finds ancestors for deletion, syncs to Storage. Returns `TruncateResult::Success { deleted_commits, deleted_blobs }` or `TruncateResult::PermanentError(TruncateError)`.
+`truncate_branch()` validates tails, checks all tips are descendants of some tail, finds ancestors for deletion, syncs to Storage. Returns `TruncateResult::Success { deleted_commits }` or `TruncateResult::PermanentError(TruncateError)`.
 
 > `crates/groove/src/object_manager.rs:899-1006`
 
@@ -146,25 +126,22 @@ Merged:       root → a ─┬─► merge (tip)
 ## Error Handling
 
 ```
-Error: ObjectNotFound, BranchNotFound, ParentNotFound, StorageError, BlobNotFound
+Error: ObjectNotFound, BranchNotFound, ParentNotFound, StorageError
 TruncateError: ObjectNotFound, BranchNotFound, TailNotFound, TipBeforeTail
 ```
 
 > `crates/groove/src/object_manager.rs:80-109`
 
-Note: the old async-era errors (`ObjectNotReady`, `BranchNotLoaded`, `BlobNotLoaded`) no longer exist.
+Note: the old async-era errors (`ObjectNotReady`, `BranchNotLoaded`) no longer exist.
 
 ## Design Decisions
 
 1. **Content-addressed commits**: BLAKE3 hashing gives deduplication, integrity verification, and deterministic IDs. Two clients creating the same commit independently produce the same CommitId — sync can detect this and skip duplicates.
 2. **Synchronous persistence**: All writes go to Storage immediately. Within a single node, there's no window where data is "committed but not persisted." This simplifies the query engine enormously — see [Storage](storage.md).
 3. **Explicit tip/tail tracking**: Tips (the frontier) tell sync "what's new since last time." Tails let us bound history size without losing data integrity.
-4. **Blob deduplication**: Large binary payloads stored once, referenced by content hash. Multiple commits sharing the same file content share one blob.
-5. **Pluggable storage via trait**: `Storage` trait decouples ObjectManager from backend (MemoryStorage, BfTreeStorage). The same ObjectManager code runs in browser WASM and native Rust.
-6. **Monotonic timestamps**: `next_timestamp()` guarantees causal ordering within a single manager instance. (`object_manager.rs:151-164`)
+4. **Pluggable storage via trait**: `Storage` trait decouples ObjectManager from backend (MemoryStorage, BfTreeStorage). The same ObjectManager code runs in browser WASM and native Rust.
+5. **Monotonic timestamps**: `next_timestamp()` guarantees causal ordering within a single manager instance. (`object_manager.rs:151-164`)
 
 ## Test Coverage
 
-46+ unit tests in `object_manager.rs:1199-2287` using `MemoryStorage`.
-
-Note: blob and truncation tests were rewritten for the sync Storage API. A TODO remains for additional blob test coverage.
+46+ unit tests in `object_manager.rs` using `MemoryStorage`.

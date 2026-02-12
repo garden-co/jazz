@@ -66,7 +66,6 @@ Used in PersistenceAck and QuerySettled for tier-aware durability.
 | ------------------------------------------- | -------------------------------------------- |
 | `ObjectUpdated`                             | Object/branch commits (topologically sorted) |
 | `ObjectTruncated`                           | Branch truncation notification               |
-| `BlobRequest` / `BlobResponse`              | Blob transfer                                |
 | `QuerySubscription` / `QueryUnsubscription` | Client query registration                    |
 | `PersistenceAck`                            | Tier-level durability confirmation           |
 | `QuerySettled`                              | Query results settled at tier                |
@@ -81,8 +80,6 @@ Note: the spec originally called these `QueryRegistration`/`QueryUnregistration`
 | Variant                | Purpose                                |
 | ---------------------- | -------------------------------------- |
 | `PermissionDenied`     | Insufficient permission                |
-| `BlobAccessDenied`     | Blob permission denied                 |
-| `BlobNotFound`         | Blob not in storage                    |
 | `SessionRequired`      | User client without session            |
 | `CatalogueWriteDenied` | User client attempting catalogue write |
 
