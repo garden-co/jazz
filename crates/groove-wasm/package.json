@@ -14,11 +14,11 @@
     "url": "https://github.com/garden-co/jazz"
   },
   "files": [
-    "groove_wasm_bg.wasm",
-    "groove_wasm_bg.js",
-    "groove_wasm.js",
-    "groove_wasm.d.ts"
+    "pkg/groove_wasm_bg.wasm",
+    "pkg/groove_wasm_bg.js",
+    "pkg/groove_wasm.js",
+    "pkg/groove_wasm.d.ts"
   ],
-  "main": "groove_wasm.js",
-  "types": "groove_wasm.d.ts"
+  "main": "pkg/groove_wasm.js",
+  "types": "pkg/groove_wasm.d.ts"
 }
