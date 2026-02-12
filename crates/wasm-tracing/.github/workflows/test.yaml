@@ -1,0 +1,25 @@
+name: Test
+
+on:
+    pull_request: {}
+
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy
+            - uses: Swatinem/rust-cache@v2
+            - run: cargo fmt --all -- --check
+            - run: cargo clippy --all-targets --all-features -- -D warnings
+
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: Swatinem/rust-cache@v2
+            - uses: jetli/wasm-pack-action@v0.4.0
+            - run: wasm-pack test --chrome --headless
