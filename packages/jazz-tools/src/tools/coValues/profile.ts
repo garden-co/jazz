@@ -7,18 +7,9 @@ import {
   Simplify,
   TypeSym,
 } from "../internal.js";
-import { z } from "../implementation/zodSchema/zodReExport.js";
-import { createCoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
-import type { CoreCoMapSchema } from "../implementation/zodSchema/schemaTypes/CoMapSchema.js";
 
 /** @category Identity & Permissions */
 export class Profile extends CoMap {
-  static coValueSchema: CoreCoMapSchema = createCoreCoMapSchema({
-    name: z.string(),
-    inbox: z.optional(z.string()),
-    inboxInvite: z.optional(z.string()),
-  });
-
   declare readonly name: string;
   declare readonly inbox?: string;
   declare readonly inboxInvite?: string;
