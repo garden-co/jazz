@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use web_time::{SystemTime, UNIX_EPOCH};
 
-use blake3::Hasher;
 use smallvec::smallvec;
 use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
-use crate::storage::Storage;
-use crate::storage::{ContentHash, StorageError};
+use crate::storage::{Storage, StorageError};
 
 /// Unique identifier for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,24 +56,6 @@ pub struct AllObjectUpdate {
     pub old_content: Option<Vec<u8>>,
 }
 
-/// Full blob identifier (for addressing within commit context).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct BlobId {
-    pub object_id: ObjectId,
-    pub branch_name: BranchName,
-    pub commit_id: CommitId,
-    pub content_hash: ContentHash,
-}
-
-/// State of a blob in memory.
-#[derive(Debug, Clone)]
-enum BlobState {
-    /// Data in memory.
-    Available { data: Vec<u8> },
-    /// Blob not found in storage (permanent error).
-    NotFound,
-}
-
 /// Errors that can occur when managing objects and commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -84,17 +64,12 @@ pub enum Error {
     ParentNotFound(CommitId),
     /// Storage operation failed.
     StorageError(StorageError),
-    /// Blob not found (permanent error).
-    BlobNotFound(ContentHash),
 }
 
 /// Result of a branch truncation operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TruncateResult {
-    Success {
-        deleted_commits: usize,
-        deleted_blobs: usize,
-    },
+    Success { deleted_commits: usize },
     PermanentError(TruncateError),
 }
 
@@ -106,14 +81,6 @@ pub enum TruncateError {
     TailNotFound(CommitId),
     /// Can't truncate past the frontier - tip is not a descendant of any tail.
     TipBeforeTail(CommitId),
-}
-
-/// Association of a blob with a specific commit in an object/branch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlobAssociation {
-    pub object_id: ObjectId,
-    pub branch_name: BranchName,
-    pub commit_id: CommitId,
 }
 
 /// Manages a collection of objects.
@@ -135,10 +102,6 @@ pub struct ObjectManager {
     pub all_objects_outbox: Vec<AllObjectUpdate>,
     /// Last timestamp used, for monotonic ordering.
     last_timestamp: u64,
-    /// Blobs by content hash (deduplicated storage).
-    blobs: HashMap<ContentHash, BlobState>,
-    /// Track which commits reference each blob (for GC).
-    blob_associations: HashMap<ContentHash, Vec<BlobAssociation>>,
 }
 
 impl ObjectManager {
@@ -526,79 +489,6 @@ impl ObjectManager {
         Ok(&branch.commits)
     }
 
-    /// Associate a blob with a commit, storing the data if new.
-    ///
-    /// Deduplicates by content hash. Returns full BlobId for addressing.
-    /// Persists to storage via Storage synchronously.
-    pub fn associate_blob<H: Storage>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        commit_id: CommitId,
-        data: Vec<u8>,
-    ) -> BlobId {
-        let branch_name = branch_name.into();
-
-        // Compute content hash
-        let mut hasher = Hasher::new();
-        hasher.update(&data);
-        let content_hash = ContentHash(*hasher.finalize().as_bytes());
-
-        // Create association
-        let association = BlobAssociation {
-            object_id,
-            branch_name,
-            commit_id,
-        };
-
-        // Check if blob already exists
-        if let std::collections::hash_map::Entry::Vacant(e) = self.blobs.entry(content_hash) {
-            // New blob - store data synchronously
-            let _ = io.store_blob(content_hash, &data);
-            e.insert(BlobState::Available { data });
-        }
-
-        // Add association (whether blob was new or existing)
-        self.blob_associations
-            .entry(content_hash)
-            .or_default()
-            .push(association);
-
-        BlobId {
-            object_id,
-            branch_name,
-            commit_id,
-            content_hash,
-        }
-    }
-
-    /// Load a blob by its identifier.
-    ///
-    /// Returns the data synchronously from Storage, caching in memory.
-    pub fn load_blob<H: Storage>(&mut self, io: &H, blob_id: &BlobId) -> Result<Vec<u8>, Error> {
-        let content_hash = blob_id.content_hash;
-
-        // Check cache first
-        if let Some(BlobState::Available { data, .. }) = self.blobs.get(&content_hash) {
-            return Ok(data.clone());
-        }
-
-        // Load from storage synchronously
-        match io.load_blob(content_hash) {
-            Ok(Some(data)) => {
-                self.blobs
-                    .insert(content_hash, BlobState::Available { data: data.clone() });
-                Ok(data)
-            }
-            Ok(None) => {
-                self.blobs.insert(content_hash, BlobState::NotFound);
-                Err(Error::BlobNotFound(content_hash))
-            }
-            Err(e) => Err(Error::StorageError(e)),
-        }
-    }
-
     /// Receive an object from a remote source (with specified ID).
     ///
     /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
@@ -709,33 +599,6 @@ impl ObjectManager {
         );
 
         Ok(commit_id)
-    }
-
-    /// Store a blob directly, returning its content hash.
-    ///
-    /// Simpler interface than `associate_blob` for sync layer use.
-    /// Persists to storage via Storage synchronously.
-    pub fn put_blob<H: Storage>(
-        &mut self,
-        io: &mut H,
-        object_id: ObjectId,
-        branch_name: impl Into<BranchName>,
-        commit_id: CommitId,
-        data: Vec<u8>,
-    ) -> Result<ContentHash, Error> {
-        let blob_id = self.associate_blob(io, object_id, branch_name, commit_id, data);
-        Ok(blob_id.content_hash)
-    }
-
-    /// Get blob data by content hash.
-    ///
-    /// Returns the data if available in memory. Does NOT load from storage.
-    /// Use `load_blob` if you need to load from storage.
-    pub fn get_blob(&self, content_hash: &ContentHash) -> Result<&[u8], Error> {
-        match self.blobs.get(content_hash) {
-            Some(BlobState::Available { data }) => Ok(data),
-            Some(BlobState::NotFound) | None => Err(Error::BlobNotFound(*content_hash)),
-        }
     }
 
     /// Subscribe to updates on a branch.
@@ -894,8 +757,7 @@ impl ObjectManager {
     /// Truncate a branch by removing commits topologically earlier than the specified tails.
     ///
     /// All tips must be descendants of (or equal to) some tail. Commits before the tails
-    /// are deleted, their blob associations removed, and orphaned blobs deleted.
-    /// Operations are persisted synchronously via Storage.
+    /// are deleted. Operations are persisted synchronously via Storage.
     pub fn truncate_branch<H: Storage>(
         &mut self,
         io: &mut H,
@@ -943,36 +805,11 @@ impl ObjectManager {
 
         // If nothing to delete and tails already set to same value, return success immediately
         if commits_to_delete.is_empty() && branch.tails.as_ref() == Some(&tail_smolset) {
-            return TruncateResult::Success {
-                deleted_commits: 0,
-                deleted_blobs: 0,
-            };
-        }
-
-        // Collect blob associations for commits being deleted
-        let mut blobs_to_dissociate: Vec<(ContentHash, BlobAssociation)> = Vec::new();
-        for commit_id in &commits_to_delete {
-            for (content_hash, associations) in &self.blob_associations {
-                for assoc in associations {
-                    if assoc.object_id == object_id
-                        && assoc.branch_name == branch_name
-                        && assoc.commit_id == *commit_id
-                    {
-                        blobs_to_dissociate.push((*content_hash, assoc.clone()));
-                    }
-                }
-            }
+            return TruncateResult::Success { deleted_commits: 0 };
         }
 
         // Sync storage: set branch tails
         let _ = io.set_branch_tails(object_id, &branch_name, Some(tail_ids));
-
-        // Sync storage: delete blobs (simplified - full implementation would track associations)
-        let mut deleted_blobs = 0;
-        for (content_hash, _assoc) in &blobs_to_dissociate {
-            let _ = io.delete_blob(*content_hash);
-            deleted_blobs += 1;
-        }
 
         // Sync storage: delete commits
         for commit_id in &commits_to_delete {
@@ -993,15 +830,8 @@ impl ObjectManager {
             branch.commits.remove(commit_id);
         }
 
-        // Remove deleted blobs from memory
-        for (content_hash, _) in &blobs_to_dissociate {
-            self.blobs.remove(content_hash);
-            self.blob_associations.remove(content_hash);
-        }
-
         TruncateResult::Success {
             deleted_commits: commits_to_delete.len(),
-            deleted_blobs,
         }
     }
 
@@ -1086,8 +916,8 @@ impl ObjectManager {
 
     /// Calculate memory usage breakdown for profiling.
     ///
-    /// Returns a tuple: (row_objects, index_objects, blobs, subscriptions, other, total)
-    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize, usize) {
+    /// Returns a tuple: (row_objects, index_objects, subscriptions, other, total)
+    pub fn memory_size(&self) -> (usize, usize, usize, usize, usize) {
         let mut row_objects = 0usize;
         let mut index_objects = 0usize;
 
@@ -1103,17 +933,6 @@ impl ObjectManager {
             }
         }
 
-        // Blobs
-        let mut blobs = 0usize;
-        for (hash, state) in &self.blobs {
-            blobs += std::mem::size_of_val(hash);
-            blobs += match state {
-                BlobState::Available { data } => data.len() + 32,
-                BlobState::NotFound => 16,
-            };
-            blobs += 48; // HashMap entry overhead
-        }
-
         // Subscriptions
         let subscriptions = self.subscriptions.len() * 80  // ~80 bytes per subscription
             + self.branch_subscribers.len() * 96  // ~96 bytes per branch subscriber entry
@@ -1123,15 +942,8 @@ impl ObjectManager {
         // Other (subscription outbox for all objects)
         let other = self.all_objects_outbox.len() * 200; // AllObjectUpdate ~200 bytes
 
-        let total = row_objects + index_objects + blobs + subscriptions + other;
-        (
-            row_objects,
-            index_objects,
-            blobs,
-            subscriptions,
-            other,
-            total,
-        )
+        let total = row_objects + index_objects + subscriptions + other;
+        (row_objects, index_objects, subscriptions, other, total)
     }
 
     /// Estimate memory size of an Object.
@@ -2285,10 +2097,4 @@ mod tests {
         let updates = manager.take_subscription_updates();
         assert_eq!(updates[0].commit_ids, vec![merge_all]);
     }
-
-    // NOTE: blob tests and truncation tests deleted - they were testing the old async
-    // request/response API (take_requests, push_response, StorageRequest, StorageResponse).
-    // With sync storage, these need to be rewritten to use Storage directly.
-    // TODO: Add new blob tests using MemoryStorage
-    // TODO: Add new truncation tests using MemoryStorage
 }

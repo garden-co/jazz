@@ -10,7 +10,7 @@ RuntimeCore is generic over three platform traits. This is how the same core log
 
 | Trait        | Purpose                                                | Implementations                                 |
 | ------------ | ------------------------------------------------------ | ----------------------------------------------- |
-| `Storage`    | Synchronous data persistence (objects, blobs, indices) | MemoryStorage, BfTreeStorage                    |
+| `Storage`    | Synchronous data persistence (objects, indices)        | MemoryStorage, BfTreeStorage                    |
 | `Scheduler`  | Async batched_tick scheduling with debounce            | TokioScheduler, WasmScheduler, NoopScheduler    |
 | `SyncSender` | Network message dispatch                               | CallbackSyncSender, JsSyncSender, VecSyncSender |
 

@@ -4,7 +4,7 @@ Allow subscriptions to stream results incrementally instead of waiting for the i
 
 ## Overview
 
-Currently, subscriptions wait for settlement before delivering results. For large result sets (e.g., streaming a file's binary chunks after `binary_columns_and_fk_refs.md`), the client may want to start processing data as it arrives rather than waiting for the full initial batch.
+Currently, subscriptions wait for settlement before delivering results. For large result sets (e.g., streaming a file's binary chunks after `built_in_file_storage.md`), the client may want to start processing data as it arrives rather than waiting for the full initial batch.
 
 - Opt-out flag on subscription: "stream immediately, settle later"
 - Useful for file downloads, large collection browsing, progressive loading
@@ -16,4 +16,4 @@ Currently, subscriptions wait for settlement before delivering results. For larg
 - How does this interact with ORDER BY — can we stream in order, or is ordering only guaranteed at settlement?
 - Does the client need to distinguish "streaming partial" from "settled complete"?
 
-Related: `../b_mvp/binary_columns_and_fk_refs.md`
+Related: `../b_mvp/built_in_file_storage.md`

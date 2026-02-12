@@ -252,7 +252,6 @@ impl MemoryBreakdown {
         );
         println!("    - row objects: {}", format_bytes(om.row_objects));
         println!("    - index objects: {}", format_bytes(om.index_objects));
-        println!("    - blobs: {}", format_bytes(om.blobs));
         println!("    - subscriptions: {}", format_bytes(om.subscriptions));
         println!("    - outbox/inbox: {}", format_bytes(om.outbox_inbox));
 
@@ -276,8 +275,6 @@ pub struct ObjectManagerMemory {
     pub row_objects: usize,
     /// Size of index object storage (legacy, now unused).
     pub index_objects: usize,
-    /// Size of blob storage.
-    pub blobs: usize,
     /// Size of subscription tracking.
     pub subscriptions: usize,
     /// Size of outbox/inbox buffers.

@@ -8,7 +8,7 @@ Read the status-quo specs in the order below — each builds on the ones before 
 
 ### 1. Data Model
 
-**[Object Manager](status-quo/object_manager.md)** — The foundational data layer. Objects are versioned using a git-like DAG (branches, commits, blobs). Every piece of data in the system is an object identified by its BLAKE3 content hash.
+**[Object Manager](status-quo/object_manager.md)** — The foundational data layer. Objects are versioned using a git-like DAG (branches, commits). Every piece of data in the system is an object identified by its BLAKE3 content hash.
 
 ### 2. Storage
 
@@ -61,7 +61,7 @@ Read the status-quo specs in the order below — each builds on the ones before 
 │  ├── SchemaManager   (versioning, lenses, catalogue)    │
 │  │   └── QueryManager (reactive query graphs)           │
 │  ├── SyncManager     (roles, scoped sync, ack/settled)  │
-│  ├── ObjectManager   (DAG: branches, commits, blobs)    │
+│  ├── ObjectManager   (DAG: branches, commits)           │
 │  └── Storage         (BfTree native / WASM+OPFS)        │
 └─────────────────────────────────────────────────────────┘
 ```
