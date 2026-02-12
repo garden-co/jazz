@@ -29,9 +29,6 @@ pub struct JazzClient {
     runtime: TokioRuntime<BfTreeStorage>,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
-    /// Client configuration.
-    #[allow(dead_code)]
-    context: AppContext,
     /// Active subscriptions (metadata).
     subscriptions: Arc<RwLock<HashMap<SubscriptionHandle, SubscriptionState>>>,
     /// Subscription delta senders (for routing deltas from callbacks to streams).
@@ -43,11 +40,8 @@ pub struct JazzClient {
 }
 
 /// State for an active subscription.
-#[allow(dead_code)]
 struct SubscriptionState {
-    query: Query,
     runtime_handle: RuntimeSubHandle,
-    server_query_id: Option<groove::sync_manager::QueryId>,
 }
 
 impl JazzClient {
@@ -259,7 +253,6 @@ impl JazzClient {
         Ok(Self {
             runtime,
             server_connection,
-            context,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscription_senders,
             next_handle: std::sync::atomic::AtomicU64::new(1),
@@ -321,15 +314,11 @@ impl JazzClient {
             let mut subs = self.subscriptions.write().await;
             subs.insert(
                 handle,
-                SubscriptionState {
-                    query,
-                    runtime_handle,
-                    server_query_id: None,
-                },
+                SubscriptionState { runtime_handle },
             );
         }
 
-        Ok(SubscriptionStream::new(handle, rx))
+        Ok(SubscriptionStream::new(rx))
     }
 
     /// One-shot query, optionally waiting for a settled tier.

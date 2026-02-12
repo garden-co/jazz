@@ -1,11 +1,9 @@
 //! HTTP/SSE transport for server communication.
 
-#![allow(dead_code)]
-
 use base64::Engine;
 use groove::query_manager::session::Session;
 use groove::sync_manager::{ClientId, SyncPayload};
-use jazz_transport::{ConnectionId, SyncPayloadRequest};
+use jazz_transport::SyncPayloadRequest;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 
@@ -37,7 +35,6 @@ impl AuthConfig {
 pub struct ServerConnection {
     client: Client,
     base_url: String,
-    connection_id: Option<ConnectionId>,
     auth: AuthConfig,
 }
 
@@ -58,7 +55,6 @@ impl ServerConnection {
         Ok(Self {
             client,
             base_url: base_url.to_string(),
-            connection_id: None,
             auth,
         })
     }
@@ -149,20 +145,11 @@ impl ServerConnection {
         Ok(())
     }
 
-    /// Get the connection ID (once connected via SSE).
-    pub fn connection_id(&self) -> Option<ConnectionId> {
-        self.connection_id
-    }
-
     /// Get the base URL for this connection.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
-    /// Check if backend secret is configured.
-    pub fn has_backend_secret(&self) -> bool {
-        self.auth.backend_secret.is_some()
-    }
 }
 
 /// Check if a sync payload is for a catalogue object (schema or lens).
@@ -170,9 +157,10 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
     match payload {
         SyncPayload::ObjectUpdated { metadata, .. } => {
             if let Some(meta) = metadata
-                && let Some(type_str) = meta.metadata.get("type")
+                && let Some(type_str) = meta.metadata.get(groove::metadata::MetadataKey::Type.as_str())
             {
-                return type_str == "catalogue_schema" || type_str == "catalogue_lens";
+                return type_str == groove::metadata::ObjectType::CatalogueSchema.as_str()
+                    || type_str == groove::metadata::ObjectType::CatalogueLens.as_str();
             }
             false
         }

@@ -712,16 +712,6 @@ fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
     Some(ObjectId(internment::Intern::new(uuid)))
 }
 
-/// Parse an ObjectId from a hex string (32 hex chars = 16 bytes UUID).
-fn parse_object_id_hex(hex_str: &str) -> Option<ObjectId> {
-    let bytes = hex::decode(hex_str).ok()?;
-    if bytes.len() != 16 {
-        return None;
-    }
-    let uuid = uuid::Uuid::from_bytes(bytes.try_into().ok()?);
-    Some(ObjectId(internment::Intern::new(uuid)))
-}
-
 /// Parse chunk metadata from a value. Returns Some(num_chunks) if this is chunk metadata.
 fn parse_chunk_meta(data: &[u8]) -> Option<usize> {
     // Quick check: chunk meta is JSON like {"chunks":N}
