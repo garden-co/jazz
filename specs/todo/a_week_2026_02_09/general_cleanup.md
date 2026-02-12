@@ -82,7 +82,13 @@ These files are getting unwieldy but don't need immediate action:
 
 Action: either use it to implement the schema hash, or remove the dependency.
 
-## 10. Worker Bridge Error Swallowing (LOW)
+## 10. Examples Lose Data on Reload (MEDIUM)
+
+The example apps (e.g., `todo-client-localfirst-ts`) lose all data when the page reloads, despite browser persistence tests passing. Likely related to the hardcoded-zeros issue in item 3 (schema hash and client ID are all zeros → branch mismatch between sessions, so the new session can't find data written by the old one).
+
+Investigate: does fixing the schema hash / client ID placeholders also fix persistence in the examples?
+
+## 11. Worker Bridge Error Swallowing (LOW)
 
 `db.ts:198–204` catches worker bridge init errors with `console.error` but doesn't propagate them. If the bridge fails to init, subsequent operations will fail with unrelated errors instead of a clear "bridge not initialized" failure.
 
