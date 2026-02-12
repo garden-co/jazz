@@ -3,7 +3,11 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", "target/**"]
+      "inputs": ["package.json"],
+      "outputs": ["dist/**", "target/**", "pkg/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["build"]
     },
     "test": {
       "dependsOn": ["build"],

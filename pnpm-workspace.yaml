@@ -2,8 +2,11 @@ packages:
   - packages/*
   - examples/*
   - crates
-  - crates/groove-wasm/pkg
+  - crates/groove-wasm
   - crates/groove-napi
+
+catalog:
+  "@types/node": ^20.0.0
 
 ignoredBuiltDependencies:
   - blake3

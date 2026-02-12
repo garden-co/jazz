@@ -1,9 +1,10 @@
 {
   "scripts": {
+    "postinstall": "git update-index --skip-worktree crates/groove-wasm/pkg/groove_wasm.js 2>/dev/null || true",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
-    "build": "turbo run build",
+    "build": "turbo run build && turbo run typecheck",
     "test": "turbo run test"
   },
   "devDependencies": {
