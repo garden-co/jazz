@@ -34,16 +34,9 @@ Removed all actionable dead code:
 
 Remaining `#[allow(dead_code)]` are acceptable: bf-tree internals, Axum extractors, benchmark helpers, test utilities.
 
-## 5. `delete()` vs `delete_with_session()` Duplication (LOW-MEDIUM)
+## 5. ~~`delete()` vs `delete_with_session()` Duplication~~ ✅
 
-`query_manager/manager.rs` has two ~80-line delete implementations:
-
-- `delete()` (lines 1108–1186) — no session
-- `delete_with_session()` (lines 1192–1290) — adds policy check, otherwise identical commit/index logic
-
-Same pattern exists for `insert()` → `insert_with_session()` and `update()` → `update_with_session()`, but those delegate cleanly. `delete` doesn't — it duplicates the commit construction, index teardown, and metadata creation.
-
-Action: make `delete()` delegate to `delete_with_session(…, None)` like the other CRUD methods do.
+Done. `delete()` now delegates to `delete_with_session(…, None)`, matching `insert()` and `update()`. Removed ~70 duplicate lines. Also fixed a latent bug: `delete()` was missing the `forward_update_to_servers` call that `delete_with_session()` had.
 
 ## 6. SyncManager Constructor Duplication (LOW)
 
