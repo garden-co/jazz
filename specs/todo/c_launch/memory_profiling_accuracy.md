@@ -6,4 +6,4 @@
 - Subscription overhead per branch
 - HashMap overhead factors
 
-Note: old blob tests are superseded by `../b_mvp/binary_columns_and_fk_refs.md`.
+Note: old blob tests are superseded by `../b_mvp/built_in_file_storage.md`.
