@@ -154,8 +154,8 @@ The SubscriptionManager preserves object identity for unchanged items: if a new 
 
 ## Example Application
 
-`examples/todo-ts-client/` — working browser app with basic CRUD, subscriptions, and server sync. Schema uses simple columns (title, done, description) without relations.
+`examples/todo-client-localfirst-ts/` — working browser app with basic CRUD, subscriptions, and server sync. Schema uses simple columns (title, done, description) without relations.
 
-> `examples/todo-ts-client/schema/current.ts` (schema definition)
-> `examples/todo-ts-client/schema/app.ts` (generated client)
-> `examples/todo-ts-client/src/main.ts` (application code)
+> `examples/todo-client-localfirst-ts/schema/current.ts` (schema definition)
+> `examples/todo-client-localfirst-ts/schema/app.ts` (generated client)
+> `examples/todo-client-localfirst-ts/src/main.ts` (application code)
