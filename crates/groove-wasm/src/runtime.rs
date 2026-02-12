@@ -22,14 +22,14 @@ use serde::Serialize;
 use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
 
-/// Initialize tracing-wasm exactly once (idempotent across multiple WasmRuntime instances).
+/// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
 fn init_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        let config = tracing_wasm::WASMLayerConfigBuilder::default()
-            .set_max_level(tracing::Level::TRACE)
-            .build();
-        tracing_wasm::set_as_global_default_with_config(config);
+        let config = wasm_tracing::WasmLayerConfig::new()
+            .with_max_level(tracing::Level::TRACE)
+            .with_console_group_spans();
+        let _ = wasm_tracing::set_as_global_default_with_config(config);
     });
 }
 

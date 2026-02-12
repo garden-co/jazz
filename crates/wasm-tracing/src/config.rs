@@ -35,6 +35,10 @@ pub struct WasmLayerConfig {
     pub show_origin: bool,
     /// Optional URL to prepend to origins. E.g. to allow for showing full file paths that can be navigated when logged in the browser console.
     pub origin_base_url: Option<String>,
+    /// Log span enter/exit as `console.groupCollapsed` / `console.groupEnd`.
+    ///
+    /// `false` by default.
+    pub console_group_spans: bool,
 }
 
 impl Default for WasmLayerConfig {
@@ -48,6 +52,7 @@ impl Default for WasmLayerConfig {
             show_fields: true,
             show_origin: true,
             origin_base_url: None,
+            console_group_spans: false,
         }
     }
 }
@@ -98,6 +103,12 @@ impl WasmLayerConfig {
         self.origin_base_url = Some(origin_base_url.to_string());
         self
     }
+
+    /// Log span enter/exit as `console.groupCollapsed` / `console.groupEnd`.
+    pub fn with_console_group_spans(mut self) -> Self {
+        self.console_group_spans = true;
+        self
+    }
 }
 
 #[test]
@@ -114,7 +125,8 @@ fn test_default_built_config() {
             max_level: tracing::Level::TRACE,
             show_fields: true,
             show_origin: true,
-            origin_base_url: None
+            origin_base_url: None,
+            console_group_spans: false,
         }
     )
 }
