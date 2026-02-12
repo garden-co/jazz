@@ -16,6 +16,7 @@ import {
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
   type Schema,
+  CoValueCreateOptions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -87,39 +88,16 @@ export class CoFeedSchema<
 
   create(
     init: CoFeedSchemaInit<T>,
-    options?:
-      | {
-          owner: Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | { owner?: Group; validation?: LocalValidationMode }
-      | Group,
+    options?: CoValueCreateOptions,
   ): CoFeedInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | { owner?: Account | Group; validation?: LocalValidationMode }
-      | Account
-      | Group,
+    options: CoValueCreateOptions<{}, Account | Group>,
   ): CoFeedInstance<T>;
   create(
     init: CoFeedSchemaInit<T>,
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-          validation?: LocalValidationMode;
-        }
-      | { owner?: Account | Group; validation?: LocalValidationMode }
-      | Account
-      | Group,
+    options?: CoValueCreateOptions<{}, Account | Group>,
   ): CoFeedInstance<T> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
