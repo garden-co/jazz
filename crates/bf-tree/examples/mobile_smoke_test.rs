@@ -6,14 +6,14 @@
 //! Run on host (proxy for mobile code path):
 //!     cargo run -p bf-tree --example mobile_smoke_test
 //!
-//! Cross-compile and run on Android emulator:
+//! Run on iOS simulator (requires Xcode + a booted simulator):
+//!     cargo build -p bf-tree --example mobile_smoke_test --target aarch64-apple-ios-sim
+//!     xcrun simctl spawn booted target/aarch64-apple-ios-sim/debug/examples/mobile_smoke_test
+//!
+//! Run on Android emulator (requires NDK + cargo-ndk + a booted emulator):
 //!     cargo ndk -t arm64-v8a build -p bf-tree --example mobile_smoke_test
 //!     adb push target/aarch64-linux-android/debug/examples/mobile_smoke_test /data/local/tmp/
 //!     adb shell /data/local/tmp/mobile_smoke_test
-//!
-//! Cross-compile check for iOS (no device needed):
-//!     cargo build -p bf-tree --example mobile_smoke_test --target aarch64-apple-ios
-//!     cargo build -p bf-tree --example mobile_smoke_test --target aarch64-apple-ios-sim
 //!
 //! Options:
 //!     --memory       Use in-memory backend (no filesystem)
