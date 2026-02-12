@@ -3,6 +3,7 @@ import {
   cojsonInternals,
   LocalNode,
   RawCoMap,
+  SessionID,
   StorageReconciliationAcquireResult,
 } from "../exports";
 import {
@@ -547,11 +548,11 @@ describe("full storage reconciliation", () => {
       // Kill the node before the reconciliation completes
       await client.node.gracefulShutdown();
 
-      // Try to acquire the lock again, fails because the lock is held by the previous node
+      // Try to acquire the lock in another session, fails because the lock is held by the previous node
       const storageReconciliationLock =
         await new Promise<StorageReconciliationAcquireResult>((resolve) =>
           storage.tryAcquireStorageReconciliationLock(
-            client.node.currentSessionID,
+            "another-session-id" as SessionID,
             peer.id,
             resolve,
           ),
@@ -626,9 +627,7 @@ describe("full storage reconciliation", () => {
       await promise;
       await anotherClient.node.gracefulShutdown();
 
-      // Wait for the lock to expire
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
+      // No need to wait for the lock to expire, since it's held by the same session
       const acquireResult =
         await new Promise<StorageReconciliationAcquireResult>((resolve) =>
           storage.tryAcquireStorageReconciliationLock(

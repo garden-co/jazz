@@ -373,7 +373,13 @@ export class SQLiteClient
       const expiresAt = lockRow
         ? lockRow.acquiredAt + STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS
         : 0;
-      if (lockRow && !lockRow.releasedAt && expiresAt >= now) {
+      const isLockHeldByOtherSession = lockRow?.holderSessionId !== sessionId;
+      if (
+        lockRow &&
+        !lockRow.releasedAt &&
+        expiresAt >= now &&
+        isLockHeldByOtherSession
+      ) {
         result = { acquired: false, reason: "lock_held" };
         return;
       }

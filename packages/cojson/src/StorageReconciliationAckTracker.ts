@@ -69,6 +69,8 @@ export class StorageReconciliationAckTracker {
       if (listeners.size === 0) {
         this.batchAckListeners.delete(key);
       }
+      // The `callback` is never invoked, so the reconciliation process for this peer
+      // is interrupted. Once the peer reconnects, the reconciliation process will resume.
     };
 
     listeners.add(onAck);

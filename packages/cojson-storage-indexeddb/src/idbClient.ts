@@ -450,7 +450,13 @@ export class IDBClient implements DBClientInterfaceAsync {
           ? lock.acquiredAt +
             cojsonInternals.STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS
           : 0;
-        if (!lock?.releasedAt && expiresAt >= now) {
+        const isLockHeldByOtherSession = lock?.holderSessionId !== sessionId;
+        if (
+          lock &&
+          !lock.releasedAt &&
+          expiresAt >= now &&
+          isLockHeldByOtherSession
+        ) {
           result = { acquired: false, reason: "lock_held" };
           return;
         }
