@@ -541,7 +541,10 @@ mod tests {
 
         let id = ObjectId::new();
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(
+            crate::metadata::MetadataKey::Table.to_string(),
+            "users".to_string(),
+        );
 
         // Create object
         storage.create_object(id, metadata.clone()).unwrap();

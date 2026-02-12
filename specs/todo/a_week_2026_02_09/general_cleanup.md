@@ -2,20 +2,14 @@
 
 Codebase audit findings. Excludes the stale `groove-rocksdb` driver (tracked separately) and blob removal (done on `removing-blob-feature` branch).
 
-## 1. Stringly-Typed Metadata Keys (MEDIUM)
+## 1. ~~Stringly-Typed Metadata Keys~~ ✅
 
-`query_manager/manager.rs` uses raw string literals for object metadata throughout (18 occurrences across manager.rs + manager_tests.rs):
+Done. New `metadata.rs` module with three enums:
+- `MetadataKey` — `Table`, `Type`, `Delete`, `AppId`, `SchemaHash`, `SourceHash`, `TargetHash`, `NoSync`
+- `ObjectType` — `CatalogueSchema`, `CatalogueLens`, `Index`
+- `DeleteKind` — `Soft`, `Hard`
 
-```rust
-metadata.get("delete")   // soft/hard delete marker
-metadata.get("table")    // table name
-metadata.get("type")     // catalogue object type
-metadata.insert("delete".to_string(), "soft".to_string())
-```
-
-Identical strings repeated in insert, update, delete, undelete, hard_delete, and catalogue processing paths. A typo in any one of these would silently break.
-
-Action: extract constants (`metadata::TABLE`, `metadata::DELETE`, `metadata::TYPE`) or a small enum. The four delete-metadata creation blocks (lines 1155, 1252, 1335, 1510) should collapse to a helper.
+Plus `soft_delete_metadata()` / `hard_delete_metadata()` helpers. Removed `CATALOGUE_TYPE_SCHEMA` / `CATALOGUE_TYPE_LENS` constants. All raw string metadata keys now live only in the enum `as_str()` definitions.
 
 ## 2. TypeScript Duplication (MEDIUM)
 

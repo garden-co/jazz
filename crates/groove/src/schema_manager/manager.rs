@@ -23,11 +23,6 @@ use super::encoding::{decode_lens_transform, decode_schema, encode_lens_transfor
 use super::lens::Lens;
 use super::types::AppId;
 
-/// Metadata type for catalogue schema objects.
-pub const CATALOGUE_TYPE_SCHEMA: &str = "catalogue_schema";
-/// Metadata type for catalogue lens objects.
-pub const CATALOGUE_TYPE_LENS: &str = "catalogue_lens";
-
 /// SchemaManager coordinates schema evolution with query execution.
 ///
 /// It manages:
@@ -462,19 +457,40 @@ impl SchemaManager {
     /// Build metadata for a schema catalogue object.
     fn schema_metadata(&self, schema_hash: &SchemaHash) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
-        metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        metadata.insert("app_id".to_string(), self.app_id.uuid().to_string());
-        metadata.insert("schema_hash".to_string(), schema_hash.to_string());
+        metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            self.app_id.uuid().to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::SchemaHash.to_string(),
+            schema_hash.to_string(),
+        );
         metadata
     }
 
     /// Build metadata for a lens catalogue object.
     fn lens_metadata(&self, lens: &Lens) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
-        metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
-        metadata.insert("app_id".to_string(), self.app_id.uuid().to_string());
-        metadata.insert("source_hash".to_string(), lens.source_hash.to_string());
-        metadata.insert("target_hash".to_string(), lens.target_hash.to_string());
+        metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueLens.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            self.app_id.uuid().to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::SourceHash.to_string(),
+            lens.source_hash.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::TargetHash.to_string(),
+            lens.target_hash.to_string(),
+        );
         metadata
     }
 
@@ -491,13 +507,17 @@ impl SchemaManager {
         metadata: &HashMap<String, String>,
         content: &[u8],
     ) -> Result<(), SchemaError> {
-        let Some(type_str) = metadata.get("type") else {
+        let Some(type_str) = metadata.get(crate::metadata::MetadataKey::Type.as_str()) else {
             return Ok(()); // Not a catalogue object
         };
 
         match type_str.as_str() {
-            CATALOGUE_TYPE_SCHEMA => self.process_catalogue_schema(metadata, content),
-            CATALOGUE_TYPE_LENS => self.process_catalogue_lens(metadata, content),
+            t if t == crate::metadata::ObjectType::CatalogueSchema.as_str() => {
+                self.process_catalogue_schema(metadata, content)
+            }
+            t if t == crate::metadata::ObjectType::CatalogueLens.as_str() => {
+                self.process_catalogue_lens(metadata, content)
+            }
             _ => Ok(()), // Unknown type, ignore
         }
     }
@@ -508,7 +528,10 @@ impl SchemaManager {
         content: &[u8],
     ) -> Result<(), SchemaError> {
         // Verify app_id matches
-        let app_id_str = metadata.get("app_id").map(|s| s.as_str()).unwrap_or("");
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
         if app_id_str != self.app_id.uuid().to_string() {
             return Ok(()); // Different app, ignore
         }
@@ -546,20 +569,23 @@ impl SchemaManager {
         content: &[u8],
     ) -> Result<(), SchemaError> {
         // Verify app_id matches
-        let app_id_str = metadata.get("app_id").map(|s| s.as_str()).unwrap_or("");
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
         if app_id_str != self.app_id.uuid().to_string() {
             return Ok(()); // Different app, ignore
         }
 
         // Parse source/target hashes from metadata
         let source_hex = metadata
-            .get("source_hash")
+            .get(crate::metadata::MetadataKey::SourceHash.as_str())
             .ok_or_else(|| SchemaError::LensNotFound {
                 source: SchemaHash::from_bytes([0; 32]),
                 target: SchemaHash::from_bytes([0; 32]),
             })?;
         let target_hex = metadata
-            .get("target_hash")
+            .get(crate::metadata::MetadataKey::TargetHash.as_str())
             .ok_or_else(|| SchemaError::LensNotFound {
                 source: SchemaHash::from_bytes([0; 32]),
                 target: SchemaHash::from_bytes([0; 32]),

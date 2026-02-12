@@ -785,7 +785,10 @@ mod tests {
 
         let id = ObjectId::new();
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(
+            crate::metadata::MetadataKey::Table.to_string(),
+            "users".to_string(),
+        );
         metadata.insert("app".to_string(), "test".to_string());
 
         // Create
@@ -974,7 +977,10 @@ mod tests {
 
         let id = ObjectId::new();
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(
+            crate::metadata::MetadataKey::Table.to_string(),
+            "users".to_string(),
+        );
 
         let commit_content = b"persistent data";
         let branch = BranchName::new("main");

@@ -5,6 +5,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::commit::CommitId;
+    use crate::metadata::MetadataKey;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::types::{
@@ -559,7 +560,7 @@ mod tests {
 
         // Create object and add commit on v1 branch
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
         qm.sync_manager_mut().object_manager.create_with_id(
             &mut storage,
             old_row_id,
@@ -755,7 +756,7 @@ mod tests {
 
         let mut storage = MemoryStorage::new();
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
         qm.sync_manager_mut().object_manager.create_with_id(
             &mut storage,
             row1_id,
@@ -990,7 +991,7 @@ mod tests {
 
         let mut storage = MemoryStorage::new();
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
         qm.sync_manager_mut()
             .object_manager
             .create_with_id(&mut storage, row_id, Some(metadata));
@@ -1089,7 +1090,7 @@ mod tests {
         let row_data = encode_row(&v1_table.descriptor, &row_values).unwrap();
 
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
         qm.sync_manager_mut()
             .object_manager
             .create_with_id(&mut storage, row_id, Some(metadata));
@@ -1134,7 +1135,7 @@ mod tests {
     // Catalogue Sync Tests
     // ========================================================================
 
-    use crate::schema_manager::manager::{CATALOGUE_TYPE_LENS, CATALOGUE_TYPE_SCHEMA};
+    use crate::metadata::ObjectType;
     use crate::schema_manager::{
         decode_lens_transform, decode_schema, encode_lens_transform, encode_schema,
     };
@@ -1242,9 +1243,15 @@ mod tests {
         let v2_encoded = encode_schema(&v2);
 
         let mut metadata = HashMap::new();
-        metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        metadata.insert("schema_hash".to_string(), v2_hash.to_string());
+        metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
 
         // Process the catalogue update
         manager_b
@@ -1288,9 +1295,15 @@ mod tests {
         let v2_object_id = v2_hash.to_object_id();
         let v2_encoded = encode_schema(&v2);
         let mut schema_metadata = HashMap::new();
-        schema_metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        schema_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        schema_metadata.insert("schema_hash".to_string(), v2_hash.to_string());
+        schema_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        schema_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
 
         manager_b
             .process_catalogue_update(v2_object_id, &schema_metadata, &v2_encoded)
@@ -1304,10 +1317,16 @@ mod tests {
         let lens_encoded = encode_lens_transform(&lens.forward);
 
         let mut lens_metadata = HashMap::new();
-        lens_metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
-        lens_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        lens_metadata.insert("source_hash".to_string(), v1_hash.to_string());
-        lens_metadata.insert("target_hash".to_string(), v2_hash.to_string());
+        lens_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_metadata.insert(MetadataKey::SourceHash.to_string(), v1_hash.to_string());
+        lens_metadata.insert(MetadataKey::TargetHash.to_string(), v2_hash.to_string());
 
         manager_b
             .process_catalogue_update(lens_object_id, &lens_metadata, &lens_encoded)
@@ -1410,9 +1429,15 @@ mod tests {
         // First, receive the v2 schema
         let v2_encoded = encode_schema(&v2);
         let mut schema_metadata = HashMap::new();
-        schema_metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        schema_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        schema_metadata.insert("schema_hash".to_string(), v2_hash.to_string());
+        schema_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        schema_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
 
         client_b
             .process_catalogue_update(schema_object_id, &schema_metadata, &v2_encoded)
@@ -1424,10 +1449,16 @@ mod tests {
         // Then, receive the lens
         let lens_encoded = encode_lens_transform(&lens.forward);
         let mut lens_metadata = HashMap::new();
-        lens_metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
-        lens_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        lens_metadata.insert("source_hash".to_string(), v1_hash.to_string());
-        lens_metadata.insert("target_hash".to_string(), v2_hash.to_string());
+        lens_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_metadata.insert(MetadataKey::SourceHash.to_string(), v1_hash.to_string());
+        lens_metadata.insert(MetadataKey::TargetHash.to_string(), v2_hash.to_string());
 
         client_b
             .process_catalogue_update(lens_object_id, &lens_metadata, &lens_encoded)
@@ -1568,9 +1599,15 @@ mod tests {
         // Receive v2 schema - becomes pending
         let v2_encoded = encode_schema(&v2);
         let mut v2_metadata = HashMap::new();
-        v2_metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        v2_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        v2_metadata.insert("schema_hash".to_string(), v2_hash.to_string());
+        v2_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        v2_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        v2_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
 
         client
             .process_catalogue_update(v2_hash.to_object_id(), &v2_metadata, &v2_encoded)
@@ -1582,9 +1619,15 @@ mod tests {
         // Receive v3 schema - also becomes pending
         let v3_encoded = encode_schema(&v3);
         let mut v3_metadata = HashMap::new();
-        v3_metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        v3_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        v3_metadata.insert("schema_hash".to_string(), v3_hash.to_string());
+        v3_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        v3_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        v3_metadata.insert(MetadataKey::SchemaHash.to_string(), v3_hash.to_string());
 
         client
             .process_catalogue_update(v3_hash.to_object_id(), &v3_metadata, &v3_encoded)
@@ -1598,10 +1641,16 @@ mod tests {
         let lens_v1_v2 = generate_lens(&v1, &v2);
         let lens_v1_v2_encoded = encode_lens_transform(&lens_v1_v2.forward);
         let mut lens_v1_v2_metadata = HashMap::new();
-        lens_v1_v2_metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
-        lens_v1_v2_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        lens_v1_v2_metadata.insert("source_hash".to_string(), v1_hash.to_string());
-        lens_v1_v2_metadata.insert("target_hash".to_string(), v2_hash.to_string());
+        lens_v1_v2_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_v1_v2_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_v1_v2_metadata.insert(MetadataKey::SourceHash.to_string(), v1_hash.to_string());
+        lens_v1_v2_metadata.insert(MetadataKey::TargetHash.to_string(), v2_hash.to_string());
 
         client
             .process_catalogue_update(
@@ -1623,10 +1672,16 @@ mod tests {
         let lens_v2_v3 = generate_lens(&v2, &v3);
         let lens_v2_v3_encoded = encode_lens_transform(&lens_v2_v3.forward);
         let mut lens_v2_v3_metadata = HashMap::new();
-        lens_v2_v3_metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
-        lens_v2_v3_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        lens_v2_v3_metadata.insert("source_hash".to_string(), v2_hash.to_string());
-        lens_v2_v3_metadata.insert("target_hash".to_string(), v3_hash.to_string());
+        lens_v2_v3_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_v2_v3_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_v2_v3_metadata.insert(MetadataKey::SourceHash.to_string(), v2_hash.to_string());
+        lens_v2_v3_metadata.insert(MetadataKey::TargetHash.to_string(), v3_hash.to_string());
 
         client
             .process_catalogue_update(
@@ -1979,7 +2034,7 @@ mod tests {
         .unwrap();
 
         let mut alice_metadata = HashMap::new();
-        alice_metadata.insert("table".to_string(), "documents".to_string());
+        alice_metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
 
         // Get branch name before mutable borrows
         let server_branch = server.branch_name().to_string();
@@ -2021,7 +2076,7 @@ mod tests {
         .unwrap();
 
         let mut bob_metadata = HashMap::new();
-        bob_metadata.insert("table".to_string(), "documents".to_string());
+        bob_metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
 
         server
             .query_manager_mut()
@@ -2317,7 +2372,7 @@ mod tests {
         .unwrap();
 
         let mut note_metadata = HashMap::new();
-        note_metadata.insert("table".to_string(), "notes".to_string());
+        note_metadata.insert(MetadataKey::Table.to_string(), "notes".to_string());
 
         // Get branch name before mutable borrows
         let server_branch = server.branch_name().to_string();
@@ -2469,7 +2524,7 @@ mod tests {
         let row_data = encode_row(&v2_table.descriptor, &row_values).unwrap();
 
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), "users".to_string());
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
 
         // Add the object to the object manager
         client
@@ -2510,9 +2565,15 @@ mod tests {
         // Receive v2 schema
         let v2_encoded = encode_schema(&v2);
         let mut schema_metadata = HashMap::new();
-        schema_metadata.insert("type".to_string(), CATALOGUE_TYPE_SCHEMA.to_string());
-        schema_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        schema_metadata.insert("schema_hash".to_string(), v2_hash.to_string());
+        schema_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        schema_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
 
         client
             .process_catalogue_update(v2_hash.to_object_id(), &schema_metadata, &v2_encoded)
@@ -2525,10 +2586,16 @@ mod tests {
         let lens = generate_lens(&v1, &v2);
         let lens_encoded = encode_lens_transform(&lens.forward);
         let mut lens_metadata = HashMap::new();
-        lens_metadata.insert("type".to_string(), CATALOGUE_TYPE_LENS.to_string());
-        lens_metadata.insert("app_id".to_string(), test_app_id().uuid().to_string());
-        lens_metadata.insert("source_hash".to_string(), v1_hash.to_string());
-        lens_metadata.insert("target_hash".to_string(), v2_hash.to_string());
+        lens_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_metadata.insert(MetadataKey::SourceHash.to_string(), v1_hash.to_string());
+        lens_metadata.insert(MetadataKey::TargetHash.to_string(), v2_hash.to_string());
 
         client
             .process_catalogue_update(lens.object_id(), &lens_metadata, &lens_encoded)

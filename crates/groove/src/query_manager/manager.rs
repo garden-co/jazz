@@ -2,6 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::commit::{CommitId, StoredState};
+use crate::metadata::{
+    DeleteKind, MetadataKey, ObjectType, hard_delete_metadata, soft_delete_metadata,
+};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
@@ -584,8 +587,8 @@ impl QueryManager {
             && commit
                 .metadata
                 .as_ref()
-                .and_then(|m| m.get("delete"))
-                .map(|v| v == "hard")
+                .and_then(|m| m.get(MetadataKey::Delete.as_str()))
+                .map(|v| v == DeleteKind::Hard.as_str())
                 .unwrap_or(false)
     }
 
@@ -607,8 +610,8 @@ impl QueryManager {
         commit
             .metadata
             .as_ref()
-            .and_then(|m| m.get("delete"))
-            .map(|v| v == "soft")
+            .and_then(|m| m.get(MetadataKey::Delete.as_str()))
+            .map(|v| v == DeleteKind::Soft.as_str())
             .unwrap_or(false)
     }
 
@@ -684,7 +687,7 @@ impl QueryManager {
 
         // Create object with table metadata
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), table.to_string());
+        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
 
         let object_id = self
             .sync_manager
@@ -777,7 +780,7 @@ impl QueryManager {
 
         // Create object with table metadata
         let mut metadata = HashMap::new();
-        metadata.insert("table".to_string(), table.to_string());
+        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
 
         let object_id = self
             .sync_manager
@@ -980,7 +983,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get("table").cloned())
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1120,7 +1123,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get("table").cloned())
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1153,8 +1156,7 @@ impl QueryManager {
         let author = id;
 
         // Create delete metadata
-        let mut delete_metadata = std::collections::BTreeMap::new();
-        delete_metadata.insert("delete".to_string(), "soft".to_string());
+        let delete_metadata = soft_delete_metadata();
 
         // Add commit with preserved content + delete: soft metadata
         // Content is copied from previous tip so soft-deleted rows can still be read
@@ -1205,7 +1207,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get("table").cloned())
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1250,8 +1252,7 @@ impl QueryManager {
         let author = id;
 
         // Create delete metadata
-        let mut delete_metadata = std::collections::BTreeMap::new();
-        delete_metadata.insert("delete".to_string(), "soft".to_string());
+        let delete_metadata = soft_delete_metadata();
 
         // Add commit with preserved content + delete: soft metadata
         // Content is copied from previous tip so soft-deleted rows can still be read
@@ -1334,8 +1335,7 @@ impl QueryManager {
         let author = id;
 
         // Create delete metadata
-        let mut delete_metadata = std::collections::BTreeMap::new();
-        delete_metadata.insert("delete".to_string(), "soft".to_string());
+        let delete_metadata = soft_delete_metadata();
 
         // Add commit with preserved content + delete: soft metadata
         let delete_commit_id = self
@@ -1392,7 +1392,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get("table").cloned())
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1478,7 +1478,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get("table").cloned())
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1508,8 +1508,7 @@ impl QueryManager {
         let author = id;
 
         // Create hard delete metadata
-        let mut delete_metadata = std::collections::BTreeMap::new();
-        delete_metadata.insert("delete".to_string(), "hard".to_string());
+        let delete_metadata = hard_delete_metadata();
 
         // Add commit with empty content + delete: hard metadata
         let delete_commit_id = self
@@ -1570,7 +1569,7 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get("table").cloned())
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
@@ -1592,7 +1591,7 @@ impl QueryManager {
             .object_manager
             .get(id)?
             .metadata
-            .get("table")?
+            .get(MetadataKey::Table.as_str())?
             .clone();
         let table_name = TableName::new(&table);
 
@@ -2333,7 +2332,7 @@ impl QueryManager {
         check: PendingPermissionCheck,
     ) {
         // Get table name from metadata
-        let table_name = match check.metadata.get("table") {
+        let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => TableName::new(t),
             None => {
                 // Not a row object, allow
@@ -2848,8 +2847,9 @@ impl QueryManager {
     /// Handle an object update from the global subscription.
     fn handle_object_update(&mut self, storage: &mut dyn Storage, update: AllObjectUpdate) {
         // Check if this is a catalogue object (schema or lens)
-        if let Some(type_str) = update.metadata.get("type")
-            && (type_str == "catalogue_schema" || type_str == "catalogue_lens")
+        if let Some(type_str) = update.metadata.get(MetadataKey::Type.as_str())
+            && (type_str == ObjectType::CatalogueSchema.as_str()
+                || type_str == ObjectType::CatalogueLens.as_str())
         {
             // Queue for SchemaManager processing
             // Load content from the object's latest commit
@@ -2864,7 +2864,7 @@ impl QueryManager {
         }
 
         // Check if this is a row object
-        let table = match update.metadata.get("table") {
+        let table = match update.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => t.clone(),
             None => return,
         };
@@ -3054,8 +3054,8 @@ impl QueryManager {
             && commit
                 .metadata
                 .as_ref()
-                .and_then(|m| m.get("delete"))
-                .map(|v| v == "hard")
+                .and_then(|m| m.get(MetadataKey::Delete.as_str()))
+                .map(|v| v == DeleteKind::Hard.as_str())
                 .unwrap_or(false)
     }
 

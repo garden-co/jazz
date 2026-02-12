@@ -260,8 +260,9 @@ impl SyncPayload {
             _ => return false,
         };
         matches!(
-            metadata.get("type").map(|s| s.as_str()),
-            Some("catalogue_schema" | "catalogue_lens")
+            metadata.get(crate::metadata::MetadataKey::Type.as_str()).map(|s| s.as_str()),
+            Some(t) if t == crate::metadata::ObjectType::CatalogueSchema.as_str()
+                || t == crate::metadata::ObjectType::CatalogueLens.as_str()
         )
     }
 
@@ -831,7 +832,11 @@ impl SyncManager {
         tips: HashSet<CommitId>,
     ) {
         // Skip objects marked as nosync (local-only, e.g., index nodes)
-        if metadata.get("nosync").map(|v| v == "true").unwrap_or(false) {
+        if metadata
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
             return;
         }
 
@@ -911,7 +916,11 @@ impl SyncManager {
         tips: HashSet<CommitId>,
     ) {
         // Skip objects marked as nosync (local-only, e.g., index nodes)
-        if metadata.get("nosync").map(|v| v == "true").unwrap_or(false) {
+        if metadata
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
             return;
         }
 
@@ -1607,7 +1616,7 @@ impl SyncManager {
         };
         if object
             .metadata
-            .get("nosync")
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")
             .unwrap_or(false)
         {
@@ -1657,7 +1666,7 @@ impl SyncManager {
         };
         if object
             .metadata
-            .get("nosync")
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")
             .unwrap_or(false)
         {
@@ -2214,7 +2223,10 @@ mod tests {
         };
 
         let mut cat_metadata = HashMap::new();
-        cat_metadata.insert("type".to_string(), "catalogue_schema".to_string());
+        cat_metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        );
 
         sm.push_inbox(InboxEntry {
             source: Source::Client(client_id),
@@ -2429,7 +2441,10 @@ mod tests {
         };
 
         let mut cat_metadata = HashMap::new();
-        cat_metadata.insert("type".to_string(), "catalogue_schema".to_string());
+        cat_metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        );
 
         sm.push_inbox(InboxEntry {
             source: Source::Client(client_id),
@@ -2911,9 +2926,12 @@ mod tests {
         let obj_id = sm.object_manager.create(
             &mut io,
             Some(
-                [("nosync".to_string(), "true".to_string())]
-                    .into_iter()
-                    .collect(),
+                [(
+                    crate::metadata::MetadataKey::NoSync.to_string(),
+                    "true".to_string(),
+                )]
+                .into_iter()
+                .collect(),
             ),
         );
         let author = ObjectId::new();
@@ -2949,9 +2967,12 @@ mod tests {
         let obj_id = sm.object_manager.create(
             &mut io,
             Some(
-                [("nosync".to_string(), "true".to_string())]
-                    .into_iter()
-                    .collect(),
+                [(
+                    crate::metadata::MetadataKey::NoSync.to_string(),
+                    "true".to_string(),
+                )]
+                .into_iter()
+                .collect(),
             ),
         );
         let author = ObjectId::new();
@@ -2990,9 +3011,12 @@ mod tests {
         let obj_id = sm.object_manager.create(
             &mut io,
             Some(
-                [("nosync".to_string(), "true".to_string())]
-                    .into_iter()
-                    .collect(),
+                [(
+                    crate::metadata::MetadataKey::NoSync.to_string(),
+                    "true".to_string(),
+                )]
+                .into_iter()
+                .collect(),
             ),
         );
         let author = ObjectId::new();
@@ -3046,9 +3070,12 @@ mod tests {
         let obj_id = sm.object_manager.create(
             &mut io,
             Some(
-                [("nosync".to_string(), "true".to_string())]
-                    .into_iter()
-                    .collect(),
+                [(
+                    crate::metadata::MetadataKey::NoSync.to_string(),
+                    "true".to_string(),
+                )]
+                .into_iter()
+                .collect(),
             ),
         );
         let author = ObjectId::new();
@@ -3102,9 +3129,12 @@ mod tests {
         let obj_id = sm.object_manager.create(
             &mut io,
             Some(
-                [("nosync".to_string(), "true".to_string())]
-                    .into_iter()
-                    .collect(),
+                [(
+                    crate::metadata::MetadataKey::NoSync.to_string(),
+                    "true".to_string(),
+                )]
+                .into_iter()
+                .collect(),
             ),
         );
         let author = ObjectId::new();

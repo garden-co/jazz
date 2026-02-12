@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use smallvec::smallvec;
 
 use crate::commit::Commit;
+use crate::metadata::MetadataKey;
 use crate::object::ObjectId;
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
@@ -97,7 +98,7 @@ fn encode_document(owner_id: &str, title: &str, folder_id: Option<ObjectId>) -> 
 /// Helper to create a document metadata map
 fn document_metadata() -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
-    m.insert("table".to_string(), "documents".to_string());
+    m.insert(MetadataKey::Table.to_string(), "documents".to_string());
     m
 }
 
@@ -277,7 +278,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     // Create an object for the row
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("table".to_string(), "notes".to_string());
+    metadata.insert(MetadataKey::Table.to_string(), "notes".to_string());
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
@@ -558,7 +559,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     // Create object for protected row
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("table".to_string(), "protected".to_string());
+    metadata.insert(MetadataKey::Table.to_string(), "protected".to_string());
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
@@ -669,7 +670,7 @@ fn rebac_update_denied_by_using_policy() {
 
     // Create Alice's document first (as server/no session)
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("table".to_string(), "documents".to_string());
+    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
     let obj_id = qm
         .sync_manager_mut()
         .object_manager
@@ -844,7 +845,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     // Create Alice's folder
     let mut folder_meta = std::collections::HashMap::new();
-    folder_meta.insert("table".to_string(), "folders".to_string());
+    folder_meta.insert(MetadataKey::Table.to_string(), "folders".to_string());
     let folder_id = qm
         .sync_manager_mut()
         .object_manager
@@ -874,7 +875,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     // Create Bob's document in Alice's folder
     let mut doc_meta = std::collections::HashMap::new();
-    doc_meta.insert("table".to_string(), "documents".to_string());
+    doc_meta.insert(MetadataKey::Table.to_string(), "documents".to_string());
     let doc_id = qm
         .sync_manager_mut()
         .object_manager
