@@ -1,4 +1,4 @@
-# jazz-ts CLI: monorepo-aware jazz binary fallback — TODO
+# ~~jazz-ts CLI: monorepo-aware jazz binary fallback~~ — ✅
 
 When `jazz-ts build` can't find `jazz` on PATH, it should try `target/debug/jazz` relative to the monorepo root before giving up. This avoids every example needing `--jazz-bin ../../target/debug/jazz` in its build script.
 

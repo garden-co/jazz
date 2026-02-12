@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "jazz-ts build --jazz-bin ../../target/debug/jazz && vite build",
+    "build": "jazz-ts build && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts"
   },
