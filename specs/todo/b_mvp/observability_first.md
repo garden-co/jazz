@@ -21,10 +21,12 @@ This gives us debugging capability from day one without building dashboards.
 ## Launch: Collection & Exposure
 
 ### For us (framework maintainers)
+
 - Operational visibility into hosted infra, error rates, performance regressions
 - Billing usage metering derived from the telemetry pipeline (storage bytes, sync bandwidth, active connections)
 
 ### For app developers
+
 - Understand mutation and query settling latency, sync health, storage usage
 - Distributed traces showing exact timing across all tiers:
   1. Mutation on client (local write)
@@ -34,6 +36,7 @@ This gives us debugging capability from day one without building dashboards.
   5. Query settlement back down through each tier
 
 ### Infrastructure
+
 - Grafana or custom UI in developer dashboard
 - Per-app trace filtering
 - Export to developer's own OTel collector

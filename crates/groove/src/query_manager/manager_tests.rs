@@ -5,6 +5,7 @@
 use serde_json::json;
 use smallvec::smallvec;
 
+use crate::metadata::MetadataKey;
 use crate::storage::MemoryStorage;
 use crate::sync_manager::SyncManager;
 
@@ -455,7 +456,7 @@ fn synced_update_updates_column_indices() {
 
     // Receive object with table metadata
     let mut metadata = HashMap::new();
-    metadata.insert("table".to_string(), "users".to_string());
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id, metadata);
@@ -611,7 +612,7 @@ fn synced_insert_appears_in_subscription_delta() {
 
     // Receive object with table metadata
     let mut metadata = HashMap::new();
-    metadata.insert("table".to_string(), "users".to_string());
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id, metadata);
@@ -806,7 +807,7 @@ fn synced_row_visible_in_filtered_subscription() {
     let author_1 = row_id_1;
 
     let mut metadata_1 = HashMap::new();
-    metadata_1.insert("table".to_string(), "users".to_string());
+    metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id_1, metadata_1);
@@ -858,7 +859,7 @@ fn synced_row_visible_in_filtered_subscription() {
     let author_2 = row_id_2;
 
     let mut metadata_2 = HashMap::new();
-    metadata_2.insert("table".to_string(), "users".to_string());
+    metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id_2, metadata_2);
@@ -1430,7 +1431,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
 
     // Object metadata marking it as a "users" table row
     let mut obj_metadata = std::collections::HashMap::new();
-    obj_metadata.insert("table".to_string(), "users".to_string());
+    obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
 
     // Push the sync message through SyncManager's inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -1911,7 +1912,7 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
             delete_commit
                 .metadata
                 .as_ref()
-                .and_then(|m| m.get("delete")),
+                .and_then(|m| m.get(MetadataKey::Delete.as_str())),
             Some(&"soft".to_string())
         );
     }
@@ -4400,7 +4401,7 @@ fn handle_object_update_respects_branch() {
     let author = row_id;
 
     let mut metadata = HashMap::new();
-    metadata.insert("table".to_string(), "users".to_string());
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id, metadata);
@@ -4444,7 +4445,7 @@ fn handle_object_update_respects_branch() {
     // Now insert on schema branch and verify it appears in default query
     let row_id2 = crate::object::ObjectId::new();
     let mut metadata2 = HashMap::new();
-    metadata2.insert("table".to_string(), "users".to_string());
+    metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id2, metadata2);

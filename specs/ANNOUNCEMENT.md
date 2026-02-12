@@ -2,7 +2,7 @@
 
 Today, we’re proud to announce Jazz v2: a new direction for what we think a modern database should look like. In this blog post we’ll explore its defining features and how it differs from both traditional databases and other emerging modern databases.
 
-*Note: if you’re using Jazz v0.x (which we’ll call “classic Jazz”) rest assured that we will keep maintaining the open-source codebase as well as the infrastructure for it. See the section at the end of this blogpost for more details on that, as well as differences between classic Jazz and Jazz 2 and what migration paths are available.*
+_Note: if you’re using Jazz v0.x (which we’ll call “classic Jazz”) rest assured that we will keep maintaining the open-source codebase as well as the infrastructure for it. See the section at the end of this blogpost for more details on that, as well as differences between classic Jazz and Jazz 2 and what migration paths are available._
 
 ## Looks familiar - relational semantics with a great TypeScript ORM & SQL escape hatch
 
@@ -10,12 +10,12 @@ Today, we’re proud to announce Jazz v2: a new direction for what we think a mo
 - All of Jazz’s magic functionality like edit metadata and time travel can be expressed via columns and filters (basically teasing later sections here)
 - We can then offer a vertically integrated ORM that makes use of all these features with a more modern, cohesive API
 - SQL as an escape hatch
-    - a lot of emerging databases choose custom schema and query languages
-    - one more thing to learn, but semantics are often equivalent/isomorphic to SQL
-    - a lot of people know SQL!
-    - LLMs know SQL really well!
+  - a lot of emerging databases choose custom schema and query languages
+  - one more thing to learn, but semantics are often equivalent/isomorphic to SQL
+  - a lot of people know SQL!
+  - LLMs know SQL really well!
 
-## Local-first & distributed - the best of embedded databases *and* cloud databases
+## Local-first & distributed - the best of embedded databases _and_ cloud databases
 
 - this is the biggest difference between Jazz and both traditional and other modern databases
 - low-latency, same process like embedded databases
@@ -36,8 +36,8 @@ Today, we’re proud to announce Jazz v2: a new direction for what we think a mo
 - typically, they are written in an imperative, hard to test way
 - typically require several round-trips between db and backend
 - Postgres’s RLS is expressive and powerful (use the same logic for permissions as well as queries)
-    - but it is slightly arcane and requires many db connections to enforce permissions correctly for different client users
-    - integration of external auth with db user is left to the backend, another source of issues (segue to next point)
+  - but it is slightly arcane and requires many db connections to enforce permissions correctly for different client users
+  - integration of external auth with db user is left to the backend, another source of issues (segue to next point)
 
 ## Auth & Enterprise Solved - with BetterAuth / WorkOS
 
@@ -61,7 +61,7 @@ Today, we’re proud to announce Jazz v2: a new direction for what we think a mo
 ## The perfect glue between your apps and services - JS/TS in browser and server runtimes, React, React Native & Expo, Rust, Go, Swift, Kotlin, SQL over HTTP, Webhooks
 
 - export to external databases
-    - sync to external systems (only one-way)
+  - sync to external systems (only one-way)
 
 ## Performance
 
@@ -72,6 +72,7 @@ Today, we’re proud to announce Jazz v2: a new direction for what we think a mo
 ## What have we learned from classic Jazz and how the way people are building apps changed over the last three years
 
 SEPARATE POST? -> docs page?
+
 - for each section have a link to somewhere that explains the learnings and design decisions about that aspect in terms of jazz1 -> jazz2
 
 ## How we’ll maintain classic jazz & how we’ll help classic jazz adopters migrate to jazz2

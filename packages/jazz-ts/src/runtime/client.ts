@@ -7,6 +7,7 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import { sendSyncPayload, readBinaryFrames } from "./sync-transport.js";
 
 /**
  * Common interface for WASM and NAPI runtimes.
@@ -538,54 +539,10 @@ export class JazzClient {
   }
 
   private async sendSyncMessage(serverUrl: string, payload: any): Promise<void> {
-    try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-
-      // Check if this is a catalogue sync - add admin header
-      if (this.isCataloguePayload(payload)) {
-        if (this.context.adminSecret) {
-          headers["X-Jazz-Admin-Secret"] = this.context.adminSecret;
-        }
-      }
-      // Otherwise use JWT if available
-      else if (this.context.jwtToken) {
-        headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
-      }
-
-      // Wrap payload in SyncPayloadRequest format
-      const body = JSON.stringify({
-        payload,
-        client_id: "00000000-0000-0000-0000-000000000000", // TODO: use real client_id
-      });
-
-      const response = await fetch(`${serverUrl}/sync`, {
-        method: "POST",
-        headers,
-        body,
-      });
-
-      if (!response.ok) {
-        console.error("Sync send error:", response.statusText);
-      }
-    } catch (e) {
-      console.error("Sync send error:", e);
-    }
-  }
-
-  /**
-   * Check if a sync payload is for a catalogue object (schema or lens).
-   */
-  private isCataloguePayload(payload: {
-    ObjectUpdated?: { metadata?: { metadata?: Record<string, string> } };
-  }): boolean {
-    const metadata = payload?.ObjectUpdated?.metadata?.metadata;
-    if (metadata) {
-      const type_ = metadata["type"];
-      return type_ === "catalogue_schema" || type_ === "catalogue_lens";
-    }
-    return false;
+    await sendSyncPayload(serverUrl, payload, {
+      jwtToken: this.context.jwtToken,
+      adminSecret: this.context.adminSecret,
+    });
   }
 
   /**
@@ -617,34 +574,9 @@ export class JazzClient {
       }
 
       const reader = response.body!.getReader();
-      let buffer = new Uint8Array(0);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        // Append chunk to buffer
-        const newBuffer = new Uint8Array(buffer.length + value.length);
-        newBuffer.set(buffer);
-        newBuffer.set(value, buffer.length);
-        buffer = newBuffer;
-
-        // Read complete frames
-        while (buffer.length >= 4) {
-          const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
-          if (buffer.length < 4 + len) break;
-          const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
-          buffer = buffer.slice(4 + len);
-          try {
-            const event = JSON.parse(json);
-            if (event.type === "SyncUpdate") {
-              this.runtime.onSyncMessageReceived(JSON.stringify(event.payload));
-            }
-          } catch (e) {
-            console.error("Stream parse error:", e);
-          }
-        }
-      }
+      await readBinaryFrames(reader, {
+        onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
+      });
     } catch (e: any) {
       if (e?.name === "AbortError") return; // Intentional shutdown
       console.error("Stream error:", e);
