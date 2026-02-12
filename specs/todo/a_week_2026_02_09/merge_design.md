@@ -127,12 +127,12 @@ The diff operates on decoded `Value` columns — not raw bytes. The row encoding
 
 ### What changes from status quo
 
-1. **Read path**: instead of LWW-picks-one-tip, detect multiple tips → trigger merge → read merged result
-2. **Merge trigger**: explicit step when diverged tips are observed, not just a side effect of the next write
+1. **Read path**: instead of LWW-picks-one-tip, detect multiple tips → compute merged result ad-hoc (read-only, no commit created)
+2. **Write path**: on write with diverged tips, reconcile tips via three-way merge *then* apply the user's edit on top — the resulting commit has all tips as parents (this part already works) but now with correct merged content instead of blind overwrite
 3. **LCA computation**: new algorithm to find common ancestor in the commit DAG
 4. **Column-level diff**: new function to compare two decoded rows and produce a changeset
 
-The write path (`writes.rs`) already uses all tips as parents — that part stays. But instead of blindly writing new content, the merge step would first reconcile diverged tips before applying the user's edit on top.
+Key insight: **reads never create merge commits**. The merged view is computed on the fly and discarded. This keeps reads cheap, requires no write access, and avoids creating commits that exist only for read resolution. Merge commits are only materialized when the next write happens — the write reconciles diverged tips, applies the user's edit, and produces a single commit with all tips as parents.
 
 ### Relationship to per-column strategies
 
@@ -219,33 +219,45 @@ Today, merge happens **implicitly on the next local write** — `update()` uses 
 
 ### Proposed timing
 
-**Auto-merge (eager)**: merge tips as soon as divergence is observed, during `process()` / `settle()`. This means:
+**Reads**: compute merged result ad-hoc whenever tips are diverged. No commit is created — the merged view is ephemeral, computed in the read path (`load_row_from_object_on_branch` or equivalent). This means:
 
-- When `receive_commit()` creates a second tip on a branch, immediately trigger merge
-- The merge commit is created locally, becomes the sole tip, and syncs normally
-- **When** concurrent edits touch disjoint columns → auto-merge, no conflict
-- **When** concurrent edits touch the same column and strategy is deterministic (e.g., LWW) → auto-merge using strategy
+- Readers see a correct merged view immediately after sync delivers diverged commits
+- No write access or commit creation required for reads
+- The cost is a three-way diff on each read of a diverged object (cacheable if tips haven't changed)
 
-**Deferred merge**:
+**Writes**: materialize the merge commit only when the user performs a write. The write path:
 
-- **When** sync delivers out-of-order commits (missing parents) → `receive_commit()` already handles this (returns error, commit isn't applied). Retry when parents arrive.
-- **When** strategy requires application input → keep tips diverged, surface conflict
+1. Detect diverged tips (already does this — `get_tip_ids()`)
+2. Compute three-way merge to reconcile diverged state
+3. Apply the user's edit on top of the merged state
+4. Create commit with all tips as parents (already does this)
 
-**Conflict artifacts**:
+This is similar to status quo, except step 2 is new — today, writes skip reconciliation.
 
-- **When** concurrent edits touch the same column and no deterministic strategy exists → keep tips diverged, expose all tips to subscribers in deterministic order
+**Auto-merge conditions** (applied in both read and write paths):
+
+- **When** concurrent edits touch disjoint columns → merge, no conflict
+- **When** concurrent edits touch the same column and strategy is deterministic (e.g., LWW) → merge using strategy
+
+**Conflict handling**:
+
+- **When** concurrent edits touch the same column and no deterministic strategy exists → keep tips diverged, expose conflict to application
 - Application resolves by creating an explicit merge commit
+- **When** sync delivers out-of-order commits (missing parents) → `receive_commit()` already rejects these; retry when parents arrive
 
 ### Who creates the merge commit?
 
-Every peer that observes diverged tips computes the same merge (deterministic). The merge commit is created locally and synced like any other commit. Peers that receive a merge commit they've already computed locally recognize it as identical (same parents, same content → same hash via BLAKE3) and deduplicate.
+Only the peer that performs the next write. Other peers continue reading the ad-hoc merged view until they either write (creating their own merge commit) or receive the merge commit via sync.
 
-The determinism requirement means: given the same DAG state, every peer must:
+When two peers independently write on the same diverged object, they each create a merge commit. If the writes are identical (same merge result, same timestamp), the commits deduplicate by CommitId. If the writes differ (different user edits on top of the merge), the DAG diverges again — which is correct and will be resolved by the next merge cycle.
+
+Determinism requirement for the merge *computation* (not the commit): given the same DAG state, every peer must:
 - Pick the same LCA
 - Apply the same column-level diff
 - Use the same merge strategy
-- Produce byte-identical content
-- Use a deterministic timestamp for the merge commit (e.g., `max(A.timestamp, B.timestamp) + 1`)
+- Produce the same merged field values
+
+The merge *commit* doesn't need to be deterministic across peers because it's only created on write, which adds peer-specific content (the user's edit) and timestamp.
 
 ## Wire Protocol Considerations
 
@@ -262,11 +274,11 @@ Not MVP — just noting that the full-snapshot storage model doesn't preclude wi
 ## Open Questions
 
 - How expensive is three-way diff in practice? (Benchmarks needed — see `storage_benchmarking_spike.md`)
+- Should the ad-hoc merged read result be cached per object? (Cache key = set of tip CommitIds; invalidate when tips change)
 - LCA algorithm: simple parent-walking vs. indexed ancestor queries? (Per-object DAGs are small, so simple walking is likely fine)
-- Deterministic merge timestamp: `max(tips) + 1`? Or use the receiving peer's wall clock? (Former is deterministic but might drift from real time)
 - How does schema migration interact with merge? (Commits on different schema versions need lens transformation before diffing)
-- Should merge be triggered in `receive_commit()`, in `process()`, or in `settle()`? (`process()` is where QueryManager already handles AllObjectUpdates — natural fit)
-- What happens to AllObjectUpdate's `old_content` field after merge? (It currently tracks the previous LWW winner; with merge, the "previous" state is always a single tip)
+- Where does the ad-hoc merge computation live? In `load_row_from_object_on_branch()` (read path) or a separate merge helper called by both reads and writes?
+- What happens to AllObjectUpdate's `old_content` field after merge? (It currently tracks the previous LWW winner; with ad-hoc merge on read, do we still need it?)
 
 ## Related Specs
 
