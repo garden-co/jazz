@@ -7,4 +7,7 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ["groove-wasm"],
   },
+  worker: {
+    format: "es",
+  },
 });
