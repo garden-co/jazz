@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Todo App - Jazz TypeScript Client</title>
+    <title>Todo App - Jazz React Client</title>
     <style>
       body {
         font-family: system-ui;
@@ -40,10 +40,7 @@
     </style>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module">
-      import { startApp } from "/src/main.ts";
-      startApp(document.getElementById("app"));
-    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

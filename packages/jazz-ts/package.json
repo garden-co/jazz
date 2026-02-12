@@ -8,7 +8,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/worker/groove-worker.ts dist/worker/groove-worker.ts",
     "test": "vitest run"
   },
   "dependencies": {

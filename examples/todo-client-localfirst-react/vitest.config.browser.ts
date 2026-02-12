@@ -1,17 +1,10 @@
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
-import { resolve } from "node:path";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait()],
-  resolve: {
-    alias: {
-      // Needed because jazz-ts browser tests import from source (../../src/),
-      // bypassing node_modules resolution. Consumers don't need this.
-      "groove-wasm": resolve(__dirname, "../../crates/groove-wasm/pkg"),
-    },
-  },
+  plugins: [wasm(), topLevelAwait(), react()],
   worker: {
     plugins: () => [wasm(), topLevelAwait()],
   },
@@ -22,7 +15,7 @@ export default defineConfig({
       provider: "playwright",
       headless: true,
     },
-    include: ["tests/browser/**/*.test.ts"],
+    include: ["tests/browser/**/*.test.tsx"],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },

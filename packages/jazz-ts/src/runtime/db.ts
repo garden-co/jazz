@@ -44,13 +44,15 @@ export interface DbConfig {
  * Interface that QueryBuilder classes implement.
  * Generated builders expose these internal properties for Db to use.
  */
-export interface QueryBuilder<_T> {
+export interface QueryBuilder<T> {
   /** Table name for this query */
   readonly _table: string;
   /** Schema reference for translation and transformation */
   readonly _schema: WasmSchema;
   /** Build and return the query as JSON */
   _build(): string;
+  /** @internal Phantom brand — enables TypeScript to infer T from usage */
+  readonly _rowType: T;
 }
 
 /**
@@ -60,11 +62,15 @@ export interface QueryBuilder<_T> {
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<_T, _Init> {
+export interface TableProxy<T, Init> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
   readonly _schema: WasmSchema;
+  /** @internal Phantom brand — enables TypeScript to infer T from usage */
+  readonly _rowType: T;
+  /** @internal Phantom brand — enables TypeScript to infer Init from usage */
+  readonly _initType: Init;
 }
 
 /**
