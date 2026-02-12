@@ -923,7 +923,10 @@ impl ObjectManager {
 
         for obj in self.objects.values() {
             let obj_size = self.estimate_object_size(obj);
-            let is_index = obj.metadata.get("type").is_some_and(|t| t == "index");
+            let is_index = obj
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
+                .is_some_and(|t| t == crate::metadata::ObjectType::Index.as_str());
             // Add HashMap entry overhead: ~48 bytes per entry
             let entry_overhead = std::mem::size_of::<ObjectId>() + 48;
             if is_index {
