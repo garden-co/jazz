@@ -46,7 +46,13 @@ function isUnionSchema(schema: unknown): schema is z.ZodUnion {
     return false;
   }
 
-  if ("type" in schema && schema.type === "union") {
+  if (
+    "def" in schema &&
+    typeof schema.def === "object" &&
+    schema.def !== null &&
+    "type" in schema.def &&
+    schema.def.type === "union"
+  ) {
     return true;
   }
 
