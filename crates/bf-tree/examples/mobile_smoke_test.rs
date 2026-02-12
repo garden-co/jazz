@@ -19,11 +19,9 @@
 //!     --memory       Use in-memory backend (no filesystem)
 //!     --bulk N       Number of bulk insert entries (default: 10000)
 //!
-//! Known issue: on Android debug builds, bulk inserts that trigger leaf node
-//! splits (~43+ entries) crash due to a pre-existing UB in mapping_table.rs
-//! (get_unchecked_mut out of bounds). The Android debug sysroot includes
-//! runtime UB precondition checks that catch this; macOS does not.
-//! See mapping_table.rs:116. This needs fixing before production use.
+//! Note: this example uncovered a bug where Android's TBI (Top Byte Ignore)
+//! pointer tags collided with PageID's discriminator bit. Fixed by moving
+//! ID_MASK from bit 62 to bit 48 (above VA range, below TBI tag byte).
 
 use bf_tree::{BfTree, LeafInsertResult, LeafReadResult};
 

@@ -109,7 +109,14 @@ impl Default for BfTree {
 }
 
 impl BfTree {
-    pub(crate) const ROOT_IS_LEAF_MASK: u64 = 0x8000_0000_0000_0000; // This is quite error-prone, make sure the mask is not conflicting with the page id definition.
+    /// Flag stored in `root_page_id` to indicate the root is a leaf page.
+    ///
+    /// Bit 49 — same safe zone as ID_MASK (bit 48): above the 48-bit VA
+    /// range and below the TBI tag byte. See the doc comment on `PageID`
+    /// in page_id.rs for the full bit-layout rationale.
+    ///
+    /// Must not collide with ID_MASK (bit 48).
+    pub(crate) const ROOT_IS_LEAF_MASK: u64 = 0x0002_0000_0000_0000;
 
     /// Create the size classes of all memory pages in acending order based on the record size (key + value) and the leaf page size
     /// [s_0, s_1, ..., s_x], ascending order.
