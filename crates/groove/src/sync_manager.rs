@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::{BlobId, ObjectManager};
+use crate::object_manager::ObjectManager;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
@@ -173,10 +173,6 @@ pub enum SyncError {
         branch_name: BranchName,
         reason: String,
     },
-    /// Blob request denied due to insufficient permission.
-    BlobAccessDenied { blob_id: BlobId },
-    /// Blob not found in storage.
-    BlobNotFound { blob_id: BlobId },
     /// Client must have a session to write.
     SessionRequired {
         object_id: ObjectId,
@@ -217,12 +213,6 @@ pub enum SyncPayload {
         branch_name: BranchName,
         tails: HashSet<CommitId>,
     },
-
-    /// Request a blob by ID.
-    BlobRequest { blob_id: BlobId },
-
-    /// Response to a blob request.
-    BlobResponse { blob_id: BlobId, data: Vec<u8> },
 
     /// Subscribe to a query (client to server).
     /// Server will build QueryGraph and send matching objects.
@@ -280,8 +270,6 @@ impl SyncPayload {
         match self {
             SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
             SyncPayload::ObjectTruncated { .. } => "ObjectTruncated",
-            SyncPayload::BlobRequest { .. } => "BlobRequest",
-            SyncPayload::BlobResponse { .. } => "BlobResponse",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::PersistenceAck { .. } => "PersistenceAck",
@@ -1179,15 +1167,6 @@ impl SyncManager {
                     });
                 }
             }
-            SyncPayload::BlobResponse { blob_id, data } => {
-                let _ = self.object_manager.put_blob(
-                    storage,
-                    blob_id.object_id,
-                    blob_id.branch_name,
-                    blob_id.commit_id,
-                    data.clone(),
-                );
-            }
             SyncPayload::QuerySettled { query_id, tier } => {
                 // Queue for local QueryManager to process
                 self.pending_query_settled.push((query_id, tier));
@@ -1207,9 +1186,7 @@ impl SyncManager {
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
             }
             // Servers shouldn't send these to us
-            SyncPayload::BlobRequest { .. }
-            | SyncPayload::QuerySubscription { .. }
-            | SyncPayload::QueryUnsubscription { .. } => {}
+            SyncPayload::QuerySubscription { .. } | SyncPayload::QueryUnsubscription { .. } => {}
         }
     }
 
@@ -1350,44 +1327,6 @@ impl SyncManager {
                     }
                 }
             }
-            SyncPayload::BlobRequest { blob_id } => {
-                // Peer/Admin bypass scope check for blobs
-                let has_permission = matches!(client.role, ClientRole::Peer | ClientRole::Admin)
-                    || client
-                        .queries
-                        .values()
-                        .flat_map(|q| q.scope.iter())
-                        .any(|(obj_id, _)| *obj_id == blob_id.object_id);
-
-                if !has_permission {
-                    self.outbox.push(OutboxEntry {
-                        destination: Destination::Client(client_id),
-                        payload: SyncPayload::Error(SyncError::BlobAccessDenied {
-                            blob_id: blob_id.clone(),
-                        }),
-                    });
-                } else {
-                    match self.object_manager.get_blob(&blob_id.content_hash) {
-                        Ok(data) => {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::BlobResponse {
-                                    blob_id: blob_id.clone(),
-                                    data: data.to_vec(),
-                                },
-                            });
-                        }
-                        Err(_) => {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::BlobNotFound {
-                                    blob_id: blob_id.clone(),
-                                }),
-                            });
-                        }
-                    }
-                }
-            }
             // Handle query subscription with full Query struct
             // Queue for QueryManager to process (SyncManager doesn't know about QueryGraph)
             SyncPayload::QuerySubscription {
@@ -1475,7 +1414,7 @@ impl SyncManager {
                 self.pending_query_settled.push((*query_id, *tier));
             }
             // Clients shouldn't send these
-            SyncPayload::BlobResponse { .. } | SyncPayload::Error(_) => {}
+            SyncPayload::Error(_) => {}
         }
     }
 
@@ -2811,137 +2750,6 @@ mod tests {
                 assert_eq!(*object_id, obj_id);
             }
             _ => panic!("Expected ObjectUpdated to client"),
-        }
-    }
-
-    // ========================================================================
-    // Phase 6: Blob Handling Tests
-    // ========================================================================
-
-    #[test]
-    fn blob_request_with_permission_returns_data() {
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        // Create object with blob
-        let obj_id = sm.object_manager.create(&mut io, None);
-        let author = ObjectId::new();
-        let commit_id = sm
-            .object_manager
-            .add_commit(
-                &mut io,
-                obj_id,
-                "main",
-                vec![],
-                b"content".to_vec(),
-                author,
-                None,
-            )
-            .unwrap();
-
-        let content_hash = sm
-            .object_manager
-            .put_blob(&mut io, obj_id, "main", commit_id, b"blob data".to_vec())
-            .unwrap();
-
-        // Client with read permission
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-
-        let mut scope = HashSet::new();
-        scope.insert((obj_id, "main".into()));
-        sm.set_client_query_scope(client_id, QueryId(1), scope, None);
-        sm.take_outbox();
-
-        // Request blob
-        let blob_id = BlobId {
-            object_id: obj_id,
-            branch_name: "main".into(),
-            commit_id,
-            content_hash,
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::BlobRequest {
-                blob_id: blob_id.clone(),
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        let outbox = sm.take_outbox();
-        assert_eq!(outbox.len(), 1);
-
-        match &outbox[0].payload {
-            SyncPayload::BlobResponse {
-                blob_id: resp_id,
-                data,
-            } => {
-                assert_eq!(*resp_id, blob_id);
-                assert_eq!(data, b"blob data");
-            }
-            _ => panic!("Expected BlobResponse"),
-        }
-    }
-
-    #[test]
-    fn blob_request_without_permission_returns_error() {
-        let mut sm = SyncManager::new();
-        let mut io = MemoryStorage::new();
-
-        // Create object with blob
-        let obj_id = sm.object_manager.create(&mut io, None);
-        let author = ObjectId::new();
-        let commit_id = sm
-            .object_manager
-            .add_commit(
-                &mut io,
-                obj_id,
-                "main",
-                vec![],
-                b"content".to_vec(),
-                author,
-                None,
-            )
-            .unwrap();
-
-        let content_hash = sm
-            .object_manager
-            .put_blob(&mut io, obj_id, "main", commit_id, b"blob data".to_vec())
-            .unwrap();
-
-        // Client WITHOUT permission for this object
-        let client_id = ClientId::new();
-        sm.add_client(client_id);
-        // No query = no scope
-
-        let blob_id = BlobId {
-            object_id: obj_id,
-            branch_name: "main".into(),
-            commit_id,
-            content_hash,
-        };
-
-        sm.push_inbox(InboxEntry {
-            source: Source::Client(client_id),
-            payload: SyncPayload::BlobRequest {
-                blob_id: blob_id.clone(),
-            },
-        });
-
-        sm.process_inbox(&mut io);
-
-        let outbox = sm.take_outbox();
-        assert_eq!(outbox.len(), 1);
-
-        match &outbox[0].payload {
-            SyncPayload::Error(SyncError::BlobAccessDenied {
-                blob_id: err_blob_id,
-            }) => {
-                assert_eq!(*err_blob_id, blob_id);
-            }
-            _ => panic!("Expected BlobAccessDenied error"),
         }
     }
 

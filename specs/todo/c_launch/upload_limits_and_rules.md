@@ -18,4 +18,4 @@ These protect app developers from unexpected costs when malicious or buggy clien
 - Where are limits configured? (Per-app in dashboard, per-table in schema, or both?)
 - How to enforce on a local-first system where writes happen offline first?
 - Rejection semantics: reject at sync time, or accept-then-quarantine?
-- Should limits apply to row data as well as binary blobs?
+- Should limits apply to row data as well as binary data (file parts)?

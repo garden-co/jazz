@@ -28,10 +28,6 @@ use crate::sync_manager::PersistenceTier;
 // Storage Types
 // ============================================================================
 
-/// BLAKE3 hash of blob content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ContentHash(pub [u8; 32]);
-
 /// Errors from storage operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageError {
@@ -54,7 +50,7 @@ pub struct LoadedBranch {
 // Storage Trait
 // ============================================================================
 
-/// Synchronous storage for objects, blobs, and indices.
+/// Synchronous storage for objects and indices.
 ///
 /// All operations are **synchronous** - they return immediately with results.
 /// This eliminates the async response/callback pattern that permeated the
@@ -112,19 +108,6 @@ pub trait Storage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError>;
-
-    // ================================================================
-    // Blob storage (sync)
-    // ================================================================
-
-    /// Store a blob by content hash.
-    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError>;
-
-    /// Load a blob by content hash. Returns None if not found.
-    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError>;
-
-    /// Delete a blob by content hash.
-    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError>;
 
     // ================================================================
     // Persistence ack storage
@@ -206,7 +189,7 @@ type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 
 /// In-memory Storage for testing and main-thread use.
 ///
-/// Stores objects, blobs, and indices in HashMaps/BTreeMaps. No persistence.
+/// Stores objects and indices in HashMaps/BTreeMaps. No persistence.
 /// This is sufficient for:
 /// - All groove unit tests
 /// - All groove integration tests
@@ -215,9 +198,6 @@ type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 pub struct MemoryStorage {
     /// Object storage: object_id -> ObjectData
     objects: HashMap<ObjectId, ObjectData>,
-
-    /// Blob storage: content_hash -> data
-    blobs: HashMap<ContentHash, Vec<u8>>,
 
     /// Index storage: key -> (encoded_value -> row_ids)
     indices: HashMap<IndexKey, IndexEntries>,
@@ -425,24 +405,6 @@ impl Storage for MemoryStorage {
     }
 
     // ================================================================
-    // Blob storage
-    // ================================================================
-
-    fn store_blob(&mut self, hash: ContentHash, data: &[u8]) -> Result<(), StorageError> {
-        self.blobs.insert(hash, data.to_vec());
-        Ok(())
-    }
-
-    fn load_blob(&self, hash: ContentHash) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.blobs.get(&hash).cloned())
-    }
-
-    fn delete_blob(&mut self, hash: ContentHash) -> Result<(), StorageError> {
-        self.blobs.remove(&hash);
-        Ok(())
-    }
-
-    // ================================================================
     // Persistence ack storage
     // ================================================================
 
@@ -618,25 +580,6 @@ mod tests {
         storage.delete_commit(id, &branch, commit_id).unwrap();
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 0);
-    }
-
-    #[test]
-    fn memory_storage_blob_storage() {
-        let mut storage = MemoryStorage::new();
-
-        let hash = ContentHash([42u8; 32]);
-        let data = b"hello world";
-
-        // Store
-        storage.store_blob(hash, data).unwrap();
-
-        // Load
-        let loaded = storage.load_blob(hash).unwrap();
-        assert_eq!(loaded, Some(data.to_vec()));
-
-        // Delete
-        storage.delete_blob(hash).unwrap();
-        assert_eq!(storage.load_blob(hash).unwrap(), None);
     }
 
     #[test]
