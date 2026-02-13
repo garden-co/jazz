@@ -80,11 +80,14 @@ These files are getting unwieldy but don't need immediate action:
 
 Done. `blake3` is now used to compute schema hashes in `jazz-ts` runtime schema context.
 
-## 10. Examples Lose Data on Reload (MEDIUM)
+## 10. ~~Examples Lose Data on Reload~~ ✅
 
-The example apps (e.g., `todo-client-localfirst-ts`) lose all data when the page reloads, despite browser persistence tests passing. Likely related to the hardcoded-zeros issue in item 3 (schema hash and client ID are all zeros → branch mismatch between sessions, so the new session can't find data written by the old one).
+Done. Real schema hashes plus stable sync client IDs fixed reload persistence in `todo-client-localfirst-ts`.
 
-Investigate: does fixing the schema hash / client ID placeholders also fix persistence in the examples?
+Coverage now includes:
+
+- `persists todos across app destroy and remount (OPFS)`
+- `persists todos across real page reload (OPFS)`
 
 ## 11. Worker Bridge Error Swallowing (LOW)
 
@@ -92,7 +95,7 @@ Investigate: does fixing the schema hash / client ID placeholders also fix persi
 
 `client.ts:568–574` similarly logs sync POST failures but doesn't surface them to callers.
 
-## 12. Client ID Simplification (HIGH, in progress)
+## 12. ~~Client ID Simplification~~ ✅
 
 The current client-id path grew extra concepts (`syncClientId`, `serverClientId`, worker-local stream IDs, fallback transport IDs). This makes identity behavior hard to reason about.
 
@@ -128,14 +131,18 @@ Primary purpose of client IDs is server-side sync-state continuity across short 
 
 ### Progress
 
-- ✅ Phase 1 started in `jazz-ts`:
+- ✅ Phase 1 completed in `jazz-ts`:
   - Stable `sync_client_id` resolution + browser persistence (`localStorage`)
   - Single-ID usage for both `/events` query param and `/sync` body
   - `Connected.client_id` is no longer adopted as local identity
   - Removed transport fallback client-id generation path
   - Added unit coverage for client-id helpers, transport headers, and persistence keying
-- ✅ Phase 2 started in `jazz-cli`:
+- ✅ Phase 2 completed in `jazz-cli`:
   - Stream disconnect now schedules delayed client cleanup (default 60s grace window)
   - Reconnect cancels pending cleanup for that `client_id`
   - Cleanup runs only when no active stream remains for that client
-- ⏳ Follow-up: add dedicated tests for lease expiry behavior (retain within grace, purge after)
+- ✅ Phase 3 validation completed:
+  - Browser e2e covers stable ID reuse across remount/reload in `todo-client-localfirst-ts`
+  - `jazz-cli` integration tests now cover reconnect lease behavior:
+    - `test_reconnect_within_grace_retains_client_sync_state`
+    - `test_reconnect_after_grace_purges_client_sync_state`

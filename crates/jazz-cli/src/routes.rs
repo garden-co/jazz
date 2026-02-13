@@ -1,7 +1,6 @@
 //! HTTP routes for the Jazz server.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     Router,
@@ -117,6 +116,49 @@ async fn schedule_client_cleanup(
     pending.insert(client_id, PendingClientCleanup { generation, handle });
 }
 
+struct StreamCleanupGuard {
+    state: Arc<ServerState>,
+    connection_id: u64,
+    client_id: groove::sync_manager::ClientId,
+}
+
+impl Drop for StreamCleanupGuard {
+    fn drop(&mut self) {
+        let state = self.state.clone();
+        let connection_id = self.connection_id;
+        let client_id = self.client_id;
+
+        tokio::spawn(async move {
+            {
+                let mut connections = state.connections.write().await;
+                connections.remove(&connection_id);
+            }
+
+            let has_active_connections = {
+                let connections = state.connections.read().await;
+                connections
+                    .values()
+                    .any(|connection| connection.client_id == client_id)
+            };
+
+            if has_active_connections {
+                tracing::debug!(
+                    "Stream connection {} closed for client {}, but other streams remain",
+                    connection_id,
+                    client_id
+                );
+            } else {
+                schedule_client_cleanup(state.clone(), client_id).await;
+                tracing::debug!(
+                    "Stream connection {} closed for client {}; scheduled delayed cleanup",
+                    connection_id,
+                    client_id
+                );
+            }
+        });
+    }
+}
+
 /// Binary streaming events endpoint - clients connect here for all updates.
 ///
 /// Uses length-prefixed binary frames over a chunked HTTP response.
@@ -179,16 +221,20 @@ async fn events_handler(
         connections.insert(connection_id, ConnectionState { client_id });
     }
 
-    // Clone state for cleanup on drop
-    let state_cleanup = state.clone();
-    let client_id_cleanup = client_id;
-    let connection_id_cleanup = connection_id;
+    let stream_cleanup_guard = StreamCleanupGuard {
+        state: state.clone(),
+        connection_id,
+        client_id,
+    };
+    let heartbeat_interval_duration = state.events_heartbeat_interval;
 
     // Capture client_id string for stream
     let client_id_str = client_id.to_string();
 
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
+        let _cleanup_guard = stream_cleanup_guard;
+
         // Send Connected frame
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
@@ -197,7 +243,7 @@ async fn events_handler(
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
         // Heartbeat interval
-        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut heartbeat_interval = tokio::time::interval(heartbeat_interval_duration);
 
         loop {
             tokio::select! {
@@ -227,34 +273,6 @@ async fn events_handler(
                     yield Ok(encode_frame(&heartbeat));
                 }
             }
-        }
-
-        // Cleanup on stream close
-        {
-            let mut connections = state_cleanup.connections.write().await;
-            connections.remove(&connection_id_cleanup);
-        }
-
-        let has_active_connections = {
-            let connections = state_cleanup.connections.read().await;
-            connections
-                .values()
-                .any(|connection| connection.client_id == client_id_cleanup)
-        };
-
-        if has_active_connections {
-            tracing::debug!(
-                "Stream connection {} closed for client {}, but other streams remain",
-                connection_id_cleanup,
-                client_id_cleanup
-            );
-        } else {
-            schedule_client_cleanup(state_cleanup.clone(), client_id_cleanup).await;
-            tracing::debug!(
-                "Stream connection {} closed for client {}; scheduled delayed cleanup",
-                connection_id_cleanup,
-                client_id_cleanup
-            );
         }
     };
 

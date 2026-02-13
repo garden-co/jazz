@@ -16,6 +16,47 @@ use tracing::info;
 use crate::middleware::AuthConfig;
 use crate::routes;
 
+fn client_disconnect_grace_from_env() -> Duration {
+    match std::env::var("JAZZ_CLIENT_DISCONNECT_GRACE_MS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(error) => {
+                tracing::warn!(
+                    value = %raw,
+                    %error,
+                    "Invalid JAZZ_CLIENT_DISCONNECT_GRACE_MS, using default"
+                );
+                Duration::from_secs(60)
+            }
+        },
+        Err(_) => Duration::from_secs(60),
+    }
+}
+
+fn events_heartbeat_interval_from_env() -> Duration {
+    match std::env::var("JAZZ_EVENTS_HEARTBEAT_MS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            Ok(_) => {
+                tracing::warn!(
+                    value = %raw,
+                    "JAZZ_EVENTS_HEARTBEAT_MS must be > 0, using default"
+                );
+                Duration::from_secs(30)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    value = %raw,
+                    %error,
+                    "Invalid JAZZ_EVENTS_HEARTBEAT_MS, using default"
+                );
+                Duration::from_secs(30)
+            }
+        },
+        Err(_) => Duration::from_secs(30),
+    }
+}
+
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub runtime: TokioRuntime<RocksDbStorage>,
@@ -27,6 +68,7 @@ pub struct ServerState {
     pub pending_client_cleanup: RwLock<HashMap<ClientId, PendingClientCleanup>>,
     pub next_cleanup_generation: AtomicU64,
     pub client_disconnect_grace: Duration,
+    pub events_heartbeat_interval: Duration,
     /// Broadcast channel for sending sync payloads to SSE clients
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
     /// Authentication configuration
@@ -99,6 +141,11 @@ pub async fn run(
         info!("Auth not configured - all endpoints are public");
     }
 
+    let client_disconnect_grace = client_disconnect_grace_from_env();
+    let events_heartbeat_interval = events_heartbeat_interval_from_env();
+    info!("Client disconnect grace: {:?}", client_disconnect_grace);
+    info!("Events heartbeat interval: {:?}", events_heartbeat_interval);
+
     // Build server state
     let state = Arc::new(ServerState {
         runtime,
@@ -107,7 +154,8 @@ pub async fn run(
         next_connection_id: AtomicU64::new(1),
         pending_client_cleanup: RwLock::new(HashMap::new()),
         next_cleanup_generation: AtomicU64::new(1),
-        client_disconnect_grace: Duration::from_secs(60),
+        client_disconnect_grace,
+        events_heartbeat_interval,
         sync_broadcast: sync_tx,
         auth_config,
     });
