@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.10
+
+### Patch Changes
+
+- 41d8587: Run a full storage reconciliation process periodically to ensure all CoValues in storage are synced with the server.
+  - cojson-core-wasm@0.20.10
+  - cojson-core-rn@0.20.10
+  - cojson-core-napi@0.20.10
+
 ## 0.20.9
 
 ### Patch Changes

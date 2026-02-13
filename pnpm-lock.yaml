@@ -2657,22 +2657,22 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.20.9
+        specifier: workspace:0.20.10
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.20.9
+        specifier: workspace:0.20.10
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.20.9
+        specifier: workspace:0.20.10
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.20.9
+        specifier: workspace:0.20.10
         version: link:../jazz-tools
       jazz-webhook:
-        specifier: workspace:0.20.9
+        specifier: workspace:0.20.10
         version: link:../jazz-webhook
       ws:
         specifier: ^8.14.2
@@ -19571,9 +19571,9 @@ snapshots:
       eslint-visitor-keys: 2.1.0
       semver: 6.3.1
 
-  '@babel/eslint-parser@7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1))':
+  '@babel/eslint-parser@7.27.0(@babel/core@7.28.5)(eslint@9.39.1(jiti@2.6.1))':
     dependencies:
-      '@babel/core': 7.28.3
+      '@babel/core': 7.28.5
       '@nicolo-ribaudo/eslint-scope-5-internals': 5.1.1-v1
       eslint: 9.39.1(jiti@2.6.1)
       eslint-visitor-keys: 2.1.0
@@ -27702,7 +27702,7 @@ snapshots:
   '@react-native/eslint-config@0.81.5(eslint@9.39.1(jiti@2.6.1))(jest@29.7.0(@types/node@24.3.0)(babel-plugin-macros@3.1.0)(ts-node@10.9.2(@swc/core@1.11.29(@swc/helpers@0.5.17))(@types/node@24.3.0)(typescript@5.9.2)))(prettier@3.6.2)(typescript@5.9.2)':
     dependencies:
       '@babel/core': 7.28.3
-      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1))
+      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.5)(eslint@9.39.1(jiti@2.6.1))
       '@react-native/eslint-plugin': 0.81.5
       '@typescript-eslint/eslint-plugin': 7.18.0(@typescript-eslint/parser@7.18.0(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2))(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2)
       '@typescript-eslint/parser': 7.18.0(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2)
@@ -32875,7 +32875,7 @@ snapshots:
 
   eslint-plugin-ft-flow@2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1)))(eslint@9.39.1(jiti@2.6.1)):
     dependencies:
-      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1))
+      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.5)(eslint@9.39.1(jiti@2.6.1))
       eslint: 9.39.1(jiti@2.6.1)
       lodash: 4.17.21
       string-natural-compare: 3.0.1
