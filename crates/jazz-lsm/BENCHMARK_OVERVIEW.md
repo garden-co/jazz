@@ -27,24 +27,24 @@ Rounded to one decimal place; values below `0.1 K/s` are shown as `<0.1 K/s`.
 
 ## Phase 1 Mixed Baseline (single-threaded worker)
 
-All throughput values below are shown as `K/s` (1 K = 1,000 ops/s). This section is the baseline for the new mixed workload scenarios from Phase 1.
+Throughput values below are shown as exact `ops/s` from the mixed benchmark runners.
 
 | Scenario | Value Size (bytes) | jazz-lsm native ops/s | native p95 op (ms) | jazz-lsm wasm/opfs ops/s | wasm p95 op (ms) | Notes |
 |---|---:|---:|---:|---:|---:|---|
-| mixed_random_70r_30w | 32 | 2.7 K/s | 2.38 | 7.4 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_50r_50w_with_updates | 32 | 2.4 K/s | 3.35 | 7.4 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_60r_20w_20d | 32 | 2.6 K/s | 3.05 | 6.1 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_70r_30w | 256 | 2.5 K/s | 2.77 | 5.4 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_50r_50w_with_updates | 256 | 2.2 K/s | 3.22 | 5.4 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_60r_20w_20d | 256 | 2.3 K/s | 2.63 | 5.3 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_70r_30w | 4096 | 1.1 K/s | 2.45 | 2.4 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_50r_50w_with_updates | 4096 | 1.6 K/s | 2.19 | 2.6 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_60r_20w_20d | 4096 | 2.3 K/s | 0.63 | 2.6 K/s | 1.00 | Native `count=500`; WASM `count=200` |
-| mixed_random_70r_30w | 1,048,576 | <0.1 K/s | 78.04 | 0.3 K/s | 7.00 | Native `count=64`; WASM `count=4` |
-| mixed_random_50r_50w_with_updates | 1,048,576 | <0.1 K/s | 46.97 | 0.3 K/s | 7.00 | Native `count=64`; WASM `count=4` |
-| mixed_random_60r_20w_20d | 1,048,576 | <0.1 K/s | 44.13 | 0.3 K/s | 6.00 | Native `count=64`; WASM `count=4` |
+| mixed_random_70r_30w | 32 | 2673.363 | 2.380 | 5882.353 | 0.200 | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | 2359.634 | 3.354 | 5555.556 | 0.300 | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | 2578.329 | 3.052 | 6024.096 | 0.300 | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | 2471.936 | 2.766 | 2941.176 | 0.800 | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 256 | 2204.954 | 3.219 | 5347.594 | 0.300 | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 256 | 2250.680 | 2.631 | 5882.353 | 0.300 | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 4096 | 1140.796 | 2.448 | 3003.003 | 0.400 | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 4096 | 1590.260 | 2.190 | 3225.806 | 0.400 | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 4096 | 2294.221 | 0.633 | 3205.128 | 0.400 | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 1,048,576 | 35.669 | 78.036 | 277.778 | 6.800 | Native `count=64`; WASM `count=4` |
+| mixed_random_50r_50w_with_updates | 1,048,576 | 39.794 | 46.966 | 283.688 | 6.400 | Native `count=64`; WASM `count=4` |
+| mixed_random_60r_20w_20d | 1,048,576 | 46.140 | 44.129 | 289.855 | 6.400 | Native `count=64`; WASM `count=4` |
 
-WASM latency here is quantized by `Date.now()` millisecond resolution, so `p95` is coarse and should be treated as directional.
+WASM benchmark timing now uses `performance.now()` (with `Date.now()` fallback), so p95 values include sub-millisecond precision.
 
 ## Progress Tracking
 
@@ -65,5 +65,5 @@ WASM latency here is quantized by `Date.now()` millisecond resolution, so `p95` 
 - `jazz-lsm` WASM 1MB: `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --count 32 --value-sizes 1048576 --json`
 - Mixed native baseline (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
 - Mixed native baseline (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
-- Mixed wasm/opfs baseline (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 200 --value-sizes 32,256,4096 --json`
+- Mixed wasm/opfs baseline (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
 - Mixed wasm/opfs baseline (1MB reduced): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 4 --value-sizes 1048576 --json`

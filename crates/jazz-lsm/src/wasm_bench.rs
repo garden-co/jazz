@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde::Serialize;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{JsCast, prelude::*};
 
 use crate::{LsmOptions, LsmTree, OpfsFs, WriteDurability};
 
@@ -125,6 +125,26 @@ fn unique_namespace(label: &str) -> String {
     format!("bench-{label}-{ts}-{rand}")
 }
 
+fn high_res_now_ms() -> f64 {
+    let global = js_sys::global();
+    let perf_key = JsValue::from_str("performance");
+    if let Ok(perf) = js_sys::Reflect::get(&global, &perf_key)
+        && !perf.is_undefined()
+        && !perf.is_null()
+    {
+        let now_key = JsValue::from_str("now");
+        if let Ok(now_fn) = js_sys::Reflect::get(&perf, &now_key)
+            && let Some(now_fn) = now_fn.dyn_ref::<js_sys::Function>()
+            && let Ok(v) = now_fn.call0(&perf)
+            && let Some(ms) = v.as_f64()
+        {
+            return ms;
+        }
+    }
+
+    js_sys::Date::now()
+}
+
 fn percentile_ms(latencies_ms: &mut [f64], percentile: f64) -> f64 {
     if latencies_ms.is_empty() {
         return 0.0;
@@ -173,7 +193,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
     let mut db = open_db(&namespace).await?;
     let size = value_size as usize;
 
-    let start = js_sys::Date::now();
+    let start = high_res_now_ms();
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
         let k = key(i);
@@ -183,7 +203,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let elapsed_ms = js_sys::Date::now() - start;
+    let elapsed_ms = high_res_now_ms() - start;
 
     OpfsFs::destroy(&namespace)
         .await
@@ -215,7 +235,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
     let size = value_size as usize;
     let order = shuffled_indices(count as usize);
 
-    let start = js_sys::Date::now();
+    let start = high_res_now_ms();
     let mut checksum = 0u64;
     for &i in &order {
         let k = key(i);
@@ -225,7 +245,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let elapsed_ms = js_sys::Date::now() - start;
+    let elapsed_ms = high_res_now_ms() - start;
 
     OpfsFs::destroy(&namespace)
         .await
@@ -264,7 +284,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
     }
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    let start = js_sys::Date::now();
+    let start = high_res_now_ms();
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
         let k = key(i);
@@ -274,7 +294,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
             .ok_or_else(|| JsValue::from_str("missing key during seq_read benchmark"))?;
         checksum = checksum.wrapping_add(v[0] as u64);
     }
-    let elapsed_ms = js_sys::Date::now() - start;
+    let elapsed_ms = high_res_now_ms() - start;
 
     OpfsFs::destroy(&namespace)
         .await
@@ -315,7 +335,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
 
     let order = shuffled_indices(count as usize);
 
-    let start = js_sys::Date::now();
+    let start = high_res_now_ms();
     let mut checksum = 0u64;
     for &i in &order {
         let k = key(i);
@@ -325,7 +345,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
             .ok_or_else(|| JsValue::from_str("missing key during random_read benchmark"))?;
         checksum = checksum.wrapping_add(v[0] as u64);
     }
-    let elapsed_ms = js_sys::Date::now() - start;
+    let elapsed_ms = high_res_now_ms() - start;
 
     OpfsFs::destroy(&namespace)
         .await
@@ -380,10 +400,10 @@ async fn run_mixed_scenario(
     let mut checksum = 0u64;
     let mut op_latencies_ms = Vec::with_capacity(count as usize);
 
-    let total_start = js_sys::Date::now();
+    let total_start = high_res_now_ms();
     for step in 0..(count as usize) {
         let op = choose_operation(scenario, rng.next_u8() % 100);
-        let op_start = js_sys::Date::now();
+        let op_start = high_res_now_ms();
 
         match op {
             OpChoice::Read => {
@@ -425,10 +445,10 @@ async fn run_mixed_scenario(
             }
         }
 
-        op_latencies_ms.push(js_sys::Date::now() - op_start);
+        op_latencies_ms.push(high_res_now_ms() - op_start);
     }
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let elapsed_ms = js_sys::Date::now() - total_start;
+    let elapsed_ms = high_res_now_ms() - total_start;
 
     OpfsFs::destroy(&namespace)
         .await
