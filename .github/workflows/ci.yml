@@ -3,6 +3,9 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches:
+      - gio/feat/basic-initial-ci
 
 jobs:
   validate:
