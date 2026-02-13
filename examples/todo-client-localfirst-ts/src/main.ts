@@ -1,5 +1,46 @@
 import { createDb, type DbConfig, type Db } from "jazz-ts";
-import { app } from "../schema/app.js";
+import { app, Todo } from "../schema/app.js";
+
+function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
+  const todoIds = new Set(todos.map((todo) => todo.id));
+  const childrenByParent = new Map<string, Todo[]>();
+  const roots: Todo[] = [];
+
+  for (const todo of todos) {
+    const parentId = todo.parent;
+    if (parentId && todoIds.has(parentId)) {
+      const siblings = childrenByParent.get(parentId) ?? [];
+      siblings.push(todo);
+      childrenByParent.set(parentId, siblings);
+    } else {
+      roots.push(todo);
+    }
+  }
+
+  const ordered: { todo: Todo; depth: number }[] = [];
+  const visited = new Set<string>();
+
+  const visit = (todo: Todo, depth: number) => {
+    if (visited.has(todo.id)) return;
+    visited.add(todo.id);
+    ordered.push({ todo, depth });
+    const children = childrenByParent.get(todo.id) ?? [];
+    for (const child of children) {
+      visit(child, depth + 1);
+    }
+  };
+
+  for (const root of roots) {
+    visit(root, 0);
+  }
+
+  // Handle cycles or disconnected nodes defensively.
+  for (const todo of todos) {
+    visit(todo, 0);
+  }
+
+  return ordered;
+}
 
 export async function startApp(
   container: HTMLElement,
@@ -27,7 +68,14 @@ export async function startApp(
   const btn = document.createElement("button");
   btn.type = "submit";
   btn.textContent = "Add";
+  const parentSelect = document.createElement("select");
+  parentSelect.id = "parent-select";
+  const noParentOption = document.createElement("option");
+  noParentOption.value = "";
+  noParentOption.textContent = "No parent";
+  parentSelect.appendChild(noParentOption);
   form.appendChild(input);
+  form.appendChild(parentSelect);
   form.appendChild(btn);
   container.appendChild(form);
 
@@ -37,15 +85,25 @@ export async function startApp(
 
   // Subscribe to all todos
   db.subscribeAll(app.todos, ({ all }) => {
-    list.innerHTML = all
+    const ordered = orderTodosWithDepth(all);
+    parentSelect.innerHTML = "";
+    parentSelect.appendChild(noParentOption);
+    for (const todo of all) {
+      const option = document.createElement("option");
+      option.value = todo.id;
+      option.textContent = todo.title;
+      parentSelect.appendChild(option);
+    }
+
+    list.innerHTML = ordered
       .map(
-        (t) => `
-      <li class="${t.done ? "done" : ""}">
-        <input type="checkbox" ${t.done ? "checked" : ""}
-               data-id="${t.id}" class="toggle">
-        <span>${t.title}</span>
-        ${t.description ? `<small>${t.description}</small>` : ""}
-        <button data-id="${t.id}" class="delete-btn">&times;</button>
+        ({ todo, depth }) => `
+      <li class="${todo.done ? "done" : ""}" data-depth="${depth}" style="padding-left: ${depth * 20}px;">
+        <input type="checkbox" ${todo.done ? "checked" : ""}
+               data-id="${todo.id}" class="toggle">
+        <span>${todo.title}</span>
+        ${todo.description ? `<small>${todo.description}</small>` : ""}
+        <button data-id="${todo.id}" class="delete-btn">&times;</button>
       </li>
     `,
       )
@@ -55,11 +113,14 @@ export async function startApp(
   // Add todo form
   form.addEventListener("submit", (e) => {
     e.preventDefault();
+    const selectedParentId = parentSelect.value;
     db.insert(app.todos, {
       title: input.value,
       done: false,
+      ...(selectedParentId ? { parent: selectedParentId } : {}),
     });
     input.value = "";
+    parentSelect.value = "";
   });
 
   // Event delegation for toggle and delete
