@@ -14,6 +14,8 @@ describe("translateQuery", () => {
           { name: "title", column_type: { type: "Text" }, nullable: false },
           { name: "done", column_type: { type: "Boolean" }, nullable: false },
           { name: "priority", column_type: { type: "Integer" }, nullable: true },
+          { name: "project", column_type: { type: "Uuid" }, nullable: true },
+          { name: "created_at", column_type: { type: "Timestamp" }, nullable: true },
         ],
       },
     },
@@ -74,6 +76,21 @@ describe("translateQuery", () => {
       ]);
     });
 
+    it("translates eq condition with UUID string for Uuid columns", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "project", op: "eq", value: "00000000-0000-0000-0000-000000000123" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+
+      expect(result.disjuncts[0].conditions).toEqual([
+        { Eq: { column: "project", value: { Uuid: "00000000-0000-0000-0000-000000000123" } } },
+      ]);
+    });
+
     it("translates eq condition with boolean", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -101,6 +118,21 @@ describe("translateQuery", () => {
 
       expect(result.disjuncts[0].conditions).toEqual([
         { Eq: { column: "priority", value: { Integer: 5 } } },
+      ]);
+    });
+
+    it("translates eq condition with number for Timestamp columns", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "created_at", op: "eq", value: 1712345678 }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+
+      expect(result.disjuncts[0].conditions).toEqual([
+        { Eq: { column: "created_at", value: { Timestamp: 1712345678 } } },
       ]);
     });
 

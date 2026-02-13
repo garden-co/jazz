@@ -8,7 +8,7 @@
  * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins }
  */
 
-import type { WasmSchema } from "../drivers/types.js";
+import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 
 /**
@@ -23,10 +23,21 @@ interface BuilderOutput {
   offset?: number;
 }
 
+function getColumnType(
+  schema: WasmSchema,
+  table: string,
+  column: string,
+): ColumnType["type"] | undefined {
+  const tableSchema = schema.tables[table];
+  if (!tableSchema) return undefined;
+  const col = tableSchema.columns.find((c) => c.name === column);
+  return col?.column_type?.type;
+}
+
 /**
  * Translate a JavaScript value to WasmValue format.
  */
-function toWasmValue(value: unknown): object {
+function toWasmValue(value: unknown, columnType?: ColumnType["type"]): object {
   if (value === null || value === undefined) {
     return { Null: null };
   }
@@ -34,10 +45,16 @@ function toWasmValue(value: unknown): object {
     return { Boolean: value };
   }
   if (typeof value === "number") {
+    if (columnType === "Timestamp") {
+      return { Timestamp: value };
+    }
     // Use Integer for all numbers - WASM will handle type coercion
     return { Integer: value };
   }
   if (typeof value === "string") {
+    if (columnType === "Uuid") {
+      return { Uuid: value };
+    }
     return { Text: value };
   }
   throw new Error(`Unsupported value type: ${typeof value}`);
@@ -46,8 +63,13 @@ function toWasmValue(value: unknown): object {
 /**
  * Translate operator string to Condition enum variant.
  */
-function toCondition(cond: { column: string; op: string; value: unknown }): object {
-  const value = toWasmValue(cond.value);
+function toCondition(
+  cond: { column: string; op: string; value: unknown },
+  schema: WasmSchema,
+  table: string,
+): object {
+  const columnType = getColumnType(schema, table, cond.column);
+  const value = toWasmValue(cond.value, columnType);
 
   switch (cond.op) {
     case "eq":
@@ -69,7 +91,9 @@ function toCondition(cond: { column: string; op: string; value: unknown }): obje
     case "in":
       // Handle IN operator with array of values
       if (Array.isArray(cond.value)) {
-        return { In: { column: cond.column, values: cond.value.map(toWasmValue) } };
+        return {
+          In: { column: cond.column, values: cond.value.map((v) => toWasmValue(v, columnType)) },
+        };
       }
       throw new Error(`"in" operator requires an array value`);
     default:
@@ -160,7 +184,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     branches: [],
     disjuncts: [
       {
-        conditions: builder.conditions.map(toCondition),
+        conditions: builder.conditions.map((cond) => toCondition(cond, schema, builder.table)),
       },
     ],
     order_by: builder.orderBy.map(([col, dir]) => [
