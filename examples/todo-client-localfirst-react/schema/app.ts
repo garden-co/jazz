@@ -22,33 +22,33 @@ export interface TodoWhereInput {
 }
 
 export const wasmSchema: WasmSchema = {
-  "tables": {
-    "todos": {
-      "columns": [
+  tables: {
+    todos: {
+      columns: [
         {
-          "name": "title",
-          "column_type": {
-            "type": "Text"
+          name: "title",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "done",
-          "column_type": {
-            "type": "Boolean"
+          name: "done",
+          column_type: {
+            type: "Boolean",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "description",
-          "column_type": {
-            "type": "Text"
+          name: "description",
+          column_type: {
+            type: "Text",
           },
-          "nullable": true
-        }
-      ]
-    }
-  }
+          nullable: true,
+        },
+      ],
+    },
+  },
 };
 
 export class TodoQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<Todo> {
