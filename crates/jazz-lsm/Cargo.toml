@@ -7,13 +7,7 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-compare-native = [
-  "dep:bf-tree",
-  "dep:rocksdb",
-  "dep:fjall",
-  "dep:surrealkv",
-  "dep:tokio",
-]
+compare-native = ["dep:bf-tree", "dep:rocksdb", "dep:fjall", "dep:surrealkv", "dep:tokio"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

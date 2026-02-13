@@ -334,6 +334,11 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     client,
     shutdown: async () => {
       await client.shutdown();
+      try {
+        runtime.close();
+      } catch {
+        // runtime may already be closed by higher-level shutdown plumbing
+      }
     },
     flush: () => {
       runtime.flush();

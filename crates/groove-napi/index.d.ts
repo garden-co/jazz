@@ -44,4 +44,6 @@ export declare class NapiRuntime {
   setClientRole(clientId: string, role: string): void;
   getSchema(): any;
   flush(): void;
+  /** Flush and close the underlying storage, releasing filesystem locks. */
+  close(): void;
 }

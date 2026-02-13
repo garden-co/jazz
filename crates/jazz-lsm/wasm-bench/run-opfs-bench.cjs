@@ -82,7 +82,7 @@ function ensureBuiltPkg(pkgDir) {
   const wasmEntry = path.join(pkgDir, "jazz_lsm_bg.wasm");
   if (!fs.existsSync(jsEntry) || !fs.existsSync(wasmEntry)) {
     throw new Error(
-      "Missing wasm package output. Run `pnpm --dir crates/jazz-lsm run bench:wasm:build` first."
+      "Missing wasm package output. Run `pnpm --dir crates/jazz-lsm run bench:wasm:build` first.",
     );
   }
 }
@@ -110,7 +110,7 @@ function printTable(results) {
     "deletes",
   ];
   const headers = preferredHeaders.filter((h) =>
-    results.some((r) => r[h] !== undefined && r[h] !== null)
+    results.some((r) => r[h] !== undefined && r[h] !== null),
   );
 
   const rows = results.map((r) =>
@@ -121,12 +121,10 @@ function printTable(results) {
       if (h === "elapsed_ms") return Number(v).toFixed(3);
       if (h === "p95_op_ms") return Number(v).toFixed(4);
       return String(v);
-    })
+    }),
   );
 
-  const widths = headers.map((h, idx) =>
-    Math.max(h.length, ...rows.map((row) => row[idx].length))
-  );
+  const widths = headers.map((h, idx) => Math.max(h.length, ...rows.map((row) => row[idx].length)));
   const line = widths.map((w) => "-".repeat(w)).join("  ");
   const fmt = (row) => row.map((v, idx) => v.padEnd(widths[idx])).join("  ");
 
@@ -366,11 +364,9 @@ async function run() {
           }
           await page.goto(baseUrl, { waitUntil: "load", timeout: 60_000 });
 
-          await page.waitForFunction(
-            () => window.__benchDone === true,
-            undefined,
-            { timeout: 30 * 60 * 1000 }
-          );
+          await page.waitForFunction(() => window.__benchDone === true, undefined, {
+            timeout: 30 * 60 * 1000,
+          });
 
           const done = await page.evaluate(() => ({
             error: window.__benchError,
