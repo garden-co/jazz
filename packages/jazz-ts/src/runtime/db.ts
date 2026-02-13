@@ -92,7 +92,7 @@ export interface TableProxy<T, Init> {
  * // Subscriptions
  * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
  *   console.log("All todos:", delta.all);
- *   console.log("Added:", delta.added);
+ *   console.log("Added:", delta.added.map(({ item, index }) => ({ item, index })));
  * });
  * ```
  */
@@ -391,7 +391,7 @@ export class Db {
    * const unsubscribe = db.subscribeAll(app.todos, (delta) => {
    *   setTodos(delta.all);
    *   if (delta.added.length > 0) {
-   *     console.log("New todos:", delta.added);
+   *     console.log("New todos:", delta.added.map(({ item }) => item));
    *   }
    * });
    *

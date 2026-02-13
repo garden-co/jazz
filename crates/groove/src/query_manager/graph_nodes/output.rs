@@ -1,4 +1,5 @@
 use ahash::AHashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::types::{
@@ -135,31 +136,121 @@ pub struct DecodedDelta {
     pub updated: Vec<(crate::object::ObjectId, Vec<Value>, Vec<Value>)>,
 }
 
+/// Indexed state derived from a row delta and previous output order.
+///
+/// This is used by adapters (e.g. wasm) to build stable index-based deltas
+/// without re-implementing output ordering logic.
+#[derive(Debug, Clone)]
+pub struct IndexedRowState {
+    pub pre_index_by_id: HashMap<crate::object::ObjectId, usize>,
+    pub post_index_by_id: HashMap<crate::object::ObjectId, usize>,
+    pub post_ids: Vec<crate::object::ObjectId>,
+}
+
+/// Compute pre/post index maps for a `RowDelta`, given the prior ordered ids.
+///
+/// Ordering rules:
+/// - start from prior order and detach removed + updated-old ids
+/// - append `added` ids (stream order)
+/// - append `updated.new` ids (stream order, enables moves)
+pub fn index_row_delta(current_ids: &[crate::object::ObjectId], delta: &RowDelta) -> IndexedRowState {
+    // ASCII flow:
+    // pre:    [A, B, C]
+    // detach:    ^B
+    // base:   [A, C]
+    // +added: [A, C, N]
+    // +upd:   [A, C, N, B]
+
+    let pre_index_by_id: HashMap<_, _> = current_ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (*id, index))
+        .collect();
+
+    let mut ids_to_detach = HashSet::new();
+    for row in &delta.removed {
+        ids_to_detach.insert(row.id);
+    }
+    for (old, _) in &delta.updated {
+        ids_to_detach.insert(old.id);
+    }
+
+    let mut post_ids = Vec::with_capacity(current_ids.len() + delta.added.len());
+    let mut post_index_by_id = HashMap::new();
+
+    for id in current_ids {
+        if !ids_to_detach.contains(id) {
+            post_index_by_id.insert(*id, post_ids.len());
+            post_ids.push(*id);
+        }
+    }
+
+    let mut append_if_missing = |id: crate::object::ObjectId| {
+        if let std::collections::hash_map::Entry::Vacant(entry) = post_index_by_id.entry(id) {
+            entry.insert(post_ids.len());
+            post_ids.push(id);
+        }
+    };
+
+    for row in &delta.added {
+        append_if_missing(row.id);
+    }
+
+    for (_, new) in &delta.updated {
+        append_if_missing(new.id);
+    }
+
+    IndexedRowState {
+        pre_index_by_id,
+        post_index_by_id,
+        post_ids,
+    }
+}
+
 impl RowNode for OutputNode {
     fn output_descriptor(&self) -> &RowDescriptor {
         &self.descriptor
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // Apply changes to current_tuples and ordered_tuples
+        // Build next ordered state in three phases:
+        // 1) detach removed + updated-old ids from pre-state,
+        // 2) reinsert updated-new tuples in stream order (enables moves),
+        // 3) append added tuples in stream order.
+        let mut detached = AHashSet::new();
         for tuple in &input.removed {
-            self.current_tuples.remove(tuple);
-            self.ordered_tuples.retain(|t| t != tuple);
+            detached.insert(tuple.ids());
         }
+        for (old_tuple, _) in &input.updated {
+            detached.insert(old_tuple.ids());
+        }
+
+        let mut next_ordered: Vec<Tuple> = self
+            .ordered_tuples
+            .iter()
+            .filter(|t| !detached.contains(&t.ids()))
+            .cloned()
+            .collect();
+        let mut next_ids: AHashSet<_> = next_ordered.iter().map(|t| t.ids()).collect();
 
         for tuple in &input.added {
-            self.current_tuples.insert(tuple.clone());
-            self.ordered_tuples.push(tuple.clone());
-        }
-
-        for (old_tuple, new_tuple) in &input.updated {
-            self.current_tuples.remove(old_tuple);
-            self.current_tuples.insert(new_tuple.clone());
-            // Update in place in ordered_tuples to preserve position
-            if let Some(pos) = self.ordered_tuples.iter().position(|t| t == old_tuple) {
-                self.ordered_tuples[pos] = new_tuple.clone();
+            let ids = tuple.ids();
+            if !next_ids.contains(&ids) {
+                next_ids.insert(ids);
+                next_ordered.push(tuple.clone());
             }
         }
+
+        for (_, new_tuple) in &input.updated {
+            let ids = new_tuple.ids();
+            if !next_ids.contains(&ids) {
+                next_ids.insert(ids);
+                next_ordered.push(new_tuple.clone());
+            }
+        }
+
+        self.ordered_tuples = next_ordered;
+        self.current_tuples = self.ordered_tuples.iter().cloned().collect();
 
         self.dirty = false;
 
@@ -214,6 +305,10 @@ mod tests {
         let descriptor = test_descriptor();
         let tuple_desc = TupleDescriptor::single_with_materialization("", descriptor, true);
         OutputNode::with_tuple_descriptor(tuple_desc, mode)
+    }
+
+    fn ordered_ids(node: &OutputNode) -> Vec<ObjectId> {
+        node.ordered_tuples.iter().map(|t| t.ids()[0]).collect()
     }
 
     #[test]
@@ -328,5 +423,62 @@ mod tests {
         let deltas = node.take_tuple_deltas();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].added.len(), 1);
+    }
+
+    #[test]
+    fn index_row_delta_tracks_remove_add_and_move() {
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_new = ObjectId::new();
+        let row = |id: ObjectId| Row {
+            id,
+            data: vec![],
+            commit_id: CommitId([0; 32]),
+        };
+
+        // pre: [A, B]
+        // delta: remove B, add New, update A->A (move)
+        // post: [New, A]
+        let delta = RowDelta {
+            added: vec![row(id_new)],
+            removed: vec![row(id_b)],
+            updated: vec![(row(id_a), row(id_a))],
+        };
+        let indexed = index_row_delta(&[id_a, id_b], &delta);
+
+        assert_eq!(indexed.pre_index_by_id.get(&id_a), Some(&0));
+        assert_eq!(indexed.pre_index_by_id.get(&id_b), Some(&1));
+        assert_eq!(indexed.post_index_by_id.get(&id_new), Some(&0));
+        assert_eq!(indexed.post_index_by_id.get(&id_a), Some(&1));
+        assert_eq!(indexed.post_ids, vec![id_new, id_a]);
+    }
+
+    #[test]
+    fn output_applies_identity_updates_as_moves() {
+        let mut node = make_output_node(OutputMode::Delta);
+
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+        let a = make_tuple(id_a, 1, "A");
+        let b = make_tuple(id_b, 2, "B");
+        let c = make_tuple(id_c, 0, "C");
+
+        // Seed [A, B]
+        node.process(TupleDelta {
+            added: vec![a.clone(), b.clone()],
+            removed: vec![],
+            updated: vec![],
+        });
+        assert_eq!(ordered_ids(&node), vec![id_a, id_b]);
+
+        // Represent reorder to [C, A, B] via add C + move A/B.
+        node.process(TupleDelta {
+            added: vec![c],
+            removed: vec![],
+            updated: vec![(a.clone(), a), (b.clone(), b)],
+        });
+
+        assert_eq!(ordered_ids(&node), vec![id_c, id_a, id_b]);
     }
 }
