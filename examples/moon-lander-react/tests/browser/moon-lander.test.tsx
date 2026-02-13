@@ -31,6 +31,9 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Physics speed multiplier — 10x makes descent ~1s instead of ~7s. */
+const SPEED = 10;
+
 const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
 /** Mount the Game component. Returns the wrapper element. */
@@ -41,7 +44,7 @@ async function mountGame(): Promise<HTMLDivElement> {
   mounts.push({ root, container: el });
 
   await act(async () => {
-    root.render(<Game />);
+    root.render(<Game physicsSpeed={SPEED} />);
   });
 
   // Wait for canvas to appear
@@ -101,7 +104,7 @@ async function waitForAttr(
   el: HTMLDivElement,
   attr: string,
   expected: string,
-  timeoutMs = 10000,
+  timeoutMs = 5000,
 ): Promise<void> {
   const container = el.querySelector('[data-testid="game-container"]')!;
   await waitFor(
@@ -190,8 +193,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
     const y0 = readNum(el, "player-y");
 
-    // Let the game loop run for a bit
-    await new Promise((r) => setTimeout(r, 500));
+    // Let the game loop run briefly (at 10x speed, 100ms ≈ 1s game time)
+    await new Promise((r) => setTimeout(r, 100));
 
     const y1 = readNum(el, "player-y");
     expect(y1).toBeGreaterThan(y0); // Y increases = moving downward
@@ -204,13 +207,13 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
   it("upward thrust reduces descent speed", async () => {
     const el = await mountGame();
 
-    // Let gravity build up some downward velocity
-    await new Promise((r) => setTimeout(r, 300));
+    // Let gravity build up some downward velocity (100ms ≈ 1s game time)
+    await new Promise((r) => setTimeout(r, 100));
     const vy0 = readNum(el, "velocity-y");
     expect(vy0).toBeGreaterThan(0); // Falling downward
 
-    // Apply upward thrust
-    await holdKey("ArrowUp", 200, "ArrowUp");
+    // Apply upward thrust (50ms ≈ 0.5s game time)
+    await holdKey("ArrowUp", 50, "ArrowUp");
     await waitFrames(5);
 
     const vy1 = readNum(el, "velocity-y");
@@ -223,8 +226,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
     const x0 = readNum(el, "player-x");
 
-    // Thrust right
-    await holdKey("ArrowRight", 300, "ArrowRight");
+    // Thrust right (50ms ≈ 0.5s game time)
+    await holdKey("ArrowRight", 50, "ArrowRight");
     await waitFrames(5);
 
     const x1 = readNum(el, "player-x");
@@ -238,13 +241,10 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
   it("lands safely when reaching ground at low velocity", async () => {
     const el = await mountGame();
 
-    // Strategy: let the lander descend. The initial altitude is low enough
-    // and gravity gentle enough that we can use thrust to land safely.
-    // We wait for the lander to approach the ground, then check for landing.
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    // At 10x speed, landing happens in ~1-2s
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
     const y = readNum(el, "player-y");
-    // Player should be at or very near ground level after landing
     expect(y).toBeGreaterThanOrEqual(GROUND_LEVEL - 5);
     expect(y).toBeLessThanOrEqual(GROUND_LEVEL);
   });
@@ -273,8 +273,6 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
       }
     }
 
-    // Stars are spread across the full starfield. With the camera high up,
-    // fewer are visible in the top 100 rows — but at least some should appear.
     expect(brightPixels).toBeGreaterThan(0);
   });
 
@@ -285,9 +283,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
   it("renders the moon surface", async () => {
     const el = await mountGame();
 
-    // Ground is only on screen after camera follows the player down.
-    // Wait for landing so the camera locks with ground visible.
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    // Wait for landing so the camera locks with ground visible
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
     const canvas = el.querySelector<HTMLCanvasElement>(
       '[data-testid="game-canvas"]',
@@ -316,11 +313,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
   it("pressing E after landing exits the lander to walking mode", async () => {
     const el = await mountGame();
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
-    // Wait for landing
-    await waitForAttr(el, "player-mode", "landed", 15000);
-
-    // Press E to exit
     pressKey("e", "KeyE");
     await waitFrames(5);
     releaseKey("e", "KeyE");
@@ -334,7 +328,7 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
   it("astronaut walks right with D key", async () => {
     const el = await mountGame();
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
@@ -342,8 +336,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
     const x0 = readNum(el, "player-x");
 
-    // Walk right
-    await holdKey("d", 300, "KeyD");
+    // Walk right (50ms ≈ 0.5s game time → ~60px)
+    await holdKey("d", 50, "KeyD");
     await waitFrames(5);
 
     const x1 = readNum(el, "player-x");
@@ -352,7 +346,7 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
   it("astronaut walks left with A key", async () => {
     const el = await mountGame();
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
@@ -360,8 +354,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
     const x0 = readNum(el, "player-x");
 
-    // Walk left
-    await holdKey("a", 300, "KeyA");
+    // Walk left (50ms ≈ 0.5s game time → ~60px)
+    await holdKey("a", 50, "KeyA");
     await waitFrames(5);
 
     const x1 = readNum(el, "player-x");
@@ -374,24 +368,21 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
   it("lander remains visible at landing position while walking", async () => {
     const el = await mountGame();
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
-    // Record lander position
     const landerX = readNum(el, "lander-x");
 
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Walk away from the lander
-    await holdKey("d", 500, "KeyD");
+    // Walk away (80ms ≈ 0.8s game time → ~96px)
+    await holdKey("d", 80, "KeyD");
     await waitFrames(5);
 
-    // Lander should still be at the same position
     const landerX2 = readNum(el, "lander-x");
     expect(landerX2).toBe(landerX);
 
-    // Player should have moved away
     const playerX = readNum(el, "player-x");
     expect(playerX).not.toBe(landerX);
   });
@@ -402,19 +393,18 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
   it("pressing E near the lander re-enters it", async () => {
     const el = await mountGame();
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
-    // Exit lander
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Walk a short distance away (but stay close enough to return)
-    await holdKey("d", 150, "KeyD");
+    // Walk a short distance away (50ms ≈ 0.5s → ~60px)
+    await holdKey("d", 50, "KeyD");
     await waitFrames(3);
 
-    // Walk back toward lander
-    await holdKey("a", 200, "KeyA");
+    // Walk back toward lander (50ms ≈ 0.5s → ~60px, ending near start)
+    await holdKey("a", 50, "KeyA");
     await waitFrames(3);
 
     // Should be near lander — press E to re-enter
@@ -427,17 +417,16 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
 
   it("pressing E when far from lander does nothing", async () => {
     const el = await mountGame();
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    await waitForAttr(el, "player-mode", "landed", 3000);
 
     pressKey("e", "KeyE");
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // Walk far away from lander
-    await holdKey("d", 1000, "KeyD");
+    // Walk far away (200ms ≈ 2s game time → ~240px)
+    await holdKey("d", 200, "KeyD");
     await waitFrames(5);
 
-    // Verify we're far from the lander
     const playerX = readNum(el, "player-x");
     const landerX = readNum(el, "lander-x");
     expect(Math.abs(playerX - landerX)).toBeGreaterThan(LANDER_INTERACT_RADIUS);
@@ -482,9 +471,7 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
     const startY = readNum(el, "player-y");
     expect(startY).toBeLessThan(GROUND_LEVEL);
 
-    // Use gentle thrust to control descent
-    // (just let it descend naturally — initial altitude is low)
-    await waitForAttr(el, "player-mode", "landed", 15000);
+    await waitForAttr(el, "player-mode", "landed", 3000);
     expect(readNum(el, "player-y")).toBeGreaterThanOrEqual(GROUND_LEVEL - 5);
 
     // --- Exit lander ---
@@ -493,8 +480,8 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
     await waitForAttr(el, "player-mode", "walking", 3000);
     releaseKey("e", "KeyE");
 
-    // --- Walk right ---
-    await holdKey("d", 400, "KeyD");
+    // --- Walk right (80ms ≈ 0.8s → ~96px) ---
+    await holdKey("d", 80, "KeyD");
     await waitFrames(5);
     const walkRightX = readNum(el, "player-x");
     expect(walkRightX).toBeGreaterThan(landerX);
@@ -502,14 +489,14 @@ describe("Moon Lander — Phase 1: Solo Landing & Walking", () => {
     // Lander hasn't moved
     expect(readNum(el, "lander-x")).toBe(landerX);
 
-    // --- Walk back left toward lander ---
-    await holdKey("a", 600, "KeyA");
+    // --- Walk back left toward lander (100ms ≈ 1s → ~120px) ---
+    await holdKey("a", 100, "KeyA");
     await waitFrames(5);
     const walkBackX = readNum(el, "player-x");
     expect(walkBackX).toBeLessThan(walkRightX);
 
     // --- Re-enter lander ---
-    // We should be near the lander now (walked back past it)
+    // Net movement: ~96px right, ~120px left → ~24px left of lander → within radius
     pressKey("e", "KeyE");
     await waitFrames(5);
     releaseKey("e", "KeyE");

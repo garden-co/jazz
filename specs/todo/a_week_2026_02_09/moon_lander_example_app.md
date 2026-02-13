@@ -417,7 +417,7 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
 
 ### Phase 2: Multiplayer Basics
 
-- [ ] Jazz sync server with JWT auth
+- [ ] Jazz sync server
 - [ ] Unique dbName per tab for OPFS lock avoidance
 - [ ] Player creation with stable identity (localStorage playerId, deterministic name)
 - [ ] Player presence (online/offline heartbeat every 3s)

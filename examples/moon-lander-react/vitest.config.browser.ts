@@ -16,6 +16,7 @@ export default defineConfig({
       headless: true,
     },
     include: ["tests/browser/**/*.test.tsx"],
+    globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
 });
