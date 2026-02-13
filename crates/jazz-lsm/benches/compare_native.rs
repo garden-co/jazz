@@ -7,7 +7,12 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use fjall::{Config as FjallConfig, PartitionCreateOptions, PersistMode};
 use jazz_lsm::{LsmOptions, LsmTree, StdFs, WriteDurability};
 use rocksdb::{Options as RocksOptions, WriteOptions};
+use surrealkv::{
+    Durability as SurrealDurability, Mode as SurrealMode, Transaction as SurrealTransaction,
+    Tree as SurrealTree, TreeBuilder as SurrealTreeBuilder,
+};
 use tempfile::TempDir;
+use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 const DEFAULT_VALUE_SIZES: [usize; 3] = [32, 256, 4096];
 const DEFAULT_KEY_COUNT: usize = 5_000;
@@ -211,6 +216,94 @@ impl Engine for FjallEngine {
     }
 }
 
+struct SurrealKvEngine {
+    tree: SurrealTree,
+    runtime: TokioRuntime,
+    write_txn: Option<SurrealTransaction>,
+    read_txn: Option<SurrealTransaction>,
+}
+
+impl SurrealKvEngine {
+    fn open(path: &Path) -> Self {
+        let runtime = TokioRuntimeBuilder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build surrealkv tokio runtime");
+        let tree = {
+            let _guard = runtime.enter();
+            SurrealTreeBuilder::new()
+                .with_path(path.join("surrealkv"))
+                .with_level_count(4)
+                .with_max_memtable_size(256 * 1024 * 1024)
+                .without_compression()
+                .build()
+                .expect("open surrealkv")
+        };
+        Self {
+            tree,
+            runtime,
+            write_txn: None,
+            read_txn: None,
+        }
+    }
+
+    fn ensure_write_txn(&mut self) -> &mut SurrealTransaction {
+        if self.write_txn.is_none() {
+            let txn = {
+                let _guard = self.runtime.enter();
+                self.tree
+                    .begin()
+                    .expect("begin surrealkv write txn")
+                    .with_durability(SurrealDurability::Eventual)
+            };
+            self.write_txn = Some(txn);
+        }
+        self.write_txn.as_mut().expect("surrealkv write txn")
+    }
+
+    fn ensure_read_txn(&mut self) -> &mut SurrealTransaction {
+        if self.read_txn.is_none() {
+            let txn = {
+                let _guard = self.runtime.enter();
+                self.tree
+                    .begin_with_mode(SurrealMode::ReadOnly)
+                    .expect("begin surrealkv read txn")
+            };
+            self.read_txn = Some(txn);
+        }
+        self.read_txn.as_mut().expect("surrealkv read txn")
+    }
+}
+
+impl Engine for SurrealKvEngine {
+    fn put(&mut self, key: &[u8], value: &[u8]) {
+        self.read_txn = None;
+        self.ensure_write_txn()
+            .set(key, value)
+            .expect("surrealkv set");
+    }
+
+    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+        if self.write_txn.is_some() {
+            self.finish_writes();
+        }
+        self.ensure_read_txn()
+            .get(key)
+            .expect("surrealkv get")
+            .expect("surrealkv key present")
+    }
+
+    fn finish_writes(&mut self) {
+        self.read_txn = None;
+        if let Some(mut txn) = self.write_txn.take() {
+            self.runtime
+                .block_on(async { txn.commit().await })
+                .expect("surrealkv commit");
+        }
+    }
+}
+
 fn key(i: usize) -> Vec<u8> {
     format!("k{i:08}").into_bytes()
 }
@@ -244,6 +337,7 @@ fn engine_factories(max_value_size: usize) -> Vec<(&'static str, Box<dyn Fn(&Pat
         ));
     }
     out.push(("rocksdb", Box::new(|path| Box::new(RocksDbEngine::open(path)))));
+    out.push(("surrealkv", Box::new(|path| Box::new(SurrealKvEngine::open(path)))));
     out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
     out
 }

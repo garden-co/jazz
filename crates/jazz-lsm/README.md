@@ -46,7 +46,7 @@ Compile checks used during development:
     - `JAZZ_LSM_BENCH_VALUE_SIZES` (comma-separated bytes, e.g. `32,256,4096`)
 - Native mixed benchmark matrix (ops/s + p95 op latency + operation counters):
   - `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 5000 --value-sizes 32,256,4096 --json`
-- Native comparative benchmark (same workload matrix across `jazz-lsm`, `bf-tree`, `rocksdb`, `fjall`):
+- Native comparative benchmark (same workload matrix across `jazz-lsm`, `bf-tree`, `rocksdb`, `surrealkv`, `fjall`):
   - `cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
   - Uses the same optional env overrides:
     - `JAZZ_LSM_BENCH_KEY_COUNT`

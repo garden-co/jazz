@@ -4,24 +4,24 @@ Generated on 2026-02-13.
 
 All values below are throughput shown as `K/s` (1 K = 1,000 ops/s) from the runs executed in this session. Native numbers come from Criterion `--quick` runs; WASM numbers come from the OPFS worker harness.
 
-| Scenario | Value Size (bytes) | jazz-lsm native (compare_native) | jazz-lsm wasm/opfs | bf-tree native | rocksdb native | fjall native | bf-tree wasm/opfs | Notes |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| seq_write | 32 | 36.3 K/s | 3.4 K/s | 866.3 K/s | 1430.1 K/s | 21.2 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| random_write | 32 | 34.0 K/s | 3.3 K/s | 1160.1 K/s | 1062.5 K/s | 21.4 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| seq_read | 32 | 3.1 K/s | 4.8 K/s | 2767.3 K/s | 1069.9 K/s | 23.1 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| random_read | 32 | 3.1 K/s | 4.9 K/s | 2401.0 K/s | 1015.2 K/s | 23.1 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| seq_write | 256 | 26.8 K/s | 3.1 K/s | 365.7 K/s | 1063.8 K/s | 21.4 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| random_write | 256 | 24.6 K/s | 3.1 K/s | 622.3 K/s | 824.4 K/s | 21.5 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| seq_read | 256 | 5.9 K/s | 4.3 K/s | 2162.7 K/s | 988.1 K/s | 24.2 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| random_read | 256 | 5.9 K/s | 4.4 K/s | 1783.8 K/s | 908.0 K/s | 24.3 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| seq_write | 4096 | 3.0 K/s | 3.7 K/s | 33.6 K/s | 152.1 K/s | 10.8 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| random_write | 4096 | 3.1 K/s | 3.7 K/s | 41.4 K/s | 161.5 K/s | 10.1 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| seq_read | 4096 | 0.6 K/s | 0.7 K/s | 322.1 K/s | 352.9 K/s | 23.1 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| random_read | 4096 | 0.5 K/s | 0.7 K/s | 314.6 K/s | 324.5 K/s | 21.2 K/s | N/A | Native `count=5000`; WASM `count=500` |
-| seq_write | 1,048,576 | <0.1 K/s | 0.1 K/s | N/A | 0.8 K/s | 0.3 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: <0.1 K/s |
-| random_write | 1,048,576 | <0.1 K/s | 0.1 K/s | N/A | 0.8 K/s | 0.2 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: <0.1 K/s |
-| seq_read | 1,048,576 | 0.3 K/s | 0.2 K/s | N/A | 4.6 K/s | 1.3 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: 0.2 K/s |
-| random_read | 1,048,576 | 0.2 K/s | 0.2 K/s | N/A | 3.7 K/s | 0.2 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: 0.2 K/s |
+| Scenario | Value Size (bytes) | jazz-lsm native (compare_native) | jazz-lsm wasm/opfs | bf-tree native | rocksdb native | surrealkv native | fjall native | bf-tree wasm/opfs | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| seq_write | 32 | 125.5 K/s | 3.4 K/s | 1110.7 K/s | 1265.8 K/s | 487.4 K/s | 21.4 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| random_write | 32 | 182.1 K/s | 3.3 K/s | 1148.6 K/s | 983.5 K/s | 482.1 K/s | 21.4 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| seq_read | 32 | 66.0 K/s | 4.8 K/s | 2764.1 K/s | 1017.0 K/s | 704.8 K/s | 29.6 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| random_read | 32 | 66.4 K/s | 4.9 K/s | 2371.1 K/s | 950.4 K/s | 563.9 K/s | 22.1 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| seq_write | 256 | 60.6 K/s | 3.1 K/s | 876.2 K/s | 947.7 K/s | 411.1 K/s | 21.8 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| random_write | 256 | 62.6 K/s | 3.1 K/s | 891.6 K/s | 819.9 K/s | 386.9 K/s | 21.2 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| seq_read | 256 | 145.3 K/s | 4.3 K/s | 2813.7 K/s | 890.4 K/s | 666.3 K/s | 22.5 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| random_read | 256 | 147.5 K/s | 4.4 K/s | 2217.4 K/s | 877.7 K/s | 621.1 K/s | 22.8 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| seq_write | 4096 | 2.7 K/s | 3.7 K/s | 76.7 K/s | 150.9 K/s | 129.4 K/s | 21.3 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| random_write | 4096 | 3.6 K/s | 3.7 K/s | 81.1 K/s | 201.1 K/s | 116.1 K/s | 20.9 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| seq_read | 4096 | 86.7 K/s | 0.7 K/s | 515.6 K/s | 353.4 K/s | 541.0 K/s | 29.1 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| random_read | 4096 | 55.0 K/s | 0.7 K/s | 432.7 K/s | 327.5 K/s | 455.5 K/s | 28.8 K/s | N/A | Native `count=5000`; WASM `count=500` |
+| seq_write | 1,048,576 | <0.1 K/s | 0.1 K/s | N/A | 0.7 K/s | 0.7 K/s | 0.3 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: <0.1 K/s |
+| random_write | 1,048,576 | <0.1 K/s | 0.1 K/s | N/A | 0.6 K/s | 0.7 K/s | 0.3 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: <0.1 K/s |
+| seq_read | 1,048,576 | 1.6 K/s | 0.2 K/s | N/A | 5.9 K/s | 1.9 K/s | 0.2 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: 0.2 K/s |
+| random_read | 1,048,576 | 1.8 K/s | 0.2 K/s | N/A | 6.4 K/s | 6.5 K/s | 0.2 K/s | N/A | Native compare `count=64`; WASM `count=32`; `bf-tree` unsupported at 1MB. Standalone `lsm_native`: 0.2 K/s |
 
 Rounded to one decimal place; values below `0.1 K/s` are shown as `<0.1 K/s`.
 
@@ -156,7 +156,8 @@ Phase 6 values below compare against Phase 5 where a Phase 5 baseline exists.
 
 - `jazz-lsm` WASM rerun (standard sizes): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --count 500 --value-sizes 32,256,4096 --json`
 - `jazz-lsm` native 1MB standalone: `JAZZ_LSM_BENCH_KEY_COUNT=64 JAZZ_LSM_BENCH_VALUE_SIZES=1048576 cargo bench -p jazz-lsm --bench lsm_native -- --quick`
-- Native comparative 1MB: `DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib JAZZ_LSM_BENCH_KEY_COUNT=64 JAZZ_LSM_BENCH_VALUE_SIZES=1048576 cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
+- Native comparative standard sizes (`jazz-lsm` / `bf-tree` / `rocksdb` / `surrealkv` / `fjall`): `DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
+- Native comparative 1MB (`jazz-lsm` / `rocksdb` / `surrealkv` / `fjall`): `DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib JAZZ_LSM_BENCH_KEY_COUNT=64 JAZZ_LSM_BENCH_VALUE_SIZES=1048576 cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
 - `jazz-lsm` WASM 1MB: `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --count 32 --value-sizes 1048576 --json`
 - Mixed native baseline (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
 - Mixed native baseline (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
