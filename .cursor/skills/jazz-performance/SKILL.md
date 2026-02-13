@@ -41,16 +41,16 @@ In browsers and on mobile devices, the fastest crypto will automatically be init
 
 ```ts
 // ❌ SLOW: Inline CoValue creation creates a dependency chain
-const task = await Task.create({
+const task = Task.create({
   column: {
     board: { team: myTeam }
   }
 });
 
 // ✅ FASTER: Flat structure with references
-const board = await Board.create({ team: myTeam });
-const column = await Column.create({ board });
-const task = await Task.create({ column });
+const board = Board.create({ team: myTeam });
+const column = Column.create({ board });
+const task = Task.create({ column });
 ```
 
 ### Use `sameAsContainer`
