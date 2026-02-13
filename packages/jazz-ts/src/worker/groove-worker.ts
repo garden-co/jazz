@@ -23,8 +23,7 @@ let mainClientId: string | null = null;
 let jwtToken: string | undefined;
 let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
-let serverClientId: string | null = null; // Client ID assigned by server (from Connected frame)
-let streamClientId: string | null = null; // Stable ID we use for /events and /sync
+let syncClientId: string | null = null; // Stable ID used for /events and /sync
 let upstreamServerUrl: string | null = null;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
 
@@ -71,7 +70,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     // Store auth
     jwtToken = msg.jwtToken;
     adminSecret = msg.adminSecret;
-    streamClientId = resolveClientId(msg.clientId);
+    syncClientId = resolveClientId(msg.clientId);
     upstreamServerUrl = msg.serverUrl ?? null;
 
     // Register main thread as a Peer client
@@ -94,9 +93,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
     });
 
     // Connect to upstream server if URL provided.
-    // IMPORTANT: connectStream first to set serverClientId, THEN addServer.
-    // addServer() flushes the outbox synchronously (including catalogue sync),
-    // and those POSTs need serverClientId to be set.
+    // IMPORTANT: connectStream first so auth/session path is active before
+    // addServer() flushes the outbox synchronously.
     if (msg.serverUrl) {
       await connectStream(msg.serverUrl);
       runtime.addServer();
@@ -120,20 +118,29 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
 /** POST a sync payload to the upstream server. */
 async function sendToServer(serverUrl: string, payload: any): Promise<void> {
+  if (!syncClientId) {
+    console.error("[worker] Missing sync client_id; dropping outbound payload");
+    return;
+  }
+
   await sendSyncPayload(
     serverUrl,
     payload,
-    { jwtToken, adminSecret, clientId: serverClientId ?? streamClientId ?? undefined },
+    { jwtToken, adminSecret, clientId: syncClientId },
     "[worker] ",
   );
 }
 
 /**
  * Connect to the server's binary streaming endpoint.
- * Resolves once the Connected frame is received (serverClientId is set).
+ * Resolves once the Connected frame is received.
  * Stream reading continues in the background after resolution.
  */
 async function connectStream(serverUrl: string): Promise<void> {
+  if (!syncClientId) {
+    throw new Error("[worker] Missing sync client_id before stream connect");
+  }
+
   const headers: Record<string, string> = {
     Accept: "application/octet-stream",
   };
@@ -144,7 +151,7 @@ async function connectStream(serverUrl: string): Promise<void> {
   const abortController = new AbortController();
   streamAbortController = abortController;
 
-  const params = streamClientId ? `?client_id=${encodeURIComponent(streamClientId)}` : "";
+  const params = `?client_id=${encodeURIComponent(syncClientId)}`;
   const streamUrl = `${serverUrl}/events${params}`;
 
   try {
@@ -181,8 +188,11 @@ async function connectStream(serverUrl: string): Promise<void> {
             {
               onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
               onConnected: (clientId) => {
-                serverClientId = clientId;
-                streamClientId = clientId;
+                if (clientId !== syncClientId) {
+                  console.warn(
+                    `[worker] Connected client_id mismatch: requested ${syncClientId}, got ${clientId}`,
+                  );
+                }
                 resolve();
               },
             },

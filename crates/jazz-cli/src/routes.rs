@@ -18,7 +18,7 @@ use serde::Deserialize;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::commands::server::{ConnectionState, ServerState};
+use crate::commands::server::{ConnectionState, PendingClientCleanup, ServerState};
 use crate::middleware::auth::{extract_session, validate_admin_secret};
 
 /// Create the router with all routes.
@@ -53,6 +53,68 @@ fn encode_frame(event: &ServerEvent) -> Bytes {
     buf.extend_from_slice(&len);
     buf.extend_from_slice(&json);
     Bytes::from(buf)
+}
+
+async fn cancel_pending_client_cleanup(
+    state: &Arc<ServerState>,
+    client_id: groove::sync_manager::ClientId,
+) {
+    let pending = {
+        let mut cleanup = state.pending_client_cleanup.write().await;
+        cleanup.remove(&client_id)
+    };
+
+    if let Some(pending) = pending {
+        pending.handle.abort();
+    }
+}
+
+async fn schedule_client_cleanup(
+    state: Arc<ServerState>,
+    client_id: groove::sync_manager::ClientId,
+) {
+    cancel_pending_client_cleanup(&state, client_id).await;
+
+    let generation = state
+        .next_cleanup_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let grace = state.client_disconnect_grace;
+    let state_for_task = state.clone();
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+
+        let still_connected = {
+            let connections = state_for_task.connections.read().await;
+            connections
+                .values()
+                .any(|connection| connection.client_id == client_id)
+        };
+
+        if still_connected {
+            tracing::debug!(
+                "Skipping delayed cleanup for client {} (reconnected within grace window)",
+                client_id
+            );
+        } else {
+            let _ = state_for_task.runtime.remove_client(client_id);
+            tracing::debug!(
+                "Removed disconnected client {} after {:?}",
+                client_id,
+                grace
+            );
+        }
+
+        let mut pending = state_for_task.pending_client_cleanup.write().await;
+        if let Some(current) = pending.get(&client_id)
+            && current.generation == generation
+        {
+            pending.remove(&client_id);
+        }
+    });
+
+    let mut pending = state.pending_client_cleanup.write().await;
+    pending.insert(client_id, PendingClientCleanup { generation, handle });
 }
 
 /// Binary streaming events endpoint - clients connect here for all updates.
@@ -100,6 +162,9 @@ async fn events_handler(
         }
     };
 
+    // Client reconnected: cancel any delayed cleanup task.
+    cancel_pending_client_cleanup(&state, client_id).await;
+
     // Ensure client is registered with session (idempotent — won't overwrite
     // existing role if client was already registered by a /sync request).
     let _ = state.runtime.ensure_client_with_session(client_id, session);
@@ -110,12 +175,7 @@ async fn events_handler(
     // Store connection state
     {
         let mut connections = state.connections.write().await;
-        connections.insert(
-            connection_id,
-            ConnectionState {
-                _client_id: client_id,
-            },
-        );
+        connections.insert(connection_id, ConnectionState { client_id });
     }
 
     // Clone state for cleanup on drop
@@ -173,8 +233,28 @@ async fn events_handler(
             let mut connections = state_cleanup.connections.write().await;
             connections.remove(&connection_id_cleanup);
         }
-        let _ = state_cleanup.runtime.remove_client(client_id_cleanup);
-        tracing::debug!("Stream connection {} closed, cleaned up", connection_id_cleanup);
+
+        let has_active_connections = {
+            let connections = state_cleanup.connections.read().await;
+            connections
+                .values()
+                .any(|connection| connection.client_id == client_id_cleanup)
+        };
+
+        if has_active_connections {
+            tracing::debug!(
+                "Stream connection {} closed for client {}, but other streams remain",
+                connection_id_cleanup,
+                client_id_cleanup
+            );
+        } else {
+            schedule_client_cleanup(state_cleanup.clone(), client_id_cleanup).await;
+            tracing::debug!(
+                "Stream connection {} closed for client {}; scheduled delayed cleanup",
+                connection_id_cleanup,
+                client_id_cleanup
+            );
+        }
     };
 
     Ok(axum::response::Response::builder()

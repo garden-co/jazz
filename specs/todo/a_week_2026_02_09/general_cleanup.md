@@ -127,3 +127,17 @@ Primary purpose of client IDs is server-side sync-state continuity across short 
 3. **Validation**
    - Add tests for stable ID reuse across remount/reconnect.
    - Add tests for server-side short-disconnect resume (state retained within lease, purged after).
+
+### Progress
+
+- ✅ Phase 1 started in `jazz-ts`:
+  - Stable `sync_client_id` resolution + browser persistence (`localStorage`)
+  - Single-ID usage for both `/events` query param and `/sync` body
+  - `Connected.client_id` is no longer adopted as local identity
+  - Removed transport fallback client-id generation path
+  - Added unit coverage for client-id helpers, transport headers, and persistence keying
+- ✅ Phase 2 started in `jazz-cli`:
+  - Stream disconnect now schedules delayed client cleanup (default 60s grace window)
+  - Reconnect cancels pending cleanup for that `client_id`
+  - Cleanup runs only when no active stream remains for that client
+- ⏳ Follow-up: add dedicated tests for lease expiry behavior (retain within grace, purge after)

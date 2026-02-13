@@ -185,7 +185,6 @@ export class JazzClient {
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
   private readonly syncClientId: string;
-  private serverClientId: string | null = null;
 
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
@@ -546,7 +545,7 @@ export class JazzClient {
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
       adminSecret: this.context.adminSecret,
-      clientId: this.serverClientId ?? this.syncClientId,
+      clientId: this.syncClientId,
     });
   }
 
@@ -567,7 +566,7 @@ export class JazzClient {
     const abortController = new AbortController();
     this.streamAbortController = abortController;
 
-    const params = new URLSearchParams({ client_id: this.serverClientId ?? this.syncClientId });
+    const params = new URLSearchParams({ client_id: this.syncClientId });
     const streamUrl = `${serverUrl}/events?${params.toString()}`;
 
     try {
@@ -588,7 +587,11 @@ export class JazzClient {
       await readBinaryFrames(reader, {
         onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
         onConnected: (clientId) => {
-          this.serverClientId = clientId;
+          if (clientId !== this.syncClientId) {
+            console.warn(
+              `Connected client_id mismatch: requested ${this.syncClientId}, got ${clientId}`,
+            );
+          }
         },
       });
     } catch (e: any) {

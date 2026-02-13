@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::BfTreeStorage;
@@ -20,7 +22,11 @@ pub struct ServerState {
     #[allow(dead_code)]
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
-    pub next_connection_id: std::sync::atomic::AtomicU64,
+    pub next_connection_id: AtomicU64,
+    /// Pending delayed client cleanup tasks (for reconnect grace window)
+    pub pending_client_cleanup: RwLock<HashMap<ClientId, PendingClientCleanup>>,
+    pub next_cleanup_generation: AtomicU64,
+    pub client_disconnect_grace: Duration,
     /// Broadcast channel for sending sync payloads to SSE clients
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
     /// Authentication configuration
@@ -29,7 +35,12 @@ pub struct ServerState {
 
 /// State for a single SSE connection.
 pub struct ConnectionState {
-    pub _client_id: ClientId,
+    pub client_id: ClientId,
+}
+
+pub struct PendingClientCleanup {
+    pub generation: u64,
+    pub handle: tokio::task::JoinHandle<()>,
 }
 
 /// Run the Jazz server.
@@ -93,7 +104,10 @@ pub async fn run(
         runtime,
         app_id,
         connections: RwLock::new(HashMap::new()),
-        next_connection_id: std::sync::atomic::AtomicU64::new(1),
+        next_connection_id: AtomicU64::new(1),
+        pending_client_cleanup: RwLock::new(HashMap::new()),
+        next_cleanup_generation: AtomicU64::new(1),
+        client_disconnect_grace: Duration::from_secs(60),
         sync_broadcast: sync_tx,
         auth_config,
     });

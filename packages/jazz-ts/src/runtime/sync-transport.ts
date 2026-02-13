@@ -6,16 +6,12 @@
  * catalogue payload detection.
  */
 
-import { generateClientId } from "./client-id.js";
-
 /** Auth and identity context for sync operations. */
 export interface SyncAuth {
   jwtToken?: string;
   adminSecret?: string;
-  clientId?: string;
+  clientId: string;
 }
-
-const fallbackClientId = generateClientId();
 
 /** Callbacks for stream events. */
 export interface StreamCallbacks {
@@ -62,7 +58,7 @@ export async function sendSyncPayload(
 
     const body = JSON.stringify({
       payload,
-      client_id: auth.clientId ?? fallbackClientId,
+      client_id: auth.clientId,
     });
 
     const response = await fetch(`${serverUrl}/sync`, {

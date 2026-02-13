@@ -17,6 +17,7 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRows } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import { withResolvedSyncClientId } from "./sync-client-id-store.js";
 
 /**
  * Configuration for creating a Db instance.
@@ -24,7 +25,7 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 export interface DbConfig {
   /** Application identifier (used for isolation) */
   appId: string;
-  /** Optional sync client ID (UUID) */
+  /** Optional sync client ID (UUID); if omitted, a stable ID is generated */
   clientId?: string;
   /** Storage driver implementation (optional — storage is in-memory by default) */
   driver?: StorageDriver;
@@ -119,6 +120,7 @@ export class Db {
    * @internal Use createDb() instead.
    */
   static async create(config: DbConfig): Promise<Db> {
+    config = withResolvedSyncClientId(config);
     const wasmModule = await loadWasmModule();
     return new Db(config, wasmModule);
   }
@@ -133,6 +135,7 @@ export class Db {
    * @internal Use createDb() instead — it auto-detects browser.
    */
   static async createWithWorker(config: DbConfig): Promise<Db> {
+    config = withResolvedSyncClientId(config);
     const wasmModule = await loadWasmModule();
     const db = new Db(config, wasmModule);
 
