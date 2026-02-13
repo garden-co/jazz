@@ -112,10 +112,20 @@ impl RowNode for SortNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
+        let old_sorted = self.sorted_tuples.clone();
+        let old_positions: ahash::AHashMap<_, _> = old_sorted
+            .iter()
+            .enumerate()
+            .map(|(idx, tuple)| (tuple.ids(), idx))
+            .collect();
+
         // Track which tuple IDs are added/removed
         let mut added_ids: AHashSet<_> = input.added.iter().map(|t| t.ids()).collect();
+        let added_ids_all = added_ids.clone();
         let mut removed_ids: AHashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
+        let removed_ids_all = removed_ids.clone();
         let updated_old_ids: AHashSet<_> = input.updated.iter().map(|(old, _)| old.ids()).collect();
+        let mut emitted_updated_ids = updated_old_ids.clone();
 
         // Handle removals - find and remove
         for tuple in &input.removed {
@@ -168,6 +178,24 @@ impl RowNode for SortNode {
                     .find(|t| t.ids() == old_tuple.ids())
             {
                 result.updated.push((old_tuple.clone(), new_tuple.clone()));
+            }
+        }
+
+        // Emit identity-preserving updates when tuples shift position because of
+        // inserts/removals around them. This encodes move information for downstream
+        // nodes that only receive deltas.
+        for (new_idx, new_tuple) in self.sorted_tuples.iter().enumerate() {
+            let ids = new_tuple.ids();
+            if added_ids_all.contains(&ids) || removed_ids_all.contains(&ids) {
+                continue;
+            }
+            if emitted_updated_ids.contains(&ids) {
+                continue;
+            }
+            if let Some(old_idx) = old_positions.get(&ids) && *old_idx != new_idx {
+                let old_tuple = old_sorted[*old_idx].clone();
+                result.updated.push((old_tuple, new_tuple.clone()));
+                emitted_updated_ids.insert(ids);
             }
         }
 
@@ -454,5 +482,52 @@ mod tests {
         let sorted_ids = get_sorted_ids(&node);
         assert_eq!(sorted_ids[0], id2); // 50 first
         assert_eq!(sorted_ids[1], id1); // 100 second
+    }
+
+    #[test]
+    fn sort_emits_move_updates_when_insert_shifts_positions() {
+        let sort_keys = vec![SortKey {
+            col_index: 2, // score asc
+            direction: SortDirection::Ascending,
+        }];
+        let mut node = make_sort_node(sort_keys);
+
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+        let a = make_tuple(
+            id_a,
+            &[Value::Integer(1), Value::Text("A".into()), Value::Integer(10)],
+        );
+        let b = make_tuple(
+            id_b,
+            &[Value::Integer(2), Value::Text("B".into()), Value::Integer(20)],
+        );
+        let c = make_tuple(
+            id_c,
+            &[Value::Integer(3), Value::Text("C".into()), Value::Integer(0)],
+        );
+
+        // Seed: [A, B]
+        node.process(TupleDelta {
+            added: vec![a.clone(), b.clone()],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        // Insert C at front => [C, A, B]. A and B should be emitted as move updates.
+        let delta = node.process(TupleDelta {
+            added: vec![c],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        assert_eq!(delta.added.len(), 1);
+        assert_eq!(delta.added[0].ids()[0], id_c);
+        assert_eq!(delta.updated.len(), 2);
+        assert_eq!(delta.updated[0].0.ids()[0], id_a);
+        assert_eq!(delta.updated[0].1.ids()[0], id_a);
+        assert_eq!(delta.updated[1].0.ids()[0], id_b);
+        assert_eq!(delta.updated[1].1.ids()[0], id_b);
     }
 }
