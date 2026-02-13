@@ -10,7 +10,7 @@ use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
-use groove::storage::{BfTreeStorage, Storage};
+use groove::storage::{Storage, SurrealKvStorage};
 use groove::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
 };
@@ -26,7 +26,7 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 /// Combines local persistence with server sync.
 pub struct JazzClient {
     /// Handle to the local runtime.
-    runtime: TokioRuntime<BfTreeStorage>,
+    runtime: TokioRuntime<SurrealKvStorage>,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
     /// Active subscriptions (metadata).
@@ -48,7 +48,7 @@ impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
-    /// 1. Open local RocksDB storage
+    /// 1. Open local SurrealKV storage
     /// 2. Initialize the runtime
     /// 3. Connect to the server (if URL provided)
     /// 4. Start syncing
@@ -103,8 +103,8 @@ impl JazzClient {
         };
 
         // Create persistent storage
-        let db_path = context.data_dir.join("groove.bftree");
-        let storage = BfTreeStorage::open(&db_path, 64 * 1024 * 1024)
+        let db_path = context.data_dir.join("groove.surrealkv");
+        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| JazzError::Storage(format!("{:?}", e)))?;
 
         // Clone server connection for sync callback
@@ -403,10 +403,16 @@ impl JazzClient {
             .await
             .map_err(|e| JazzError::Connection(e.to_string()))?;
 
-        // Snapshot bf-tree storage to disk for persistence
+        // Flush buffered data to ensure persistence
         self.runtime
             .with_storage(|storage| storage.flush())
             .map_err(|e| JazzError::Storage(e.to_string()))?;
+
+        // Close SurrealKV to release lock files before process shutdown/reopen.
+        self.runtime
+            .with_storage(|storage| storage.close())
+            .map_err(|e| JazzError::Storage(e.to_string()))?
+            .map_err(|e| JazzError::Storage(format!("{:?}", e)))?;
 
         Ok(())
     }
@@ -463,7 +469,7 @@ impl<'a> SessionClient<'a> {
 }
 
 /// Handle incoming server events.
-fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<BfTreeStorage>) -> Result<()> {
+fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<SurrealKvStorage>) -> Result<()> {
     match event {
         ServerEvent::Connected {
             connection_id,

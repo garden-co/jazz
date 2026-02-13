@@ -13,6 +13,10 @@
 mod bftree;
 #[cfg(feature = "bftree")]
 pub use bftree::BfTreeStorage;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+mod surrealkv;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+pub use surrealkv::SurrealKvStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;

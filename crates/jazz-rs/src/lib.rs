@@ -1,7 +1,7 @@
 //! Jazz Rust client library.
 //!
 //! Provides a high-level API for building Jazz applications with:
-//! - Local persistence via RocksDB
+//! - Local persistence via SurrealKV
 //! - Server sync via HTTP/SSE
 //! - Query subscriptions with real-time updates
 //!
@@ -64,7 +64,7 @@ pub struct AppContext {
     pub schema: Schema,
     /// Server URL for sync (e.g., "http://localhost:1625").
     pub server_url: String,
-    /// Local data directory for RocksDB storage.
+    /// Local data directory for SurrealKV storage.
     pub data_dir: PathBuf,
 
     // Authentication fields
