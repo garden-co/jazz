@@ -162,10 +162,10 @@ async fn get_todo(State(state): State<Arc<AppState>>, Path(id): Path<Uuid>) -> i
         Ok(rows) => {
             // Find the todo with matching id
             for (object_id, values) in &rows {
-                if *object_id.uuid() == id {
-                    if let Some(todo) = row_to_todo(*object_id, values) {
-                        return Json(todo).into_response();
-                    }
+                if *object_id.uuid() == id
+                    && let Some(todo) = row_to_todo(*object_id, values)
+                {
+                    return Json(todo).into_response();
                 }
             }
             (
@@ -207,10 +207,10 @@ async fn update_todo(
         let query = QueryBuilder::new("todos").build();
         if let Ok(rows) = state.client.query(query, None).await {
             for (oid, values) in &rows {
-                if *oid.uuid() == id {
-                    if let Some(todo) = row_to_todo(*oid, values) {
-                        return Json(todo).into_response();
-                    }
+                if *oid.uuid() == id
+                    && let Some(todo) = row_to_todo(*oid, values)
+                {
+                    return Json(todo).into_response();
                 }
             }
         }
@@ -231,10 +231,10 @@ async fn update_todo(
             match state.client.query(query, None).await {
                 Ok(rows) => {
                     for (oid, values) in &rows {
-                        if *oid.uuid() == id {
-                            if let Some(todo) = row_to_todo(*oid, values) {
-                                return Json(todo).into_response();
-                            }
+                        if *oid.uuid() == id
+                            && let Some(todo) = row_to_todo(*oid, values)
+                        {
+                            return Json(todo).into_response();
                         }
                     }
                     (
