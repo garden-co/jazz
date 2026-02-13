@@ -192,7 +192,9 @@ impl RowNode for SortNode {
             if emitted_updated_ids.contains(&ids) {
                 continue;
             }
-            if let Some(old_idx) = old_positions.get(&ids) && *old_idx != new_idx {
+            if let Some(old_idx) = old_positions.get(&ids)
+                && *old_idx != new_idx
+            {
                 let old_tuple = old_sorted[*old_idx].clone();
                 result.updated.push((old_tuple, new_tuple.clone()));
                 emitted_updated_ids.insert(ids);
@@ -497,15 +499,27 @@ mod tests {
         let id_c = ObjectId::new();
         let a = make_tuple(
             id_a,
-            &[Value::Integer(1), Value::Text("A".into()), Value::Integer(10)],
+            &[
+                Value::Integer(1),
+                Value::Text("A".into()),
+                Value::Integer(10),
+            ],
         );
         let b = make_tuple(
             id_b,
-            &[Value::Integer(2), Value::Text("B".into()), Value::Integer(20)],
+            &[
+                Value::Integer(2),
+                Value::Text("B".into()),
+                Value::Integer(20),
+            ],
         );
         let c = make_tuple(
             id_c,
-            &[Value::Integer(3), Value::Text("C".into()), Value::Integer(0)],
+            &[
+                Value::Integer(3),
+                Value::Text("C".into()),
+                Value::Integer(0),
+            ],
         );
 
         // Seed: [A, B]
