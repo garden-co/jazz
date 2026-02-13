@@ -8,6 +8,7 @@ BfTree's persistence model relies on two mechanisms working together:
 2. **Snapshot** — expensive full serialization of the tree to disk, after which the WAL can be safely truncated
 
 On **native**, the lifecycle is:
+
 - Open: load snapshot → replay WAL → create fresh WAL (offset 0)
 - Runtime: writes go to WAL (background flush thread)
 - Shutdown: `snapshot()` writes full tree state to disk, WAL is implicitly truncated on next open
@@ -19,6 +20,7 @@ This works because `snapshot()` persists everything, so the WAL is ephemeral by 
 `snapshot()` **cannot work on WASM**. It calls `CircularBuffer::drain()` which enters a multi-threaded spin loop (`try_bump_head_address_to_evicting_addr` in a `loop` with `backoff.snooze()`). On WASM's single-threaded runtime, this is an infinite busy-wait that blocks the event loop and hangs the worker.
 
 Without `snapshot()`:
+
 - WAL replay loads data into memory on open ✓
 - But `open_with_opfs` creates a fresh WAL at `file_offset: 0`, overwriting the old WAL
 - Since there's no snapshot, the replayed data only lives in memory
@@ -27,11 +29,12 @@ Without `snapshot()`:
 ### Why "just keep appending to the WAL" isn't a solution
 
 An ever-growing WAL without compaction will:
+
 - Grow without bound (every mutation appended forever)
 - Make recovery increasingly slow (replay everything since first write)
 - Eventually exceed OPFS quota
 
-The WAL is architecturally a *delta log between snapshots*. Without snapshots, it becomes the only source of truth, which it was never designed to be.
+The WAL is architecturally a _delta log between snapshots_. Without snapshots, it becomes the only source of truth, which it was never designed to be.
 
 ## Root cause
 

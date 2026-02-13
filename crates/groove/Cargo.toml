@@ -6,9 +6,11 @@ edition = "2024"
 [features]
 default = []
 bftree = ["bf-tree"]
+jazz-lsm = ["dep:jazz-lsm"]
 
 [dependencies]
 bf-tree = { path = "../bf-tree", optional = true, features = ["tracing"] }
+jazz-lsm = { path = "../jazz-lsm", optional = true }
 futures = "0.3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }

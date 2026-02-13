@@ -14,17 +14,17 @@ Improve `jazz-lsm` mixed read/write performance in a single-threaded runtime, ta
 
 Order is strict. Stop after each item and re-benchmark.
 
-| Order | Item | Complexity | Expected mixed R/W impact | Why this order |
-|---|---|---|---|---|
-| 1 | Add mixed workload benchmarks + counters | S | Baseline quality (no direct speedup) | Cheapest way to avoid optimizing blind; needed to measure ROI of every next step |
-| 2 | Internal write batching + in-memory WAL byte tracking | S-M | +30% to +150% writes, +10% to +60% mixed | Removes per-op fixed overhead and avoids repeated WAL length checks |
-| 3 | Reuse encode/decode buffers in write path | S | +10% to +40% writes, +5% to +20% mixed | Allocation churn is currently high and easy to reduce |
-| 4 | SST v2 block format + point-read block index | M-H | +3x to +20x reads, +2x to +8x mixed | Biggest structural read bottleneck today is full-file reads for point lookups |
-| 5 | Per-SST bloom filters | M | +1.5x to +4x random reads, +1.3x to +3x mixed | Cheap read amplification reduction once block/index format exists |
-| 6 | SST metadata/index cache + small block cache | M | +1.2x to +3x reads, +1.2x to +2x mixed | Avoids repeated parse/read of hot SST internals |
-| 7 | Range-scoped compaction picking + compaction budget per op | M-H | +1.5x to +4x writes under churn, +1.5x to +3x mixed | Reduces write amplification and large foreground stalls |
-| 8 | Large-value separation (blob log for values above threshold) | H | +5x to +20x for 1MB workloads, +2x to +8x mixed at large values | High ROI for large values; avoids repeatedly rewriting value payloads during compaction |
-| 9 | Append-only manifest edits + periodic checkpoint | M | +10% to +40% write-heavy mixed | Lowers metadata rewrite/sync overhead during flush/compaction |
+| Order | Item                                                         | Complexity | Expected mixed R/W impact                                       | Why this order                                                                          |
+| ----- | ------------------------------------------------------------ | ---------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 1     | Add mixed workload benchmarks + counters                     | S          | Baseline quality (no direct speedup)                            | Cheapest way to avoid optimizing blind; needed to measure ROI of every next step        |
+| 2     | Internal write batching + in-memory WAL byte tracking        | S-M        | +30% to +150% writes, +10% to +60% mixed                        | Removes per-op fixed overhead and avoids repeated WAL length checks                     |
+| 3     | Reuse encode/decode buffers in write path                    | S          | +10% to +40% writes, +5% to +20% mixed                          | Allocation churn is currently high and easy to reduce                                   |
+| 4     | SST v2 block format + point-read block index                 | M-H        | +3x to +20x reads, +2x to +8x mixed                             | Biggest structural read bottleneck today is full-file reads for point lookups           |
+| 5     | Per-SST bloom filters                                        | M          | +1.5x to +4x random reads, +1.3x to +3x mixed                   | Cheap read amplification reduction once block/index format exists                       |
+| 6     | SST metadata/index cache + small block cache                 | M          | +1.2x to +3x reads, +1.2x to +2x mixed                          | Avoids repeated parse/read of hot SST internals                                         |
+| 7     | Range-scoped compaction picking + compaction budget per op   | M-H        | +1.5x to +4x writes under churn, +1.5x to +3x mixed             | Reduces write amplification and large foreground stalls                                 |
+| 8     | Large-value separation (blob log for values above threshold) | H          | +5x to +20x for 1MB workloads, +2x to +8x mixed at large values | High ROI for large values; avoids repeatedly rewriting value payloads during compaction |
+| 9     | Append-only manifest edits + periodic checkpoint             | M          | +10% to +40% write-heavy mixed                                  | Lowers metadata rewrite/sync overhead during flush/compaction                           |
 
 ## Detailed scope per item
 

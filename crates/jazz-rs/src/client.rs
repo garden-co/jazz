@@ -312,10 +312,7 @@ impl JazzClient {
         // Track subscription metadata
         {
             let mut subs = self.subscriptions.write().await;
-            subs.insert(
-                handle,
-                SubscriptionState { runtime_handle },
-            );
+            subs.insert(handle, SubscriptionState { runtime_handle });
         }
 
         Ok(SubscriptionStream::new(rx))

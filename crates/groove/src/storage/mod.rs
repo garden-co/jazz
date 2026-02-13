@@ -13,6 +13,10 @@
 mod bftree;
 #[cfg(feature = "bftree")]
 pub use bftree::BfTreeStorage;
+#[cfg(feature = "jazz-lsm")]
+mod jazzlsm;
+#[cfg(feature = "jazz-lsm")]
+pub use jazzlsm::JazzLsmStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
