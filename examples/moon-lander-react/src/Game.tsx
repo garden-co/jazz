@@ -10,6 +10,7 @@ import {
   MAX_LANDING_VELOCITY,
   type PlayerMode,
 } from "./game/constants.js";
+import { drawBackground } from "./game/render.js";
 
 export function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -53,6 +54,9 @@ export function Game() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    // Initial draw so pixels are available immediately (before first rAF)
+    drawBackground(ctx, posXRef.current - CANVAS_WIDTH / 2);
+
     let lastTime = performance.now();
     let rafId = 0;
 
@@ -93,8 +97,7 @@ export function Game() {
       }
 
       // --- Render ---
-      ctx.fillStyle = "#0a0a0f";
-      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+      drawBackground(ctx, posXRef.current - CANVAS_WIDTH / 2);
 
       rafId = requestAnimationFrame(gameLoop);
     };
