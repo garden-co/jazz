@@ -45,4 +45,5 @@ jobs:
       - run: pnpm oxlint .
       - run: pnpm build
       - run: cargo clippy --workspace -- -D warnings
+      - run: pnpm exec playwright install
       - run: pnpm test
