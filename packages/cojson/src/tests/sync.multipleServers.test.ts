@@ -2,9 +2,11 @@ import { assert, beforeEach, describe, expect, test } from "vitest";
 
 import { expectList, expectMap } from "../coValue";
 import { WasmCrypto } from "../crypto/WasmCrypto";
+import { CO_VALUE_LOADING_CONFIG, setCoValueLoadingTimeout } from "../config";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
+  blockMessageTypeOnOutgoingPeer,
   fillCoMapWithLargeData,
   loadCoValueOrFail,
   setupTestNode,
@@ -26,16 +28,18 @@ beforeEach(async () => {
 });
 
 function connectServers(client: ReturnType<typeof setupTestNode>) {
-  client.connectToSyncServer({
+  const server1Connection = client.connectToSyncServer({
     ourName: "client",
     syncServerName: "server1",
     syncServer: server1.node,
   });
-  client.connectToSyncServer({
+  const server2Connection = client.connectToSyncServer({
     ourName: "client",
     syncServerName: "server2",
     syncServer: server2.node,
   });
+
+  return { server1Connection, server2Connection };
 }
 
 describe("multiple servers peers", () => {
@@ -422,5 +426,58 @@ describe("multiple servers peers", () => {
         "server2 -> client | KNOWN Map sessions: header/200",
       ]
     `);
+  });
+
+  test("coValue loading times out on both servers", async () => {
+    const previousTimeout = CO_VALUE_LOADING_CONFIG.TIMEOUT;
+    setCoValueLoadingTimeout(20);
+
+    try {
+      const creator = setupTestNode();
+      connectServers(creator);
+
+      const group = creator.node.createGroup();
+      const map = group.createMap();
+      map.set("hello", "world", "trusting");
+      await map.core.waitForSync();
+
+      const client = setupTestNode();
+      const { server1Connection, server2Connection } = connectServers(client);
+
+      blockMessageTypeOnOutgoingPeer(
+        server1Connection.peerOnServer,
+        "content",
+        {
+          id: map.id,
+        },
+      );
+      blockMessageTypeOnOutgoingPeer(
+        server2Connection.peerOnServer,
+        "content",
+        {
+          id: map.id,
+        },
+      );
+
+      const loadedMap = await client.node.load(map.id, true);
+
+      expect(loadedMap).toBe("unavailable");
+    } finally {
+      setCoValueLoadingTimeout(previousTimeout);
+    }
+  });
+
+  test("coValue loading is unavailable on both servers", async () => {
+    const disconnectedNode = setupTestNode();
+    const group = disconnectedNode.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    const client = setupTestNode();
+    connectServers(client);
+
+    const loadedMap = await client.node.load(map.id, true);
+
+    expect(loadedMap).toBe("unavailable");
   });
 });

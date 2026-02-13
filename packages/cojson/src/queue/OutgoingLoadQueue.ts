@@ -1,3 +1,4 @@
+import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import { CO_VALUE_LOADING_CONFIG } from "../config.js";
 import { CoValueCore } from "../exports.js";
 import type { RawCoID } from "../ids.js";
@@ -29,6 +30,7 @@ export type LoadMode = "low-priority" | "immediate" | "high-priority";
  */
 export class OutgoingLoadQueue {
   private inFlightLoads: Map<CoValueCore, number> = new Map();
+  private inFlightCounter: UpDownCounter;
   private highPriorityPending: LinkedList<PendingLoad> = meteredList(
     "load-requests-queue",
     { priority: "high" },
@@ -49,7 +51,18 @@ export class OutgoingLoadQueue {
     new Map();
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private peerId: PeerID) {}
+  constructor(private peerId: PeerID) {
+    this.inFlightCounter = metrics
+      .getMeter("cojson")
+      .createUpDownCounter("jazz.loadqueue.outgoing.inflight", {
+        description: "Number of in-flight outgoing load requests",
+        unit: "1",
+        valueType: ValueType.INT,
+      });
+
+    // Emit an initial 0 value so the series appears immediately.
+    this.inFlightCounter.add(0);
+  }
 
   /**
    * Check if we can send another load request.
@@ -67,7 +80,17 @@ export class OutgoingLoadQueue {
   private trackSent(coValue: CoValueCore): void {
     const now = performance.now();
     this.inFlightLoads.set(coValue, now);
+    this.inFlightCounter.add(1);
     this.scheduleTimeoutCheck(CO_VALUE_LOADING_CONFIG.TIMEOUT);
+  }
+
+  private untrackInFlight(coValue: CoValueCore): boolean {
+    if (!this.inFlightLoads.delete(coValue)) {
+      return false;
+    }
+
+    this.inFlightCounter.add(-1);
+    return true;
   }
 
   /**
@@ -116,8 +139,9 @@ export class OutgoingLoadQueue {
           );
         }
 
-        this.inFlightLoads.delete(coValue);
-        this.processQueue();
+        if (this.untrackInFlight(coValue)) {
+          this.processQueue();
+        }
       } else {
         nextTimeout = Math.min(nextTimeout ?? Infinity, timeout - now);
       }
@@ -152,8 +176,9 @@ export class OutgoingLoadQueue {
       return;
     }
 
-    this.inFlightLoads.delete(coValue);
-    this.processQueue();
+    if (this.untrackInFlight(coValue)) {
+      this.processQueue();
+    }
   }
 
   /**
@@ -270,7 +295,11 @@ export class OutgoingLoadQueue {
       clearTimeout(this.timeoutHandle);
       this.timeoutHandle = null;
     }
+    const inFlightCount = this.inFlightLoads.size;
     this.inFlightLoads.clear();
+    if (inFlightCount > 0) {
+      this.inFlightCounter.add(-inFlightCount);
+    }
 
     // Drain existing queues to balance push/pull metrics
     while (this.highPriorityPending.shift()) {}

@@ -947,7 +947,12 @@ export class SyncManager {
       }
     }
 
-    peer.trackLoadRequestComplete(coValue);
+    // KNOWN with header=true does not guarantee that content arrived.
+    // Keep the request in-flight until content (or a terminal state) lands,
+    // so queue timeout logic can mark this peer as unavailable if needed.
+    if (!availableOnPeer || coValue.isAvailable()) {
+      peer.trackLoadRequestComplete(coValue);
+    }
   }
 
   handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
