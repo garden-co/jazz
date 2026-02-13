@@ -9,6 +9,7 @@ import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { sendSyncPayload, readBinaryFrames } from "./sync-transport.js";
 import { resolveClientId } from "./client-id.js";
+import { computeSchemaHash } from "./schema-hash.js";
 
 /**
  * Common interface for WASM and NAPI runtimes.
@@ -185,11 +186,13 @@ export class JazzClient {
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
   private readonly syncClientId: string;
+  private readonly schemaHash: string;
 
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
     this.syncClientId = resolveClientId(context.clientId);
+    this.schemaHash = computeSchemaHash(context.schema);
   }
 
   /**
@@ -466,10 +469,9 @@ export class JazzClient {
    * @internal
    */
   getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
-    // TODO: Compute actual schema hash
     return {
       env: this.context.env ?? "dev",
-      schema_hash: "0".repeat(64), // Placeholder - should compute from schema
+      schema_hash: this.schemaHash,
       user_branch: this.context.userBranch ?? "main",
     };
   }

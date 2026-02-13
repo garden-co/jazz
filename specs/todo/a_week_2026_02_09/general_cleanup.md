@@ -20,7 +20,7 @@ Done. New `runtime/sync-transport.ts` with `isCataloguePayload()`, `sendSyncPayl
 
 Remaining stubs that still break real functionality:
 
-- **Schema hash is hardcoded zeros** — `client.ts:468`: `schema_hash: "0".repeat(64)`. All schemas hash to the same value, which means branch composition (`{env}-{schemaHash}-{userBranch}`) collapses. `blake3` is declared as a dependency but never imported.
+- ~~**Schema hash is hardcoded zeros**~~ ✅ — replaced with real deterministic schema hashing (BLAKE3 over canonicalized schema structure, matching Rust ordering rules).
 - ~~**Client ID is hardcoded zeros**~~ ✅ — fixed by generating/validating real UUID client IDs and wiring them through main-thread + worker sync transport.
 - **Nested array relation mapping** — `row-transformer.ts:70–77`: TODO to map nested arrays from array subqueries to relation names. Currently returns unnamed extra values.
 - ~~**Token refresh doesn't reconnect**~~ ✅ — worker now aborts and reconnects the stream when `update-auth` is received.
@@ -76,11 +76,9 @@ These files are getting unwieldy but don't need immediate action:
 | `object_manager.rs` | 2,294 | Clean after blob removal                                                         |
 | `types.rs`          | 2,419 | Type definitions; cohesive                                                       |
 
-## 9. Unused `blake3` Dependency (LOW)
+## 9. ~~Unused `blake3` Dependency~~ ✅
 
-`packages/jazz-ts/package.json` declares `blake3` (line 15) but it's never imported anywhere in the TypeScript code. Was presumably added for schema hash computation (see item 4) but never wired up.
-
-Action: either use it to implement the schema hash, or remove the dependency.
+Done. `blake3` is now used to compute schema hashes in `jazz-ts` runtime schema context.
 
 ## 10. Examples Lose Data on Reload (MEDIUM)
 
