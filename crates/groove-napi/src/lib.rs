@@ -1,11 +1,11 @@
 //! groove-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<BfTreeStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<SurrealKvStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `BfTreeStorage` provides persistent on-disk storage
+//! - `SurrealKvStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
@@ -28,7 +28,7 @@ use groove::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::{BfTreeStorage, Storage};
+use groove::storage::{Storage, SurrealKvStorage};
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -303,7 +303,7 @@ fn parse_query(json: &str) -> napi::Result<Query> {
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<BfTreeStorage, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<SurrealKvStorage, NapiScheduler, NapiSyncSender>;
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
@@ -388,7 +388,7 @@ pub struct NapiRuntime {
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with BfTree-backed persistent storage.
+    /// Create a new NapiRuntime with SurrealKV-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -425,9 +425,9 @@ impl NapiRuntime {
             napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e))
         })?;
 
-        // Create BfTreeStorage
+        // Create SurrealKvStorage
         let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = BfTreeStorage::open(&data_path, cache_size)
+        let storage = SurrealKvStorage::open(&data_path, cache_size)
             .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))?;
 
         // Create components
