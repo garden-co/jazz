@@ -273,6 +273,7 @@ export function Game({ physicsSpeed = 1 }: GameProps) {
       data-player-color={playerProps.color}
       data-required-fuel={playerProps.requiredFuelType}
       data-lander-fuel={exposed.fuel}
+      data-player-online="true"
       data-player-mode={exposed.mode}
       data-player-x={exposed.px}
       data-player-y={exposed.py}
