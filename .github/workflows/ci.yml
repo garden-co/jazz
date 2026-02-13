@@ -3,9 +3,6 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches:
-      - gio/feat/basic-initial-ci
 
 concurrency:
   # For pushes, this lets concurrent runs happen, so each push gets a result.
