@@ -1,10 +1,11 @@
 {
   "scripts": {
     "format": "oxfmt .",
-    "format:check": "oxfmt --check .",
-    "lint": "oxlint .",
+    "format:check": "oxfmt --check . && cargo fmt --check",
+    "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
     "build": "turbo run build:crates && turbo run build",
-    "test": "turbo run test"
+    "test": "turbo run test",
+    "postinstall": "lefthook install"
   },
   "devDependencies": {
     "lefthook": "^2.0.15",
