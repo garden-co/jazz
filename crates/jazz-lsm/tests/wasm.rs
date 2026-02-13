@@ -47,6 +47,22 @@ async fn flush_wal_makes_acknowledged_write_survive_restart() {
 }
 
 #[wasm_bindgen_test]
+async fn wal_replay_survives_second_restart_without_flush() {
+    let ns = unique_namespace("double-crash-wal-replay");
+    OpfsFs::destroy(&ns).await.expect("cleanup before test");
+    let ns_for_open = ns.clone();
+
+    scenarios::wal_replay_survives_second_restart_without_flush::<OpfsFs, _, _>(move || {
+        let ns = ns_for_open.clone();
+        async move { open_with_defaults(&ns).await }
+    })
+    .await
+    .expect("scenario should pass");
+
+    OpfsFs::destroy(&ns).await.expect("cleanup after test");
+}
+
+#[wasm_bindgen_test]
 async fn unknown_merge_operator_is_rejected_on_open() {
     let ns = unique_namespace("unknown-merge");
     OpfsFs::destroy(&ns).await.expect("cleanup before test");
