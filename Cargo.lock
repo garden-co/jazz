@@ -1080,6 +1080,7 @@ dependencies = [
  "internment",
  "jazz-lsm",
  "rand 0.8.5",
+ "rocksdb",
  "serde",
  "serde_json",
  "small-map",

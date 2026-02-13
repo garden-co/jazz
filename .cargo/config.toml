@@ -1,0 +1,5 @@
+[env]
+LIBCLANG_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }
+LLVM_CONFIG_PATH = { value = "/opt/homebrew/opt/llvm/bin/llvm-config", force = false }
+DYLD_LIBRARY_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }
+DYLD_FALLBACK_LIBRARY_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }

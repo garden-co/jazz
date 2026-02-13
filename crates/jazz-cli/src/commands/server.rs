@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::BfTreeStorage;
+use groove::storage::RocksDbStorage;
 use groove::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
 use groove_tokio::TokioRuntime;
 use tokio::sync::{RwLock, broadcast};
@@ -16,7 +16,7 @@ use crate::routes;
 
 /// Server state shared across request handlers.
 pub struct ServerState {
-    pub runtime: TokioRuntime<BfTreeStorage>,
+    pub runtime: TokioRuntime<RocksDbStorage>,
     #[allow(dead_code)]
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
@@ -57,8 +57,8 @@ pub async fn run(
     let sync_tx_clone = sync_tx.clone();
 
     // Create persistent storage
-    let db_path = format!("{}/groove.bftree", data_dir);
-    let storage = BfTreeStorage::open(&db_path, 64 * 1024 * 1024)
+    let db_path = format!("{}/groove.rocksdb", data_dir);
+    let storage = RocksDbStorage::open(&db_path, 64 * 1024 * 1024)
         .map_err(|e| format!("Failed to open storage: {:?}", e))?;
 
     // Create runtime with sync callback that routes to SSE clients

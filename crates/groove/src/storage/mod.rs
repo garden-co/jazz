@@ -17,6 +17,10 @@ pub use bftree::BfTreeStorage;
 mod jazzlsm;
 #[cfg(feature = "jazz-lsm")]
 pub use jazzlsm::JazzLsmStorage;
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+mod rocksdb;
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+pub use rocksdb::RocksDbStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
@@ -129,7 +133,7 @@ pub trait Storage {
     // ================================================================
     //
     // These replace our entire BTreeIndex implementation.
-    // MemoryStorage uses BTreeMaps. BfTreeStorage (Phase 7) uses bf-tree.
+    // MemoryStorage uses BTreeMaps. Persistent backends handle encoding/ordering.
     //
     // NOTE: Branch is included in all index methods to support multi-branch
     // scenarios (e.g., user branch vs main branch).
