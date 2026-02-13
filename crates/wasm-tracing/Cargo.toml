@@ -3,12 +3,7 @@ name = "wasm-tracing"
 version = "3.0.0-alpha.0"
 authors = ["Daniel Gallups <dsgallups@protonmail.com>"]
 edition = "2021"
-categories = [
-    "development-tools::debugging",
-    "development-tools::profiling",
-    "no-std",
-    "wasm",
-]
+categories = ["development-tools::debugging", "development-tools::profiling", "no-std", "wasm"]
 documentation = "https://docs.rs/wasm_tracing"
 description = "Tracing subscriber for WebAssembly. Maintained fork of tracing-wasm."
 keywords = ["logging", "metrics", "wasm", "spans", "tracing"]
@@ -22,13 +17,9 @@ mark-with-rayon-thread-index = ["rayon"]
 
 [dependencies]
 rayon = { version = "1.10", optional = true }
-tracing = { version = "0.1", features = [
-    "attributes",
-], default-features = false }
+tracing = { version = "0.1", features = ["attributes"], default-features = false }
 tracing-log = { version = "0.2", default-features = false, optional = true }
-tracing-subscriber = { version = "0.3", features = [
-    "registry",
-], default-features = false }
+tracing-subscriber = { version = "0.3", features = ["registry"], default-features = false }
 wasm-bindgen = { version = "0.2" }
 
 

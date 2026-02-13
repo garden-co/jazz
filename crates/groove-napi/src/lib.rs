@@ -950,6 +950,20 @@ impl NapiRuntime {
         core.storage().flush();
         Ok(())
     }
+
+    /// Flush and close the underlying storage, releasing filesystem locks.
+    #[napi]
+    pub fn close(&self) -> napi::Result<()> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.storage().flush();
+        core.storage()
+            .close()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
+        Ok(())
+    }
 }
 
 // ============================================================================
