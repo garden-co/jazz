@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::rc::Rc;
 
 use crate::error::LsmError;
 use crate::format::{OpKind, VersionedRecord, decode_records_into, encode_record_into};
@@ -12,8 +13,12 @@ const SST_PREFIX: &str = "sst-";
 const WAL_APPEND_BATCH_BYTES: usize = 32 * 1024;
 const SST_V2_BLOCK_TARGET_BYTES: usize = 16 * 1024;
 const SST_V2_FOOTER_MAGIC: [u8; 8] = *b"JLSM2IDX";
-const SST_V2_VERSION: u32 = 1;
-const SST_V2_FOOTER_SIZE: usize = 8 + 4 + 4 + 8 + 8;
+const SST_V2_VERSION: u32 = 2;
+const SST_V2_FOOTER_SIZE: usize = 8 + 4 + 4 + 8 + 8 + 8 + 8;
+const SST_V2_BLOOM_VERSION: u32 = 1;
+const SST_V2_BLOOM_HEADER_SIZE: usize = 4 + 1 + 3 + 4 + 4;
+const SST_V2_BLOOM_TARGET_FPR: f64 = 0.01;
+const SST_V2_BLOOM_MAX_HASHES: u8 = 16;
 
 #[derive(Debug, Clone)]
 struct SstV2BlockIndex {
@@ -21,6 +26,55 @@ struct SstV2BlockIndex {
     len: u32,
     min_key: Vec<u8>,
     max_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SstV2Footer {
+    block_count: u32,
+    bloom_offset: u64,
+    bloom_len: u64,
+    index_offset: u64,
+    index_len: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SstV2BloomFilter {
+    hash_count: u8,
+    bit_count: u32,
+    bits: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct SstV2CachedMeta {
+    bloom: SstV2BloomFilter,
+    blocks: Vec<SstV2BlockIndex>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BlockCacheKey {
+    sst_id: u64,
+    block_offset: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BlockCacheEntry {
+    data: Rc<Vec<u8>>,
+    size: usize,
+}
+
+#[derive(Debug, Default)]
+struct SstMetaCache {
+    capacity: usize,
+    entries: HashMap<u64, Rc<SstV2CachedMeta>>,
+    lru: VecDeque<u64>,
+}
+
+#[derive(Debug, Default)]
+struct SstBlockCache {
+    max_bytes: usize,
+    used_bytes: usize,
+    entries: HashMap<BlockCacheKey, BlockCacheEntry>,
+    lru: VecDeque<BlockCacheKey>,
 }
 
 pub type MergeFn = Box<dyn Fn(Option<&[u8]>, &[u8]) -> Vec<u8> + 'static>;
@@ -54,6 +108,8 @@ pub struct LsmOptions {
     pub level0_file_limit: usize,
     pub level_fanout: usize,
     pub max_levels: usize,
+    pub sst_meta_cache_entries: usize,
+    pub sst_block_cache_bytes: usize,
     pub write_durability: WriteDurability,
     pub key_prefix_mode: KeyPrefixMode,
     pub value_compression: ValueCompression,
@@ -67,6 +123,8 @@ impl Default for LsmOptions {
             level0_file_limit: 4,
             level_fanout: 4,
             max_levels: 4,
+            sst_meta_cache_entries: 256,
+            sst_block_cache_bytes: 4 * 1024 * 1024,
             write_durability: WriteDurability::Buffered,
             key_prefix_mode: KeyPrefixMode::Disabled,
             value_compression: ValueCompression::None,
@@ -91,6 +149,8 @@ pub struct LsmTree<F: SyncFs> {
     memtable_bytes: usize,
     wal_bytes: Cell<u64>,
     wal_buffer: RefCell<Vec<u8>>,
+    sst_meta_cache: RefCell<SstMetaCache>,
+    sst_block_cache: RefCell<SstBlockCache>,
 }
 
 impl<F: SyncFs> LsmTree<F> {
@@ -124,6 +184,9 @@ impl<F: SyncFs> LsmTree<F> {
             }
         }
 
+        let meta_cache_entries = options.sst_meta_cache_entries;
+        let block_cache_bytes = options.sst_block_cache_bytes;
+
         let mut tree = Self {
             fs,
             options,
@@ -134,6 +197,8 @@ impl<F: SyncFs> LsmTree<F> {
             memtable_bytes: 0,
             wal_bytes: Cell::new(0),
             wal_buffer: RefCell::new(Vec::with_capacity(WAL_APPEND_BATCH_BYTES)),
+            sst_meta_cache: RefCell::new(SstMetaCache::with_capacity(meta_cache_entries)),
+            sst_block_cache: RefCell::new(SstBlockCache::with_max_bytes(block_cache_bytes)),
         };
 
         tree.replay_wal()?;
@@ -424,9 +489,9 @@ impl<F: SyncFs> LsmTree<F> {
         out: &mut Vec<VersionedRecord>,
     ) -> Result<(), LsmError> {
         out.clear();
-        let index = self.read_sst_v2_index(meta)?;
+        let cached = self.get_or_load_sst_meta(meta)?;
         let mut block_records = Vec::new();
-        for block in &index {
+        for block in &cached.blocks {
             self.read_sst_v2_block_records(meta, block, &mut block_records)?;
             out.append(&mut block_records);
         }
@@ -440,9 +505,13 @@ impl<F: SyncFs> LsmTree<F> {
         out: &mut Vec<VersionedRecord>,
     ) -> Result<(), LsmError> {
         out.clear();
-        let index = self.read_sst_v2_index(meta)?;
+        let cached = self.get_or_load_sst_meta(meta)?;
+        if !cached.bloom.might_contain(key) {
+            return Ok(());
+        }
+
         let mut block_records = Vec::new();
-        for block in &index {
+        for block in &cached.blocks {
             if key < block.min_key.as_slice() || key > block.max_key.as_slice() {
                 continue;
             }
@@ -464,9 +533,9 @@ impl<F: SyncFs> LsmTree<F> {
         out: &mut Vec<VersionedRecord>,
     ) -> Result<(), LsmError> {
         out.clear();
-        let index = self.read_sst_v2_index(meta)?;
+        let cached = self.get_or_load_sst_meta(meta)?;
         let mut block_records = Vec::new();
-        for block in &index {
+        for block in &cached.blocks {
             if let Some(start) = start_inclusive
                 && block.max_key.as_slice() < start
             {
@@ -487,7 +556,34 @@ impl<F: SyncFs> LsmTree<F> {
         Ok(())
     }
 
-    fn read_sst_v2_index(&self, meta: &SstMeta) -> Result<Vec<SstV2BlockIndex>, LsmError> {
+    fn get_or_load_sst_meta(&self, meta: &SstMeta) -> Result<Rc<SstV2CachedMeta>, LsmError> {
+        {
+            let mut cache = self.sst_meta_cache.borrow_mut();
+            if let Some(hit) = cache.get(meta.id) {
+                return Ok(hit);
+            }
+        }
+
+        let loaded = Rc::new(self.load_sst_meta_from_fs(meta)?);
+        self.sst_meta_cache
+            .borrow_mut()
+            .insert(meta.id, loaded.clone());
+        Ok(loaded)
+    }
+
+    fn load_sst_meta_from_fs(&self, meta: &SstMeta) -> Result<SstV2CachedMeta, LsmError> {
+        let footer = self.read_sst_v2_footer(meta)?;
+        let bloom = self.read_sst_v2_bloom(meta, footer)?;
+        let blocks = self.read_sst_v2_index(meta, footer)?;
+        Ok(SstV2CachedMeta { bloom, blocks })
+    }
+
+    fn invalidate_sst_caches(&self, sst_id: u64) {
+        self.sst_meta_cache.borrow_mut().remove(sst_id);
+        self.sst_block_cache.borrow_mut().remove_sst(sst_id);
+    }
+
+    fn read_sst_v2_footer(&self, meta: &SstMeta) -> Result<SstV2Footer, LsmError> {
         let file_len = self.fs.file_len(&meta.path)?;
         if file_len < SST_V2_FOOTER_SIZE as u64 {
             return Err(corrupt_sst(&meta.path, 0));
@@ -512,20 +608,59 @@ impl<F: SyncFs> LsmTree<F> {
 
         let block_count =
             u32::from_le_bytes(footer[12..16].try_into().expect("footer block count bytes"));
-        let index_offset = u64::from_le_bytes(
+        let bloom_offset = u64::from_le_bytes(
             footer[16..24]
                 .try_into()
-                .expect("footer index offset bytes"),
+                .expect("footer bloom offset bytes"),
         );
+        let bloom_len = u64::from_le_bytes(footer[24..32].try_into().expect("footer bloom len"));
+        let index_offset =
+            u64::from_le_bytes(footer[32..40].try_into().expect("footer index offset"));
         let index_len =
-            u64::from_le_bytes(footer[24..32].try_into().expect("footer index len bytes"));
+            u64::from_le_bytes(footer[40..48].try_into().expect("footer index len bytes"));
 
-        if index_offset >= footer_offset
+        if bloom_len == 0
             || index_len == 0
+            || bloom_offset >= index_offset
+            || bloom_offset.saturating_add(bloom_len) != index_offset
             || index_offset.saturating_add(index_len) != footer_offset
         {
             return Err(corrupt_sst(&meta.path, footer_offset));
         }
+
+        Ok(SstV2Footer {
+            block_count,
+            bloom_offset,
+            bloom_len,
+            index_offset,
+            index_len,
+        })
+    }
+
+    fn read_sst_v2_bloom(
+        &self,
+        meta: &SstMeta,
+        footer: SstV2Footer,
+    ) -> Result<SstV2BloomFilter, LsmError> {
+        if footer.bloom_len > usize::MAX as u64 {
+            return Err(corrupt_sst(&meta.path, footer.bloom_offset));
+        }
+        let bloom_bytes =
+            self.fs
+                .read_range(&meta.path, footer.bloom_offset, footer.bloom_len as usize)?;
+        if bloom_bytes.len() != footer.bloom_len as usize {
+            return Err(corrupt_sst(&meta.path, footer.bloom_offset));
+        }
+        parse_sst_v2_bloom(&bloom_bytes, &meta.path, footer.bloom_offset)
+    }
+
+    fn read_sst_v2_index(
+        &self,
+        meta: &SstMeta,
+        footer: SstV2Footer,
+    ) -> Result<Vec<SstV2BlockIndex>, LsmError> {
+        let index_offset = footer.index_offset;
+        let index_len = footer.index_len;
 
         if index_len > usize::MAX as u64 {
             return Err(corrupt_sst(&meta.path, index_offset));
@@ -538,14 +673,15 @@ impl<F: SyncFs> LsmTree<F> {
             return Err(corrupt_sst(&meta.path, index_offset));
         }
 
-        let blocks = parse_sst_v2_index(&index_bytes, &meta.path, index_offset, block_count)?;
+        let blocks =
+            parse_sst_v2_index(&index_bytes, &meta.path, index_offset, footer.block_count)?;
         let mut prev_end = 0u64;
         for block in &blocks {
             if block.offset < prev_end {
                 return Err(corrupt_sst(&meta.path, block.offset));
             }
             let end = block.offset.saturating_add(block.len as u64);
-            if end > index_offset {
+            if end > footer.bloom_offset {
                 return Err(corrupt_sst(&meta.path, block.offset));
             }
             prev_end = end;
@@ -559,14 +695,38 @@ impl<F: SyncFs> LsmTree<F> {
         block: &SstV2BlockIndex,
         out: &mut Vec<VersionedRecord>,
     ) -> Result<(), LsmError> {
+        let data = self.read_sst_v2_block_bytes(meta, block)?;
+        decode_records_into(&data, &meta.path, false, out)?;
+        self.validate_merge_ops(out)
+    }
+
+    fn read_sst_v2_block_bytes(
+        &self,
+        meta: &SstMeta,
+        block: &SstV2BlockIndex,
+    ) -> Result<Rc<Vec<u8>>, LsmError> {
+        let key = BlockCacheKey {
+            sst_id: meta.id,
+            block_offset: block.offset,
+        };
+        {
+            let mut cache = self.sst_block_cache.borrow_mut();
+            if let Some(hit) = cache.get(&key) {
+                return Ok(hit);
+            }
+        }
+
         let data = self
             .fs
             .read_range(&meta.path, block.offset, block.len as usize)?;
         if data.len() != block.len as usize {
             return Err(corrupt_sst(&meta.path, block.offset));
         }
-        decode_records_into(&data, &meta.path, false, out)?;
-        self.validate_merge_ops(out)
+        let data = Rc::new(data);
+        self.sst_block_cache
+            .borrow_mut()
+            .insert(key, data.clone());
+        Ok(data)
     }
 
     fn validate_merge_ops(&self, records: &[VersionedRecord]) -> Result<(), LsmError> {
@@ -708,6 +868,7 @@ impl<F: SyncFs> LsmTree<F> {
         output_records.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.seq.cmp(&a.seq)));
 
         for meta in input_files {
+            self.invalidate_sst_caches(meta.id);
             self.fs.remove_file(&meta.path)?;
         }
 
@@ -787,6 +948,12 @@ fn encode_sst_v2(records: &[VersionedRecord]) -> Result<Vec<u8>, LsmError> {
         &mut block_max_key,
     )?;
 
+    let bloom_offset = file_bytes.len() as u64;
+    let bloom = build_sst_v2_bloom(records)?;
+    let bloom_bytes = encode_sst_v2_bloom(&bloom)?;
+    let bloom_len = bloom_bytes.len() as u64;
+    file_bytes.extend_from_slice(&bloom_bytes);
+
     let index_offset = file_bytes.len() as u64;
     let index_bytes = encode_sst_v2_index(&blocks)?;
     let index_len = index_bytes.len() as u64;
@@ -797,10 +964,295 @@ fn encode_sst_v2(records: &[VersionedRecord]) -> Result<Vec<u8>, LsmError> {
     file_bytes.extend_from_slice(&SST_V2_FOOTER_MAGIC);
     file_bytes.extend_from_slice(&SST_V2_VERSION.to_le_bytes());
     file_bytes.extend_from_slice(&block_count.to_le_bytes());
+    file_bytes.extend_from_slice(&bloom_offset.to_le_bytes());
+    file_bytes.extend_from_slice(&bloom_len.to_le_bytes());
     file_bytes.extend_from_slice(&index_offset.to_le_bytes());
     file_bytes.extend_from_slice(&index_len.to_le_bytes());
 
     Ok(file_bytes)
+}
+
+fn build_sst_v2_bloom(records: &[VersionedRecord]) -> Result<SstV2BloomFilter, LsmError> {
+    let expected_items = records.len().max(1);
+    let ln2_sq = std::f64::consts::LN_2 * std::f64::consts::LN_2;
+    let target_bits = (-(expected_items as f64) * SST_V2_BLOOM_TARGET_FPR.ln() / ln2_sq).ceil();
+    let bit_count = target_bits.max(64.0) as usize;
+    let byte_count = bit_count.div_ceil(8);
+    let bit_count_u32 = u32::try_from(bit_count)
+        .map_err(|_| LsmError::InvalidOptions("SST bloom bit count overflow".to_string()))?;
+
+    let hashes = (((bit_count as f64 / expected_items as f64) * std::f64::consts::LN_2).round()
+        as usize)
+        .clamp(1, SST_V2_BLOOM_MAX_HASHES as usize) as u8;
+
+    let mut bloom = SstV2BloomFilter {
+        hash_count: hashes,
+        bit_count: bit_count_u32,
+        bits: vec![0; byte_count],
+    };
+    for record in records {
+        bloom.insert(&record.key);
+    }
+    Ok(bloom)
+}
+
+fn encode_sst_v2_bloom(bloom: &SstV2BloomFilter) -> Result<Vec<u8>, LsmError> {
+    if bloom.hash_count == 0 || bloom.bit_count == 0 || bloom.bits.is_empty() {
+        return Err(LsmError::InvalidOptions(
+            "invalid SST bloom parameters".to_string(),
+        ));
+    }
+    if (bloom.bits.len() as u64) * 8 < bloom.bit_count as u64 {
+        return Err(LsmError::InvalidOptions(
+            "SST bloom bitset is smaller than declared bit_count".to_string(),
+        ));
+    }
+
+    let crc = crc32fast::hash(&bloom.bits);
+    let mut out = Vec::with_capacity(SST_V2_BLOOM_HEADER_SIZE + bloom.bits.len());
+    out.extend_from_slice(&SST_V2_BLOOM_VERSION.to_le_bytes());
+    out.push(bloom.hash_count);
+    out.extend_from_slice(&[0, 0, 0]);
+    out.extend_from_slice(&bloom.bit_count.to_le_bytes());
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&bloom.bits);
+    Ok(out)
+}
+
+fn parse_sst_v2_bloom(
+    data: &[u8],
+    path: &str,
+    bloom_offset: u64,
+) -> Result<SstV2BloomFilter, LsmError> {
+    if data.len() < SST_V2_BLOOM_HEADER_SIZE {
+        return Err(corrupt_sst(path, bloom_offset));
+    }
+
+    let version = u32::from_le_bytes(
+        data[0..4]
+            .try_into()
+            .expect("SST bloom version bytes are present"),
+    );
+    if version != SST_V2_BLOOM_VERSION {
+        return Err(corrupt_sst(path, bloom_offset));
+    }
+
+    let hash_count = data[4];
+    if hash_count == 0 || hash_count > SST_V2_BLOOM_MAX_HASHES {
+        return Err(corrupt_sst(path, bloom_offset + 4));
+    }
+
+    let bit_count = u32::from_le_bytes(
+        data[8..12]
+            .try_into()
+            .expect("SST bloom bit_count bytes are present"),
+    );
+    if bit_count == 0 {
+        return Err(corrupt_sst(path, bloom_offset + 8));
+    }
+
+    let expected_crc = u32::from_le_bytes(
+        data[12..16]
+            .try_into()
+            .expect("SST bloom crc bytes are present"),
+    );
+    let bits = data[SST_V2_BLOOM_HEADER_SIZE..].to_vec();
+    if bits.is_empty() || (bits.len() as u64) * 8 < bit_count as u64 {
+        return Err(corrupt_sst(
+            path,
+            bloom_offset + SST_V2_BLOOM_HEADER_SIZE as u64,
+        ));
+    }
+    if crc32fast::hash(&bits) != expected_crc {
+        return Err(corrupt_sst(path, bloom_offset + 12));
+    }
+
+    Ok(SstV2BloomFilter {
+        hash_count,
+        bit_count,
+        bits,
+    })
+}
+
+impl SstV2BloomFilter {
+    fn might_contain(&self, key: &[u8]) -> bool {
+        let bit_count = self.bit_count as u64;
+        if bit_count == 0 || self.hash_count == 0 || self.bits.is_empty() {
+            return true;
+        }
+
+        let (h1, h2_raw) = bloom_hash_pair(key);
+        let h2 = h2_raw | 1;
+        for i in 0..(self.hash_count as u64) {
+            let idx = h1.wrapping_add(i.wrapping_mul(h2)) % bit_count;
+            if !bit_is_set(&self.bits, idx as u32) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn insert(&mut self, key: &[u8]) {
+        let bit_count = self.bit_count as u64;
+        if bit_count == 0 || self.hash_count == 0 || self.bits.is_empty() {
+            return;
+        }
+
+        let (h1, h2_raw) = bloom_hash_pair(key);
+        let h2 = h2_raw | 1;
+        for i in 0..(self.hash_count as u64) {
+            let idx = h1.wrapping_add(i.wrapping_mul(h2)) % bit_count;
+            set_bit(&mut self.bits, idx as u32);
+        }
+    }
+}
+
+fn bloom_hash_pair(key: &[u8]) -> (u64, u64) {
+    (
+        fnv1a64_with_seed(key, 0x9E37_79B9_7F4A_7C15),
+        fnv1a64_with_seed(key, 0xC2B2_AE3D_27D4_EB4F),
+    )
+}
+
+fn fnv1a64_with_seed(data: &[u8], seed: u64) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut h = FNV_OFFSET ^ seed;
+    for &byte in data {
+        h ^= byte as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+
+    // Finalize/mix to spread low-entropy key prefixes.
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
+    h
+}
+
+fn bit_is_set(bits: &[u8], bit_idx: u32) -> bool {
+    let byte_idx = (bit_idx / 8) as usize;
+    let mask = 1u8 << (bit_idx % 8);
+    bits.get(byte_idx).is_some_and(|b| (b & mask) != 0)
+}
+
+fn set_bit(bits: &mut [u8], bit_idx: u32) {
+    let byte_idx = (bit_idx / 8) as usize;
+    let mask = 1u8 << (bit_idx % 8);
+    if let Some(byte) = bits.get_mut(byte_idx) {
+        *byte |= mask;
+    }
+}
+
+impl SstMetaCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, sst_id: u64) -> Option<Rc<SstV2CachedMeta>> {
+        let hit = self.entries.get(&sst_id).cloned()?;
+        self.touch(sst_id);
+        Some(hit)
+    }
+
+    fn insert(&mut self, sst_id: u64, entry: Rc<SstV2CachedMeta>) {
+        if self.capacity == 0 {
+            return;
+        }
+        self.entries.insert(sst_id, entry);
+        self.touch(sst_id);
+        self.evict_if_needed();
+    }
+
+    fn remove(&mut self, sst_id: u64) {
+        self.entries.remove(&sst_id);
+        self.lru.retain(|id| *id != sst_id);
+    }
+
+    fn touch(&mut self, sst_id: u64) {
+        self.lru.retain(|id| *id != sst_id);
+        self.lru.push_back(sst_id);
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.entries.len() > self.capacity {
+            let Some(evict_id) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evict_id);
+        }
+    }
+}
+
+impl SstBlockCache {
+    fn with_max_bytes(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            used_bytes: 0,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &BlockCacheKey) -> Option<Rc<Vec<u8>>> {
+        let hit = self.entries.get(key)?.data.clone();
+        self.touch(*key);
+        Some(hit)
+    }
+
+    fn insert(&mut self, key: BlockCacheKey, data: Rc<Vec<u8>>) {
+        let size = data.len();
+        if self.max_bytes == 0 || size == 0 || size > self.max_bytes {
+            return;
+        }
+
+        if let Some(old) = self.entries.remove(&key) {
+            self.used_bytes = self.used_bytes.saturating_sub(old.size);
+        }
+
+        self.entries.insert(key, BlockCacheEntry { data, size });
+        self.used_bytes = self.used_bytes.saturating_add(size);
+        self.touch(key);
+        self.evict_if_needed();
+    }
+
+    fn remove_sst(&mut self, sst_id: u64) {
+        let keys: Vec<BlockCacheKey> = self
+            .entries
+            .keys()
+            .filter(|k| k.sst_id == sst_id)
+            .copied()
+            .collect();
+        for key in keys {
+            if let Some(entry) = self.entries.remove(&key) {
+                self.used_bytes = self.used_bytes.saturating_sub(entry.size);
+            }
+            self.lru.retain(|k| *k != key);
+        }
+    }
+
+    fn touch(&mut self, key: BlockCacheKey) {
+        self.lru.retain(|k| *k != key);
+        self.lru.push_back(key);
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.used_bytes > self.max_bytes {
+            let Some(evict_key) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&evict_key) {
+                self.used_bytes = self.used_bytes.saturating_sub(entry.size);
+            }
+        }
+    }
 }
 
 fn finish_sst_v2_block(
@@ -1138,7 +1590,7 @@ mod tests {
         let target_key = b"k001337".to_vec();
         let expected_value = format!("value-001337-{}", "x".repeat(64)).into_bytes();
         let got = db.get(&target_key).expect("get");
-        assert_eq!(got, Some(expected_value));
+        assert_eq!(got, Some(expected_value.clone()));
 
         let (read_all_calls, read_range_calls) = fs.read_counts();
         assert_eq!(
@@ -1146,8 +1598,76 @@ mod tests {
             "point lookups should avoid full-file SST reads"
         );
         assert!(
-            read_range_calls >= 3,
-            "expected footer/index/block reads via read_range"
+            read_range_calls >= 4,
+            "expected footer/bloom/index/block reads via read_range"
+        );
+
+        fs.reset_read_counters();
+        let got_again = db.get(&target_key).expect("get again");
+        assert_eq!(got_again, Some(expected_value));
+        let (read_all_calls_again, read_range_calls_again) = fs.read_counts();
+        assert_eq!(read_all_calls_again, 0);
+        assert_eq!(
+            read_range_calls_again, 0,
+            "expected hot-point lookup to hit metadata+block cache without fs reads"
+        );
+    }
+
+    #[test]
+    fn bloom_filter_skips_index_and_block_reads_for_missing_key() {
+        let fs = TrackingFs::default();
+        let mut db = LsmTree::open(
+            fs.clone(),
+            LsmOptions {
+                max_memtable_bytes: 8 * 1024 * 1024,
+                max_wal_bytes: 64 * 1024 * 1024,
+                level0_file_limit: 8,
+                level_fanout: 4,
+                max_levels: 2,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .expect("open");
+
+        for i in 0..2000 {
+            let key = format!("k{i:06}").into_bytes();
+            let value = format!("value-{i:06}-{}", "y".repeat(32)).into_bytes();
+            db.put(&key, &value).expect("put");
+        }
+        db.flush().expect("flush");
+
+        let mut min_read_all_calls = u64::MAX;
+        let mut min_read_range_calls = u64::MAX;
+        for suffix in 0..=255 {
+            let db = LsmTree::open(
+                fs.clone(),
+                LsmOptions {
+                    max_memtable_bytes: 8 * 1024 * 1024,
+                    max_wal_bytes: 64 * 1024 * 1024,
+                    level0_file_limit: 8,
+                    level_fanout: 4,
+                    max_levels: 2,
+                    ..Default::default()
+                },
+                vec![],
+            )
+            .expect("reopen");
+            let candidate = format!("k0013{suffix:02x}");
+            fs.reset_read_counters();
+            let got = db.get(candidate.as_bytes()).expect("get");
+            if got.is_some() {
+                continue;
+            }
+            let (read_all_calls, read_range_calls) = fs.read_counts();
+            min_read_all_calls = min_read_all_calls.min(read_all_calls);
+            min_read_range_calls = min_read_range_calls.min(read_range_calls);
+        }
+
+        assert_eq!(min_read_all_calls, 0);
+        assert!(
+            (2..=3).contains(&min_read_range_calls),
+            "at least one missing-key lookup should avoid block IO via bloom/range filtering; got {min_read_range_calls}"
         );
     }
 }

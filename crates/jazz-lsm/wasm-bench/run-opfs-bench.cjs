@@ -15,6 +15,7 @@ function parseArgs(argv) {
     valueSizes: DEFAULT_VALUE_SIZES,
     profile: DEFAULT_PROFILE,
     json: false,
+    progress: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -52,6 +53,11 @@ function parseArgs(argv) {
 
     if (arg === "--json") {
       out.json = true;
+      continue;
+    }
+
+    if (arg === "--progress") {
+      out.progress = true;
       continue;
     }
 
@@ -141,41 +147,63 @@ import init, {
   bench_opfs_mixed_scenario
 } from "/pkg/jazz_lsm.js";
 
-await init();
+const pendingRequests = [];
+let wasmReady = false;
+let initError = null;
 
-self.onmessage = async (e) => {
-  const count = Number(e.data?.count ?? 5000);
-  const valueSizes = Array.isArray(e.data?.valueSizes) ? e.data.valueSizes : [32, 256, 4096];
-  const profile = String(e.data?.profile ?? "basic");
+const basicRuns = [
+  ["seq_write", bench_opfs_sequential_write],
+  ["random_write", bench_opfs_random_write],
+  ["seq_read", bench_opfs_sequential_read],
+  ["random_read", bench_opfs_random_read]
+];
+const mixedScenarios = [
+  "mixed_random_70r_30w",
+  "mixed_random_50r_50w_with_updates",
+  "mixed_random_60r_20w_20d"
+];
 
-  const basicRuns = [
-    ["seq_write", bench_opfs_sequential_write],
-    ["random_write", bench_opfs_random_write],
-    ["seq_read", bench_opfs_sequential_read],
-    ["random_read", bench_opfs_random_read]
-  ];
-  const mixedScenarios = [
-    "mixed_random_70r_30w",
-    "mixed_random_50r_50w_with_updates",
-    "mixed_random_60r_20w_20d"
-  ];
+async function runRequest(payload) {
+  const count = Number(payload?.count ?? 5000);
+  const valueSizes = Array.isArray(payload?.valueSizes) ? payload.valueSizes : [32, 256, 4096];
+  const profile = String(payload?.profile ?? "basic");
 
   try {
     const out = [];
     for (const valueSize of valueSizes) {
       if (profile === "basic" || profile === "all") {
         for (const [name, fn] of basicRuns) {
+          const startedAt = performance.now();
+          self.postMessage({ type: "progress", event: "start", operation: name, value_size: valueSize });
           const result = await fn(count, valueSize);
           const withName = { ...result, operation: result.operation || name };
           out.push(withName);
+          self.postMessage({
+            type: "progress",
+            event: "end",
+            operation: withName.operation,
+            value_size: valueSize,
+            elapsed_ms: performance.now() - startedAt,
+            phase_times_ms: withName.phase_times_ms || []
+          });
           self.postMessage({ type: "result", result: withName });
         }
       }
 
       if (profile === "mixed" || profile === "all") {
         for (const scenario of mixedScenarios) {
+          const startedAt = performance.now();
+          self.postMessage({ type: "progress", event: "start", operation: scenario, value_size: valueSize });
           const result = await bench_opfs_mixed_scenario(scenario, count, valueSize);
           out.push(result);
+          self.postMessage({
+            type: "progress",
+            event: "end",
+            operation: scenario,
+            value_size: valueSize,
+            elapsed_ms: performance.now() - startedAt,
+            phase_times_ms: result.phase_times_ms || []
+          });
           self.postMessage({ type: "result", result });
         }
       }
@@ -185,11 +213,40 @@ self.onmessage = async (e) => {
   } catch (error) {
     self.postMessage({ type: "error", error: error?.message || String(error) });
   }
+}
+
+self.onmessage = (e) => {
+  const payload = e.data || {};
+  if (initError) {
+    self.postMessage({ type: "error", error: initError });
+    return;
+  }
+  if (!wasmReady) {
+    pendingRequests.push(payload);
+    return;
+  }
+  void runRequest(payload);
 };
+
+(async () => {
+  self.postMessage({ type: "progress", event: "worker_boot" });
+  try {
+    await init();
+    wasmReady = true;
+    self.postMessage({ type: "progress", event: "wasm_init_done" });
+    while (pendingRequests.length > 0) {
+      const next = pendingRequests.shift();
+      await runRequest(next);
+    }
+  } catch (error) {
+    initError = error?.message || String(error);
+    self.postMessage({ type: "error", error: initError });
+  }
+})();
 `;
 }
 
-function createHtml(count, valueSizes, profile) {
+function createHtml(count, valueSizes, profile, progress) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>jazz-lsm wasm opfs bench</title>
@@ -197,24 +254,47 @@ function createHtml(count, valueSizes, profile) {
 window.__benchDone = false;
 window.__benchError = null;
 window.__benchResults = [];
+window.__benchProgress = [];
+const __emitProgress = ${progress ? "true" : "false"};
 
 const worker = new Worker("/worker.js", { type: "module" });
+if (__emitProgress) {
+  console.log("[bench-progress]", "page_loaded");
+}
 worker.onmessage = (e) => {
   const msg = e.data || {};
   if (msg.type === "result") {
     window.__benchResults.push(msg.result);
+    if (__emitProgress) {
+      console.log("[bench-progress]", JSON.stringify({ type: "result", operation: msg.result?.operation, value_size: msg.result?.value_size }));
+    }
+  }
+  if (msg.type === "progress") {
+    window.__benchProgress.push(msg);
+    if (__emitProgress) {
+      console.log("[bench-progress]", JSON.stringify(msg));
+    }
   }
   if (msg.type === "done") {
     window.__benchDone = true;
+    if (__emitProgress) {
+      console.log("[bench-progress]", "worker_done");
+    }
   }
   if (msg.type === "error") {
     window.__benchDone = true;
     window.__benchError = msg.error || "unknown worker error";
+    if (__emitProgress) {
+      console.log("[bench-progress]", JSON.stringify({ type: "error", error: window.__benchError }));
+    }
   }
 };
 worker.onerror = (e) => {
   window.__benchDone = true;
   window.__benchError = e.message || "worker error";
+  if (__emitProgress) {
+    console.log("[bench-progress]", JSON.stringify({ type: "worker_onerror", error: window.__benchError }));
+  }
 };
 worker.postMessage({ count: ${count}, valueSizes: [${valueSizes.join(",")}], profile: "${profile}" });
 </script>`;
@@ -227,7 +307,7 @@ async function run() {
   ensureBuiltPkg(pkgDir);
 
   const workerScript = createWorkerScript();
-  const html = createHtml(args.count, args.valueSizes, args.profile);
+  const html = createHtml(args.count, args.valueSizes, args.profile, args.progress);
 
   const server = http.createServer((req, res) => {
     const url = req.url || "/";
@@ -279,6 +359,11 @@ async function run() {
           browser = await chromium.launch({ headless: true });
           context = await browser.newContext();
           const page = await context.newPage();
+          if (args.progress) {
+            page.on("console", (msg) => {
+              console.log(msg.text());
+            });
+          }
           await page.goto(baseUrl, { waitUntil: "load", timeout: 60_000 });
 
           await page.waitForFunction(
