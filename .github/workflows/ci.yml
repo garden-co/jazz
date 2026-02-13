@@ -44,7 +44,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm format:check
-      - run: pnpm lint
+      - run: pnpm oxlint .
       - run: pnpm build
+      - run: cargo clippy --workspace -- -D warnings
       - run: npx playwright install chromium
       - run: pnpm test
