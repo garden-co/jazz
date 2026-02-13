@@ -1,3 +1,4 @@
+// @ts-expect-error package not installed
 import { Extension } from "@tiptap/core";
 import { CoRichText } from "jazz-tools";
 import { createJazzPlugin } from "jazz-tools/prosemirror";
@@ -14,12 +15,14 @@ export const JazzSyncExtension = Extension.create<JazzSyncOptions>({
 
   addOptions() {
     return {
+      // TipTap treats extension options as optional...
       coRichText: undefined as any,
       config: {},
     };
   },
 
   addProseMirrorPlugins() {
+    // ...so we check that it exists at runtime.
     if (!this.options.coRichText) {
       throw new Error("JazzSyncExtension requires a CoRichText value");
     }

@@ -22,7 +22,7 @@ const JazzAccount = co.account({
 <>
   <p>{note.toString()}</p>
   <p>{note}</p>
-</>;
+</>
 // #endregion
 
 // #region TextEditor
