@@ -25,6 +25,21 @@ pub enum FsError {
 
 pub trait SyncFs: Clone {
     fn read_all(&self, path: &str) -> Result<Vec<u8>, FsError>;
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let data = self.read_all(path)?;
+        if offset > usize::MAX as u64 {
+            return Ok(Vec::new());
+        }
+        let start = offset as usize;
+        if start >= data.len() {
+            return Ok(Vec::new());
+        }
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data[start..end].to_vec())
+    }
     fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError>;
     fn write_atomic(&self, path: &str, data: &[u8]) -> Result<(), FsError>;
     fn append(&self, path: &str, data: &[u8]) -> Result<(), FsError>;
@@ -54,6 +69,25 @@ impl SyncFs for MemoryFs {
             .get(path)
             .cloned()
             .ok_or_else(|| FsError::NotFound(path.to_string()))
+    }
+
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let files = self.files.borrow();
+        let data = files
+            .get(path)
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
+        if offset > usize::MAX as u64 {
+            return Ok(Vec::new());
+        }
+        let start = offset as usize;
+        if start >= data.len() {
+            return Ok(Vec::new());
+        }
+        let end = start.saturating_add(len).min(data.len());
+        Ok(data[start..end].to_vec())
     }
 
     fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
@@ -147,6 +181,34 @@ impl SyncFs for StdFs {
                 FsError::Io(e.to_string())
             }
         })
+    }
+
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(self.full_path(path))
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    FsError::NotFound(path.to_string())
+                } else {
+                    FsError::Io(e.to_string())
+                }
+            })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| FsError::Io(e.to_string()))?;
+
+        let mut out = vec![0u8; len];
+        let read = file
+            .read(&mut out)
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        out.truncate(read);
+        Ok(out)
     }
 
     fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
@@ -381,6 +443,70 @@ impl<I: ContainerIo> ContainerFs<I> {
         Ok(out)
     }
 
+    fn read_range_inner(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let state = self.inner.borrow();
+        let entry = state
+            .meta
+            .files
+            .get(path)
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
+
+        if offset >= entry.size {
+            return Ok(Vec::new());
+        }
+
+        let want = (entry.size - offset).min(len as u64) as usize;
+        let mut out = vec![0u8; want];
+        let mut out_cursor = 0usize;
+        let mut logical_cursor = 0u64;
+        let mut remaining = want as u64;
+
+        for extent in &entry.extents {
+            let extent_start = logical_cursor;
+            let extent_end = logical_cursor + extent.len;
+            logical_cursor = extent_end;
+
+            if extent_end <= offset {
+                continue;
+            }
+            if remaining == 0 {
+                break;
+            }
+
+            let read_start_in_extent = offset.saturating_sub(extent_start);
+            if read_start_in_extent >= extent.len {
+                continue;
+            }
+
+            let available = extent.len - read_start_in_extent;
+            let take = available.min(remaining);
+            let start = out_cursor;
+            let end = out_cursor + take as usize;
+            read_exact_at(
+                &state.io,
+                extent.offset + read_start_in_extent,
+                &mut out[start..end],
+            )?;
+
+            out_cursor = end;
+            remaining -= take;
+        }
+
+        if out_cursor != out.len() {
+            return Err(FsError::Io(format!(
+                "short range read for {path} at offset {offset}: expected {} bytes, got {}",
+                out.len(),
+                out_cursor
+            )));
+        }
+
+        Ok(out)
+    }
+
     fn write_all_inner(&self, path: &str, data: &[u8], atomic: bool) -> Result<(), FsError> {
         let mut state = self.inner.borrow_mut();
 
@@ -554,6 +680,10 @@ impl<I: ContainerIo> ContainerFs<I> {
 impl<I: ContainerIo> SyncFs for ContainerFs<I> {
     fn read_all(&self, path: &str) -> Result<Vec<u8>, FsError> {
         self.read_all_inner(path)
+    }
+
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        self.read_range_inner(path, offset, len)
     }
 
     fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
@@ -1065,6 +1195,10 @@ impl SyncFs for OpfsFs {
         self.inner.read_all(path)
     }
 
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        self.inner.read_range(path, offset, len)
+    }
+
     fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
         self.inner.write_all(path, data)
     }
@@ -1258,6 +1392,22 @@ mod tests {
         fs.truncate("wal", 7).unwrap();
         fs.assert_valid().unwrap();
         assert_eq!(fs.read_all("wal").unwrap(), b"abcd\0\0\0".to_vec());
+    }
+
+    #[test]
+    fn mapping_read_range_spans_multiple_extents() {
+        let io = MemContainerIo::default();
+        let fs = open_mem_fs(io);
+
+        fs.append("wal", b"abcdefghij").unwrap();
+        fs.write_all("gap", b"XXXXXXXXXXXXXXXXXXXX").unwrap();
+        fs.append("wal", b"klmnopqrst").unwrap();
+        fs.assert_valid().unwrap();
+
+        assert_eq!(fs.read_range("wal", 0, 4).unwrap(), b"abcd".to_vec());
+        assert_eq!(fs.read_range("wal", 8, 6).unwrap(), b"ijklmn".to_vec());
+        assert_eq!(fs.read_range("wal", 18, 10).unwrap(), b"st".to_vec());
+        assert_eq!(fs.read_range("wal", 999, 8).unwrap(), Vec::<u8>::new());
     }
 
     #[test]
