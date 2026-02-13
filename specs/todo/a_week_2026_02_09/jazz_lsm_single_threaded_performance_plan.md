@@ -10,21 +10,52 @@ Improve `jazz-lsm` mixed read/write performance in a single-threaded runtime, ta
 - Maintenance work must be cooperative (bounded foreground steps)
 - Durability contract unchanged: no lost acknowledged writes after `flush_wal()`
 
-## Prioritized roadmap (lowest complexity, highest ROI first)
+## Roadmap status (updated 2026-02-13)
 
-Order is strict. Stop after each item and re-benchmark.
+| Phase | Item | Status | Complexity | Expected mixed R/W impact | Notes |
+|---|---|---|---|---|---|
+| 1 | Mixed workload benchmarks + counters | Done | S | Baseline quality | Implemented for native + WASM |
+| 2 | Internal write batching + in-memory WAL byte tracking | Done | S-M | High | Highest payoff-per-complexity so far |
+| 3 | Reuse encode/decode buffers in write path | Done | S | Medium | Positive native, mixed WASM |
+| 4 | SST v2 block format + point-read block index | Done | M-H | High but variable | Keep selective parts in Phase 8 stack |
+| 5 | Per-SST bloom filters | Done | M | Low/negative net | Kept for now; may revisit/trim later |
+| 6 | SST metadata/index cache + small block cache | Done | M | High | Highest payoff-per-complexity so far |
+| 7 | Range-scoped compaction + per-step budget | Dropped | M-H | Negative net in current runs | Dropped after strong native regressions |
+| 8 | `phase_2_6_some_4` consolidation | Done (mixed) | S-M | Mixed; not clearly better than Phase 6 | Finalized at `32 KiB` blocks + bloom enabled |
+| 9 | Append-only manifest edits + periodic checkpoint | Planned (next) | M | +10% to +40% write-heavy mixed | Re-ordered ahead of large-value separation |
+| 10 | Large-value separation (blob log threshold) | Planned | H | +5x to +20x for 1MB-heavy workloads | Still likely required for sustained 1MB performance |
 
-| Order | Item | Complexity | Expected mixed R/W impact | Why this order |
-|---|---|---|---|---|
-| 1 | Add mixed workload benchmarks + counters | S | Baseline quality (no direct speedup) | Cheapest way to avoid optimizing blind; needed to measure ROI of every next step |
-| 2 | Internal write batching + in-memory WAL byte tracking | S-M | +30% to +150% writes, +10% to +60% mixed | Removes per-op fixed overhead and avoids repeated WAL length checks |
-| 3 | Reuse encode/decode buffers in write path | S | +10% to +40% writes, +5% to +20% mixed | Allocation churn is currently high and easy to reduce |
-| 4 | SST v2 block format + point-read block index | M-H | +3x to +20x reads, +2x to +8x mixed | Biggest structural read bottleneck today is full-file reads for point lookups |
-| 5 | Per-SST bloom filters | M | +1.5x to +4x random reads, +1.3x to +3x mixed | Cheap read amplification reduction once block/index format exists |
-| 6 | SST metadata/index cache + small block cache | M | +1.2x to +3x reads, +1.2x to +2x mixed | Avoids repeated parse/read of hot SST internals |
-| 7 | Range-scoped compaction picking + compaction budget per op | M-H | +1.5x to +4x writes under churn, +1.5x to +3x mixed | Reduces write amplification and large foreground stalls |
-| 8 | Large-value separation (blob log for values above threshold) | H | +5x to +20x for 1MB workloads, +2x to +8x mixed at large values | High ROI for large values; avoids repeatedly rewriting value payloads during compaction |
-| 9 | Append-only manifest edits + periodic checkpoint | M | +10% to +40% write-heavy mixed | Lowers metadata rewrite/sync overhead during flush/compaction |
+## Measured ROI update (2026-02-13)
+
+Observed payoff-per-complexity from completed phases:
+
+1. `Phase 2` (internal WAL batching + in-memory WAL bytes): highest ROI, low complexity.
+2. `Phase 6` (SST metadata/index cache + block cache): highest ROI, medium complexity.
+3. `Phase 3` (buffer reuse): good native ROI, mixed wasm impact.
+4. `Phase 4` (SST v2 block format + point index): high upside but more volatility/complexity.
+5. `Phase 5` (bloom filters): low/negative net in current runs.
+6. `Phase 7` (range-scoped compaction + per-step budget): negative net for native in current runs.
+
+Decision for next iteration: build and benchmark **Phase 8** (`phase_2_6_some_4`).
+
+## Phase 8: `phase_2_6_some_4`
+
+Goal: keep the strongest low/medium-complexity wins while avoiding recent native regressions.
+
+- Keep `Phase 2` internals unchanged.
+- Keep `Phase 6` caches unchanged.
+- Keep selective `Phase 4` read-path structure (SST v2 + point-read index + positional reads), but tune block sizing for lower write/index overhead.
+- Do not include `Phase 7` compaction changes in this stack.
+- Re-benchmark mixed native + wasm for `32/256/4096/1048576` and compare against `Phase 6`.
+
+### Phase 8 implementation diff (code-level)
+
+- Removed Phase 7 WIP behavior from `db.rs` by reverting range-scoped compaction input selection and per-step compaction-budget options.
+- Restored compaction behavior to the pre-Phase-7 path (the Phase 6 baseline compaction path).
+- Tuned selective Phase 4 block sizing in two passes:
+  - Tried `64 KiB` SST blocks + bloom disabled by default; rejected due strong benchmark regressions.
+  - Finalized on `32 KiB` SST blocks + bloom enabled by default.
+- Removed the optional bloom-disable toggle from `LsmOptions` to keep Phase 8 on a single code path.
 
 ## Detailed scope per item
 
@@ -67,24 +98,31 @@ Order is strict. Stop after each item and re-benchmark.
 - Add bounded LRU block cache (configurable bytes)
 - Keep cache simple and deterministic for single-thread worker
 
-### 7) Compaction improvements (single-thread cooperative)
+### 7) Compaction improvements (single-thread cooperative) [Dropped]
 
-- Replace whole-level rewrite with range/file-set selection
-- Add configurable per-call compaction budget (bytes or records)
-- Run bounded compaction work on foreground operations (`put/get/flush/compact_step`) without long event-loop stalls
+- This phase is dropped in its current form.
+- Reason: observed native regressions outweighed gains in current measurements.
+- If revisited later, it should be treated as a new design phase with a stricter rollback gate.
 
-### 8) Large-value separation
+### 8) `phase_2_6_some_4` consolidation
 
-- Add value size threshold option
-- Values above threshold stored in append-only blob log
-- LSM records keep blob pointer + length + checksum
-- Compaction rewrites pointers, not blob payloads
+- Keep Phase 2 and Phase 6 behavior as-is.
+- Keep selective Phase 4 read path (SST v2 + point-read index + positional reads).
+- Use `32 KiB` SST block target to balance index/block overhead against read amplification.
+- Explicitly exclude Phase 7 compaction changes.
 
 ### 9) Manifest edits log
 
 - Replace full manifest rewrite with append-only version edits
 - Add periodic checkpoint/snapshot of manifest state
 - Recovery = checkpoint + tail replay
+
+### 10) Large-value separation
+
+- Add value size threshold option
+- Values above threshold stored in append-only blob log
+- LSM records keep blob pointer + length + checksum
+- Compaction rewrites pointers, not blob payloads
 
 ## Non-goals (for this plan)
 
