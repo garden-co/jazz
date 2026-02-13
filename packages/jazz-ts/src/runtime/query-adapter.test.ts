@@ -91,6 +91,21 @@ describe("translateQuery", () => {
       ]);
     });
 
+    it("treats implicit id column as UUID", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "id", op: "eq", value: "00000000-0000-0000-0000-000000000abc" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = JSON.parse(translateQuery(builderJson, basicSchema));
+
+      expect(result.disjuncts[0].conditions).toEqual([
+        { Eq: { column: "_id", value: { Uuid: "00000000-0000-0000-0000-000000000abc" } } },
+      ]);
+    });
+
     it("translates eq condition with boolean", () => {
       const builderJson = JSON.stringify({
         table: "todos",
