@@ -16,7 +16,11 @@ import {
 } from "./game/constants.js";
 import { drawBackground, drawLander, drawAstronaut } from "./game/render.js";
 
-export function Game() {
+interface GameProps {
+  physicsSpeed?: number;
+}
+
+export function Game({ physicsSpeed = 1 }: GameProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sizeRef = useRef({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
 
@@ -90,7 +94,8 @@ export function Game() {
     let rafId = 0;
 
     const gameLoop = (now: number) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      const rawDt = Math.min((now - lastTime) / 1000, 0.05);
+      const dt = rawDt * physicsSpeed;
       lastTime = now;
       const keys = keysRef.current;
       const { w, h } = sizeRef.current;
