@@ -11,8 +11,10 @@ import {
   WALK_SPEED,
   LANDER_INTERACT_RADIUS,
   INITIAL_FUEL,
+  FUEL_TYPES,
   COLOURS,
   type PlayerMode,
+  type FuelType,
 } from "./game/constants.js";
 import { drawBackground, drawLander, drawAstronaut } from "./game/render.js";
 
@@ -30,8 +32,40 @@ function getOrCreatePlayerId(): string {
   return id;
 }
 
+/** Simple hash of a string to a number (for deterministic derivation). */
+function hashCode(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+const PLAYER_NAMES = [
+  "Armstrong", "Aldrin", "Collins", "Shepard", "Glenn",
+  "Ride", "Jemison", "Tereshkova", "Gagarin", "Leonov",
+  "Bean", "Conrad", "Lovell", "Swigert", "Haise",
+  "Cernan", "Schmitt", "Duke", "Young", "Scott",
+];
+
+const PLAYER_COLOURS = [
+  "#ff00ff", "#00ffff", "#ff6600", "#00ff00",
+  "#ff66ff", "#8b00ff", "#ffff00", "#ff3366",
+];
+
+/** Derive deterministic player properties from a player ID. */
+function derivePlayerProps(id: string) {
+  const h = hashCode(id);
+  return {
+    name: PLAYER_NAMES[h % PLAYER_NAMES.length],
+    color: PLAYER_COLOURS[h % PLAYER_COLOURS.length],
+    requiredFuelType: FUEL_TYPES[h % FUEL_TYPES.length] as FuelType,
+  };
+}
+
 export function Game({ physicsSpeed = 1 }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
+  const playerProps = useRef(derivePlayerProps(playerId)).current;
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sizeRef = useRef({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
@@ -235,6 +269,10 @@ export function Game({ physicsSpeed = 1 }: GameProps) {
     <div
       data-testid="game-container"
       data-player-id={playerId}
+      data-player-name={playerProps.name}
+      data-player-color={playerProps.color}
+      data-required-fuel={playerProps.requiredFuelType}
+      data-lander-fuel={exposed.fuel}
       data-player-mode={exposed.mode}
       data-player-x={exposed.px}
       data-player-y={exposed.py}
