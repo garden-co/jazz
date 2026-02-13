@@ -120,11 +120,11 @@ impl BfTreeStorage {
         let ack_count = count_prefix("ack:");
         tracing::info!(obj_count, idx_count, ack_count, "BfTreeStorage opened");
         // If there are index keys, log a sample
-        if idx_count > 0 {
-            if let Ok(keys) = self.tree_scan_keys("idx:") {
-                for key in keys.iter().take(5) {
-                    tracing::debug!(key, "sample index key");
-                }
+        if idx_count > 0
+            && let Ok(keys) = self.tree_scan_keys("idx:")
+        {
+            for key in keys.iter().take(5) {
+                tracing::debug!(key, "sample index key");
             }
         }
     }
