@@ -15,6 +15,7 @@ import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } fro
 import { WorkerBridge } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRows } from "./row-transformer.js";
+import { ensureSchemaHashReady } from "./schema-hash.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { withResolvedSyncClientId } from "./sync-client-id-store.js";
@@ -121,6 +122,7 @@ export class Db {
    */
   static async create(config: DbConfig): Promise<Db> {
     config = withResolvedSyncClientId(config);
+    await ensureSchemaHashReady();
     const wasmModule = await loadWasmModule();
     return new Db(config, wasmModule);
   }
@@ -136,6 +138,7 @@ export class Db {
    */
   static async createWithWorker(config: DbConfig): Promise<Db> {
     config = withResolvedSyncClientId(config);
+    await ensureSchemaHashReady();
     const wasmModule = await loadWasmModule();
     const db = new Db(config, wasmModule);
 
