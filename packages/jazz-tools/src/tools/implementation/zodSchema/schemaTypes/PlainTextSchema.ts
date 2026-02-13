@@ -17,6 +17,7 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
+import { coValueValidationSchema } from "./schemaValidators.js";
 
 export interface CorePlainTextSchema extends CoreCoValueSchema {
   builtin: "CoPlainText";
@@ -43,7 +44,13 @@ export class PlainTextSchema implements CorePlainTextSchema {
       return this.#validationSchema;
     }
 
-    this.#validationSchema = z.string().or(z.instanceof(CoPlainText));
+    const validationSchema = z.string();
+
+    this.#validationSchema = coValueValidationSchema(
+      validationSchema,
+      CoPlainText,
+      "CoPlainText",
+    );
     return this.#validationSchema;
   };
 

@@ -47,7 +47,7 @@ import {
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
 import {
-  extractFieldElementFromUnionSchema,
+  expectArraySchema,
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
@@ -542,18 +542,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   }
 
   private getItemSchema(): z.ZodType {
-    /**
-     * coListSchema may be undefined if the CoList is created directly with its constructor,
-     * without using a co.list().create() to create it.
-     * In that case, we can't validate the values.
-     */
-    if (this.coListSchema === undefined) {
-      return z.any();
-    }
-
-    const fieldSchema = extractFieldElementFromUnionSchema(
+    const fieldSchema = expectArraySchema(
       this.coListSchema.getValidationSchema(),
-    );
+    ).element;
 
     return normalizeZodSchema(fieldSchema);
   }

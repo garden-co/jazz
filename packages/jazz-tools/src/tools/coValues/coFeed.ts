@@ -64,7 +64,7 @@ import {
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
 import {
-  extractFieldElementFromUnionSchema,
+  expectArraySchema,
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
@@ -477,18 +477,9 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   }
 
   private getItemSchema(): z.ZodType {
-    /**
-     * coFeedSchema may be undefined if the CoFeed is created directly with its constructor,
-     * without using a co.feed().create() to create it.
-     * In that case, we can't validate the values.
-     */
-    if (this.coFeedSchema === undefined) {
-      return z.any();
-    }
-
-    const fieldSchema = extractFieldElementFromUnionSchema(
+    const fieldSchema = expectArraySchema(
       this.coFeedSchema.getValidationSchema(),
-    );
+    ).element;
 
     return normalizeZodSchema(fieldSchema);
   }

@@ -124,4 +124,16 @@ describe("co.optional", () => {
 
     expect(person?.preferredName?.toString()).toEqual("John");
   });
+
+  test("can set undefined to an optional field", () => {
+    const Person = co.map({
+      name: co.optional(co.plainText()),
+    });
+
+    const person = Person.create({});
+
+    person.$jazz.set("name", undefined);
+
+    expect(person.name).toBeUndefined();
+  });
 });

@@ -61,7 +61,7 @@ import {
   type LocalValidationMode,
 } from "../implementation/zodSchema/validationSettings.js";
 import {
-  extractFieldShapeFromUnionSchema,
+  expectObjectSchema,
   normalizeZodSchema,
 } from "../implementation/zodSchema/schemaTypes/schemaValidators.js";
 import { assertCoValueSchema } from "../implementation/zodSchema/schemaInvariant.js";
@@ -608,7 +608,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     let objectValidation: z.ZodObject | undefined;
 
     try {
-      objectValidation = extractFieldShapeFromUnionSchema(fullSchema);
+      objectValidation = expectObjectSchema(fullSchema);
     } catch {
       // Base/core schemas may expose a non-union validation schema (e.g. z.any()).
       // In those cases we keep legacy dynamic behavior and skip strict per-field validation.

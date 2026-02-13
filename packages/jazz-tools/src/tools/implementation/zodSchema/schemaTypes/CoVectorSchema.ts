@@ -15,6 +15,7 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
+import { coValueValidationSchema } from "./schemaValidators.js";
 
 export interface CoreCoVectorSchema extends CoreCoValueSchema {
   builtin: "CoVector";
@@ -45,10 +46,13 @@ export class CoVectorSchema implements CoreCoVectorSchema {
       return this.#validationSchema;
     }
 
-    this.#validationSchema = z
-      .instanceof(CoVector)
-      .or(z.instanceof(Float32Array))
-      .or(z.array(z.number()));
+    const validationSchema = z.instanceof(Float32Array).or(z.array(z.number()));
+
+    this.#validationSchema = coValueValidationSchema(
+      validationSchema,
+      CoVector,
+      "CoVector",
+    );
 
     return this.#validationSchema;
   };

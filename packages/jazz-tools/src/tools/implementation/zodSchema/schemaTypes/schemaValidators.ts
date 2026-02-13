@@ -1,4 +1,9 @@
-import { Account, Group, isCoValueSchema } from "../../../internal.js";
+import {
+  Account,
+  Group,
+  isCoValue,
+  isCoValueSchema,
+} from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import type { CoreCoValueSchema } from "./CoValueSchema.js";
 
@@ -41,58 +46,79 @@ export function generateValidationSchemaFromItem(item: InputSchema): z.ZodType {
   throw new Error(`Unsupported schema type: ${item}`);
 }
 
-function isUnionSchema(schema: unknown): schema is z.ZodUnion {
-  if (typeof schema !== "object" || schema === null) {
-    return false;
-  }
+/**
+ * Returns a Zod schema that accepts either an instance of the given CoValue class
+ * or a plain value valid against the given plain schema. Validation is not used on read,
+ * so existing CoValue instances are accepted; for non-CoValue inputs, validation runs
+ * against the plain schema. The result includes `plainSchema` in meta for extraction.
+ */
+export function coValueValidationSchema(
+  plainSchema: z.ZodType,
+  expectedCoValueClass: new (...args: any[]) => unknown,
+  type: string,
+): z.ZodType {
+  return z
+    .unknown()
+    .superRefine((value, ctx) => {
+      if (isCoValue(value)) {
+        if (!(value instanceof expectedCoValueClass)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `Expected a ${type} when providing a CoValue instance`,
+          });
+        }
+        return;
+      }
 
-  if (
-    "def" in schema &&
-    typeof schema.def === "object" &&
-    schema.def !== null &&
-    "type" in schema.def &&
-    schema.def.type === "union"
-  ) {
-    return true;
-  }
-
-  return false;
+      const parsedValue = plainSchema.safeParse(value);
+      if (!parsedValue.success) {
+        for (const issue of parsedValue.error.issues) {
+          ctx.addIssue({ ...issue });
+        }
+      }
+    })
+    .meta({
+      plainSchema,
+    });
 }
 
-export function extractFieldShapeFromUnionSchema(schema: unknown): z.ZodObject {
-  if (!isUnionSchema(schema)) {
-    throw new Error("Schema is not a union");
+export function extractPlainSchema(schema: z.ZodType): z.ZodType {
+  // plainSchema is only set on unknown schemas with superRefine
+  if (schema.def.type !== "unknown") {
+    return schema;
+  }
+  const plainSchema = schema.meta()?.plainSchema;
+  if (plainSchema) {
+    return plainSchema as z.ZodType;
   }
 
-  const unionElement = schema.options[1];
-
-  if (typeof unionElement !== "object" || unionElement === null) {
-    throw new Error("Union element is not an object");
-  }
-
-  if ("shape" in unionElement) {
-    return unionElement as z.ZodObject;
-  }
-
-  throw new Error("Union element is not an object with shape");
+  throw new Error("Schema does not have a plain schema");
 }
 
-export function extractFieldElementFromUnionSchema(schema: unknown): z.ZodType {
-  if (!isUnionSchema(schema)) {
-    throw new Error("Schema is not a union");
+export function expectObjectSchema(schema: z.ZodType): z.ZodObject {
+  if (schema.def.type === "object") {
+    return schema as z.ZodObject;
   }
 
-  const unionElement = schema.options[1];
-
-  if (typeof unionElement !== "object" || unionElement === null) {
-    throw new Error("Union element is not an object");
+  const plainSchema = extractPlainSchema(schema);
+  if (plainSchema.def.type === "object") {
+    return plainSchema as z.ZodObject;
   }
 
-  if ("element" in unionElement) {
-    return unionElement.element as z.ZodType;
+  throw new Error("Schema does not have an object schema");
+}
+
+export function expectArraySchema(schema: z.ZodType): z.ZodArray<z.ZodType> {
+  if (schema.def.type === "array") {
+    return schema as z.ZodArray<z.ZodType>;
   }
 
-  throw new Error("Union element is not an object with element");
+  const plainSchema = extractPlainSchema(schema);
+  if (plainSchema.def.type === "array") {
+    return plainSchema as z.ZodArray<z.ZodType>;
+  }
+
+  throw new Error("Schema does not have an array schema");
 }
 
 export function normalizeZodSchema(schema: z.ZodType): z.ZodType {

@@ -16,6 +16,7 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
+import { coValueValidationSchema } from "./schemaValidators.js";
 
 export interface CoreRichTextSchema extends CoreCoValueSchema {
   builtin: "CoRichText";
@@ -36,6 +37,7 @@ export class RichTextSchema implements CoreRichTextSchema {
   readonly resolveQuery = true as const;
 
   #permissions: SchemaPermissions | null = null;
+  #validationSchema: z.ZodType | undefined = undefined;
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal
@@ -46,14 +48,18 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   constructor(private coValueClass: typeof CoRichText) {}
 
-  #validationSchema: z.ZodType | undefined = undefined;
-
   getValidationSchema = () => {
     if (this.#validationSchema) {
       return this.#validationSchema;
     }
 
-    this.#validationSchema = z.string().or(z.instanceof(CoRichText));
+    const validationSchema = z.string();
+
+    this.#validationSchema = coValueValidationSchema(
+      validationSchema,
+      CoRichText,
+      "CoRichText",
+    );
     return this.#validationSchema;
   };
 
