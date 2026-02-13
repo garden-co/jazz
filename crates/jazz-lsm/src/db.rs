@@ -2,6 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
+use serde::Serialize;
+
 use crate::error::LsmError;
 use crate::format::{OpKind, VersionedRecord, decode_records_into, encode_record_into};
 use crate::fs::{FsError, SyncFs};
@@ -141,6 +143,21 @@ pub struct DebugState {
     pub deepest_tombstones: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RuntimeStats {
+    pub wal_buffer_flushes: u64,
+    pub wal_buffer_flush_bytes: u64,
+    pub memtable_flushes: u64,
+    pub memtable_flush_input_records: u64,
+    pub memtable_flush_output_bytes: u64,
+    pub compaction_steps: u64,
+    pub compaction_input_files: u64,
+    pub compaction_input_bytes: u64,
+    pub compaction_output_files: u64,
+    pub compaction_output_bytes: u64,
+    pub compaction_drop_tombstone_steps: u64,
+}
+
 pub struct LsmTree<F: SyncFs> {
     fs: F,
     options: LsmOptions,
@@ -153,6 +170,7 @@ pub struct LsmTree<F: SyncFs> {
     wal_buffer: RefCell<Vec<u8>>,
     sst_meta_cache: RefCell<SstMetaCache>,
     sst_block_cache: RefCell<SstBlockCache>,
+    runtime_stats: RefCell<RuntimeStats>,
 }
 
 impl<F: SyncFs> LsmTree<F> {
@@ -201,6 +219,7 @@ impl<F: SyncFs> LsmTree<F> {
             wal_buffer: RefCell::new(Vec::with_capacity(WAL_APPEND_BATCH_BYTES)),
             sst_meta_cache: RefCell::new(SstMetaCache::with_capacity(meta_cache_entries)),
             sst_block_cache: RefCell::new(SstBlockCache::with_max_bytes(block_cache_bytes)),
+            runtime_stats: RefCell::new(RuntimeStats::default()),
         };
 
         tree.replay_wal()?;
@@ -338,6 +357,10 @@ impl<F: SyncFs> LsmTree<F> {
         })
     }
 
+    pub fn runtime_stats(&self) -> RuntimeStats {
+        self.runtime_stats.borrow().clone()
+    }
+
     fn after_write(&mut self) -> Result<(), LsmError> {
         if self.options.write_durability == WriteDurability::SyncEveryWrite {
             self.flush_wal()?;
@@ -380,8 +403,14 @@ impl<F: SyncFs> LsmTree<F> {
             return Ok(());
         }
 
+        let append_bytes = buffer.len() as u64;
         self.fs.append(WAL_FILE, &buffer)?;
         buffer.clear();
+        drop(buffer);
+
+        let mut stats = self.runtime_stats.borrow_mut();
+        stats.wal_buffer_flushes = stats.wal_buffer_flushes.saturating_add(1);
+        stats.wal_buffer_flush_bytes = stats.wal_buffer_flush_bytes.saturating_add(append_bytes);
         Ok(())
     }
 
@@ -459,6 +488,17 @@ impl<F: SyncFs> LsmTree<F> {
         };
 
         self.manifest.levels[0].push(meta);
+
+        {
+            let mut stats = self.runtime_stats.borrow_mut();
+            stats.memtable_flushes = stats.memtable_flushes.saturating_add(1);
+            stats.memtable_flush_input_records = stats
+                .memtable_flush_input_records
+                .saturating_add(records.len() as u64);
+            stats.memtable_flush_output_bytes = stats
+                .memtable_flush_output_bytes
+                .saturating_add(bytes.len() as u64);
+        }
 
         self.memtable.clear();
         self.memtable_bytes = 0;
@@ -840,6 +880,11 @@ impl<F: SyncFs> LsmTree<F> {
         if input_files.is_empty() {
             return Ok(false);
         }
+        let input_file_count = input_files.len() as u64;
+        let input_file_bytes = input_files
+            .iter()
+            .map(|m| m.bytes)
+            .fold(0u64, u64::saturating_add);
 
         let mut by_key: BTreeMap<Vec<u8>, Vec<VersionedRecord>> = BTreeMap::new();
         let mut sst_records = Vec::new();
@@ -874,12 +919,16 @@ impl<F: SyncFs> LsmTree<F> {
             self.fs.remove_file(&meta.path)?;
         }
 
+        let mut output_file_count = 0u64;
+        let mut output_file_bytes = 0u64;
         if !output_records.is_empty() {
             let file_id = self.manifest.next_file_id;
             self.manifest.next_file_id += 1;
 
             let path = sst_path(file_id);
             let bytes = encode_sst_v2(&output_records)?;
+            output_file_count = 1;
+            output_file_bytes = bytes.len() as u64;
 
             self.fs.write_all(&path, &bytes)?;
             self.fs.sync_file(&path)?;
@@ -907,6 +956,26 @@ impl<F: SyncFs> LsmTree<F> {
         }
 
         self.persist_manifest()?;
+        {
+            let mut stats = self.runtime_stats.borrow_mut();
+            stats.compaction_steps = stats.compaction_steps.saturating_add(1);
+            stats.compaction_input_files = stats
+                .compaction_input_files
+                .saturating_add(input_file_count);
+            stats.compaction_input_bytes = stats
+                .compaction_input_bytes
+                .saturating_add(input_file_bytes);
+            stats.compaction_output_files = stats
+                .compaction_output_files
+                .saturating_add(output_file_count);
+            stats.compaction_output_bytes = stats
+                .compaction_output_bytes
+                .saturating_add(output_file_bytes);
+            if drop_tombstones {
+                stats.compaction_drop_tombstone_steps =
+                    stats.compaction_drop_tombstone_steps.saturating_add(1);
+            }
+        }
         Ok(true)
     }
 }

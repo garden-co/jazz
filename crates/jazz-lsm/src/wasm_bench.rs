@@ -6,7 +6,7 @@ use std::rc::Rc;
 use serde::Serialize;
 use wasm_bindgen::{JsCast, prelude::*};
 
-use crate::{FsError, LsmOptions, LsmTree, OpfsFs, SyncFs, WriteDurability};
+use crate::{FsError, LsmOptions, LsmTree, OpfsFs, RuntimeStats, SyncFs, WriteDurability};
 
 #[derive(Debug, Clone, Serialize)]
 struct PhaseTiming {
@@ -49,6 +49,7 @@ struct BenchmarkResult {
     operation: String,
     value_size: u32,
     count: u32,
+    seed: u64,
     wall_elapsed_ms: f64,
     elapsed_ms: f64,
     ops_per_sec: f64,
@@ -61,6 +62,7 @@ struct BenchmarkResult {
     checksum: u64,
     phase_times_ms: Vec<PhaseTiming>,
     fs_stats: FsStats,
+    runtime_stats: RuntimeStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +93,7 @@ const MIXED_SCENARIOS: [MixedScenario; 3] = [
         update_pct: 80,
     },
 ];
+const DEFAULT_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
 
 #[derive(Debug, Clone, Copy)]
 enum OpChoice {
@@ -150,15 +153,30 @@ fn value(size: usize, seed: u8) -> Vec<u8> {
     out
 }
 
-fn shuffled_indices(n: usize) -> Vec<usize> {
+fn shuffled_indices(n: usize, seed: u64) -> Vec<usize> {
     let mut out: Vec<usize> = (0..n).collect();
-    let mut state: u64 = 0xD1B54A32D192ED03;
+    let mut state: u64 = 0xD1B54A32D192ED03 ^ seed;
     for i in (1..n).rev() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         let j = (state as usize) % (i + 1);
         out.swap(i, j);
     }
     out
+}
+
+fn derive_seed(base_seed: u64, label: &str, value_size: u32) -> u64 {
+    const MAX_JS_SAFE_INT: u64 = 9_007_199_254_740_991;
+    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ base_seed ^ (value_size as u64);
+    for &b in label.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut derived = (h ^ ((value_size as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+        % MAX_JS_SAFE_INT;
+    if derived == 0 {
+        derived = 1;
+    }
+    derived
 }
 
 fn unique_namespace(label: &str) -> String {
@@ -374,6 +392,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
     let (mut db, tracked_fs) = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
+    let seed = derive_seed(DEFAULT_BASE_SEED, "seq_write", value_size);
 
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
@@ -391,6 +410,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
     push_phase(&mut phase_times_ms, "final_flush", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
+    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
@@ -404,6 +424,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         operation: "seq_write".to_string(),
         value_size,
         count,
+        seed,
         wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
@@ -416,6 +437,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         checksum,
         phase_times_ms,
         fs_stats,
+        runtime_stats,
     })
 }
 
@@ -433,7 +455,8 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
     let (mut db, tracked_fs) = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
-    let order = shuffled_indices(count as usize);
+    let seed = derive_seed(DEFAULT_BASE_SEED, "random_write", value_size);
+    let order = shuffled_indices(count as usize, seed);
 
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
@@ -451,6 +474,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
     push_phase(&mut phase_times_ms, "final_flush", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
+    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
@@ -464,6 +488,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         operation: "random_write".to_string(),
         value_size,
         count,
+        seed,
         wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
@@ -476,6 +501,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         checksum,
         phase_times_ms,
         fs_stats,
+        runtime_stats,
     })
 }
 
@@ -493,6 +519,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
     let (mut db, tracked_fs) = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
+    let seed = derive_seed(DEFAULT_BASE_SEED, "seq_read", value_size);
 
     let prefill_puts_start = high_res_now_ms();
     for i in 0..(count as usize) {
@@ -519,6 +546,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
+    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
@@ -532,6 +560,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
         operation: "seq_read".to_string(),
         value_size,
         count,
+        seed,
         wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
@@ -544,6 +573,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
         checksum,
         phase_times_ms,
         fs_stats,
+        runtime_stats,
     })
 }
 
@@ -561,6 +591,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
     let (mut db, tracked_fs) = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
+    let seed = derive_seed(DEFAULT_BASE_SEED, "random_read", value_size);
 
     let prefill_puts_start = high_res_now_ms();
     for i in 0..(count as usize) {
@@ -574,7 +605,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
 
-    let order = shuffled_indices(count as usize);
+    let order = shuffled_indices(count as usize, seed);
 
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
@@ -589,6 +620,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
+    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
@@ -602,6 +634,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
         operation: "random_read".to_string(),
         value_size,
         count,
+        seed,
         wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
@@ -614,6 +647,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
         checksum,
         phase_times_ms,
         fs_stats,
+        runtime_stats,
     })
 }
 
@@ -621,6 +655,7 @@ async fn run_mixed_scenario(
     scenario: MixedScenario,
     count: u32,
     value_size: u32,
+    base_seed: u64,
 ) -> Result<BenchmarkResult, JsValue> {
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
@@ -635,6 +670,7 @@ async fn run_mixed_scenario(
     let (mut db, tracked_fs) = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
+    let seed = derive_seed(base_seed, scenario.name, value_size);
     let initial_key_space = (count as usize).max(1);
 
     let prefill_puts_start = high_res_now_ms();
@@ -649,7 +685,7 @@ async fn run_mixed_scenario(
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
 
-    let mut rng = DeterministicRng::new(0xA5A5_A5A5_0123_4567 ^ (value_size as u64));
+    let mut rng = DeterministicRng::new(seed);
     let mut key_space = initial_key_space;
 
     let mut reads = 0u32;
@@ -713,6 +749,7 @@ async fn run_mixed_scenario(
     push_phase(&mut phase_times_ms, "final_flush", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
+    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
@@ -726,6 +763,7 @@ async fn run_mixed_scenario(
         operation: scenario.name.to_string(),
         value_size,
         count,
+        seed,
         wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
@@ -738,6 +776,7 @@ async fn run_mixed_scenario(
         checksum,
         phase_times_ms,
         fs_stats,
+        runtime_stats,
     })
 }
 
@@ -766,10 +805,17 @@ pub async fn bench_opfs_mixed_scenario(
     scenario_name: String,
     count: u32,
     value_size: u32,
+    base_seed: Option<u64>,
 ) -> Result<JsValue, JsValue> {
     let scenario = find_mixed_scenario(&scenario_name)
         .ok_or_else(|| JsValue::from_str(&format!("unknown mixed scenario: {scenario_name}")))?;
-    to_js_value(&run_mixed_scenario(scenario, count, value_size).await?)
+    to_js_value(&run_mixed_scenario(
+        scenario,
+        count,
+        value_size,
+        base_seed.unwrap_or(DEFAULT_BASE_SEED),
+    )
+    .await?)
 }
 
 #[wasm_bindgen]
@@ -795,7 +841,7 @@ pub async fn bench_opfs_mixed_matrix(count: u32) -> Result<JsValue, JsValue> {
 
     for value_size in sizes {
         for scenario in MIXED_SCENARIOS {
-            out.push(run_mixed_scenario(scenario, count, value_size).await?);
+            out.push(run_mixed_scenario(scenario, count, value_size, DEFAULT_BASE_SEED).await?);
         }
     }
 

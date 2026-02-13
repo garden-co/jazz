@@ -8,12 +8,31 @@ const { chromium } = require("playwright");
 const DEFAULT_COUNT = 5000;
 const DEFAULT_VALUE_SIZES = [32, 256, 4096];
 const DEFAULT_PROFILE = "basic";
+const DEFAULT_SEED = "0xA5A5A5A501234567";
+
+function parseSeed(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    throw new Error("`--seed` must not be empty");
+  }
+  try {
+    const value = BigInt(text);
+    const maxU64 = (1n << 64n) - 1n;
+    if (value < 0n || value > maxU64) {
+      throw new Error("out of range");
+    }
+    return `0x${value.toString(16)}`;
+  } catch {
+    throw new Error("`--seed` must be a valid u64 (decimal or 0x-prefixed hex)");
+  }
+}
 
 function parseArgs(argv) {
   const out = {
     count: DEFAULT_COUNT,
     valueSizes: DEFAULT_VALUE_SIZES,
     profile: DEFAULT_PROFILE,
+    seed: DEFAULT_SEED,
     json: false,
     progress: false,
   };
@@ -67,6 +86,16 @@ function parseArgs(argv) {
         throw new Error("`--profile` must be one of: basic, mixed, all");
       }
       out.profile = next;
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--seed") {
+      const next = argv[i + 1];
+      if (next == null) {
+        throw new Error("`--seed` requires a value");
+      }
+      out.seed = parseSeed(next);
       i += 1;
       continue;
     }
@@ -167,6 +196,8 @@ async function runRequest(payload) {
   const count = Number(payload?.count ?? 5000);
   const valueSizes = Array.isArray(payload?.valueSizes) ? payload.valueSizes : [32, 256, 4096];
   const profile = String(payload?.profile ?? "basic");
+  const seedRaw = String(payload?.seed ?? "${DEFAULT_SEED}");
+  const seed = BigInt(seedRaw);
 
   try {
     const out = [];
@@ -194,7 +225,7 @@ async function runRequest(payload) {
         for (const scenario of mixedScenarios) {
           const startedAt = performance.now();
           self.postMessage({ type: "progress", event: "start", operation: scenario, value_size: valueSize });
-          const result = await bench_opfs_mixed_scenario(scenario, count, valueSize);
+          const result = await bench_opfs_mixed_scenario(scenario, count, valueSize, seed);
           out.push(result);
           self.postMessage({
             type: "progress",
@@ -246,7 +277,7 @@ self.onmessage = (e) => {
 `;
 }
 
-function createHtml(count, valueSizes, profile, progress) {
+function createHtml(count, valueSizes, profile, seed, progress) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>jazz-lsm wasm opfs bench</title>
@@ -296,7 +327,7 @@ worker.onerror = (e) => {
     console.log("[bench-progress]", JSON.stringify({ type: "worker_onerror", error: window.__benchError }));
   }
 };
-worker.postMessage({ count: ${count}, valueSizes: [${valueSizes.join(",")}], profile: "${profile}" });
+worker.postMessage({ count: ${count}, valueSizes: [${valueSizes.join(",")}], profile: "${profile}", seed: "${seed}" });
 </script>`;
 }
 
@@ -307,7 +338,7 @@ async function run() {
   ensureBuiltPkg(pkgDir);
 
   const workerScript = createWorkerScript();
-  const html = createHtml(args.count, args.valueSizes, args.profile, args.progress);
+  const html = createHtml(args.count, args.valueSizes, args.profile, args.seed, args.progress);
 
   const server = http.createServer((req, res) => {
     const url = req.url || "/";

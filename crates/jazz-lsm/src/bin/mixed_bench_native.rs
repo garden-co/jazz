@@ -7,11 +7,12 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
-    use jazz_lsm::{LsmOptions, LsmTree, StdFs, WriteDurability};
+    use jazz_lsm::{LsmOptions, LsmTree, RuntimeStats, StdFs, WriteDurability};
     use serde::Serialize;
 
     const DEFAULT_COUNT: usize = 5_000;
     const DEFAULT_VALUE_SIZES: [usize; 3] = [32, 256, 4096];
+    const DEFAULT_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
 
     #[derive(Debug, Clone, Copy)]
     struct MixedScenario {
@@ -47,6 +48,7 @@ mod native {
         operation: String,
         value_size: u32,
         count: u32,
+        seed: u64,
         elapsed_ms: f64,
         ops_per_sec: f64,
         p95_op_ms: f64,
@@ -56,6 +58,7 @@ mod native {
         writes: u32,
         deletes: u32,
         checksum: u64,
+        runtime_stats: RuntimeStats,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -69,6 +72,7 @@ mod native {
     struct Args {
         count: usize,
         value_sizes: Vec<usize>,
+        seed: u64,
         json: bool,
     }
 
@@ -169,10 +173,40 @@ mod native {
         db.flush().expect("preload flush");
     }
 
+    fn derive_seed(base_seed: u64, scenario: MixedScenario, value_size: usize) -> u64 {
+        const MAX_JS_SAFE_INT: u64 = 9_007_199_254_740_991;
+        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ base_seed ^ (value_size as u64);
+        for &b in scenario.name.as_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let mut derived = (h ^ ((value_size as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+            % MAX_JS_SAFE_INT;
+        if derived == 0 {
+            derived = 1;
+        }
+        derived
+    }
+
+    fn parse_seed(raw: &str) -> Result<u64, String> {
+        let trimmed = raw.trim();
+        if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+        {
+            return u64::from_str_radix(hex, 16)
+                .map_err(|_| "`--seed` must be a valid u64 (decimal or 0x-prefixed hex)".to_string());
+        }
+        trimmed
+            .parse::<u64>()
+            .map_err(|_| "`--seed` must be a valid u64 (decimal or 0x-prefixed hex)".to_string())
+    }
+
     fn run_mixed_scenario(
         scenario: MixedScenario,
         count: usize,
         value_size: usize,
+        base_seed: u64,
     ) -> BenchmarkResult {
         let dir = temp_db_dir(scenario.name, value_size, count);
         std::fs::create_dir_all(&dir).expect("create temp db directory");
@@ -182,7 +216,8 @@ mod native {
         let initial_key_space = count.max(1);
         preload(&mut db, initial_key_space, value_size);
 
-        let mut rng = DeterministicRng::new(0xA5A5_A5A5_0123_4567 ^ (value_size as u64));
+        let seed = derive_seed(base_seed, scenario, value_size);
+        let mut rng = DeterministicRng::new(seed);
         let mut key_space = initial_key_space;
         let mut op_latencies_ns = Vec::with_capacity(count);
 
@@ -239,6 +274,7 @@ mod native {
             op_latencies_ns.push(op_start.elapsed().as_nanos() as u64);
         }
         db.flush().expect("final flush");
+        let runtime_stats = db.runtime_stats();
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
         let elapsed = total_start.elapsed();
@@ -247,6 +283,7 @@ mod native {
             operation: scenario.name.to_string(),
             value_size: value_size as u32,
             count: count as u32,
+            seed,
             elapsed_ms: elapsed.as_secs_f64() * 1000.0,
             ops_per_sec: count as f64 / elapsed.as_secs_f64(),
             p95_op_ms: percentile_ms(&mut op_latencies_ns, 0.95),
@@ -256,6 +293,7 @@ mod native {
             writes,
             deletes,
             checksum,
+            runtime_stats,
         }
     }
 
@@ -263,6 +301,7 @@ mod native {
         let mut out = Args {
             count: DEFAULT_COUNT,
             value_sizes: DEFAULT_VALUE_SIZES.to_vec(),
+            seed: DEFAULT_BASE_SEED,
             json: false,
         };
 
@@ -298,6 +337,13 @@ mod native {
                     out.value_sizes = parsed;
                     i += 2;
                 }
+                "--seed" => {
+                    let next = argv
+                        .get(i + 1)
+                        .ok_or_else(|| "`--seed` requires a value".to_string())?;
+                    out.seed = parse_seed(next)?;
+                    i += 2;
+                }
                 "--json" => {
                     out.json = true;
                     i += 1;
@@ -321,6 +367,7 @@ mod native {
             "Options:",
             "  --count <n>           Number of mixed ops per scenario/value-size (default: 5000)",
             "  --value-sizes <list>  Comma-separated value sizes in bytes (default: 32,256,4096)",
+            "  --seed <u64>          Base deterministic seed (decimal or 0x hex)",
             "  --json                Emit machine-readable JSON output",
         ]
         .join("\n")
@@ -411,7 +458,7 @@ mod native {
         let mut out = Vec::new();
         for &value_size in &args.value_sizes {
             for scenario in MIXED_SCENARIOS {
-                let result = run_mixed_scenario(scenario, args.count, value_size);
+                let result = run_mixed_scenario(scenario, args.count, value_size, args.seed);
                 out.push(result);
             }
         }
