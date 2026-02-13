@@ -1,0 +1,75 @@
+// ---------------------------------------------------------------------------
+// Game constants — single source of truth for balance tuning
+// ---------------------------------------------------------------------------
+
+// Canvas
+export const CANVAS_WIDTH = 960;
+export const CANVAS_HEIGHT = 640;
+
+// World
+export const MOON_SURFACE_WIDTH = 9600; // Pixels — ~5 screens wide
+export const GROUND_LEVEL = 560; // Y coordinate of the moon surface (from top)
+
+// Physics
+export const GRAVITY = 40; // Pixels/sec² (lunar — gentle)
+export const THRUST_POWER = 120; // Pixels/sec² applied upward when thrusting
+export const THRUST_POWER_X = 60; // Pixels/sec² applied horizontally when thrusting
+export const MAX_LANDING_VELOCITY = 80; // Max safe landing speed (pixels/sec)
+export const WALK_SPEED = 120; // Pixels/sec
+
+// Fuel (Phase 3 — declared here for reference)
+export const FUEL_BURN_Y = 8; // Fuel units/sec for vertical thrust
+export const FUEL_BURN_X = 4; // Fuel units/sec for horizontal thrust
+export const INITIAL_FUEL = 40; // Enough to land, not enough to launch
+export const MAX_FUEL = 100;
+export const REFUEL_AMOUNT = 100; // Per correct fuel unit collected
+
+// Lander interaction
+export const LANDER_INTERACT_RADIUS = 40; // Pixels — how close to walk to enter lander
+
+// Spawn
+export const INITIAL_ALTITUDE = 50; // Y position at spawn (near top of screen)
+
+// Player
+export const ASTRONAUT_WIDTH = 16;
+export const ASTRONAUT_HEIGHT = 24;
+export const LANDER_WIDTH = 24;
+export const LANDER_HEIGHT = 32;
+
+// Fuel types
+export const FUEL_TYPES = [
+  "circle",
+  "triangle",
+  "square",
+  "pentagon",
+  "hexagon",
+  "heptagon",
+  "octagon",
+] as const;
+
+export type FuelType = (typeof FUEL_TYPES)[number];
+
+// Player modes
+export type PlayerMode =
+  | "descending"
+  | "landed"
+  | "walking"
+  | "in_lander"
+  | "launched";
+
+// Colours — synthwave palette
+export const COLOURS = {
+  background: "#0a0a0f",
+  ground: "#2a1a3a",
+  pink: "#ff00ff",
+  cyan: "#00ffff",
+  purple: "#8b00ff",
+  yellow: "#ffff00",
+  green: "#00ff00",
+  orange: "#ff6600",
+  softPink: "#ff66ff",
+} as const;
+
+// DB sync (Phase 2+)
+export const DB_SYNC_INTERVAL_MS = 2000;
+export const PRESENCE_HEARTBEAT_MS = 3000;
