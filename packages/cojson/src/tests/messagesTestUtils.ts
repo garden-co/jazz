@@ -46,7 +46,7 @@ export function toSimplifiedMessages(
     return `unknown/${id}`;
   }
 
-  function toDebugString(from: string, to: string, msg: TestMessage) {
+  function toDebugString(from: string, to: string, msg: TestMessage): string {
     switch (msg.action) {
       case "known":
         return `${from} -> ${to} | KNOWN ${msg.isCorrection ? "CORRECTION " : ""}${getCoValue(msg.id)} sessions: ${simplifySessions(msg)}`;
@@ -56,6 +56,8 @@ export function toSimplifiedMessages(
         return `${from} -> ${to} | DONE ${getCoValue(msg.id)}`;
       case "content":
         return `${from} -> ${to} | CONTENT ${getCoValue(msg.id)} header: ${Boolean(msg.header)} new: ${simplifyNewContent(msg.new)}${msg.expectContentUntil ? ` expectContentUntil: ${simplifySessions({ sessions: msg.expectContentUntil, header: true })}` : ""}`;
+      case "batch":
+        return `${from} -> ${to} | BATCH [${msg.messages.map((m) => `${getCoValue(m.id)}`).join(", ")}]`;
       case "lazyLoad":
         return `${from} -> ${to} | GET_KNOWN_STATE ${getCoValue(msg.id)}`;
       case "lazyLoadResult":
