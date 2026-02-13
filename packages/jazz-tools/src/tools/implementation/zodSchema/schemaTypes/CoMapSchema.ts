@@ -92,11 +92,7 @@ export class CoMapSchema<
       );
     }
 
-    this.#validationSchema = coValueValidationSchema(
-      validationSchema,
-      CoMap,
-      "CoMap",
-    );
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoMap);
 
     return this.#validationSchema;
   };

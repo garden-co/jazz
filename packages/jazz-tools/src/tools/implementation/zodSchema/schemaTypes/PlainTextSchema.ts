@@ -49,7 +49,6 @@ export class PlainTextSchema implements CorePlainTextSchema {
     this.#validationSchema = coValueValidationSchema(
       validationSchema,
       CoPlainText,
-      "CoPlainText",
     );
     return this.#validationSchema;
   };

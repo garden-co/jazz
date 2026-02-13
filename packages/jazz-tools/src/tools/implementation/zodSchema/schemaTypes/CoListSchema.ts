@@ -72,11 +72,7 @@ export class CoListSchema<
       generateValidationSchemaFromItem(this.element),
     );
 
-    this.#validationSchema = coValueValidationSchema(
-      validationSchema,
-      CoList,
-      "CoList",
-    );
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoList);
     return this.#validationSchema;
   };
 

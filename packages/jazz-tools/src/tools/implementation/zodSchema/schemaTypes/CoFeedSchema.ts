@@ -71,11 +71,7 @@ export class CoFeedSchema<
       generateValidationSchemaFromItem(this.element),
     );
 
-    this.#validationSchema = coValueValidationSchema(
-      validationSchema,
-      CoFeed,
-      "CoFeed",
-    );
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoFeed);
     return this.#validationSchema;
   };
 

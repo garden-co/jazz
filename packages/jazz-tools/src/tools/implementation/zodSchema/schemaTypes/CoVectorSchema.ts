@@ -51,7 +51,6 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     this.#validationSchema = coValueValidationSchema(
       validationSchema,
       CoVector,
-      "CoVector",
     );
 
     return this.#validationSchema;

@@ -55,7 +55,6 @@ export function generateValidationSchemaFromItem(item: InputSchema): z.ZodType {
 export function coValueValidationSchema(
   plainSchema: z.ZodType,
   expectedCoValueClass: new (...args: any[]) => unknown,
-  type: string,
 ): z.ZodType {
   return z
     .unknown()
@@ -64,7 +63,7 @@ export function coValueValidationSchema(
         if (!(value instanceof expectedCoValueClass)) {
           ctx.addIssue({
             code: "custom",
-            message: `Expected a ${type} when providing a CoValue instance`,
+            message: `Expected a ${expectedCoValueClass.name} when providing a CoValue instance`,
           });
         }
         return;

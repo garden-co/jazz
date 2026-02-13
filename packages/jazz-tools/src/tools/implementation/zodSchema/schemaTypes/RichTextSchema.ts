@@ -58,7 +58,6 @@ export class RichTextSchema implements CoreRichTextSchema {
     this.#validationSchema = coValueValidationSchema(
       validationSchema,
       CoRichText,
-      "CoRichText",
     );
     return this.#validationSchema;
   };
