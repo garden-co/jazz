@@ -46,6 +46,25 @@ Throughput values below are shown as exact `ops/s` from the mixed benchmark runn
 
 WASM benchmark timing now uses `performance.now()` (with `Date.now()` fallback), so p95 values include sub-millisecond precision.
 
+## Phase 2 Results (internal WAL batching + in-memory `wal_bytes`)
+
+Phase 2 values below use the same mixed scenarios and count settings as the Phase 1 section. `Δ%` is computed versus Phase 1.
+
+| Scenario | Value Size (bytes) | Native ops/s (P1 -> P2) | Native p95 ms (P1 -> P2) | WASM ops/s (P1 -> P2) | WASM p95 ms (P1 -> P2) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `2673.363 -> 6534.520` (`+144.4%`) | `2.380 -> 0.124` (`-94.8%`) | `5882.353 -> 9009.009` (`+53.2%`) | `0.200 -> 0.200` (`~0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `2359.634 -> 7840.841` (`+232.3%`) | `3.354 -> 0.101` (`-97.0%`) | `5555.556 -> 14925.373` (`+168.7%`) | `0.300 -> 0.100` (`-66.7%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `2578.329 -> 7361.530` (`+185.5%`) | `3.052 -> 0.101` (`-96.7%`) | `6024.096 -> 12345.679` (`+104.9%`) | `0.300 -> 0.200` (`-33.3%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `2471.936 -> 6436.643` (`+160.4%`) | `2.766 -> 0.119` (`-95.7%`) | `2941.176 -> 10638.298` (`+261.7%`) | `0.800 -> 0.200` (`-75.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 256 | `2204.954 -> 7984.770` (`+262.1%`) | `3.219 -> 0.106` (`-96.7%`) | `5347.594 -> 11764.706` (`+120.0%`) | `0.300 -> 0.200` (`-33.3%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 256 | `2250.680 -> 7086.641` (`+214.9%`) | `2.631 -> 0.100` (`-96.2%`) | `5882.353 -> 8403.361` (`+42.9%`) | `0.300 -> 0.200` (`-33.3%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 4096 | `1140.796 -> 2037.671` (`+78.6%`) | `2.448 -> 0.738` (`-69.9%`) | `3003.003 -> 3676.471` (`+22.4%`) | `0.400 -> 0.400` (`~0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 4096 | `1590.260 -> 1675.335` (`+5.4%`) | `2.190 -> 0.938` (`-57.2%`) | `3225.806 -> 4716.981` (`+46.2%`) | `0.400 -> 0.400` (`~0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 4096 | `2294.221 -> 2178.766` (`-5.0%`) | `0.633 -> 0.789` (`+24.6%`) | `3205.128 -> 3952.569` (`+23.3%`) | `0.400 -> 0.400` (`~0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 1,048,576 | `35.669 -> 43.998` (`+23.4%`) | `78.036 -> 42.167` (`-46.0%`) | `277.778 -> 272.109` (`-2.0%`) | `6.800 -> 6.600` (`-2.9%`) | Native `count=64`; WASM `count=4` |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `39.794 -> 38.335` (`-3.7%`) | `46.966 -> 58.213` (`+24.0%`) | `283.688 -> 294.118` (`+3.7%`) | `6.400 -> 6.000` (`-6.3%`) | Native `count=64`; WASM `count=4` |
+| mixed_random_60r_20w_20d | 1,048,576 | `46.140 -> 48.729` (`+5.6%`) | `44.129 -> 44.055` (`-0.2%`) | `289.855 -> 307.692` (`+6.2%`) | `6.400 -> 5.600` (`-12.5%`) | Native `count=64`; WASM `count=4` |
+
 ## Progress Tracking
 
 - Use this mixed baseline table as the source of truth for Phase 1+ changes.
@@ -67,3 +86,7 @@ WASM benchmark timing now uses `performance.now()` (with `Date.now()` fallback),
 - Mixed native baseline (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
 - Mixed wasm/opfs baseline (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
 - Mixed wasm/opfs baseline (1MB reduced): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 4 --value-sizes 1048576 --json`
+- Phase 2 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 2 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 2 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
+- Phase 2 mixed wasm/opfs rerun (1MB reduced): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 4 --value-sizes 1048576 --json`

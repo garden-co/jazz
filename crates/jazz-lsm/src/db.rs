@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::error::LsmError;
@@ -8,6 +9,7 @@ use crate::manifest::{Manifest, SstMeta};
 const MANIFEST_FILE: &str = "MANIFEST.json";
 const WAL_FILE: &str = "active.wal";
 const SST_PREFIX: &str = "sst-";
+const WAL_APPEND_BATCH_BYTES: usize = 32 * 1024;
 
 pub type MergeFn = Box<dyn Fn(Option<&[u8]>, &[u8]) -> Vec<u8> + 'static>;
 
@@ -75,6 +77,8 @@ pub struct LsmTree<F: SyncFs> {
     required_merge_ops: BTreeSet<u32>,
     memtable: BTreeMap<Vec<u8>, Vec<VersionedRecord>>,
     memtable_bytes: usize,
+    wal_bytes: Cell<u64>,
+    wal_buffer: RefCell<Vec<u8>>,
 }
 
 impl<F: SyncFs> LsmTree<F> {
@@ -116,12 +120,14 @@ impl<F: SyncFs> LsmTree<F> {
             required_merge_ops: std::mem::take(&mut required_merge_ops),
             memtable: BTreeMap::new(),
             memtable_bytes: 0,
+            wal_bytes: Cell::new(0),
+            wal_buffer: RefCell::new(Vec::with_capacity(WAL_APPEND_BATCH_BYTES)),
         };
 
         tree.replay_wal()?;
 
         // Keep replay bounded over time by checkpointing if WAL/memtable grew too much.
-        if tree.fs.file_len(WAL_FILE)? > tree.options.max_wal_bytes
+        if tree.wal_bytes.get() > tree.options.max_wal_bytes
             || tree.memtable_bytes > tree.options.max_memtable_bytes
         {
             tree.flush()?;
@@ -203,6 +209,7 @@ impl<F: SyncFs> LsmTree<F> {
     }
 
     pub fn flush_wal(&self) -> Result<(), LsmError> {
+        self.flush_wal_buffer()?;
         self.fs.sync_file(WAL_FILE)?;
         Ok(())
     }
@@ -218,7 +225,7 @@ impl<F: SyncFs> LsmTree<F> {
     }
 
     pub fn debug_state(&self) -> Result<DebugState, LsmError> {
-        let wal_bytes = self.fs.file_len(WAL_FILE)?;
+        let wal_bytes = self.wal_bytes.get();
         let level_file_counts = self
             .manifest
             .levels
@@ -248,7 +255,7 @@ impl<F: SyncFs> LsmTree<F> {
         }
 
         if self.memtable_bytes >= self.options.max_memtable_bytes
-            || self.fs.file_len(WAL_FILE)? >= self.options.max_wal_bytes
+            || self.wal_bytes.get() >= self.options.max_wal_bytes
         {
             self.flush()?;
         }
@@ -264,7 +271,29 @@ impl<F: SyncFs> LsmTree<F> {
 
     fn append_wal(&self, record: &VersionedRecord) -> Result<(), LsmError> {
         let encoded = encode_record(record);
-        self.fs.append(WAL_FILE, &encoded)?;
+        self.wal_bytes
+            .set(self.wal_bytes.get().saturating_add(encoded.len() as u64));
+
+        {
+            let mut buffer = self.wal_buffer.borrow_mut();
+            buffer.extend_from_slice(&encoded);
+            if buffer.len() < WAL_APPEND_BATCH_BYTES {
+                return Ok(());
+            }
+        }
+
+        self.flush_wal_buffer()?;
+        Ok(())
+    }
+
+    fn flush_wal_buffer(&self) -> Result<(), LsmError> {
+        let mut buffer = self.wal_buffer.borrow_mut();
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        self.fs.append(WAL_FILE, &buffer)?;
+        buffer.clear();
         Ok(())
     }
 
@@ -279,9 +308,14 @@ impl<F: SyncFs> LsmTree<F> {
     fn replay_wal(&mut self) -> Result<(), LsmError> {
         let data = match self.fs.read_all(WAL_FILE) {
             Ok(data) => data,
-            Err(FsError::NotFound(_)) => return Ok(()),
+            Err(FsError::NotFound(_)) => {
+                self.wal_bytes.set(0);
+                return Ok(());
+            }
             Err(e) => return Err(LsmError::Fs(e)),
         };
+        self.wal_bytes.set(data.len() as u64);
+        self.wal_buffer.borrow_mut().clear();
 
         let records = decode_records(&data, WAL_FILE, true)?;
         for record in records {
@@ -299,6 +333,9 @@ impl<F: SyncFs> LsmTree<F> {
     }
 
     fn flush_memtable_to_sst(&mut self) -> Result<(), LsmError> {
+        // Make sure any buffered WAL bytes are persisted before checkpoint/truncate.
+        self.flush_wal_buffer()?;
+
         if self.memtable.is_empty() {
             return Ok(());
         }
@@ -345,6 +382,8 @@ impl<F: SyncFs> LsmTree<F> {
         // WAL can be reset after manifest references the new SST.
         self.fs.truncate(WAL_FILE, 0)?;
         self.fs.sync_file(WAL_FILE)?;
+        self.wal_bytes.set(0);
+        self.wal_buffer.borrow_mut().clear();
 
         let _ = self.compact_step_internal()?;
         Ok(())
