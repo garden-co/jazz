@@ -53,7 +53,6 @@ Open questions:
 - permissions
   - DX around optimistic updates is crucial
 
-
 - re-evaluate other storage backends
 - storage & object manager need benchmarks to de-risk perf
   - validate full obj snapshots vs delta commits
@@ -71,4 +70,3 @@ Open questions:
   - provide granular runes, signals, etc
   - explore useReducer vs useSyncExternalStore
     - transitions, suspense, etc.
-

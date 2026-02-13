@@ -9,10 +9,10 @@ pre-commit:
       run: cargo clippy --workspace --fix --allow-dirty --allow-staged -- -D warnings
       stage_fixed: true
     oxfmt:
-      glob: "*.{ts,tsx,js,jsx}"
-      run: oxfmt .
+      glob: "*.{ts,tsx,js,jsx,md}"
+      run: pnpm oxfmt .
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
-      run: oxlint --fix .
+      run: pnpm oxlint --fix .
       stage_fixed: true
