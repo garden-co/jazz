@@ -1,11 +1,33 @@
 use std::hint::black_box;
+use std::str::FromStr;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz_lsm::{LsmOptions, LsmTree, StdFs, WriteDurability};
 use tempfile::TempDir;
 
-const VALUE_SIZES: [usize; 3] = [32, 256, 4096];
-const KEY_COUNT: usize = 5_000;
+const DEFAULT_VALUE_SIZES: [usize; 3] = [32, 256, 4096];
+const DEFAULT_KEY_COUNT: usize = 5_000;
+
+fn key_count() -> usize {
+    std::env::var("JAZZ_LSM_BENCH_KEY_COUNT")
+        .ok()
+        .and_then(|v| usize::from_str(&v).ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_KEY_COUNT)
+}
+
+fn value_sizes() -> Vec<usize> {
+    std::env::var("JAZZ_LSM_BENCH_VALUE_SIZES")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|x| usize::from_str(x.trim()).ok())
+                .filter(|&n| n > 0)
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_VALUE_SIZES.to_vec())
+}
 
 fn bench_options() -> LsmOptions {
     LsmOptions {
@@ -58,9 +80,11 @@ fn populate_db(db: &mut LsmTree<StdFs>, count: usize, value_size: usize) {
 
 fn bench_seq_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("lsm_native_seq_write");
+    let key_count = key_count();
+    let value_sizes = value_sizes();
 
-    for value_size in VALUE_SIZES {
-        group.throughput(Throughput::Elements(KEY_COUNT as u64));
+    for value_size in value_sizes {
+        group.throughput(Throughput::Elements(key_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("value_{value_size}")),
             &value_size,
@@ -72,7 +96,7 @@ fn bench_seq_write(c: &mut Criterion) {
                         (dir, db)
                     },
                     |(_dir, mut db): (TempDir, LsmTree<StdFs>)| {
-                        for i in 0..KEY_COUNT {
+                        for i in 0..key_count {
                             let k = key(i);
                             let v = value(value_size, (i % 251) as u8);
                             db.put(&k, &v).expect("put");
@@ -90,10 +114,12 @@ fn bench_seq_write(c: &mut Criterion) {
 
 fn bench_random_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("lsm_native_random_write");
-    let order = shuffled_indices(KEY_COUNT);
+    let key_count = key_count();
+    let value_sizes = value_sizes();
+    let order = shuffled_indices(key_count);
 
-    for value_size in VALUE_SIZES {
-        group.throughput(Throughput::Elements(KEY_COUNT as u64));
+    for value_size in value_sizes {
+        group.throughput(Throughput::Elements(key_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("value_{value_size}")),
             &value_size,
@@ -123,9 +149,11 @@ fn bench_random_write(c: &mut Criterion) {
 
 fn bench_seq_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("lsm_native_seq_read");
+    let key_count = key_count();
+    let value_sizes = value_sizes();
 
-    for value_size in VALUE_SIZES {
-        group.throughput(Throughput::Elements(KEY_COUNT as u64));
+    for value_size in value_sizes {
+        group.throughput(Throughput::Elements(key_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("value_{value_size}")),
             &value_size,
@@ -134,12 +162,12 @@ fn bench_seq_read(c: &mut Criterion) {
                     || {
                         let dir = tempfile::tempdir().expect("tempdir");
                         let mut db = open_db(dir.path());
-                        populate_db(&mut db, KEY_COUNT, value_size);
+                        populate_db(&mut db, key_count, value_size);
                         (dir, db)
                     },
                     |(_dir, db): (TempDir, LsmTree<StdFs>)| {
                         let mut checksum: u64 = 0;
-                        for i in 0..KEY_COUNT {
+                        for i in 0..key_count {
                             let k = key(i);
                             let v = db.get(&k).expect("get").expect("present");
                             checksum = checksum.wrapping_add(v[0] as u64);
@@ -157,10 +185,12 @@ fn bench_seq_read(c: &mut Criterion) {
 
 fn bench_random_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("lsm_native_random_read");
-    let order = shuffled_indices(KEY_COUNT);
+    let key_count = key_count();
+    let value_sizes = value_sizes();
+    let order = shuffled_indices(key_count);
 
-    for value_size in VALUE_SIZES {
-        group.throughput(Throughput::Elements(KEY_COUNT as u64));
+    for value_size in value_sizes {
+        group.throughput(Throughput::Elements(key_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("value_{value_size}")),
             &value_size,
@@ -169,7 +199,7 @@ fn bench_random_read(c: &mut Criterion) {
                     || {
                         let dir = tempfile::tempdir().expect("tempdir");
                         let mut db = open_db(dir.path());
-                        populate_db(&mut db, KEY_COUNT, value_size);
+                        populate_db(&mut db, key_count, value_size);
                         (dir, db)
                     },
                     |(_dir, db): (TempDir, LsmTree<StdFs>)| {

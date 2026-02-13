@@ -41,6 +41,16 @@ Compile checks used during development:
 
 - Native benchmark (criterion, quick mode):
   - `cargo bench -p jazz-lsm --bench lsm_native -- --quick`
+  - Optional env overrides:
+    - `JAZZ_LSM_BENCH_KEY_COUNT`
+    - `JAZZ_LSM_BENCH_VALUE_SIZES` (comma-separated bytes, e.g. `32,256,4096`)
+- Native comparative benchmark (same workload matrix across `jazz-lsm`, `bf-tree`, `rocksdb`, `fjall`):
+  - `cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
+  - Uses the same optional env overrides:
+    - `JAZZ_LSM_BENCH_KEY_COUNT`
+    - `JAZZ_LSM_BENCH_VALUE_SIZES`
+  - On macOS, `rocksdb` build may require LLVM `libclang` in env:
+    - `DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
 - WASM OPFS benchmark harness (headless Chromium via Playwright):
   - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm`
   - Optional args passed to the runner:
