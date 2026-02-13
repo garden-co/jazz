@@ -48,36 +48,38 @@ impl VersionedRecord {
     }
 }
 
-pub(crate) fn encode_record(record: &VersionedRecord) -> Vec<u8> {
-    let mut payload = Vec::new();
+pub(crate) fn encode_record_into(record: &VersionedRecord, out: &mut Vec<u8>) {
+    let frame_start = out.len();
+    out.extend_from_slice(&[0u8; 4]); // reserved for payload length
+    let payload_start = out.len();
+
     let kind = match record.kind {
         OpKind::Put => 0u8,
         OpKind::Delete => 1u8,
         OpKind::Merge => 2u8,
     };
-    payload.push(kind);
-    payload.extend_from_slice(&record.seq.to_le_bytes());
-    payload.extend_from_slice(&record.merge_op_id.to_le_bytes());
-    payload.extend_from_slice(&(record.key.len() as u32).to_le_bytes());
-    payload.extend_from_slice(&(record.value.len() as u32).to_le_bytes());
-    payload.extend_from_slice(&record.key);
-    payload.extend_from_slice(&record.value);
+    out.push(kind);
+    out.extend_from_slice(&record.seq.to_le_bytes());
+    out.extend_from_slice(&record.merge_op_id.to_le_bytes());
+    out.extend_from_slice(&(record.key.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(record.value.len() as u32).to_le_bytes());
+    out.extend_from_slice(&record.key);
+    out.extend_from_slice(&record.value);
 
-    let checksum = crc32fast::hash(&payload);
-    payload.extend_from_slice(&checksum.to_le_bytes());
+    let checksum = crc32fast::hash(&out[payload_start..]);
+    out.extend_from_slice(&checksum.to_le_bytes());
 
-    let mut encoded = Vec::with_capacity(4 + payload.len());
-    encoded.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    encoded.extend_from_slice(&payload);
-    encoded
+    let payload_len = (out.len() - payload_start) as u32;
+    out[frame_start..frame_start + 4].copy_from_slice(&payload_len.to_le_bytes());
 }
 
-pub(crate) fn decode_records(
+pub(crate) fn decode_records_into(
     data: &[u8],
     path: &str,
     allow_truncated_tail: bool,
-) -> Result<Vec<VersionedRecord>, LsmError> {
-    let mut out = Vec::new();
+    out: &mut Vec<VersionedRecord>,
+) -> Result<(), LsmError> {
+    out.clear();
     let mut offset = 0usize;
 
     while offset < data.len() {
@@ -212,5 +214,5 @@ pub(crate) fn decode_records(
         offset = record_end;
     }
 
-    Ok(out)
+    Ok(())
 }
