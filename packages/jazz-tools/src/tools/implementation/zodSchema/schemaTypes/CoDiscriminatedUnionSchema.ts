@@ -19,6 +19,7 @@ import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
+import { extractPlainSchema } from "./schemaValidators.js";
 
 export interface DiscriminableCoValueSchemaDefinition {
   discriminatorMap: z.core.$ZodDiscriminatedUnionInternals["propValues"];
@@ -54,6 +55,26 @@ export class CoDiscriminatedUnionSchema<
   readonly collaborative = true as const;
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
+
+  #validationSchema: z.ZodType | undefined = undefined;
+
+  getValidationSchema = () => {
+    if (this.#validationSchema) {
+      return this.#validationSchema;
+    }
+
+    const { discriminator, options } = this.getDefinition();
+    this.#validationSchema = z.discriminatedUnion(
+      discriminator,
+      // @ts-expect-error
+      options.map((schema) => {
+        const validationSchema = schema.getValidationSchema();
+        return extractPlainSchema(validationSchema);
+      }),
+    );
+
+    return this.#validationSchema;
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -224,6 +245,7 @@ export function createCoreCoDiscriminatedUnionSchema<
   return {
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
+    getValidationSchema: () => z.any(),
     getDefinition: () => ({
       discriminator,
       get discriminatorMap() {

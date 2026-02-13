@@ -20,6 +20,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoVectorSchema,
 } from "../internal.js";
 
 /**
@@ -44,6 +45,8 @@ export class CoVector
   protected static requiredDimensionsCount: number | undefined = undefined;
   private declare _isVectorLoaded: boolean;
   private declare _requiredDimensionsCount: number;
+
+  static coValueSchema?: CoreCoVectorSchema;
 
   constructor(
     options:

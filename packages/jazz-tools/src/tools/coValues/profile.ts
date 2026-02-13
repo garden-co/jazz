@@ -6,14 +6,13 @@ import {
   Group,
   Simplify,
   TypeSym,
-  coField,
 } from "../internal.js";
 
 /** @category Identity & Permissions */
 export class Profile extends CoMap {
-  readonly name = coField.string;
-  readonly inbox? = coField.optional.string;
-  readonly inboxInvite? = coField.optional.string;
+  declare readonly name: string;
+  declare readonly inbox?: string;
+  declare readonly inboxInvite?: string;
 
   /**
    * Creates a new profile with the given initial values and owner.

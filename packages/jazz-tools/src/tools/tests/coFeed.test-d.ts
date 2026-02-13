@@ -126,6 +126,28 @@ describe("CoFeed", () => {
 
       matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
     });
+
+    test("create options", () => {
+      const StringFeed = co.feed(z.string());
+
+      StringFeed.create(["a"]);
+      StringFeed.create(["a"], Group.create());
+      StringFeed.create(["a"], {});
+      StringFeed.create(["a"], { owner: Group.create() });
+      StringFeed.create(["a"], { owner: Group.create(), unique: "test" });
+
+      // @ts-expect-error - owner is required if unique is provided
+      StringFeed.create(["a"], { unique: "test" });
+
+      // this is deprecated but valid
+      StringFeed.create(["a"], Account.getMe());
+      StringFeed.create(["a"], { owner: Account.getMe(), unique: "test" });
+
+      StringFeed.create(["a"], { validation: "loose" });
+      StringFeed.create(["a"], { owner: Group.create(), validation: "loose" });
+      // @ts-expect-error - owner is required if unique is provided
+      StringFeed.create(["a"], { unique: "test", validation: "loose" });
+    });
   });
 
   describe("CoFeed resolution", () => {

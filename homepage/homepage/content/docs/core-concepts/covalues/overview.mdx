@@ -56,6 +56,10 @@ Jazz will automatically create the CoValues for you.
 ```
 </CodeGroup>
 
+<Alert variant="warning" className="flex gap-2 items-center my-4">
+Starting from Jazz 0.20.10, it is possible to opt in to run-time schema validation on writes. This will ensure that only data which conforms to the defined schema can be inserted into the CoValue. This helps to enforce data integrity and improve the type-safety of your application. The validation strategy is currently warn by default: updates and inserts of invalid data will still be allowed, but will give a console warning. This can be changed using the setDefaultValidationMode(), which accepts `strict` (throw if invalid),  `warn` (warn if invalid) and `loose` (allow invalid), as options.
+</Alert>
+
 <Alert variant="info" className="flex gap-2 items-center my-4">
 To learn more about how permissions work when creating nested CoValues with plain JSON objects,
 refer to [Ownership on inline CoValue creation](/docs/permissions-and-sharing/cascading-permissions#ownership-on-inline-covalue-creation).

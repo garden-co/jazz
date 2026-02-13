@@ -14,6 +14,7 @@ import {
   unstable_loadUnique,
 } from "../internal";
 import { z } from "../exports";
+import { expectValidationError } from "./utils";
 
 beforeEach(async () => {
   cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
@@ -184,6 +185,50 @@ describe("Creating and finding unique CoMaps", async () => {
       title: sourceData.title,
       identifier: sourceData.identifier,
       external_id: sourceData._id,
+    });
+  });
+
+  test("upserting should validate input against schema on creation", async () => {
+    const group = Group.create();
+    const Event = co.map({
+      title: z.string(),
+    });
+
+    await expectValidationError(async () => {
+      await Event.upsertUnique({
+        value: {
+          // @ts-expect-error - number is not a string
+          title: 123,
+        },
+        unique: "test-event-identifier",
+        owner: group,
+      });
+    });
+  });
+
+  test("upserting should validate input against schema on update", async () => {
+    const group = Group.create();
+    const Event = co.map({
+      title: z.string(),
+    });
+
+    await Event.upsertUnique({
+      value: {
+        title: "123",
+      },
+      unique: "test-event-identifier",
+      owner: group,
+    });
+
+    await expectValidationError(async () => {
+      await Event.upsertUnique({
+        value: {
+          // @ts-expect-error - number is not a string
+          title: 456,
+        },
+        unique: "test-event-identifier",
+        owner: group,
+      });
     });
   });
 

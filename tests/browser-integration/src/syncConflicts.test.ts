@@ -1,11 +1,9 @@
 import { commands } from "vitest/browser";
-import { AuthSecretStorage, CoMap, coField } from "jazz-tools";
+import { AuthSecretStorage, co, z } from "jazz-tools";
 import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer, waitFor } from "./testUtils";
 
-class Issue extends CoMap {
-  estimate = coField.number;
-}
+const Issue = co.map({ estimate: z.number() });
 
 afterAll(async () => {
   await commands.cleanup();

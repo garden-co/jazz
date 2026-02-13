@@ -178,6 +178,28 @@ describe("CoList", () => {
 
       matches(list);
     });
+
+    test("create options", () => {
+      const StringList = co.list(z.string());
+
+      StringList.create(["a"]);
+      StringList.create(["a"], Group.create());
+      StringList.create(["a"], {});
+      StringList.create(["a"], { owner: Group.create() });
+      StringList.create(["a"], { owner: Group.create(), unique: "test" });
+
+      // @ts-expect-error - owner is required if unique is provided
+      StringList.create(["a"], { unique: "test" });
+
+      // this is deprecated but valid
+      StringList.create(["a"], Account.getMe());
+      StringList.create(["a"], { owner: Account.getMe(), unique: "test" });
+
+      StringList.create(["a"], { validation: "loose" });
+      StringList.create(["a"], { owner: Group.create(), validation: "loose" });
+      // @ts-expect-error - owner is required if unique is provided
+      StringList.create(["a"], { unique: "test", validation: "loose" });
+    });
   });
 
   describe("CoList resolution", () => {

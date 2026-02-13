@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { CoMap, Group, ID, co, coField, z } from "jazz-tools";
+import { Group, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import { createInviteLink, useAcceptInvite } from "../index.js";

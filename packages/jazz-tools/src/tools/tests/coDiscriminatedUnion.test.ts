@@ -9,7 +9,7 @@ import {
   z,
 } from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { assertLoaded, waitFor } from "./utils.js";
+import { assertLoaded, expectValidationError, waitFor } from "./utils.js";
 import type { Account } from "jazz-tools";
 
 describe("co.discriminatedUnion", () => {
@@ -704,8 +704,6 @@ describe("co.discriminatedUnion", () => {
         },
       });
 
-      console.log(loadedSpecies.$isLoaded);
-
       assertLoaded(loadedSpecies);
 
       for (const animal of loadedSpecies) {
@@ -739,7 +737,7 @@ describe("co.discriminatedUnion", () => {
     const Pets = co.list(Pet);
 
     expect(() => Pets.create([{ type2: "parrot", name: "Polly" }])).toThrow(
-      "co.discriminatedUnion() of collaborative types with no matching discriminator value found",
+      'Invalid discriminated union option at index "2"',
     );
   });
 
@@ -779,5 +777,380 @@ describe("co.discriminatedUnion", () => {
     expect(loadedPets[1]?.$jazz.loadingState).toEqual(
       CoValueLoadingState.UNAUTHORIZED,
     );
+  });
+
+  describe("Validation", () => {
+    test("should throw when creating with invalid field types", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      expectValidationError(() =>
+        Person.create({
+          pet: {
+            type: "dog",
+            name: "Rex",
+            // @ts-expect-error - age should be a number
+            age: "5",
+          },
+        }),
+      );
+    });
+
+    test("should throw when using already created CoValues", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+
+      const Bird = co.map({
+        type: z.literal("bird"),
+        species: z.string(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+
+      const Pets = co.list(Pet);
+
+      const dog = Dog.create({
+        type: "dog",
+        name: "Rex",
+        age: 5,
+      });
+
+      const cat = Cat.create({
+        type: "cat",
+        name: "Whiskers",
+        weight: 10,
+      });
+
+      const bird = Bird.create({
+        type: "bird",
+        species: "Parrot",
+      });
+
+      expectValidationError(() =>
+        Pets.create([
+          dog,
+          cat,
+          // @ts-expect-error - bird is not a valid discriminator value
+          bird,
+        ]),
+      );
+    });
+
+    test("should not throw when creating with invalid field types with loose validation", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      expect(() =>
+        Person.create(
+          {
+            pet: {
+              type: "dog",
+              name: "Rex",
+              // @ts-expect-error - age should be a number
+              age: "5",
+            },
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+    });
+
+    test("should throw when creating with wrong discriminator value", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      expectValidationError(() =>
+        Person.create({
+          pet: {
+            // @ts-expect-error - "bird" is not a valid discriminator value
+            type: "bird",
+            name: "Tweety",
+          },
+        }),
+      );
+    });
+
+    test("should throw when mutating with invalid field types", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: Dog.create({
+          type: "dog",
+          name: "Rex",
+          age: 5,
+        }),
+      });
+
+      if (person.pet.type === "dog") {
+        const dog = person.pet;
+        expectValidationError(() =>
+          dog.$jazz.set(
+            "age",
+            // @ts-expect-error - age should be a number
+            "6",
+          ),
+        );
+
+        expect(dog.age).toEqual(5);
+      }
+    });
+
+    test("should not throw when mutating with invalid field types with loose validation", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: Dog.create({
+          type: "dog",
+          name: "Rex",
+          age: 5,
+        }),
+      });
+
+      if (person.pet.type === "dog") {
+        const dog = person.pet;
+        expect(() =>
+          dog.$jazz.set(
+            "age",
+            // @ts-expect-error - age should be a number
+            "6",
+            { validation: "loose" },
+          ),
+        ).not.toThrow();
+
+        expect(dog.age).toEqual("6");
+      }
+    });
+
+    test("should throw when mutating to wrong union member type", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: Dog.create({
+          type: "dog",
+          name: "Rex",
+          age: 5,
+        }),
+      });
+
+      if (person.pet.type === "dog") {
+        const dog = person.pet;
+        // Try to set a field that doesn't exist on Dog (weight is only on Cat)
+        expectValidationError(() =>
+          // @ts-expect-error - weight doesn't exist on Dog
+          dog.$jazz.set("weight", 10),
+        );
+      }
+    });
+
+    test("should throw when mutating discriminator to invalid value", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: Dog.create({
+          type: "dog",
+          name: "Rex",
+          age: 5,
+        }),
+      });
+
+      if (person.pet.type === "dog") {
+        const dog = person.pet;
+        expectValidationError(() =>
+          dog.$jazz.set(
+            "type",
+            // @ts-expect-error - "bird" is not a valid discriminator value
+            "bird",
+          ),
+        );
+      }
+    });
+
+    test("loaded discriminated union keeps schema validation", async () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: Dog.create({
+          type: "dog",
+          name: "Rex",
+          age: 5,
+        }),
+      });
+
+      const loadedPerson = await Person.load(person.$jazz.id);
+
+      assertLoaded(loadedPerson);
+      assertLoaded(loadedPerson.pet);
+      if (loadedPerson.pet.type === "dog") {
+        const dog = loadedPerson.pet;
+        expectValidationError(
+          // @ts-expect-error - string is not a number
+          () => dog.$jazz.set("age", "10"),
+        );
+      }
+    });
+
+    test("should throw when creating with missing required field", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      expectValidationError(() =>
+        Person.create({
+          pet: {
+            type: "dog",
+            name: "Rex",
+            // age is required but missing
+          } as any,
+        }),
+      );
+    });
+
+    test("should throw when mutating to set missing required field on different union member", () => {
+      const Dog = co.map({
+        type: z.literal("dog"),
+        name: z.string(),
+        age: z.number(),
+      });
+      const Cat = co.map({
+        type: z.literal("cat"),
+        name: z.string(),
+        weight: z.number(),
+      });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: Dog.create({
+          type: "dog",
+          name: "Rex",
+          age: 5,
+        }),
+      });
+
+      if (person.pet.type === "dog") {
+        const dog = person.pet;
+        // Try to change type to cat but without providing required weight field
+        expectValidationError(() => (dog.$jazz.set as any)("type", "cat"));
+      }
+    });
   });
 });

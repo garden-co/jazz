@@ -24,7 +24,7 @@ export * from "./coValues/deepLoading.js";
 export * from "./implementation/anonymousJazzAgent.js";
 export * from "./implementation/activeAccountContext.js";
 export * from "./implementation/refs.js";
-export * from "./implementation/schema.js";
+export * from "./implementation/schemaRuntime.js";
 export * from "./subscribe/SubscriptionScope.js";
 export * from "./subscribe/types.js";
 export * from "./subscribe/index.js";
@@ -54,10 +54,12 @@ export * from "./implementation/zodSchema/typeConverters/CoFieldSchemaInit.js";
 export * from "./implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 export * from "./implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
 export * from "./implementation/zodSchema/schemaPermissions.js";
+export * from "./implementation/zodSchema/validationSettings.js";
 export * from "./coValues/extensions/imageDef.js";
 
 export * from "./implementation/ContextManager.js";
 
 export * from "./subscribe/JazzError.js";
 
+import "./implementation/zodSchema/initializeBuiltinSchemas.js";
 import "./implementation/devtoolsFormatters.js";

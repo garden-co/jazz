@@ -1,6 +1,6 @@
 import "jazz-tools/load-edge-wasm";
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { CoMap, coField, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { Account } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { NextResponse } from "next/server";

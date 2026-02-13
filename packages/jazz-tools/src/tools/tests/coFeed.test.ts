@@ -17,7 +17,12 @@ import {
   z,
 } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  expectValidationError,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 import {
   CoFeed,
   CoFeedInstanceCoValuesMaybeLoaded,
@@ -25,6 +30,7 @@ import {
   CoValueLoadingState,
   TypeSym,
 } from "../internal.js";
+import { setDefaultValidationMode } from "../implementation/zodSchema/validationSettings.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -84,6 +90,25 @@ describe("Simple CoFeed operations", async () => {
         const Schema = co.feed(co.plainText());
         const feed = Schema.create([""]);
         expect(feed.perAccount[me.$jazz.id]?.value?.toString()).toBe("");
+      });
+
+      test("creation input validation", () => {
+        const Text = z.string();
+        const TextStream = co.feed(Text);
+        expectValidationError(
+          // @ts-expect-error - number is not a string
+          () => TextStream.create([123], { owner: me }),
+        );
+      });
+
+      test("creation input with loose validation", () => {
+        const Text = z.string();
+        const TextStream = co.feed(Text);
+        TextStream.create(
+          // @ts-expect-error - number is not a string
+          [123],
+          { owner: me, validation: "loose" },
+        );
       });
     });
   });
@@ -152,6 +177,24 @@ describe("Simple CoFeed operations", async () => {
       );
       expect(stream.perSession[me.$jazz.sessionID]?.value?.toString()).toEqual(
         "bread",
+      );
+    });
+
+    test("push with validation errors", () => {
+      const Schema = co.feed(z.string());
+      const stream = Schema.create(["milk"]);
+      expectValidationError(
+        // @ts-expect-error - number is not a string
+        () => stream.$jazz.push(123),
+      );
+    });
+
+    test("push with validation errors with loose validation", () => {
+      const Schema = co.feed(z.string());
+      const stream = Schema.create(["milk"]);
+      stream.$jazz.pushLoose(
+        // @ts-expect-error - number is not a string
+        123,
       );
     });
   });
@@ -327,6 +370,31 @@ describe("CoFeed resolution", async () => {
       update2.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]?.value
         ?.perAccount[me.$jazz.id]?.value,
     ).toBe("bread");
+  });
+
+  test("Loaded CoFeed keeps validation", async () => {
+    const { me, stream } = await initNodeAndStream();
+    const loadedStream = await TestStream.load(stream.$jazz.id, {
+      loadAs: me,
+    });
+    assertLoaded(loadedStream);
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => loadedStream.$jazz.push(123),
+    );
+
+    const myTopLevelStream = loadedStream.perAccount[me.$jazz.id];
+    assert(myTopLevelStream);
+    assertLoaded(myTopLevelStream.value);
+    const myNestedStream = myTopLevelStream.value.perAccount[me.$jazz.id];
+    assert(myNestedStream);
+    assertLoaded(myNestedStream.value);
+    expect(myNestedStream.value.perAccount[me.$jazz.id]?.value).toEqual("milk");
+
+    expectValidationError(
+      // @ts-expect-error - number is not a string
+      () => myNestedStream.value.$jazz.push(123),
+    );
   });
 });
 
@@ -898,5 +966,206 @@ describe("waitForSync", async () => {
     expect(stream.$jazz.owner.$jazz.raw.roleOf(account.$jazz.raw.id)).toEqual(
       "admin",
     );
+  });
+});
+
+describe("nested CoValue validation mode propagation", () => {
+  test("create with nested CoValues - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogFeed = co.feed(Dog);
+
+    // Should throw with default strict validation when age is a string
+    expectValidationError(() =>
+      DogFeed.create([{ age: "12" as unknown as number }], { owner: me }),
+    );
+
+    // Should not throw with loose validation even though age is invalid
+    expect(() =>
+      DogFeed.create([{ age: "12" as unknown as number }], {
+        owner: me,
+        validation: "loose",
+      }),
+    ).not.toThrow();
+
+    const feed = DogFeed.create(
+      [{ age: "12" as unknown as number }, { age: "13" as unknown as number }],
+      { owner: me, validation: "loose" },
+    );
+
+    // Verify the nested CoValues were created with invalid data
+    const entries = Array.from(feed.perAccount[me.$jazz.id]?.all || []);
+    expect(entries.length).toBe(2);
+    assertLoaded(entries[0]?.value!);
+    expect(entries[0]?.value?.age).toBe("12");
+    assertLoaded(entries[1]?.value!);
+    expect(entries[1]?.value?.age).toBe("13");
+  });
+
+  test("push with nested CoValue - loose validation should not throw", () => {
+    const Dog = co.map({
+      age: z.number(),
+    });
+    const DogFeed = co.feed(Dog);
+
+    const feed = DogFeed.create([{ age: 5 }], {
+      owner: me,
+      validation: "loose",
+    });
+
+    // Should throw with default strict validation
+    expectValidationError(() =>
+      feed.$jazz.push({
+        age: "invalid" as unknown as number,
+      }),
+    );
+
+    // Should not throw with loose validation
+    // Note: CoFeed.push uses the global validation mode from resolveValidationMode()
+    // which defaults to "warn" in tests, so we need to test by creating a new feed
+    // with loose validation and pushing invalid data
+    const looseFeed = DogFeed.create([], {
+      owner: me,
+      validation: "loose",
+    });
+
+    expect(() =>
+      looseFeed.$jazz.pushLoose({
+        age: "12" as unknown as number,
+      }),
+    ).not.toThrow();
+
+    // Verify the nested CoValue was created with invalid data
+    const entries = Array.from(looseFeed.perAccount[me.$jazz.id]?.all || []);
+    expect(entries.length).toBe(1);
+    assertLoaded(entries[0]?.value!);
+    expect(entries[0]?.value?.age).toBe("12");
+  });
+
+  test("create with deeply nested CoValues - loose validation should not throw", () => {
+    const Collar = co.map({
+      size: z.number(),
+    });
+    const Dog = co.map({
+      age: z.number(),
+      collar: Collar,
+    });
+    const DogFeed = co.feed(Dog);
+
+    // Should throw with strict validation when any nested field is invalid
+    expectValidationError(() =>
+      DogFeed.create(
+        [
+          {
+            age: "12" as unknown as number,
+            collar: { size: 10 },
+          },
+        ],
+        { owner: me },
+      ),
+    );
+
+    expectValidationError(() =>
+      DogFeed.create(
+        [
+          {
+            age: 12,
+            collar: { size: "large" as unknown as number },
+          },
+        ],
+        { owner: me },
+      ),
+    );
+
+    // Should not throw with loose validation at any level
+    expect(() =>
+      DogFeed.create(
+        [
+          {
+            age: "12" as unknown as number,
+            collar: { size: "large" as unknown as number },
+          },
+        ],
+        { validation: "loose" },
+      ),
+    ).not.toThrow();
+
+    const feed = DogFeed.create(
+      [
+        {
+          age: "12" as unknown as number,
+          collar: { size: "large" as unknown as number },
+        },
+      ],
+      { owner: me, validation: "loose" },
+    );
+
+    // Verify all levels were created with invalid data
+    const entries = Array.from(feed.perAccount[me.$jazz.id]?.all || []);
+    expect(entries.length).toBe(1);
+    assertLoaded(entries[0]?.value!);
+    expect(entries[0]?.value?.age).toBe("12");
+    assertLoaded(entries[0]?.value?.collar!);
+    expect(entries[0]?.value?.collar.size).toBe("large");
+  });
+
+  test("global loose validation mode propagates to nested CoValues in all mutations", () => {
+    const Collar = co.map({
+      size: z.number(),
+    });
+    const Dog = co.map({
+      age: z.number(),
+      collar: Collar,
+    });
+    const DogFeed = co.feed(Dog);
+
+    // Set global validation mode to loose
+    setDefaultValidationMode("loose");
+
+    try {
+      // Test 1: Create with deeply nested invalid data
+      const feed = DogFeed.create(
+        [
+          {
+            age: "5" as unknown as number,
+            collar: { size: "small" as unknown as number },
+          },
+          {
+            age: "12" as unknown as number,
+            collar: { size: "large" as unknown as number },
+          },
+        ],
+        { owner: me },
+      );
+
+      // Verify all nested levels were created with invalid data
+      let entries = Array.from(feed.perAccount[me.$jazz.id]?.all || []);
+      expect(entries.length).toBe(2);
+      assertLoaded(entries[0]?.value!);
+      expect(entries[0]?.value?.age).toBe("5");
+      assertLoaded(entries[0]?.value?.collar!);
+      expect(entries[0]?.value?.collar.size).toBe("small");
+      assertLoaded(entries[1]?.value!);
+      expect(entries[1]?.value?.age).toBe("12");
+      assertLoaded(entries[1]?.value?.collar!);
+      expect(entries[1]?.value?.collar.size).toBe("large");
+
+      // Test 2: Push with nested invalid data (uses global validation mode)
+      feed.$jazz.push({
+        age: "20" as unknown as number,
+        collar: { size: "huge" as unknown as number },
+      });
+
+      entries = Array.from(feed.perAccount[me.$jazz.id]?.all || []);
+      expect(entries.length).toBe(3);
+      assertLoaded(entries[2]?.value!);
+      expect(entries[2]?.value?.age).toBe("20");
+      assertLoaded(entries[2]?.value?.collar!);
+      expect(entries[2]?.value?.collar.size).toBe("huge");
+    } finally {
+      // Reset to strict mode
+      setDefaultValidationMode("strict");
+    }
   });
 });

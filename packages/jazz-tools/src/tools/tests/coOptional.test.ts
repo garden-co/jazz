@@ -6,10 +6,11 @@ describe("co.optional", () => {
   beforeEach(async () => {
     await setupJazzTestSync();
 
-    await createJazzTestAccount({
+    const account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
       creationProps: { name: "Hermes Puggington" },
     });
+    account.$jazz.set("root", {});
   });
 
   test("can use co.optional with CoValue schemas as values", () => {
@@ -122,5 +123,17 @@ describe("co.optional", () => {
     });
 
     expect(person?.preferredName?.toString()).toEqual("John");
+  });
+
+  test("can set undefined to an optional field", () => {
+    const Person = co.map({
+      name: co.optional(co.plainText()),
+    });
+
+    const person = Person.create({});
+
+    person.$jazz.set("name", undefined);
+
+    expect(person.name).toBeUndefined();
   });
 });

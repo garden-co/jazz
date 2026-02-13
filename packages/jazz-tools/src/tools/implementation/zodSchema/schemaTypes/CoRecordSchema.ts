@@ -12,6 +12,7 @@ import {
   Resolved,
   Simplify,
   SubscribeListenerOptions,
+  LocalValidationMode,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -38,14 +39,24 @@ export interface CoRecordSchema<
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
-      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
+      | { owner?: Group; validation?: LocalValidationMode }
       | Group,
   ): CoRecordInstanceShape<K, V> & CoMap;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: LocalValidationMode;
+        }
+      | { owner?: Account | Group; validation?: LocalValidationMode }
       | Account
       | Group,
   ): CoRecordInstanceShape<K, V> & CoMap;

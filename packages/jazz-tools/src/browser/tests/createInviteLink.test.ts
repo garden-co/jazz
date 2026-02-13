@@ -1,4 +1,4 @@
-import { CoMap, co, coField, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { expect, test } from "vitest";
 import { createInviteLink } from "../index.js";
 import { setupTwoNodes } from "./utils.js";
