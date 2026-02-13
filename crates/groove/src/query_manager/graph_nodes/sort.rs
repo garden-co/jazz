@@ -254,6 +254,11 @@ mod tests {
         SortNode::with_tuple_descriptor(tuple_desc, sort_keys)
     }
 
+    // Scenario: ascending sort by score.
+    //
+    // ASCII:
+    // input:   [A:100, B:50, C:75]
+    // sorted:  [B:50, C:75, A:100]
     #[test]
     fn sort_ascending() {
         let sort_keys = vec![SortKey {
@@ -305,6 +310,11 @@ mod tests {
         assert_eq!(sorted_ids[2], id1); // score 100
     }
 
+    // Scenario: descending sort by score.
+    //
+    // ASCII:
+    // input:   [A:100, B:50, C:75]
+    // sorted:  [A:100, C:75, B:50]
     #[test]
     fn sort_descending() {
         let sort_keys = vec![SortKey {
@@ -356,6 +366,12 @@ mod tests {
         assert_eq!(sorted_ids[2], id2); // score 50
     }
 
+    // Scenario: multi-key sort (dept asc, score desc).
+    //
+    // ASCII:
+    // dept1: [A:100, B:50]
+    // dept2: [D:90,  C:75]
+    // final: [A, B, D, C]
     #[test]
     fn sort_multiple_keys() {
         let descriptor = RowDescriptor::new(vec![
@@ -441,6 +457,12 @@ mod tests {
         assert_eq!(sorted_ids[3], id3); // dept 2, score 75
     }
 
+    // Scenario: insertion uses sorted position (not append order).
+    //
+    // ASCII:
+    // tick1: [A:100]
+    // tick2: +B:50
+    // final: [B:50, A:100]
     #[test]
     fn sort_maintains_order_on_insert() {
         let sort_keys = vec![SortKey {
@@ -486,6 +508,13 @@ mod tests {
         assert_eq!(sorted_ids[1], id1); // 100 second
     }
 
+    // Scenario: insert at front shifts existing survivors.
+    //
+    // ASCII:
+    // pre:    [A:10, B:20]
+    // delta:  +C:0
+    // post:   [C:0, A:10, B:20]
+    // moves:  A, B => emitted as identity updates
     #[test]
     fn sort_emits_move_updates_when_insert_shifts_positions() {
         let sort_keys = vec![SortKey {
@@ -543,5 +572,209 @@ mod tests {
         assert_eq!(delta.updated[0].1.ids()[0], id_a);
         assert_eq!(delta.updated[1].0.ids()[0], id_b);
         assert_eq!(delta.updated[1].1.ids()[0], id_b);
+    }
+
+    // Scenario: removing first row shifts remaining survivors left.
+    //
+    // ASCII:
+    // pre:    [A:10, B:20, C:30]
+    // delta:  -A
+    // post:   [B:20, C:30]
+    // moves:  B, C => emitted as identity updates
+    #[test]
+    fn sort_emits_move_updates_when_remove_shifts_positions() {
+        let sort_keys = vec![SortKey {
+            col_index: 2, // score asc
+            direction: SortDirection::Ascending,
+        }];
+        let mut node = make_sort_node(sort_keys);
+
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+        let a = make_tuple(
+            id_a,
+            &[
+                Value::Integer(1),
+                Value::Text("A".into()),
+                Value::Integer(10),
+            ],
+        );
+        let b = make_tuple(
+            id_b,
+            &[
+                Value::Integer(2),
+                Value::Text("B".into()),
+                Value::Integer(20),
+            ],
+        );
+        let c = make_tuple(
+            id_c,
+            &[
+                Value::Integer(3),
+                Value::Text("C".into()),
+                Value::Integer(30),
+            ],
+        );
+
+        // Seed: [A, B, C]
+        node.process(TupleDelta {
+            added: vec![a.clone(), b.clone(), c.clone()],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        // Remove A => [B, C]. B and C must be emitted as move updates.
+        let delta = node.process(TupleDelta {
+            added: vec![],
+            removed: vec![a],
+            updated: vec![],
+        });
+
+        assert_eq!(delta.removed.len(), 1);
+        assert_eq!(delta.removed[0].ids()[0], id_a);
+        assert_eq!(delta.updated.len(), 2);
+        assert_eq!(delta.updated[0].0.ids()[0], id_b);
+        assert_eq!(delta.updated[0].1.ids()[0], id_b);
+        assert_eq!(delta.updated[1].0.ids()[0], id_c);
+        assert_eq!(delta.updated[1].1.ids()[0], id_c);
+    }
+
+    // Scenario: explicit update should not be duplicated by move-emitter.
+    //
+    // ASCII:
+    // pre:    [A:10, B:20]
+    // delta:  upd(B:20 -> B:25)
+    // post:   [A:10, B:25]
+    // expect: one updated entry for B only
+    #[test]
+    fn sort_does_not_emit_extra_move_update_for_explicit_updated_row() {
+        let sort_keys = vec![SortKey {
+            col_index: 2, // score asc
+            direction: SortDirection::Ascending,
+        }];
+        let mut node = make_sort_node(sort_keys);
+
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let a = make_tuple(
+            id_a,
+            &[
+                Value::Integer(1),
+                Value::Text("A".into()),
+                Value::Integer(10),
+            ],
+        );
+        let b_old = make_tuple(
+            id_b,
+            &[
+                Value::Integer(2),
+                Value::Text("B".into()),
+                Value::Integer(20),
+            ],
+        );
+        let b_new = make_tuple(
+            id_b,
+            &[
+                Value::Integer(2),
+                Value::Text("B".into()),
+                Value::Integer(25),
+            ],
+        );
+
+        // Seed: [A, B]
+        node.process(TupleDelta {
+            added: vec![a, b_old.clone()],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        // Explicit update for B, no position shift.
+        let delta = node.process(TupleDelta {
+            added: vec![],
+            removed: vec![],
+            updated: vec![(b_old, b_new)],
+        });
+
+        // Should emit exactly the explicit update (no duplicate move update for same id).
+        assert_eq!(delta.updated.len(), 1);
+        assert_eq!(delta.updated[0].0.ids()[0], id_b);
+        assert_eq!(delta.updated[0].1.ids()[0], id_b);
+    }
+
+    // Scenario: mixed add/remove emits moves only for shifted survivors.
+    //
+    // ASCII:
+    // pre:    [A:10, B:20, C:30]
+    // delta:  -B, +D:5
+    // post:   [D:5, A:10, C:30]
+    // moves:  A (shifted), not C (same index), not D/B (added/removed)
+    #[test]
+    fn sort_mixed_add_remove_emits_moves_for_shifted_survivors_only() {
+        let sort_keys = vec![SortKey {
+            col_index: 2, // score asc
+            direction: SortDirection::Ascending,
+        }];
+        let mut node = make_sort_node(sort_keys);
+
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+        let id_d = ObjectId::new();
+        let a = make_tuple(
+            id_a,
+            &[
+                Value::Integer(1),
+                Value::Text("A".into()),
+                Value::Integer(10),
+            ],
+        );
+        let b = make_tuple(
+            id_b,
+            &[
+                Value::Integer(2),
+                Value::Text("B".into()),
+                Value::Integer(20),
+            ],
+        );
+        let c = make_tuple(
+            id_c,
+            &[
+                Value::Integer(3),
+                Value::Text("C".into()),
+                Value::Integer(30),
+            ],
+        );
+        let d = make_tuple(
+            id_d,
+            &[
+                Value::Integer(4),
+                Value::Text("D".into()),
+                Value::Integer(5),
+            ],
+        );
+
+        // Seed: [A, B, C]
+        node.process(TupleDelta {
+            added: vec![a.clone(), b.clone(), c.clone()],
+            removed: vec![],
+            updated: vec![],
+        });
+
+        // Remove B, add D(5) => [D, A, C].
+        // A shifts from index 0 -> 1 and should be emitted as move update.
+        let delta = node.process(TupleDelta {
+            added: vec![d],
+            removed: vec![b],
+            updated: vec![],
+        });
+
+        assert_eq!(delta.added.len(), 1);
+        assert_eq!(delta.added[0].ids()[0], id_d);
+        assert_eq!(delta.removed.len(), 1);
+        assert_eq!(delta.removed[0].ids()[0], id_b);
+        assert_eq!(delta.updated.len(), 1);
+        assert_eq!(delta.updated[0].0.ids()[0], id_a);
+        assert_eq!(delta.updated[0].1.ids()[0], id_a);
     }
 }
