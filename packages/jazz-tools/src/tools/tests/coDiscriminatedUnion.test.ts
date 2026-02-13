@@ -704,8 +704,6 @@ describe("co.discriminatedUnion", () => {
         },
       });
 
-      console.log(loadedSpecies.$isLoaded);
-
       assertLoaded(loadedSpecies);
 
       for (const animal of loadedSpecies) {

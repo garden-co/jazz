@@ -31,8 +31,10 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
-import { generateValidationSchemaFromItem } from "./schemaValidators.js";
-import type { LocalValidationMode } from "../validationSettings.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
 import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoListSchema<
@@ -66,11 +68,11 @@ export class CoListSchema<
       return this.#validationSchema;
     }
 
-    // since validation is not used on read, we can't validate already existing CoValues
-    // so we accept every CoList instance
-    this.#validationSchema = z
-      .instanceof(CoList)
-      .or(z.array(generateValidationSchemaFromItem(this.element)));
+    const validationSchema = z.array(
+      generateValidationSchemaFromItem(this.element),
+    );
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoList);
     return this.#validationSchema;
   };
 

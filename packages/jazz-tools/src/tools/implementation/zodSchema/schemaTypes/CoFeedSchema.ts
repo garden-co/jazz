@@ -30,8 +30,10 @@ import {
   SchemaPermissions,
 } from "../schemaPermissions.js";
 import { z } from "../zodReExport.js";
-import { generateValidationSchemaFromItem } from "./schemaValidators.js";
-import { type LocalValidationMode } from "../validationSettings.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
 import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 export class CoFeedSchema<
@@ -65,9 +67,11 @@ export class CoFeedSchema<
       return this.#validationSchema;
     }
 
-    this.#validationSchema = z
-      .instanceof(CoFeed)
-      .or(z.array(generateValidationSchemaFromItem(this.element)));
+    const validationSchema = z.array(
+      generateValidationSchemaFromItem(this.element),
+    );
+
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoFeed);
     return this.#validationSchema;
   };
 

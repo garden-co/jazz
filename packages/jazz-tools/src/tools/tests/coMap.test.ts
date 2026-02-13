@@ -645,6 +645,33 @@ describe("CoMap", async () => {
       expect(person.name).toEqual("John");
       expect(person.age).toEqual(20);
     });
+
+    test("CoMap validation should never validate a coValue instance as a plain object", () => {
+      const Dog = co.list(z.string());
+
+      const Person = co.map({
+        pet: co.map({
+          name: z.string(),
+        }),
+      });
+
+      const dog = Dog.create(["Rex"]);
+
+      expectValidationError(
+        () =>
+          Person.create({
+            // @ts-expect-error - pet should be a CoMap
+            pet: dog,
+          }),
+        [
+          {
+            code: "custom",
+            message: "Expected a CoMap when providing a CoValue instance",
+            path: ["pet"],
+          },
+        ],
+      );
+    });
   });
 
   describe("Mutation", () => {
@@ -671,11 +698,7 @@ describe("CoMap", async () => {
       const john = Person.create({ name: "John", age: 20 });
 
       expectValidationError(() =>
-        john.$jazz.set(
-          "age",
-          // @ts-expect-error - age should be a number
-          "21",
-        ),
+        john.$jazz.set("age", "21" as unknown as number),
       );
 
       expect(john.age).toEqual(20);
@@ -1735,9 +1758,8 @@ describe("CoMap resolution", async () => {
     const person2 = await Person.load(person1.$jazz.id);
 
     assertLoaded(person2);
-    expectValidationError(
-      // @ts-expect-error - string is not a number
-      () => person2.$jazz.set("age", "20"),
+    expectValidationError(() =>
+      person2.$jazz.set("age", "20" as unknown as number),
     );
   });
 });

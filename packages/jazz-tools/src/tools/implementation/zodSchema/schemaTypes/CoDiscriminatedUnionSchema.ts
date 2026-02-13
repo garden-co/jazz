@@ -19,6 +19,7 @@ import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
+import { extractPlainSchema } from "./schemaValidators.js";
 
 export interface DiscriminableCoValueSchemaDefinition {
   discriminatorMap: z.core.$ZodDiscriminatedUnionInternals["propValues"];
@@ -68,21 +69,7 @@ export class CoDiscriminatedUnionSchema<
       // @ts-expect-error
       options.map((schema) => {
         const validationSchema = schema.getValidationSchema();
-
-        if (validationSchema.def.type === "union") {
-          const def = validationSchema.def as
-            | z.core.$ZodUnionDef<z.core.$ZodType[]>
-            | z.core.$ZodDiscriminatedUnionDef<z.core.$ZodType[]>;
-          // in case of nested co.discriminatedUnion
-          // the nested `validationSchema` is already a z.discriminatedUnion
-          if ("discriminator" in def) {
-            return validationSchema;
-          }
-
-          return def.options[1];
-        }
-
-        throw new Error("Invalid schema type");
+        return extractPlainSchema(validationSchema);
       }),
     );
 

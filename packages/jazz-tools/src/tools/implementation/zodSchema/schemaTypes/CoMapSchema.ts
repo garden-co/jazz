@@ -36,8 +36,10 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
-import { generateValidationSchemaFromItem } from "./schemaValidators.js";
-import type { LocalValidationMode } from "../validationSettings.js";
+import {
+  coValueValidationSchema,
+  generateValidationSchemaFromItem,
+} from "./schemaValidators.js";
 import { resolveSchemaField } from "../runtimeConverters/schemaFieldToCoFieldDef.js";
 
 type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
@@ -90,9 +92,8 @@ export class CoMapSchema<
       );
     }
 
-    // since validation is not used on read, we can't validate already existing CoValues
-    // so we accept every CoMap instance
-    this.#validationSchema = z.instanceof(CoMap).or(validationSchema);
+    this.#validationSchema = coValueValidationSchema(validationSchema, CoMap);
+
     return this.#validationSchema;
   };
 
