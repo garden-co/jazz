@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Todo Reload Harness</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { startApp } from "/src/main.ts";
+
+      const MARKER = "__todoHarness";
+      const params = new URLSearchParams(window.location.search);
+      const dbName = params.get("dbName");
+      const channel = params.get("channel");
+      const origin = window.location.origin;
+
+      if (!dbName || !channel) {
+        throw new Error("reload harness requires dbName and channel query params");
+      }
+
+      function post(message) {
+        window.parent.postMessage({ [MARKER]: true, channel, ...message }, origin);
+      }
+
+      async function waitFor(check, timeoutMs, message) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (check()) return;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        throw new Error(`Timeout: ${message}`);
+      }
+
+      function listTodoTitles(container) {
+        return [...container.querySelectorAll("#todo-list li span")]
+          .map((node) => node.textContent ?? "")
+          .filter((title) => title.length > 0);
+      }
+
+      const container = document.getElementById("app");
+      if (!container) throw new Error("Missing #app container");
+
+      const { destroy } = await startApp(container, { dbName });
+      await waitFor(
+        () => container.querySelector("#todo-list") !== null,
+        10000,
+        "todo list render",
+      );
+      post({ type: "ready" });
+
+      window.addEventListener("message", async (event) => {
+        if (event.origin !== origin || event.source !== window.parent) return;
+        const message = event.data;
+        if (
+          !message ||
+          message[MARKER] !== true ||
+          message.channel !== channel ||
+          typeof message.id !== "string"
+        ) {
+          return;
+        }
+
+        try {
+          let result = null;
+
+          if (message.type === "addTodo") {
+            const title = message.payload?.title;
+            if (typeof title !== "string" || title.length === 0) {
+              throw new Error("addTodo requires a non-empty payload.title");
+            }
+            const input = container.querySelector("#title-input");
+            const form = container.querySelector("#add-form");
+            if (!(input instanceof HTMLInputElement) || !(form instanceof HTMLFormElement)) {
+              throw new Error("Todo form is not rendered");
+            }
+            input.value = title;
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            await waitFor(
+              () => listTodoTitles(container).includes(title),
+              5000,
+              "added todo to appear",
+            );
+          } else if (message.type === "getTodos") {
+            result = listTodoTitles(container);
+          } else if (message.type === "shutdown") {
+            await destroy();
+          } else {
+            throw new Error(`Unknown harness command: ${String(message.type)}`);
+          }
+
+          post({ id: message.id, result });
+        } catch (error) {
+          post({
+            id: message.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    </script>
+  </body>
+</html>

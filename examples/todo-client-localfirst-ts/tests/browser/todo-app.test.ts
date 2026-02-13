@@ -57,12 +57,119 @@ function addTodo(container: HTMLElement, title: string) {
   form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 }
 
+interface HarnessMessage {
+  __todoHarness: true;
+  channel: string;
+  id?: string;
+  type?: string;
+  payload?: unknown;
+  result?: unknown;
+  error?: string;
+}
+
+function reloadHarnessUrl(dbName: string, channel: string): string {
+  const params = new URLSearchParams({
+    dbName,
+    channel,
+    nonce: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  });
+  return `/tests/browser/fixtures/reload-harness.html?${params.toString()}`;
+}
+
+function isHarnessMessage(value: unknown, channel: string): value is HarnessMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<HarnessMessage>;
+  return message.__todoHarness === true && message.channel === channel;
+}
+
+async function waitForHarnessReady(
+  frame: HTMLIFrameElement,
+  channel: string,
+  timeoutMs = 10000,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timeout: reload harness "${channel}" did not become ready`));
+    }, timeoutMs);
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.source !== frame.contentWindow) return;
+      if (!isHarnessMessage(event.data, channel)) return;
+      if (event.data.type !== "ready") return;
+      cleanup();
+      resolve();
+    };
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", onMessage);
+    };
+
+    window.addEventListener("message", onMessage);
+  });
+}
+
+async function callHarness<T>(
+  frame: HTMLIFrameElement,
+  channel: string,
+  type: string,
+  payload?: unknown,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const requestId = `${channel}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timeout: reload harness command "${type}"`));
+    }, 10000);
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.source !== frame.contentWindow) return;
+      if (!isHarnessMessage(event.data, channel)) return;
+      if (event.data.id !== requestId) return;
+
+      cleanup();
+      if (typeof event.data.error === "string" && event.data.error.length > 0) {
+        reject(new Error(event.data.error));
+        return;
+      }
+      resolve(event.data.result as T);
+    };
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", onMessage);
+    };
+
+    window.addEventListener("message", onMessage);
+
+    const target = frame.contentWindow;
+    if (!target) {
+      cleanup();
+      reject(new Error("Reload harness iframe has no contentWindow"));
+      return;
+    }
+
+    const message: HarnessMessage = {
+      __todoHarness: true,
+      channel,
+      id: requestId,
+      type,
+      payload,
+    };
+    target.postMessage(message, window.location.origin);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe("Vanilla TS Todo App E2E", () => {
   const instances: Array<{ container: HTMLDivElement; destroy: () => Promise<void> }> = [];
+  const harnessFrames: Array<{ frame: HTMLIFrameElement; channel: string }> = [];
 
   /** Mount the app into a fresh container. */
   async function mount(config?: Record<string, unknown>): Promise<HTMLDivElement> {
@@ -78,6 +185,21 @@ describe("Vanilla TS Todo App E2E", () => {
     return el;
   }
 
+  /** Mount an iframe-backed harness that can be reloaded like a real page. */
+  async function mountReloadHarness(
+    dbName: string,
+  ): Promise<{ frame: HTMLIFrameElement; channel: string }> {
+    const frame = document.createElement("iframe");
+    frame.style.display = "none";
+    const channel = uniqueDbName("reload-channel");
+    const ready = waitForHarnessReady(frame, channel);
+    frame.src = reloadHarnessUrl(dbName, channel);
+    document.body.appendChild(frame);
+    await ready;
+    harnessFrames.push({ frame, channel });
+    return { frame, channel };
+  }
+
   /** Destroy a specific instance. */
   async function destroyInstance(el: HTMLDivElement): Promise<void> {
     const idx = instances.findIndex((i) => i.container === el);
@@ -90,6 +212,16 @@ describe("Vanilla TS Todo App E2E", () => {
   }
 
   afterEach(async () => {
+    for (const { frame, channel } of harnessFrames) {
+      try {
+        await callHarness<void>(frame, channel, "shutdown");
+      } catch {
+        /* best effort */
+      }
+      frame.remove();
+    }
+    harnessFrames.length = 0;
+
     for (const { container, destroy } of instances) {
       try {
         await destroy();
@@ -242,7 +374,31 @@ describe("Vanilla TS Todo App E2E", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 7. Server sync between two app instances
+  // 7. OPFS persistence across real page reload
+  // -------------------------------------------------------------------------
+
+  it("persists todos across real iframe page reload (OPFS)", async () => {
+    const dbName = uniqueDbName("real-reload");
+    const { frame, channel } = await mountReloadHarness(dbName);
+
+    await callHarness<void>(frame, channel, "addTodo", { title: "Survive full reload" });
+
+    const before = await callHarness<string[]>(frame, channel, "getTodos");
+    expect(before).toContain("Survive full reload");
+
+    const readyAfterReload = waitForHarnessReady(frame, channel);
+    if (!frame.contentWindow) {
+      throw new Error("Reload harness iframe has no contentWindow");
+    }
+    frame.contentWindow.location.reload();
+    await readyAfterReload;
+
+    const after = await callHarness<string[]>(frame, channel, "getTodos");
+    expect(after).toContain("Survive full reload");
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Server sync between two app instances
   // -------------------------------------------------------------------------
 
   it("syncs a todo between two app instances through the server", async () => {
