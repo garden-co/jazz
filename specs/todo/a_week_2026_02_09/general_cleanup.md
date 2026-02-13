@@ -146,3 +146,128 @@ Primary purpose of client IDs is server-side sync-state continuity across short 
   - `jazz-cli` integration tests now cover reconnect lease behavior:
     - `test_reconnect_within_grace_retains_client_sync_state`
     - `test_reconnect_after_grace_purges_client_sync_state`
+
+## 13. Server Query Subscription Cleanup Gap (HIGH)
+
+When a client is removed, RuntimeCore only removes SyncManager state, but QueryManager server-side subscriptions remain.
+
+- `crates/groove/src/runtime_core.rs:896-901` — `remove_client()` delegates only to `sync_manager.remove_client()`
+- `crates/groove/src/query_manager/manager.rs:233-235` — `server_subscriptions` is independently tracked
+- `crates/jazz-cli/src/routes.rs:99` — disconnect cleanup calls `runtime.remove_client(client_id)`
+
+Impact:
+
+- Stale server-side QueryGraphs can accumulate for disconnected clients.
+- Unnecessary settle work and memory retention over time.
+
+Suggested fix:
+
+- Add `QueryManager::remove_client(client_id)` that purges `server_subscriptions` (and related pending state) for the client.
+- Call it from RuntimeCore’s `remove_client()` path.
+- Add integration coverage that no server-side subscriptions remain after grace-expiry cleanup.
+
+Related spec: `specs/todo/b_mvp/query_subscription_disconnect_cleanup.md`
+
+## 14. Silent Server Query Compilation Failures (HIGH)
+
+Server-side query compile failures are dropped without client feedback.
+
+- `crates/groove/src/query_manager/server_queries.rs:63-66` — compile failure hits `continue` with TODO to send error.
+
+Impact:
+
+- Client subscription can appear to hang with no explicit error.
+- Hard to diagnose schema/query mismatches in production.
+
+Suggested fix:
+
+- Emit structured failure to the originating client (either `SyncPayload::Error` or `ServerEvent::Error`) with query/schema context.
+
+Related spec: `specs/todo/b_mvp/silent_query_compilation_errors.md`
+
+## 15. Best-Effort Outbound Sync Can Drop Writes (HIGH)
+
+Outgoing sync delivery is fire-and-forget in all clients; failures are logged but not retried or surfaced as hard failures.
+
+- `packages/jazz-ts/src/runtime/client.ts:543-560` — sends server-bound payloads without durable retry semantics
+- `packages/jazz-ts/src/runtime/sync-transport.ts:64-75` — non-OK and exception paths only log
+- `packages/jazz-ts/src/worker/groove-worker.ts:80-91` and `packages/jazz-ts/src/worker/groove-worker.ts:119-130` — same best-effort POST behavior in worker mode
+- `crates/jazz-rs/src/client.rs:126-129` — push failure only warns
+
+Impact:
+
+- Transient outages/auth failures can permanently drop upstream sync attempts for local writes.
+- Weak delivery guarantees for multi-device convergence.
+
+Suggested fix:
+
+- Introduce retryable outbox semantics (bounded queue + exponential backoff + jitter + explicit failure state).
+- Surface delivery failures to app/runtime so callers can react.
+
+## 16. Auth/CORS Production Hardening Gaps (MEDIUM)
+
+Two production-facing shortcuts are still present:
+
+- `crates/jazz-cli/src/routes.rs:34` — `CorsLayer::permissive()` is unconditional
+- `crates/jazz-cli/src/middleware/auth.rs:250-253` — JWKS path is TODO (HMAC-only validation active today)
+
+Impact:
+
+- Overly broad browser access defaults.
+- Missing standard key-rotation path for JWT verification.
+
+Suggested fix:
+
+- Make allowed origins configurable (strict-by-default outside local dev).
+- Implement JWKS fetch/cache/rotation and issuer/audience validation.
+
+Related spec: `specs/todo/b_mvp/jwks_key_rotation.md`
+
+## 17. Debug `eprintln!` Noise in Runtime Paths (LOW)
+
+Several non-test runtime paths still use `eprintln!` debug output instead of structured tracing.
+
+- `crates/jazz-cli/src/commands/server.rs:121-125`
+- `crates/groove/src/sync_manager/inbox.rs:129`
+- `crates/jazz-rs/src/client.rs:118-123`
+- `crates/jazz-rs/src/client.rs:132`
+- `crates/jazz-rs/src/client.rs:206-209`
+
+Impact:
+
+- Noisy stderr in production.
+- Harder to filter/route logs by level/target.
+
+Suggested fix:
+
+- Replace with `tracing::{debug,warn,error}` and gate verbose logs behind log level.
+
+## 18. Duplicate Test-Server Infrastructure in `jazz-cli` Tests (LOW)
+
+Server spawn/wait scaffolding is duplicated and diverging across test files.
+
+- `crates/jazz-cli/tests/test_server.rs:11-110`
+- `crates/jazz-cli/tests/integration.rs:48-116`
+
+Impact:
+
+- Higher maintenance cost.
+- Easy for auth/env behavior to drift between suites.
+
+Suggested fix:
+
+- Consolidate into one shared helper with per-test env overrides (e.g., grace/heartbeat tuning).
+
+## 19. TODO Spec Drift (LOW)
+
+At least one TODO spec appears stale relative to current code and this cleanup log.
+
+- `specs/todo/b_mvp/codegen_schema_hash_and_client_id.md:1-8` still tracks schema hash/client ID placeholders that are already completed in this branch.
+
+Impact:
+
+- Backlog signal gets noisier and less trustworthy.
+
+Suggested fix:
+
+- Archive/close stale TODO specs or rewrite them to track only remaining follow-up work.
