@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import {
   CANVAS_WIDTH,
   CANVAS_HEIGHT,
@@ -8,12 +8,17 @@ import {
   THRUST_POWER,
   THRUST_POWER_X,
   MAX_LANDING_VELOCITY,
+  WALK_SPEED,
+  LANDER_INTERACT_RADIUS,
+  INITIAL_FUEL,
+  COLOURS,
   type PlayerMode,
 } from "./game/constants.js";
-import { drawBackground } from "./game/render.js";
+import { drawBackground, drawLander, drawAstronaut } from "./game/render.js";
 
 export function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const sizeRef = useRef({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
 
   // Physics state lives in refs (60fps, no re-renders)
   const posXRef = useRef(CANVAS_WIDTH / 2);
@@ -23,22 +28,29 @@ export function Game() {
   const modeRef = useRef<PlayerMode>("descending");
   const landerXRef = useRef(0);
   const landerYRef = useRef(0);
+  const fuelRef = useRef(INITIAL_FUEL);
 
-  // Mirrored into state purely for data-attribute exposure
+  // Mirrored into state purely for data-attribute exposure + HUD
   const [exposed, setExposed] = useState({
     mode: "descending" as PlayerMode,
     px: CANVAS_WIDTH / 2,
     py: INITIAL_ALTITUDE,
+    vx: 0,
     vy: 0,
     lx: 0,
     ly: 0,
+    fuel: INITIAL_FUEL,
   });
 
-  // Track which keys are currently held
+  // Track which keys are currently held + one-shot action queue
   const keysRef = useRef(new Set<string>());
+  const actionsRef = useRef<string[]>([]);
 
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => keysRef.current.add(e.code);
+    const onKeyDown = (e: KeyboardEvent) => {
+      keysRef.current.add(e.code);
+      if (e.code === "KeyE") actionsRef.current.push("interact");
+    };
     const onKeyUp = (e: KeyboardEvent) => keysRef.current.delete(e.code);
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("keyup", onKeyUp);
@@ -48,26 +60,51 @@ export function Game() {
     };
   }, []);
 
+  // Resize canvas to fill viewport
+  const resize = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.width = Math.max(window.innerWidth, CANVAS_WIDTH);
+    canvas.height = Math.max(window.innerHeight, CANVAS_HEIGHT);
+    sizeRef.current = { w: canvas.width, h: canvas.height };
+  }, []);
+
+  useEffect(() => {
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [resize]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Initial draw so pixels are available immediately (before first rAF)
-    drawBackground(ctx, posXRef.current - CANVAS_WIDTH / 2);
+    // Initial draw
+    const { w, h } = sizeRef.current;
+    const initCamY = Math.floor(posYRef.current - h / 2);
+    drawBackground(ctx, posXRef.current - w / 2, initCamY, w, h);
 
     let lastTime = performance.now();
     let rafId = 0;
 
     const gameLoop = (now: number) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.05); // Cap delta to avoid spiral
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
       lastTime = now;
       const keys = keysRef.current;
+      const { w, h } = sizeRef.current;
+
+      // --- Process one-shot actions ---
+      const actions = actionsRef.current.splice(0);
+      const wantsInteract = actions.includes("interact");
+
+      const thrusting =
+        modeRef.current === "descending" &&
+        (keys.has("ArrowUp") || keys.has("KeyW"));
 
       // --- Physics ---
       if (modeRef.current === "descending") {
-        // Thrust
         if (keys.has("ArrowUp") || keys.has("KeyW")) {
           velYRef.current -= THRUST_POWER * dt;
         }
@@ -88,30 +125,86 @@ export function Game() {
           if (Math.abs(velYRef.current) <= MAX_LANDING_VELOCITY) {
             modeRef.current = "landed";
           }
-          // TODO: crash if too fast
           velXRef.current = 0;
           velYRef.current = 0;
           landerXRef.current = posXRef.current;
           landerYRef.current = GROUND_LEVEL;
         }
+      } else if (modeRef.current === "landed" || modeRef.current === "in_lander") {
+        if (wantsInteract) {
+          modeRef.current = "walking";
+        }
+      } else if (modeRef.current === "walking") {
+        if (keys.has("ArrowLeft") || keys.has("KeyA")) {
+          posXRef.current -= WALK_SPEED * dt;
+        }
+        if (keys.has("ArrowRight") || keys.has("KeyD")) {
+          posXRef.current += WALK_SPEED * dt;
+        }
+
+        if (wantsInteract) {
+          const dist = Math.abs(posXRef.current - landerXRef.current);
+          if (dist <= LANDER_INTERACT_RADIUS) {
+            modeRef.current = "in_lander";
+            posXRef.current = landerXRef.current;
+          }
+        }
+      }
+
+      // --- Camera ---
+      const cameraX = Math.floor(posXRef.current - w / 2);
+      // Vertical: follow player during descent, lock ground near bottom after landing
+      const GROUND_MARGIN = 80; // pixels of ground visible below surface line
+      let cameraY: number;
+      if (modeRef.current === "descending") {
+        // Centre on player vertically
+        cameraY = Math.floor(posYRef.current - h / 2);
+      } else {
+        // Lock so ground is near the bottom
+        cameraY = Math.floor(GROUND_LEVEL - h + GROUND_MARGIN);
       }
 
       // --- Render ---
-      drawBackground(ctx, posXRef.current - CANVAS_WIDTH / 2);
+      drawBackground(ctx, cameraX, cameraY, w, h);
+
+      // Draw parked lander (if we've landed and are walking)
+      if (
+        modeRef.current === "walking" &&
+        landerXRef.current !== 0
+      ) {
+        const landerScreenX = landerXRef.current - cameraX;
+        const landerScreenY = GROUND_LEVEL - cameraY;
+        drawLander(ctx, landerScreenX, landerScreenY, false);
+      }
+
+      // Draw player
+      const screenX = posXRef.current - cameraX;
+      if (modeRef.current === "descending") {
+        const screenY = posYRef.current - cameraY;
+        drawLander(ctx, screenX, screenY, thrusting);
+      } else if (modeRef.current === "landed" || modeRef.current === "in_lander") {
+        const screenY = GROUND_LEVEL - cameraY;
+        drawLander(ctx, screenX, screenY, false);
+      } else if (modeRef.current === "walking") {
+        const screenY = GROUND_LEVEL - cameraY;
+        drawAstronaut(ctx, screenX, screenY);
+      }
 
       rafId = requestAnimationFrame(gameLoop);
     };
     rafId = requestAnimationFrame(gameLoop);
 
-    // Sync exposed state periodically so data attributes update
+    // Sync exposed state periodically so data attributes + HUD update
     const syncId = setInterval(() => {
       setExposed({
         mode: modeRef.current,
         px: posXRef.current,
         py: posYRef.current,
+        vx: velXRef.current,
         vy: velYRef.current,
         lx: landerXRef.current,
         ly: landerYRef.current,
+        fuel: fuelRef.current,
       });
     }, 50);
 
@@ -130,13 +223,68 @@ export function Game() {
       data-velocity-y={exposed.vy}
       data-lander-x={exposed.lx}
       data-lander-y={exposed.ly}
+      style={{ position: "relative", width: "100vw", height: "100vh" }}
     >
       <canvas
         ref={canvasRef}
         data-testid="game-canvas"
-        width={CANVAS_WIDTH}
-        height={CANVAS_HEIGHT}
+        style={{ display: "block" }}
       />
+
+      {/* HUD */}
+      <div
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          fontFamily: "monospace",
+          fontSize: 13,
+          color: COLOURS.cyan,
+          background: "rgba(10, 10, 15, 0.7)",
+          padding: "8px 12px",
+          borderRadius: 4,
+          lineHeight: 1.6,
+          pointerEvents: "none",
+        }}
+      >
+        <div>
+          mode: <span style={{ color: COLOURS.pink }}>{exposed.mode}</span>
+        </div>
+        <div>
+          pos: {Math.floor(exposed.px)}, {Math.floor(exposed.py)}
+        </div>
+        <div>
+          vel: {exposed.vx.toFixed(1)}, {exposed.vy.toFixed(1)}
+        </div>
+        <div>
+          fuel: <span style={{ color: exposed.fuel > 10 ? COLOURS.green : COLOURS.orange }}>{exposed.fuel}</span>
+        </div>
+        {exposed.mode === "walking" && (
+          <div>
+            lander: {Math.floor(exposed.lx)} (dist:{" "}
+            {Math.floor(Math.abs(exposed.px - exposed.lx))})
+          </div>
+        )}
+      </div>
+
+      {/* Controls hint */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: 12,
+          left: "50%",
+          transform: "translateX(-50%)",
+          fontFamily: "monospace",
+          fontSize: 12,
+          color: "rgba(255, 255, 255, 0.4)",
+          pointerEvents: "none",
+        }}
+      >
+        {exposed.mode === "descending" && "Arrow keys / WASD — thrust"}
+        {exposed.mode === "landed" && "Press E to exit lander"}
+        {exposed.mode === "in_lander" && "Press E to exit lander"}
+        {exposed.mode === "walking" && "A/D — walk | E — enter lander (when near)"}
+      </div>
     </div>
   );
 }

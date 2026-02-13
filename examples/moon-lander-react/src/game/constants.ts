@@ -28,7 +28,7 @@ export const REFUEL_AMOUNT = 100; // Per correct fuel unit collected
 export const LANDER_INTERACT_RADIUS = 40; // Pixels — how close to walk to enter lander
 
 // Spawn
-export const INITIAL_ALTITUDE = 50; // Y position at spawn (near top of screen)
+export const INITIAL_ALTITUDE = -400; // Y position at spawn (high above the moon surface)
 
 // Player
 export const ASTRONAUT_WIDTH = 16;
@@ -71,5 +71,5 @@ export const COLOURS = {
 } as const;
 
 // DB sync (Phase 2+)
-export const DB_SYNC_INTERVAL_MS = 2000;
+export const DB_SYNC_INTERVAL_MS = 200;
 export const PRESENCE_HEARTBEAT_MS = 3000;
