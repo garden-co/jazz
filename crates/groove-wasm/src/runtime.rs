@@ -607,7 +607,6 @@ impl WasmRuntime {
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let current_ids: Rc<RefCell<Vec<ObjectId>>> = Rc::new(RefCell::new(Vec::new()));
-        let current_ids_for_callback = current_ids.clone();
 
         let callback = move |delta: SubscriptionDelta| {
             let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
@@ -621,7 +620,7 @@ impl WasmRuntime {
             };
 
             let descriptor = &delta.descriptor;
-            let mut ids = current_ids_for_callback.borrow_mut();
+            let mut ids = current_ids.borrow_mut();
             let delta_json = build_wasm_delta_json(&delta, &mut ids, |row| row_to_json(row, descriptor));
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
