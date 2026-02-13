@@ -7,6 +7,12 @@ on:
     branches:
       - gio/feat/basic-initial-ci
 
+concurrency:
+  # For pushes, this lets concurrent runs happen, so each push gets a result.
+  # But for other events (e.g. PRs), we can cancel the previous runs.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
