@@ -345,7 +345,9 @@ fn find_mixed_scenario(name: &str) -> Option<MixedScenario> {
     MIXED_SCENARIOS.iter().copied().find(|s| s.name == name)
 }
 
-async fn open_db(namespace: &str) -> Result<(LsmTree<TrackingFs<OpfsFs>>, TrackingFs<OpfsFs>), JsValue> {
+async fn open_db(
+    namespace: &str,
+) -> Result<(LsmTree<TrackingFs<OpfsFs>>, TrackingFs<OpfsFs>), JsValue> {
     let fs = OpfsFs::open(namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;

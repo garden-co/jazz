@@ -723,9 +723,7 @@ impl<F: SyncFs> LsmTree<F> {
             return Err(corrupt_sst(&meta.path, block.offset));
         }
         let data = Rc::new(data);
-        self.sst_block_cache
-            .borrow_mut()
-            .insert(key, data.clone());
+        self.sst_block_cache.borrow_mut().insert(key, data.clone());
         Ok(data)
     }
 

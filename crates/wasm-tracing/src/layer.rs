@@ -194,11 +194,8 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WasmLayer {
                     .get::<StringRecorder>()
                     .map(|r| r.to_string())
                     .unwrap_or_default();
-                let message = format!("▶ \"{}\"{}{}",
-                    meta.name(),
-                    thread_display_suffix(),
-                    fields,
-                );
+                let message =
+                    format!("▶ \"{}\"{}{}", meta.name(), thread_display_suffix(), fields,);
                 if self.config.color {
                     log_with_color(
                         format!("%c{}%c {}", level, message),

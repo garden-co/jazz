@@ -73,10 +73,7 @@ impl Engine for LsmEngine {
     }
 
     fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        self.db
-            .get(key)
-            .expect("lsm get")
-            .expect("lsm key present")
+        self.db.get(key).expect("lsm get").expect("lsm key present")
     }
 
     fn finish_writes(&mut self) {
@@ -327,7 +324,9 @@ fn shuffled_indices(n: usize) -> Vec<usize> {
     out
 }
 
-fn engine_factories(max_value_size: usize) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
+fn engine_factories(
+    max_value_size: usize,
+) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
     let mut out: Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> = Vec::new();
     out.push(("jazz_lsm", Box::new(|path| Box::new(LsmEngine::open(path)))));
     if max_value_size <= BF_TREE_MAX_VALUE_SIZE {
@@ -336,8 +335,14 @@ fn engine_factories(max_value_size: usize) -> Vec<(&'static str, Box<dyn Fn(&Pat
             Box::new(move |path| Box::new(BfTreeEngine::open(path, max_value_size))),
         ));
     }
-    out.push(("rocksdb", Box::new(|path| Box::new(RocksDbEngine::open(path)))));
-    out.push(("surrealkv", Box::new(|path| Box::new(SurrealKvEngine::open(path)))));
+    out.push((
+        "rocksdb",
+        Box::new(|path| Box::new(RocksDbEngine::open(path))),
+    ));
+    out.push((
+        "surrealkv",
+        Box::new(|path| Box::new(SurrealKvEngine::open(path))),
+    ));
     out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
     out
 }
