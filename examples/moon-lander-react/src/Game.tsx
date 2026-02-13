@@ -20,7 +20,19 @@ interface GameProps {
   physicsSpeed?: number;
 }
 
+/** Get or create a stable player ID persisted in localStorage. */
+function getOrCreatePlayerId(): string {
+  const KEY = "moon-lander-player-id";
+  const existing = localStorage.getItem(KEY);
+  if (existing) return existing;
+  const id = crypto.randomUUID();
+  localStorage.setItem(KEY, id);
+  return id;
+}
+
 export function Game({ physicsSpeed = 1 }: GameProps) {
+  const playerId = useRef(getOrCreatePlayerId()).current;
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sizeRef = useRef({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
 
@@ -222,6 +234,7 @@ export function Game({ physicsSpeed = 1 }: GameProps) {
   return (
     <div
       data-testid="game-container"
+      data-player-id={playerId}
       data-player-mode={exposed.mode}
       data-player-x={exposed.px}
       data-player-y={exposed.py}
