@@ -407,23 +407,23 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
 
 ### Phase 1: Solo Landing & Walking
 
-- [ ] Basic schema (players, fuel_deposits, player_inventory, messages)
-- [ ] Canvas rendering, parallax starfield background
-- [ ] Lander sprite with thrust physics (descent)
-- [ ] Land on moon surface
-- [ ] Exit lander (E key), walk as astronaut (A/D), re-enter lander when near
-- [ ] Parked lander remains visible while walking
-- [ ] Test: "Can I land and walk around?"
+- [x] Basic schema (players, fuel_deposits, player_inventory, messages)
+- [x] Canvas rendering, parallax starfield background
+- [x] Lander sprite with thrust physics (descent)
+- [x] Land on moon surface
+- [x] Exit lander (E key), walk as astronaut (A/D), re-enter lander when near
+- [x] Parked lander remains visible while walking
+- [x] Test: "Can I land and walk around?"
 
 ### Phase 2: Multiplayer Basics
 
-- [ ] Jazz sync server
-- [ ] Unique dbName per tab for OPFS lock avoidance
-- [ ] Player creation with stable identity (localStorage playerId, deterministic name)
-- [ ] Player presence (online/offline heartbeat every 3s)
-- [ ] Real-time position sync (DB persistence every 200ms via server)
-- [ ] Render other players' landers and astronauts
-- [ ] Test: "Can two players see each other descend and land?"
+- [x] Jazz sync server
+- [x] Unique dbName per tab for OPFS lock avoidance
+- [x] Player creation with stable identity (localStorage playerId, deterministic name)
+- [x] Player presence (online/offline heartbeat every 3s)
+- [x] Real-time position sync (DB persistence every 200ms via server)
+- [x] Render other players' landers and astronauts
+- [x] Test: "Can two players see each other descend and land?"
 
 ### Phase 3: Fuel Collection
 

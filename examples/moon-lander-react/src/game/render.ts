@@ -110,16 +110,28 @@ export function drawLander(
   screenX: number,
   screenY: number,
   thrusting: boolean,
+  colour?: string,
+  name?: string,
 ) {
+  const bodyColour = colour ?? COLOURS.cyan;
   const x = Math.floor(screenX - LANDER_WIDTH / 2);
   const y = Math.floor(screenY - LANDER_HEIGHT);
 
+  // Name label above lander
+  if (name) {
+    ctx.font = "10px monospace";
+    ctx.fillStyle = bodyColour;
+    ctx.textAlign = "center";
+    ctx.fillText(name, Math.floor(screenX), y - 6);
+    ctx.textAlign = "start"; // reset
+  }
+
   // Body
-  ctx.fillStyle = COLOURS.cyan;
+  ctx.fillStyle = bodyColour;
   ctx.fillRect(x + 4, y, LANDER_WIDTH - 8, LANDER_HEIGHT - 6);
 
   // Legs
-  ctx.fillStyle = COLOURS.cyan;
+  ctx.fillStyle = bodyColour;
   ctx.fillRect(x, y + LANDER_HEIGHT - 6, 4, 6);
   ctx.fillRect(x + LANDER_WIDTH - 4, y + LANDER_HEIGHT - 6, 4, 6);
 
@@ -146,16 +158,28 @@ export function drawAstronaut(
   ctx: CanvasRenderingContext2D,
   screenX: number,
   screenY: number,
+  colour?: string,
+  name?: string,
 ) {
+  const helmetColour = colour ?? COLOURS.cyan;
   const x = Math.floor(screenX - ASTRONAUT_WIDTH / 2);
   const y = Math.floor(screenY - ASTRONAUT_HEIGHT);
+
+  // Name label above astronaut
+  if (name) {
+    ctx.font = "10px monospace";
+    ctx.fillStyle = helmetColour;
+    ctx.textAlign = "center";
+    ctx.fillText(name, Math.floor(screenX), y - 6);
+    ctx.textAlign = "start"; // reset
+  }
 
   // Body
   ctx.fillStyle = "#cccccc";
   ctx.fillRect(x + 2, y + 8, ASTRONAUT_WIDTH - 4, ASTRONAUT_HEIGHT - 8);
 
   // Helmet
-  ctx.fillStyle = COLOURS.cyan;
+  ctx.fillStyle = helmetColour;
   ctx.fillRect(x + 3, y, ASTRONAUT_WIDTH - 6, 10);
 
   // Visor

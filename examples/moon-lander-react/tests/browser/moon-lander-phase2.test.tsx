@@ -102,9 +102,10 @@ async function mountApp(opts: {
   serverUrl?: string;
   jwtToken?: string;
   adminSecret?: string;
+  playerId?: string;
   physicsSpeed?: number;
 }): Promise<HTMLDivElement> {
-  const { physicsSpeed, ...config } = opts;
+  const { physicsSpeed, playerId, ...config } = opts;
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -115,6 +116,7 @@ async function mountApp(opts: {
       <App
         {...({
           config: { appId: config.appId ?? APP_ID, ...config },
+          playerId: playerId ?? crypto.randomUUID(),
           physicsSpeed,
         } as any)}
       />,

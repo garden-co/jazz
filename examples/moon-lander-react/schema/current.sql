@@ -1,0 +1,15 @@
+CREATE TABLE players (
+    playerId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    online BOOLEAN NOT NULL,
+    lastSeen INTEGER NOT NULL,
+    positionX INTEGER NOT NULL,
+    positionY INTEGER NOT NULL,
+    velocityX INTEGER NOT NULL,
+    velocityY INTEGER NOT NULL,
+    requiredFuelType TEXT NOT NULL,
+    landerFuelLevel INTEGER NOT NULL,
+    landerSpawnX INTEGER NOT NULL
+);
