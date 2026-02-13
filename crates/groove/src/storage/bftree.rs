@@ -106,27 +106,7 @@ impl BfTreeStorage {
 
         let tree = BfTree::open_with_opfs(tree_vfs, wal_vfs, config)
             .map_err(|e| StorageError::IoError(format!("bf-tree OPFS: {:?}", e)))?;
-        let storage = Self { tree };
-        storage.log_key_stats();
-        Ok(storage)
-    }
-
-    /// Log key statistics after opening storage (for debugging persistence).
-    fn log_key_stats(&self) {
-        let count_prefix =
-            |pfx: &str| -> usize { self.tree_scan_keys(pfx).map(|v| v.len()).unwrap_or(0) };
-        let obj_count = count_prefix("obj:");
-        let idx_count = count_prefix("idx:");
-        let ack_count = count_prefix("ack:");
-        tracing::info!(obj_count, idx_count, ack_count, "BfTreeStorage opened");
-        // If there are index keys, log a sample
-        if idx_count > 0
-            && let Ok(keys) = self.tree_scan_keys("idx:")
-        {
-            for key in keys.iter().take(5) {
-                tracing::debug!(key, "sample index key");
-            }
-        }
+        Ok(Self { tree })
     }
 
     fn configure(config: &mut Config) {

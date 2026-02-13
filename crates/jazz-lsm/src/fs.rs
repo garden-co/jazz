@@ -298,6 +298,7 @@ impl SyncFs for StdFs {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(self.full_path(path))
             .map_err(|e| FsError::Io(e.to_string()))?;
         file.sync_all().map_err(|e| FsError::Io(e.to_string()))
