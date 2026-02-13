@@ -2091,6 +2091,7 @@ export class CoValueCore {
       return;
     }
 
+    let persistentCloseTimer: ReturnType<typeof setTimeout> | undefined;
     const markNotFound = () => {
       if (this.getLoadingStateForPeer(peer.id) === "pending") {
         logger.warn("Timeout waiting for peer to load coValue", {
@@ -2101,10 +2102,34 @@ export class CoValueCore {
       }
     };
 
-    // Close listener for non-persistent peers
-    const removeCloseListener = peer.persistent
-      ? undefined
-      : peer.addCloseListener(markNotFound);
+    const clearPersistentCloseTimer = () => {
+      if (persistentCloseTimer) {
+        clearTimeout(persistentCloseTimer);
+        persistentCloseTimer = undefined;
+      }
+    };
+
+    const schedulePersistentPeerGraceTimeout = () => {
+      clearPersistentCloseTimer();
+      persistentCloseTimer = setTimeout(() => {
+        // If the peer with the same id reconnected, avoid marking it as unavailable.
+        const currentPeer = this.node.syncManager.peers[peer.id];
+        if (currentPeer && !currentPeer.closed) {
+          return;
+        }
+        markNotFound();
+      }, CO_VALUE_LOADING_CONFIG.TIMEOUT);
+    };
+
+    // Non-persistent peers are considered unavailable immediately on close.
+    // Persistent peers get a grace period to reconnect before being marked unavailable.
+    const removeCloseListener = peer.addCloseListener(() => {
+      if (!peer.persistent) {
+        markNotFound();
+        return;
+      }
+      schedulePersistentPeerGraceTimeout();
+    });
 
     /**
      * On reconnection persistent peers will automatically fire the load request
@@ -2112,6 +2137,8 @@ export class CoValueCore {
      */
     if (!peer.closed) {
       peer.sendLoadRequest(this, mode);
+    } else if (peer.persistent) {
+      schedulePersistentPeerGraceTimeout();
     }
 
     this.subscribe((state, unsubscribe) => {
@@ -2123,7 +2150,8 @@ export class CoValueCore {
         peerState === "unavailable"
       ) {
         unsubscribe();
-        removeCloseListener?.();
+        removeCloseListener();
+        clearPersistentCloseTimer();
       }
     }, true);
   }
