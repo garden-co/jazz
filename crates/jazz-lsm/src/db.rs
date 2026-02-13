@@ -10,6 +10,18 @@ const MANIFEST_FILE: &str = "MANIFEST.json";
 const WAL_FILE: &str = "active.wal";
 const SST_PREFIX: &str = "sst-";
 const WAL_APPEND_BATCH_BYTES: usize = 32 * 1024;
+const SST_V2_BLOCK_TARGET_BYTES: usize = 16 * 1024;
+const SST_V2_FOOTER_MAGIC: [u8; 8] = *b"JLSM2IDX";
+const SST_V2_VERSION: u32 = 1;
+const SST_V2_FOOTER_SIZE: usize = 8 + 4 + 4 + 8 + 8;
+
+#[derive(Debug, Clone)]
+struct SstV2BlockIndex {
+    offset: u64,
+    len: u32,
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+}
 
 pub type MergeFn = Box<dyn Fn(Option<&[u8]>, &[u8]) -> Vec<u8> + 'static>;
 
@@ -190,7 +202,12 @@ impl<F: SyncFs> LsmTree<F> {
                 if !meta_overlaps_range(meta, start_inclusive, end_exclusive) {
                     continue;
                 }
-                self.read_sst_records_into(meta, &mut sst_records)?;
+                self.read_sst_records_for_range_into(
+                    meta,
+                    start_inclusive,
+                    end_exclusive,
+                    &mut sst_records,
+                )?;
                 for record in &sst_records {
                     if key_in_range(&record.key, start_inclusive, end_exclusive) {
                         keys.insert(record.key.clone());
@@ -356,15 +373,7 @@ impl<F: SyncFs> LsmTree<F> {
         self.manifest.next_file_id += 1;
 
         let path = sst_path(file_id);
-        let mut bytes = Vec::with_capacity(
-            records
-                .iter()
-                .map(|r| r.key.len() + r.value.len() + 32)
-                .sum::<usize>(),
-        );
-        for record in &records {
-            encode_record_into(record, &mut bytes);
-        }
+        let bytes = encode_sst_v2(&records)?;
 
         self.fs.write_all(&path, &bytes)?;
         self.fs.sync_file(&path)?;
@@ -414,10 +423,154 @@ impl<F: SyncFs> LsmTree<F> {
         meta: &SstMeta,
         out: &mut Vec<VersionedRecord>,
     ) -> Result<(), LsmError> {
-        let data = self.fs.read_all(&meta.path)?;
         out.clear();
+        let index = self.read_sst_v2_index(meta)?;
+        let mut block_records = Vec::new();
+        for block in &index {
+            self.read_sst_v2_block_records(meta, block, &mut block_records)?;
+            out.append(&mut block_records);
+        }
+        Ok(())
+    }
+
+    fn read_sst_records_for_key_into(
+        &self,
+        meta: &SstMeta,
+        key: &[u8],
+        out: &mut Vec<VersionedRecord>,
+    ) -> Result<(), LsmError> {
+        out.clear();
+        let index = self.read_sst_v2_index(meta)?;
+        let mut block_records = Vec::new();
+        for block in &index {
+            if key < block.min_key.as_slice() || key > block.max_key.as_slice() {
+                continue;
+            }
+            self.read_sst_v2_block_records(meta, block, &mut block_records)?;
+            for record in block_records.drain(..) {
+                if record.key == key {
+                    out.push(record);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_sst_records_for_range_into(
+        &self,
+        meta: &SstMeta,
+        start_inclusive: Option<&[u8]>,
+        end_exclusive: Option<&[u8]>,
+        out: &mut Vec<VersionedRecord>,
+    ) -> Result<(), LsmError> {
+        out.clear();
+        let index = self.read_sst_v2_index(meta)?;
+        let mut block_records = Vec::new();
+        for block in &index {
+            if let Some(start) = start_inclusive
+                && block.max_key.as_slice() < start
+            {
+                continue;
+            }
+            if let Some(end) = end_exclusive
+                && block.min_key.as_slice() >= end
+            {
+                continue;
+            }
+            self.read_sst_v2_block_records(meta, block, &mut block_records)?;
+            for record in block_records.drain(..) {
+                if key_in_range(&record.key, start_inclusive, end_exclusive) {
+                    out.push(record);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_sst_v2_index(&self, meta: &SstMeta) -> Result<Vec<SstV2BlockIndex>, LsmError> {
+        let file_len = self.fs.file_len(&meta.path)?;
+        if file_len < SST_V2_FOOTER_SIZE as u64 {
+            return Err(corrupt_sst(&meta.path, 0));
+        }
+
+        let footer_offset = file_len - SST_V2_FOOTER_SIZE as u64;
+        let footer = self
+            .fs
+            .read_range(&meta.path, footer_offset, SST_V2_FOOTER_SIZE)?;
+        if footer.len() != SST_V2_FOOTER_SIZE {
+            return Err(corrupt_sst(&meta.path, footer_offset));
+        }
+
+        if footer[0..8] != SST_V2_FOOTER_MAGIC {
+            return Err(corrupt_sst(&meta.path, footer_offset));
+        }
+
+        let version = u32::from_le_bytes(footer[8..12].try_into().expect("footer version bytes"));
+        if version != SST_V2_VERSION {
+            return Err(corrupt_sst(&meta.path, footer_offset));
+        }
+
+        let block_count =
+            u32::from_le_bytes(footer[12..16].try_into().expect("footer block count bytes"));
+        let index_offset = u64::from_le_bytes(
+            footer[16..24]
+                .try_into()
+                .expect("footer index offset bytes"),
+        );
+        let index_len =
+            u64::from_le_bytes(footer[24..32].try_into().expect("footer index len bytes"));
+
+        if index_offset >= footer_offset
+            || index_len == 0
+            || index_offset.saturating_add(index_len) != footer_offset
+        {
+            return Err(corrupt_sst(&meta.path, footer_offset));
+        }
+
+        if index_len > usize::MAX as u64 {
+            return Err(corrupt_sst(&meta.path, index_offset));
+        }
+
+        let index_bytes = self
+            .fs
+            .read_range(&meta.path, index_offset, index_len as usize)?;
+        if index_bytes.len() != index_len as usize {
+            return Err(corrupt_sst(&meta.path, index_offset));
+        }
+
+        let blocks = parse_sst_v2_index(&index_bytes, &meta.path, index_offset, block_count)?;
+        let mut prev_end = 0u64;
+        for block in &blocks {
+            if block.offset < prev_end {
+                return Err(corrupt_sst(&meta.path, block.offset));
+            }
+            let end = block.offset.saturating_add(block.len as u64);
+            if end > index_offset {
+                return Err(corrupt_sst(&meta.path, block.offset));
+            }
+            prev_end = end;
+        }
+        Ok(blocks)
+    }
+
+    fn read_sst_v2_block_records(
+        &self,
+        meta: &SstMeta,
+        block: &SstV2BlockIndex,
+        out: &mut Vec<VersionedRecord>,
+    ) -> Result<(), LsmError> {
+        let data = self
+            .fs
+            .read_range(&meta.path, block.offset, block.len as usize)?;
+        if data.len() != block.len as usize {
+            return Err(corrupt_sst(&meta.path, block.offset));
+        }
         decode_records_into(&data, &meta.path, false, out)?;
-        for record in out.iter() {
+        self.validate_merge_ops(out)
+    }
+
+    fn validate_merge_ops(&self, records: &[VersionedRecord]) -> Result<(), LsmError> {
+        for record in records {
             if record.kind == OpKind::Merge && !self.merge_ops.contains_key(&record.merge_op_id) {
                 return Err(LsmError::UnknownMergeOperator(record.merge_op_id));
             }
@@ -438,12 +591,8 @@ impl<F: SyncFs> LsmTree<F> {
                 if key < meta.min_key.as_slice() || key > meta.max_key.as_slice() {
                     continue;
                 }
-                self.read_sst_records_into(meta, &mut sst_records)?;
-                for record in &sst_records {
-                    if record.key == key {
-                        versions.push(record.clone());
-                    }
-                }
+                self.read_sst_records_for_key_into(meta, key, &mut sst_records)?;
+                versions.extend(sst_records.iter().cloned());
             }
         }
 
@@ -567,15 +716,7 @@ impl<F: SyncFs> LsmTree<F> {
             self.manifest.next_file_id += 1;
 
             let path = sst_path(file_id);
-            let mut bytes = Vec::with_capacity(
-                output_records
-                    .iter()
-                    .map(|r| r.key.len() + r.value.len() + 32)
-                    .sum::<usize>(),
-            );
-            for record in &output_records {
-                encode_record_into(record, &mut bytes);
-            }
+            let bytes = encode_sst_v2(&output_records)?;
 
             self.fs.write_all(&path, &bytes)?;
             self.fs.sync_file(&path)?;
@@ -604,6 +745,213 @@ impl<F: SyncFs> LsmTree<F> {
 
         self.persist_manifest()?;
         Ok(true)
+    }
+}
+
+fn encode_sst_v2(records: &[VersionedRecord]) -> Result<Vec<u8>, LsmError> {
+    let mut file_bytes = Vec::with_capacity(
+        records
+            .iter()
+            .map(|r| r.key.len() + r.value.len() + 32)
+            .sum::<usize>()
+            .saturating_add(1024),
+    );
+    let mut blocks = Vec::new();
+    let mut block_bytes = Vec::with_capacity(SST_V2_BLOCK_TARGET_BYTES + 256);
+    let mut block_min_key: Option<Vec<u8>> = None;
+    let mut block_max_key: Option<Vec<u8>> = None;
+
+    for record in records {
+        if block_min_key.is_none() {
+            block_min_key = Some(record.key.clone());
+        }
+        block_max_key = Some(record.key.clone());
+        encode_record_into(record, &mut block_bytes);
+
+        if block_bytes.len() >= SST_V2_BLOCK_TARGET_BYTES {
+            finish_sst_v2_block(
+                &mut file_bytes,
+                &mut blocks,
+                &mut block_bytes,
+                &mut block_min_key,
+                &mut block_max_key,
+            )?;
+        }
+    }
+
+    finish_sst_v2_block(
+        &mut file_bytes,
+        &mut blocks,
+        &mut block_bytes,
+        &mut block_min_key,
+        &mut block_max_key,
+    )?;
+
+    let index_offset = file_bytes.len() as u64;
+    let index_bytes = encode_sst_v2_index(&blocks)?;
+    let index_len = index_bytes.len() as u64;
+    file_bytes.extend_from_slice(&index_bytes);
+
+    let block_count = u32::try_from(blocks.len())
+        .map_err(|_| LsmError::InvalidOptions("too many SST blocks".to_string()))?;
+    file_bytes.extend_from_slice(&SST_V2_FOOTER_MAGIC);
+    file_bytes.extend_from_slice(&SST_V2_VERSION.to_le_bytes());
+    file_bytes.extend_from_slice(&block_count.to_le_bytes());
+    file_bytes.extend_from_slice(&index_offset.to_le_bytes());
+    file_bytes.extend_from_slice(&index_len.to_le_bytes());
+
+    Ok(file_bytes)
+}
+
+fn finish_sst_v2_block(
+    file_bytes: &mut Vec<u8>,
+    blocks: &mut Vec<SstV2BlockIndex>,
+    block_bytes: &mut Vec<u8>,
+    block_min_key: &mut Option<Vec<u8>>,
+    block_max_key: &mut Option<Vec<u8>>,
+) -> Result<(), LsmError> {
+    if block_bytes.is_empty() {
+        return Ok(());
+    }
+
+    let len = u32::try_from(block_bytes.len())
+        .map_err(|_| LsmError::InvalidOptions("SST block length overflow".to_string()))?;
+    let min_key = block_min_key
+        .take()
+        .ok_or_else(|| LsmError::InvalidOptions("missing SST block min key".to_string()))?;
+    let max_key = block_max_key
+        .take()
+        .ok_or_else(|| LsmError::InvalidOptions("missing SST block max key".to_string()))?;
+
+    let offset = file_bytes.len() as u64;
+    file_bytes.extend_from_slice(block_bytes);
+    block_bytes.clear();
+
+    blocks.push(SstV2BlockIndex {
+        offset,
+        len,
+        min_key,
+        max_key,
+    });
+
+    Ok(())
+}
+
+fn encode_sst_v2_index(blocks: &[SstV2BlockIndex]) -> Result<Vec<u8>, LsmError> {
+    let mut out = Vec::with_capacity(
+        4 + blocks
+            .iter()
+            .map(|b| 8 + 4 + 4 + 4 + b.min_key.len() + b.max_key.len())
+            .sum::<usize>(),
+    );
+
+    let count = u32::try_from(blocks.len())
+        .map_err(|_| LsmError::InvalidOptions("too many SST index entries".to_string()))?;
+    out.extend_from_slice(&count.to_le_bytes());
+
+    for block in blocks {
+        let min_len = u32::try_from(block.min_key.len())
+            .map_err(|_| LsmError::InvalidOptions("SST min key too large".to_string()))?;
+        let max_len = u32::try_from(block.max_key.len())
+            .map_err(|_| LsmError::InvalidOptions("SST max key too large".to_string()))?;
+        out.extend_from_slice(&block.offset.to_le_bytes());
+        out.extend_from_slice(&block.len.to_le_bytes());
+        out.extend_from_slice(&min_len.to_le_bytes());
+        out.extend_from_slice(&max_len.to_le_bytes());
+        out.extend_from_slice(&block.min_key);
+        out.extend_from_slice(&block.max_key);
+    }
+
+    Ok(out)
+}
+
+fn parse_sst_v2_index(
+    data: &[u8],
+    path: &str,
+    index_offset: u64,
+    expected_block_count: u32,
+) -> Result<Vec<SstV2BlockIndex>, LsmError> {
+    if data.len() < 4 {
+        return Err(corrupt_sst(path, index_offset));
+    }
+
+    let mut cursor = 0usize;
+    let count = u32::from_le_bytes(
+        data[cursor..cursor + 4]
+            .try_into()
+            .expect("SST index count bytes"),
+    );
+    cursor += 4;
+    if count != expected_block_count {
+        return Err(corrupt_sst(path, index_offset));
+    }
+
+    let mut blocks = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        if cursor + 8 + 4 + 4 + 4 > data.len() {
+            return Err(corrupt_sst(path, index_offset + cursor as u64));
+        }
+
+        let offset = u64::from_le_bytes(
+            data[cursor..cursor + 8]
+                .try_into()
+                .expect("SST index block offset bytes"),
+        );
+        cursor += 8;
+        let len = u32::from_le_bytes(
+            data[cursor..cursor + 4]
+                .try_into()
+                .expect("SST index block len bytes"),
+        );
+        cursor += 4;
+        let min_len = u32::from_le_bytes(
+            data[cursor..cursor + 4]
+                .try_into()
+                .expect("SST index min key len bytes"),
+        ) as usize;
+        cursor += 4;
+        let max_len = u32::from_le_bytes(
+            data[cursor..cursor + 4]
+                .try_into()
+                .expect("SST index max key len bytes"),
+        ) as usize;
+        cursor += 4;
+
+        if len == 0 {
+            return Err(corrupt_sst(path, index_offset + cursor as u64));
+        }
+        if cursor + min_len + max_len > data.len() {
+            return Err(corrupt_sst(path, index_offset + cursor as u64));
+        }
+
+        let min_key = data[cursor..cursor + min_len].to_vec();
+        cursor += min_len;
+        let max_key = data[cursor..cursor + max_len].to_vec();
+        cursor += max_len;
+
+        if min_key > max_key {
+            return Err(corrupt_sst(path, index_offset + cursor as u64));
+        }
+
+        blocks.push(SstV2BlockIndex {
+            offset,
+            len,
+            min_key,
+            max_key,
+        });
+    }
+
+    if cursor != data.len() {
+        return Err(corrupt_sst(path, index_offset + cursor as u64));
+    }
+
+    Ok(blocks)
+}
+
+fn corrupt_sst(path: &str, offset: u64) -> LsmError {
+    LsmError::CorruptRecord {
+        path: path.to_string(),
+        offset,
     }
 }
 
@@ -685,4 +1033,121 @@ fn meta_overlaps_range(
 
 fn sst_path(file_id: u64) -> String {
     format!("{}{:020}.sst", SST_PREFIX, file_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::fs::MemoryFs;
+
+    #[derive(Clone, Default)]
+    struct TrackingFs {
+        inner: MemoryFs,
+        read_all_calls: Rc<Cell<u64>>,
+        read_range_calls: Rc<Cell<u64>>,
+    }
+
+    impl TrackingFs {
+        fn reset_read_counters(&self) {
+            self.read_all_calls.set(0);
+            self.read_range_calls.set(0);
+        }
+
+        fn read_counts(&self) -> (u64, u64) {
+            (self.read_all_calls.get(), self.read_range_calls.get())
+        }
+    }
+
+    impl SyncFs for TrackingFs {
+        fn read_all(&self, path: &str) -> Result<Vec<u8>, FsError> {
+            self.read_all_calls.set(self.read_all_calls.get() + 1);
+            self.inner.read_all(path)
+        }
+
+        fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+            self.read_range_calls.set(self.read_range_calls.get() + 1);
+            self.inner.read_range(path, offset, len)
+        }
+
+        fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+            self.inner.write_all(path, data)
+        }
+
+        fn write_atomic(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+            self.inner.write_atomic(path, data)
+        }
+
+        fn append(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+            self.inner.append(path, data)
+        }
+
+        fn file_len(&self, path: &str) -> Result<u64, FsError> {
+            self.inner.file_len(path)
+        }
+
+        fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
+            self.inner.truncate(path, len)
+        }
+
+        fn remove_file(&self, path: &str) -> Result<(), FsError> {
+            self.inner.remove_file(path)
+        }
+
+        fn list_files(&self, prefix: &str) -> Result<Vec<String>, FsError> {
+            self.inner.list_files(prefix)
+        }
+
+        fn sync_file(&self, path: &str) -> Result<(), FsError> {
+            self.inner.sync_file(path)
+        }
+
+        fn sync_dir(&self) -> Result<(), FsError> {
+            self.inner.sync_dir()
+        }
+    }
+
+    #[test]
+    fn point_reads_use_positional_sst_blocks() {
+        let fs = TrackingFs::default();
+        let mut db = LsmTree::open(
+            fs.clone(),
+            LsmOptions {
+                max_memtable_bytes: 8 * 1024 * 1024,
+                max_wal_bytes: 64 * 1024 * 1024,
+                level0_file_limit: 8,
+                level_fanout: 4,
+                max_levels: 2,
+                ..Default::default()
+            },
+            vec![],
+        )
+        .expect("open");
+
+        for i in 0..2000 {
+            let key = format!("k{i:06}").into_bytes();
+            let value = format!("value-{i:06}-{}", "x".repeat(64)).into_bytes();
+            db.put(&key, &value).expect("put");
+        }
+        db.flush().expect("flush");
+
+        fs.reset_read_counters();
+
+        let target_key = b"k001337".to_vec();
+        let expected_value = format!("value-001337-{}", "x".repeat(64)).into_bytes();
+        let got = db.get(&target_key).expect("get");
+        assert_eq!(got, Some(expected_value));
+
+        let (read_all_calls, read_range_calls) = fs.read_counts();
+        assert_eq!(
+            read_all_calls, 0,
+            "point lookups should avoid full-file SST reads"
+        );
+        assert!(
+            read_range_calls >= 3,
+            "expected footer/index/block reads via read_range"
+        );
+    }
 }

@@ -84,6 +84,25 @@ Phase 3 values below compare against Phase 2 using the same scenario/count matri
 | mixed_random_50r_50w_with_updates | 1,048,576 | `38.335 -> 40.661` (`+6.1%`) | `58.213 -> 47.854` (`-17.8%`) | `294.118 -> 275.862` (`-6.2%`) | `6.000 -> 6.500` (`+8.3%`) | Native `count=64`; WASM `count=4` |
 | mixed_random_60r_20w_20d | 1,048,576 | `48.729 -> 48.667` (`-0.1%`) | `44.055 -> 44.308` (`+0.6%`) | `307.692 -> 268.456` (`-12.8%`) | `5.600 -> 6.900` (`+23.2%`) | Native `count=64`; WASM `count=4` |
 
+## Phase 4 Results (SST v2 block format + point-read index)
+
+Phase 4 values below compare against Phase 3 using the same scenario/count matrix where runs completed.
+
+| Scenario | Value Size (bytes) | Native ops/s (P3 -> P4) | Native p95 ms (P3 -> P4) | WASM ops/s (P3 -> P4) | WASM p95 ms (P3 -> P4) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `8145.130 -> 8826.677` (`+8.4%`) | `0.133 -> 0.119` (`-10.1%`) | `7874.016 -> 3802.281` (`-51.7%`) | `0.200 -> 0.400` (`+100.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `11789.614 -> 11004.389` (`-6.7%`) | `0.078 -> 0.080` (`+2.9%`) | `11111.111 -> 6024.096` (`-45.8%`) | `0.200 -> 0.300` (`+50.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `11494.407 -> 10538.879` (`-8.3%`) | `0.072 -> 0.078` (`+9.5%`) | `9803.922 -> 4901.961` (`-50.0%`) | `0.200 -> 0.300` (`+50.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `9536.775 -> 11279.574` (`+18.3%`) | `0.091 -> 0.071` (`-22.7%`) | `8695.652 -> 4651.163` (`-46.5%`) | `0.200 -> 0.400` (`+100.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 256 | `10985.178 -> 13009.695` (`+18.4%`) | `0.082 -> 0.058` (`-28.9%`) | `10869.565 -> 5780.347` (`-46.8%`) | `0.200 -> 0.300` (`+50.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 256 | `10337.867 -> 11787.750` (`+14.0%`) | `0.084 -> 0.065` (`-23.4%`) | `8333.333 -> 4608.295` (`-44.7%`) | `0.200 -> 0.400` (`+100.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 4096 | `2662.683 -> 10998.347` (`+313.0%`) | `0.520 -> 0.071` (`-86.4%`) | `3267.974 -> 4237.288` (`+29.7%`) | `0.400 -> 0.300` (`-25.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 4096 | `2610.600 -> 7500.994` (`+187.3%`) | `0.592 -> 0.095` (`-84.0%`) | `4016.064 -> 5263.158` (`+31.1%`) | `0.400 -> 0.300` (`-25.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 4096 | `2713.318 -> 12372.052` (`+355.9%`) | `0.633 -> 0.058` (`-90.8%`) | `3676.471 -> 4901.961` (`+33.3%`) | `0.400 -> 0.300` (`-25.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 1,048,576 | `44.601 -> 89.716` (`+101.2%`) | `43.665 -> 51.758` (`+18.5%`) | N/A | N/A | Native `count=64`; WASM 1MB run did not complete in this session |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `40.661 -> 62.312` (`+53.2%`) | `47.854 -> 65.344` (`+36.5%`) | N/A | N/A | Native `count=64`; WASM 1MB run did not complete in this session |
+| mixed_random_60r_20w_20d | 1,048,576 | `48.667 -> 96.424` (`+98.1%`) | `44.308 -> 50.606` (`+14.2%`) | N/A | N/A | Native `count=64`; WASM 1MB run did not complete in this session |
+
 ## Progress Tracking
 
 - Use this mixed baseline table as the source of truth for Phase 1+ changes.
@@ -113,3 +132,7 @@ Phase 3 values below compare against Phase 2 using the same scenario/count matri
 - Phase 3 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
 - Phase 3 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
 - Phase 3 mixed wasm/opfs rerun (1MB reduced): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 4 --value-sizes 1048576 --json`
+- Phase 4 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 4 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 4 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
+- Phase 4 mixed wasm/opfs rerun (1MB reduced): attempted with `count=4` and `count=1`, but did not complete before manual termination
