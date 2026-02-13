@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::error::LsmError;
-use crate::format::{OpKind, VersionedRecord, decode_records, encode_record};
+use crate::format::{OpKind, VersionedRecord, decode_records_into, encode_record_into};
 use crate::fs::{FsError, SyncFs};
 use crate::manifest::{Manifest, SstMeta};
 
@@ -177,6 +177,7 @@ impl<F: SyncFs> LsmTree<F> {
         end_exclusive: Option<&[u8]>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, LsmError> {
         let mut keys = BTreeSet::new();
+        let mut sst_records = Vec::new();
 
         for key in self.memtable.keys() {
             if key_in_range(key, start_inclusive, end_exclusive) {
@@ -189,10 +190,10 @@ impl<F: SyncFs> LsmTree<F> {
                 if !meta_overlaps_range(meta, start_inclusive, end_exclusive) {
                     continue;
                 }
-                let records = self.read_sst_records(meta)?;
-                for record in records {
+                self.read_sst_records_into(meta, &mut sst_records)?;
+                for record in &sst_records {
                     if key_in_range(&record.key, start_inclusive, end_exclusive) {
-                        keys.insert(record.key);
+                        keys.insert(record.key.clone());
                     }
                 }
             }
@@ -235,10 +236,14 @@ impl<F: SyncFs> LsmTree<F> {
 
         let deepest = self.manifest.levels.len().saturating_sub(1);
         let mut deepest_tombstones = 0usize;
+        let mut sst_records = Vec::new();
         if let Some(level) = self.manifest.levels.get(deepest) {
             for meta in level {
-                let records = self.read_sst_records(meta)?;
-                deepest_tombstones += records.iter().filter(|r| r.kind == OpKind::Delete).count();
+                self.read_sst_records_into(meta, &mut sst_records)?;
+                deepest_tombstones += sst_records
+                    .iter()
+                    .filter(|r| r.kind == OpKind::Delete)
+                    .count();
             }
         }
 
@@ -270,19 +275,18 @@ impl<F: SyncFs> LsmTree<F> {
     }
 
     fn append_wal(&self, record: &VersionedRecord) -> Result<(), LsmError> {
-        let encoded = encode_record(record);
-        self.wal_bytes
-            .set(self.wal_bytes.get().saturating_add(encoded.len() as u64));
-
-        {
+        let should_flush = {
             let mut buffer = self.wal_buffer.borrow_mut();
-            buffer.extend_from_slice(&encoded);
-            if buffer.len() < WAL_APPEND_BATCH_BYTES {
-                return Ok(());
-            }
+            let before_len = buffer.len();
+            encode_record_into(record, &mut buffer);
+            let appended = (buffer.len() - before_len) as u64;
+            self.wal_bytes
+                .set(self.wal_bytes.get().saturating_add(appended));
+            buffer.len() >= WAL_APPEND_BATCH_BYTES
+        };
+        if should_flush {
+            self.flush_wal_buffer()?;
         }
-
-        self.flush_wal_buffer()?;
         Ok(())
     }
 
@@ -317,7 +321,8 @@ impl<F: SyncFs> LsmTree<F> {
         self.wal_bytes.set(data.len() as u64);
         self.wal_buffer.borrow_mut().clear();
 
-        let records = decode_records(&data, WAL_FILE, true)?;
+        let mut records = Vec::new();
+        decode_records_into(&data, WAL_FILE, true, &mut records)?;
         for record in records {
             if record.kind == OpKind::Merge && !self.merge_ops.contains_key(&record.merge_op_id) {
                 return Err(LsmError::UnknownMergeOperator(record.merge_op_id));
@@ -351,9 +356,14 @@ impl<F: SyncFs> LsmTree<F> {
         self.manifest.next_file_id += 1;
 
         let path = sst_path(file_id);
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(
+            records
+                .iter()
+                .map(|r| r.key.len() + r.value.len() + 32)
+                .sum::<usize>(),
+        );
         for record in &records {
-            bytes.extend_from_slice(&encode_record(record));
+            encode_record_into(record, &mut bytes);
         }
 
         self.fs.write_all(&path, &bytes)?;
@@ -399,19 +409,25 @@ impl<F: SyncFs> LsmTree<F> {
         Ok(())
     }
 
-    fn read_sst_records(&self, meta: &SstMeta) -> Result<Vec<VersionedRecord>, LsmError> {
+    fn read_sst_records_into(
+        &self,
+        meta: &SstMeta,
+        out: &mut Vec<VersionedRecord>,
+    ) -> Result<(), LsmError> {
         let data = self.fs.read_all(&meta.path)?;
-        let records = decode_records(&data, &meta.path, false)?;
-        for record in &records {
+        out.clear();
+        decode_records_into(&data, &meta.path, false, out)?;
+        for record in out.iter() {
             if record.kind == OpKind::Merge && !self.merge_ops.contains_key(&record.merge_op_id) {
                 return Err(LsmError::UnknownMergeOperator(record.merge_op_id));
             }
         }
-        Ok(records)
+        Ok(())
     }
 
     fn collect_versions_for_key(&self, key: &[u8]) -> Result<Vec<VersionedRecord>, LsmError> {
         let mut versions = Vec::new();
+        let mut sst_records = Vec::new();
 
         if let Some(ops) = self.memtable.get(key) {
             versions.extend(ops.iter().cloned());
@@ -422,10 +438,10 @@ impl<F: SyncFs> LsmTree<F> {
                 if key < meta.min_key.as_slice() || key > meta.max_key.as_slice() {
                     continue;
                 }
-                let records = self.read_sst_records(meta)?;
-                for record in records {
+                self.read_sst_records_into(meta, &mut sst_records)?;
+                for record in &sst_records {
                     if record.key == key {
-                        versions.push(record);
+                        versions.push(record.clone());
                     }
                 }
             }
@@ -515,10 +531,14 @@ impl<F: SyncFs> LsmTree<F> {
         }
 
         let mut by_key: BTreeMap<Vec<u8>, Vec<VersionedRecord>> = BTreeMap::new();
+        let mut sst_records = Vec::new();
         for meta in &input_files {
-            let records = self.read_sst_records(meta)?;
-            for record in records {
-                by_key.entry(record.key.clone()).or_default().push(record);
+            self.read_sst_records_into(meta, &mut sst_records)?;
+            for record in &sst_records {
+                by_key
+                    .entry(record.key.clone())
+                    .or_default()
+                    .push(record.clone());
             }
         }
 
@@ -547,9 +567,14 @@ impl<F: SyncFs> LsmTree<F> {
             self.manifest.next_file_id += 1;
 
             let path = sst_path(file_id);
-            let mut bytes = Vec::new();
+            let mut bytes = Vec::with_capacity(
+                output_records
+                    .iter()
+                    .map(|r| r.key.len() + r.value.len() + 32)
+                    .sum::<usize>(),
+            );
             for record in &output_records {
-                bytes.extend_from_slice(&encode_record(record));
+                encode_record_into(record, &mut bytes);
             }
 
             self.fs.write_all(&path, &bytes)?;
