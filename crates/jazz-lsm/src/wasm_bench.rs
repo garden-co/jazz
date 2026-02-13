@@ -1,15 +1,55 @@
 #![cfg(target_arch = "wasm32")]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use serde::Serialize;
 use wasm_bindgen::{JsCast, prelude::*};
 
-use crate::{LsmOptions, LsmTree, OpfsFs, WriteDurability};
+use crate::{FsError, LsmOptions, LsmTree, OpfsFs, SyncFs, WriteDurability};
+
+#[derive(Debug, Clone, Serialize)]
+struct PhaseTiming {
+    phase: String,
+    elapsed_ms: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct FsOpStats {
+    calls: u64,
+    bytes: u64,
+    elapsed_ms: f64,
+}
+
+impl FsOpStats {
+    fn record(&mut self, bytes: u64, elapsed_ms: f64) {
+        self.calls = self.calls.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.elapsed_ms += elapsed_ms;
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct FsStats {
+    read_all: FsOpStats,
+    read_range: FsOpStats,
+    write_all: FsOpStats,
+    write_atomic: FsOpStats,
+    append: FsOpStats,
+    file_len: FsOpStats,
+    truncate: FsOpStats,
+    remove_file: FsOpStats,
+    list_files: FsOpStats,
+    sync_file: FsOpStats,
+    sync_dir: FsOpStats,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkResult {
     operation: String,
     value_size: u32,
     count: u32,
+    wall_elapsed_ms: f64,
     elapsed_ms: f64,
     ops_per_sec: f64,
     p95_op_ms: f64,
@@ -19,6 +59,8 @@ struct BenchmarkResult {
     writes: u32,
     deletes: u32,
     checksum: u64,
+    phase_times_ms: Vec<PhaseTiming>,
+    fs_stats: FsStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,6 +187,138 @@ fn high_res_now_ms() -> f64 {
     js_sys::Date::now()
 }
 
+fn push_phase(phase_times: &mut Vec<PhaseTiming>, phase: &str, start_ms: f64) {
+    phase_times.push(PhaseTiming {
+        phase: phase.to_string(),
+        elapsed_ms: high_res_now_ms() - start_ms,
+    });
+}
+
+#[derive(Debug, Clone)]
+struct TrackingFs<F: SyncFs> {
+    inner: F,
+    stats: Rc<RefCell<FsStats>>,
+}
+
+impl<F: SyncFs> TrackingFs<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            stats: Rc::new(RefCell::new(FsStats::default())),
+        }
+    }
+
+    fn snapshot(&self) -> FsStats {
+        self.stats.borrow().clone()
+    }
+}
+
+impl<F: SyncFs> SyncFs for TrackingFs<F> {
+    fn read_all(&self, path: &str) -> Result<Vec<u8>, FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.read_all(path);
+        let elapsed_ms = high_res_now_ms() - start;
+        let bytes = out.as_ref().map(|buf| buf.len() as u64).unwrap_or(0);
+        self.stats.borrow_mut().read_all.record(bytes, elapsed_ms);
+        out
+    }
+
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.read_range(path, offset, len);
+        let elapsed_ms = high_res_now_ms() - start;
+        let bytes = out.as_ref().map(|buf| buf.len() as u64).unwrap_or(0);
+        self.stats.borrow_mut().read_range.record(bytes, elapsed_ms);
+        out
+    }
+
+    fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.write_all(path, data);
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats
+            .borrow_mut()
+            .write_all
+            .record(data.len() as u64, elapsed_ms);
+        out
+    }
+
+    fn write_atomic(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.write_atomic(path, data);
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats
+            .borrow_mut()
+            .write_atomic
+            .record(data.len() as u64, elapsed_ms);
+        out
+    }
+
+    fn append(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.append(path, data);
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats
+            .borrow_mut()
+            .append
+            .record(data.len() as u64, elapsed_ms);
+        out
+    }
+
+    fn file_len(&self, path: &str) -> Result<u64, FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.file_len(path);
+        let elapsed_ms = high_res_now_ms() - start;
+        let bytes = out.as_ref().copied().unwrap_or(0);
+        self.stats.borrow_mut().file_len.record(bytes, elapsed_ms);
+        out
+    }
+
+    fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.truncate(path, len);
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats.borrow_mut().truncate.record(len, elapsed_ms);
+        out
+    }
+
+    fn remove_file(&self, path: &str) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.remove_file(path);
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats.borrow_mut().remove_file.record(0, elapsed_ms);
+        out
+    }
+
+    fn list_files(&self, prefix: &str) -> Result<Vec<String>, FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.list_files(prefix);
+        let elapsed_ms = high_res_now_ms() - start;
+        let bytes = out
+            .as_ref()
+            .map(|files| files.iter().map(|f| f.len() as u64).sum::<u64>())
+            .unwrap_or(0);
+        self.stats.borrow_mut().list_files.record(bytes, elapsed_ms);
+        out
+    }
+
+    fn sync_file(&self, path: &str) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.sync_file(path);
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats.borrow_mut().sync_file.record(0, elapsed_ms);
+        out
+    }
+
+    fn sync_dir(&self) -> Result<(), FsError> {
+        let start = high_res_now_ms();
+        let out = self.inner.sync_dir();
+        let elapsed_ms = high_res_now_ms() - start;
+        self.stats.borrow_mut().sync_dir.record(0, elapsed_ms);
+        out
+    }
+}
+
 fn percentile_ms(latencies_ms: &mut [f64], percentile: f64) -> f64 {
     if latencies_ms.is_empty() {
         return 0.0;
@@ -171,12 +345,14 @@ fn find_mixed_scenario(name: &str) -> Option<MixedScenario> {
     MIXED_SCENARIOS.iter().copied().find(|s| s.name == name)
 }
 
-async fn open_db(namespace: &str) -> Result<LsmTree<OpfsFs>, JsValue> {
+async fn open_db(namespace: &str) -> Result<(LsmTree<TrackingFs<OpfsFs>>, TrackingFs<OpfsFs>), JsValue> {
     let fs = OpfsFs::open(namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    LsmTree::open(fs, benchmark_options(), Vec::new())
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    let tracked = TrackingFs::new(fs);
+    let db = LsmTree::open(tracked.clone(), benchmark_options(), Vec::new())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok((db, tracked))
 }
 
 fn to_js_value(result: &BenchmarkResult) -> Result<JsValue, JsValue> {
@@ -185,15 +361,21 @@ fn to_js_value(result: &BenchmarkResult) -> Result<JsValue, JsValue> {
 }
 
 async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
     let namespace = unique_namespace("seq-write");
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
-    let mut db = open_db(&namespace).await?;
+    let phase_start = high_res_now_ms();
+    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
 
-    let start = high_res_now_ms();
+    let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
         let k = key(i);
@@ -202,17 +384,27 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         db.put(&k, &v)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let elapsed_ms = high_res_now_ms() - start;
+    push_phase(&mut phase_times_ms, "op_put_loop", op_start);
 
+    let flush_start = high_res_now_ms();
+    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "final_flush", flush_start);
+    let elapsed_ms = high_res_now_ms() - op_start;
+
+    drop(db);
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let fs_stats = tracked_fs.snapshot();
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
         operation: "seq_write".to_string(),
         value_size,
         count,
+        wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
         p95_op_ms: 0.0,
@@ -222,20 +414,28 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         writes: count,
         deletes: 0,
         checksum,
+        phase_times_ms,
+        fs_stats,
     })
 }
 
 async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
     let namespace = unique_namespace("rand-write");
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
-    let mut db = open_db(&namespace).await?;
+    let phase_start = high_res_now_ms();
+    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let order = shuffled_indices(count as usize);
 
-    let start = high_res_now_ms();
+    let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for &i in &order {
         let k = key(i);
@@ -244,17 +444,27 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         db.put(&k, &v)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let elapsed_ms = high_res_now_ms() - start;
+    push_phase(&mut phase_times_ms, "op_put_loop", op_start);
 
+    let flush_start = high_res_now_ms();
+    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "final_flush", flush_start);
+    let elapsed_ms = high_res_now_ms() - op_start;
+
+    drop(db);
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let fs_stats = tracked_fs.snapshot();
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
         operation: "random_write".to_string(),
         value_size,
         count,
+        wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
         p95_op_ms: 0.0,
@@ -264,27 +474,39 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         writes: count,
         deletes: 0,
         checksum,
+        phase_times_ms,
+        fs_stats,
     })
 }
 
 async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
     let namespace = unique_namespace("seq-read");
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
-    let mut db = open_db(&namespace).await?;
+    let phase_start = high_res_now_ms();
+    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
 
+    let prefill_puts_start = high_res_now_ms();
     for i in 0..(count as usize) {
         let k = key(i);
         let v = value(size, (i % 251) as u8);
         db.put(&k, &v)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
+    push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
+    let prefill_flush_start = high_res_now_ms();
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
 
-    let start = high_res_now_ms();
+    let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
         let k = key(i);
@@ -294,16 +516,23 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
             .ok_or_else(|| JsValue::from_str("missing key during seq_read benchmark"))?;
         checksum = checksum.wrapping_add(v[0] as u64);
     }
-    let elapsed_ms = high_res_now_ms() - start;
+    push_phase(&mut phase_times_ms, "op_read_loop", op_start);
+    let elapsed_ms = high_res_now_ms() - op_start;
 
+    drop(db);
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let fs_stats = tracked_fs.snapshot();
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
         operation: "seq_read".to_string(),
         value_size,
         count,
+        wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
         p95_op_ms: 0.0,
@@ -313,29 +542,41 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
         writes: 0,
         deletes: 0,
         checksum,
+        phase_times_ms,
+        fs_stats,
     })
 }
 
 async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
     let namespace = unique_namespace("rand-read");
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
-    let mut db = open_db(&namespace).await?;
+    let phase_start = high_res_now_ms();
+    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
 
+    let prefill_puts_start = high_res_now_ms();
     for i in 0..(count as usize) {
         let k = key(i);
         let v = value(size, (i % 251) as u8);
         db.put(&k, &v)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
+    push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
+    let prefill_flush_start = high_res_now_ms();
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
 
     let order = shuffled_indices(count as usize);
 
-    let start = high_res_now_ms();
+    let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for &i in &order {
         let k = key(i);
@@ -345,16 +586,23 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
             .ok_or_else(|| JsValue::from_str("missing key during random_read benchmark"))?;
         checksum = checksum.wrapping_add(v[0] as u64);
     }
-    let elapsed_ms = high_res_now_ms() - start;
+    push_phase(&mut phase_times_ms, "op_read_loop", op_start);
+    let elapsed_ms = high_res_now_ms() - op_start;
 
+    drop(db);
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let fs_stats = tracked_fs.snapshot();
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
         operation: "random_read".to_string(),
         value_size,
         count,
+        wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
         p95_op_ms: 0.0,
@@ -364,6 +612,8 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
         writes: 0,
         deletes: 0,
         checksum,
+        phase_times_ms,
+        fs_stats,
     })
 }
 
@@ -372,22 +622,32 @@ async fn run_mixed_scenario(
     count: u32,
     value_size: u32,
 ) -> Result<BenchmarkResult, JsValue> {
+    let mut phase_times_ms = Vec::new();
+    let wall_start = high_res_now_ms();
     let namespace = unique_namespace(scenario.name);
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
-    let mut db = open_db(&namespace).await?;
+    let phase_start = high_res_now_ms();
+    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let initial_key_space = (count as usize).max(1);
 
+    let prefill_puts_start = high_res_now_ms();
     for i in 0..initial_key_space {
         let k = key(i);
         let v = value(size, (i % 251) as u8);
         db.put(&k, &v)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
+    push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
+    let prefill_flush_start = high_res_now_ms();
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
 
     let mut rng = DeterministicRng::new(0xA5A5_A5A5_0123_4567 ^ (value_size as u64));
     let mut key_space = initial_key_space;
@@ -400,7 +660,7 @@ async fn run_mixed_scenario(
     let mut checksum = 0u64;
     let mut op_latencies_ms = Vec::with_capacity(count as usize);
 
-    let total_start = high_res_now_ms();
+    let op_start = high_res_now_ms();
     for step in 0..(count as usize) {
         let op = choose_operation(scenario, rng.next_u8() % 100);
         let op_start = high_res_now_ms();
@@ -447,17 +707,26 @@ async fn run_mixed_scenario(
 
         op_latencies_ms.push(high_res_now_ms() - op_start);
     }
+    push_phase(&mut phase_times_ms, "op_mixed_loop", op_start);
+    let flush_start = high_res_now_ms();
     db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let elapsed_ms = high_res_now_ms() - total_start;
+    push_phase(&mut phase_times_ms, "final_flush", flush_start);
+    let elapsed_ms = high_res_now_ms() - op_start;
 
+    drop(db);
+    let phase_start = high_res_now_ms();
     OpfsFs::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
+    let fs_stats = tracked_fs.snapshot();
+    let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
         operation: scenario.name.to_string(),
         value_size,
         count,
+        wall_elapsed_ms,
         elapsed_ms,
         ops_per_sec: (count as f64) / (elapsed_ms / 1000.0),
         p95_op_ms: percentile_ms(&mut op_latencies_ms, 0.95),
@@ -467,6 +736,8 @@ async fn run_mixed_scenario(
         writes,
         deletes,
         checksum,
+        phase_times_ms,
+        fs_stats,
     })
 }
 

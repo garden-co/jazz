@@ -103,6 +103,44 @@ Phase 4 values below compare against Phase 3 using the same scenario/count matri
 | mixed_random_50r_50w_with_updates | 1,048,576 | `40.661 -> 62.312` (`+53.2%`) | `47.854 -> 65.344` (`+36.5%`) | N/A | N/A | Native `count=64`; WASM 1MB run did not complete in this session |
 | mixed_random_60r_20w_20d | 1,048,576 | `48.667 -> 96.424` (`+98.1%`) | `44.308 -> 50.606` (`+14.2%`) | N/A | N/A | Native `count=64`; WASM 1MB run did not complete in this session |
 
+## Phase 5 Results (per-SST bloom filters)
+
+Phase 5 values below compare against Phase 4 using the same scenario/count matrix where runs completed.
+
+| Scenario | Value Size (bytes) | Native ops/s (P4 -> P5) | Native p95 ms (P4 -> P5) | WASM ops/s (P4 -> P5) | WASM p95 ms (P4 -> P5) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `8826.677 -> 7514.155` (`-14.9%`) | `0.119 -> 0.179` (`+50.3%`) | `3802.281 -> 3012.048` (`-20.8%`) | `0.400 -> 0.500` (`+25.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `11004.389 -> 9926.823` (`-9.8%`) | `0.080 -> 0.114` (`+43.0%`) | `6024.096 -> 4694.836` (`-22.1%`) | `0.300 -> 0.400` (`+33.3%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `10538.879 -> 10131.806` (`-3.9%`) | `0.078 -> 0.093` (`+19.3%`) | `4901.961 -> 3968.254` (`-19.0%`) | `0.300 -> 0.400` (`+33.3%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `11279.574 -> 10555.176` (`-6.4%`) | `0.071 -> 0.081` (`+15.1%`) | N/A | N/A | Native `count=500`; WASM `count=100` run did not complete (`count=1` smoke run completed) |
+| mixed_random_50r_50w_with_updates | 256 | `13009.695 -> 11196.380` (`-13.9%`) | `0.058 -> 0.074` (`+27.9%`) | N/A | N/A | Native `count=500`; WASM `count=100` run did not complete (`count=1` smoke run completed) |
+| mixed_random_60r_20w_20d | 256 | `11787.750 -> 10336.692` (`-12.3%`) | `0.065 -> 0.083` (`+29.1%`) | N/A | N/A | Native `count=500`; WASM `count=100` run did not complete (`count=1` smoke run completed) |
+| mixed_random_70r_30w | 4096 | `10998.347 -> 9672.419` (`-12.1%`) | `0.071 -> 0.073` (`+3.2%`) | N/A | N/A | Native `count=500`; WASM `count=100` run did not complete (`count=1` smoke run completed) |
+| mixed_random_50r_50w_with_updates | 4096 | `7500.994 -> 5926.754` (`-21.0%`) | `0.095 -> 0.116` (`+21.8%`) | N/A | N/A | Native `count=500`; WASM `count=100` run did not complete (`count=1` smoke run completed) |
+| mixed_random_60r_20w_20d | 4096 | `12372.052 -> 11477.487` (`-7.2%`) | `0.058 -> 0.069` (`+18.5%`) | N/A | N/A | Native `count=500`; WASM `count=100` run did not complete (`count=1` smoke run completed) |
+| mixed_random_70r_30w | 1,048,576 | `89.716 -> 41.586` (`-53.6%`) | `51.758 -> 75.860` (`+46.6%`) | N/A | N/A | Native `count=64`; WASM 1MB mixed run not completed in Phase 5 |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `62.312 -> 38.544` (`-38.1%`) | `65.344 -> 122.174` (`+87.0%`) | N/A | N/A | Native `count=64`; WASM 1MB mixed run not completed in Phase 5 |
+| mixed_random_60r_20w_20d | 1,048,576 | `96.424 -> 61.520` (`-36.2%`) | `50.606 -> 78.449` (`+55.0%`) | N/A | N/A | Native `count=64`; WASM 1MB mixed run not completed in Phase 5 |
+
+## Phase 6 Results (SST metadata/index cache + block cache)
+
+Phase 6 values below compare against Phase 5 where a Phase 5 baseline exists.
+
+| Scenario | Value Size (bytes) | Native ops/s (P5 -> P6) | Native p95 ms (P5 -> P6) | WASM ops/s (P5 -> P6) | WASM p95 ms (P5 -> P6) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `7514.155 -> 13546.587` (`+80.3%`) | `0.179 -> 0.042` (`-76.6%`) | `3012.048 -> 14285.714` (`+374.2%`) | `0.500 -> 0.100` (`-80.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `9926.823 -> 16396.108` (`+65.2%`) | `0.114 -> 0.029` (`-74.8%`) | `4694.836 -> 22222.222` (`+373.3%`) | `0.400 -> 0.100` (`-75.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `10131.806 -> 16452.623` (`+62.4%`) | `0.093 -> 0.029` (`-68.8%`) | `3968.254 -> 20408.163` (`+414.3%`) | `0.400 -> 0.100` (`-75.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `10555.176 -> 18244.596` (`+72.9%`) | `0.081 -> 0.010` (`-88.2%`) | N/A -> `24390.244` | N/A -> `0.100` | Native `count=500`; WASM `count=100` (Phase 5 `count=100` baseline unavailable) |
+| mixed_random_50r_50w_with_updates | 256 | `11196.380 -> 18303.872` (`+63.5%`) | `0.074 -> 0.009` (`-87.4%`) | N/A -> `23255.814` | N/A -> `0.100` | Native `count=500`; WASM `count=100` (Phase 5 `count=100` baseline unavailable) |
+| mixed_random_60r_20w_20d | 256 | `10336.692 -> 18319.464` (`+77.2%`) | `0.083 -> 0.010` (`-87.6%`) | N/A -> `25641.026` | N/A -> `0.100` | Native `count=500`; WASM `count=100` (Phase 5 `count=100` baseline unavailable) |
+| mixed_random_70r_30w | 4096 | `9672.419 -> 17609.018` (`+82.1%`) | `0.073 -> 0.024` (`-67.5%`) | N/A -> `14285.714` | N/A -> `0.200` | Native `count=500`; WASM `count=100` (Phase 5 `count=100` baseline unavailable) |
+| mixed_random_50r_50w_with_updates | 4096 | `5926.754 -> 10286.937` (`+73.6%`) | `0.116 -> 0.035` (`-69.9%`) | N/A -> `14705.882` | N/A -> `0.200` | Native `count=500`; WASM `count=100` (Phase 5 `count=100` baseline unavailable) |
+| mixed_random_60r_20w_20d | 4096 | `11477.487 -> 19627.471` (`+71.0%`) | `0.069 -> 0.020` (`-71.0%`) | N/A -> `16129.032` | N/A -> `0.100` | Native `count=500`; WASM `count=100` (Phase 5 `count=100` baseline unavailable) |
+| mixed_random_70r_30w | 1,048,576 | `41.586 -> 112.378` (`+170.2%`) | `75.860 -> 46.181` (`-39.1%`) | N/A -> `249.501` | N/A -> `21.100` | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `38.544 -> 74.406` (`+93.0%`) | `122.174 -> 50.933` (`-58.3%`) | N/A -> `138.562` | N/A -> `23.200` | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+| mixed_random_60r_20w_20d | 1,048,576 | `61.520 -> 122.286` (`+98.8%`) | `78.449 -> 44.676` (`-43.1%`) | N/A -> `286.123` | N/A -> `19.000` | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+
 ## Progress Tracking
 
 - Use this mixed baseline table as the source of truth for Phase 1+ changes.
@@ -136,3 +174,18 @@ Phase 4 values below compare against Phase 3 using the same scenario/count matri
 - Phase 4 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
 - Phase 4 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
 - Phase 4 mixed wasm/opfs rerun (1MB reduced): attempted with `count=4` and `count=1`, but did not complete before manual termination
+- Phase 5 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 5 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 5 mixed wasm/opfs rerun (32 only): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32 --json`
+- Phase 5 mixed wasm/opfs reruns (`256/4096` at `count=100`): did not complete before manual termination in this session (`count=1` smoke runs completed)
+- Phase 5 mixed wasm/opfs reruns (`1MB`): not completed in this session
+- Phase 6 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 6 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 6 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
+- Phase 6 mixed wasm/opfs rerun (1MB): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress`
+- WASM harness progress + bootstrap-fix validation: `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 1 --value-sizes 32 --progress`
+- WASM 1MB instrumented sanity (`basic`, `count=1`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 1 --value-sizes 1048576 --json --progress`
+- WASM 1MB instrumented sanity (`basic`, `count=2`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 2 --value-sizes 1048576 --json --progress`
+- WASM 1MB instrumented mixed (`count=4`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 4 --value-sizes 1048576 --json --progress`
+- WASM 1MB instrumented mixed (`count=32`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 32 --value-sizes 1048576 --json --progress`
+- WASM 1MB instrumented mixed (`count=100`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress`
