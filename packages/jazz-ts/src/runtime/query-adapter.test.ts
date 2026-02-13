@@ -79,7 +79,9 @@ describe("translateQuery", () => {
     it("translates eq condition with UUID string for Uuid columns", () => {
       const builderJson = JSON.stringify({
         table: "todos",
-        conditions: [{ column: "project", op: "eq", value: "00000000-0000-0000-0000-000000000123" }],
+        conditions: [
+          { column: "project", op: "eq", value: "00000000-0000-0000-0000-000000000123" },
+        ],
         includes: {},
         orderBy: [],
       });
