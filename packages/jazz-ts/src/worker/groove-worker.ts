@@ -8,6 +8,7 @@
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
 import { sendSyncPayload, readBinaryFrames } from "../runtime/sync-transport.js";
+import { resolveClientId } from "../runtime/client-id.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -23,6 +24,8 @@ let jwtToken: string | undefined;
 let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
 let serverClientId: string | null = null; // Client ID assigned by server (from Connected frame)
+let streamClientId: string | null = null; // Stable ID we use for /events and /sync
+let upstreamServerUrl: string | null = null;
 let pendingSyncMessages: string[] = []; // Buffer sync messages until init completes
 
 function post(msg: WorkerToMainMessage): void {
@@ -68,6 +71,8 @@ async function handleInit(msg: InitMessage): Promise<void> {
     // Store auth
     jwtToken = msg.jwtToken;
     adminSecret = msg.adminSecret;
+    streamClientId = resolveClientId(msg.clientId);
+    upstreamServerUrl = msg.serverUrl ?? null;
 
     // Register main thread as a Peer client
     mainClientId = runtime.addClient();
@@ -118,7 +123,7 @@ async function sendToServer(serverUrl: string, payload: any): Promise<void> {
   await sendSyncPayload(
     serverUrl,
     payload,
-    { jwtToken, adminSecret, clientId: serverClientId ?? undefined },
+    { jwtToken, adminSecret, clientId: serverClientId ?? streamClientId ?? undefined },
     "[worker] ",
   );
 }
@@ -136,17 +141,23 @@ async function connectStream(serverUrl: string): Promise<void> {
     headers["Authorization"] = `Bearer ${jwtToken}`;
   }
 
-  streamAbortController = new AbortController();
+  const abortController = new AbortController();
+  streamAbortController = abortController;
+
+  const params = streamClientId ? `?client_id=${encodeURIComponent(streamClientId)}` : "";
+  const streamUrl = `${serverUrl}/events${params}`;
 
   try {
-    const response = await fetch(`${serverUrl}/events`, {
+    const response = await fetch(streamUrl, {
       headers,
-      signal: streamAbortController.signal,
+      signal: abortController.signal,
     });
 
     if (!response.ok) {
       console.error(`[worker] Stream connect failed: ${response.status}`);
-      setTimeout(() => connectStream(serverUrl), 5000);
+      if (streamAbortController === abortController && !abortController.signal.aborted) {
+        setTimeout(() => connectStream(serverUrl), 5000);
+      }
       return;
     }
 
@@ -171,6 +182,7 @@ async function connectStream(serverUrl: string): Promise<void> {
               onSyncMessage: (json) => runtime?.onSyncMessageReceived(json),
               onConnected: (clientId) => {
                 serverClientId = clientId;
+                streamClientId = clientId;
                 resolve();
               },
             },
@@ -185,7 +197,7 @@ async function connectStream(serverUrl: string): Promise<void> {
         }
 
         // Reconnect unless aborted
-        if (streamAbortController && !streamAbortController.signal.aborted) {
+        if (streamAbortController === abortController && !abortController.signal.aborted) {
           setTimeout(() => connectStream(serverUrl), 5000);
         }
         resolve();
@@ -196,6 +208,9 @@ async function connectStream(serverUrl: string): Promise<void> {
   } catch (e: any) {
     if (e?.name === "AbortError") return;
     console.error("[worker] Stream connect error:", e);
+    if (streamAbortController === abortController && !abortController.signal.aborted) {
+      setTimeout(() => connectStream(serverUrl), 5000);
+    }
   }
 }
 
@@ -222,7 +237,13 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
 
     case "update-auth":
       jwtToken = msg.jwtToken;
-      // TODO: Reconnect stream with new token if needed
+      if (upstreamServerUrl) {
+        if (streamAbortController) {
+          streamAbortController.abort();
+          streamAbortController = null;
+        }
+        void connectStream(upstreamServerUrl);
+      }
       break;
 
     case "shutdown":

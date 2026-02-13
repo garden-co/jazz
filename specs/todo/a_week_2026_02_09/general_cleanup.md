@@ -18,12 +18,12 @@ Done. New `runtime/sync-transport.ts` with `isCataloguePayload()`, `sendSyncPayl
 
 ## 3. Placeholder TODOs in TypeScript (MEDIUM)
 
-These stubs break real functionality:
+Remaining stubs that still break real functionality:
 
 - **Schema hash is hardcoded zeros** — `client.ts:468`: `schema_hash: "0".repeat(64)`. All schemas hash to the same value, which means branch composition (`{env}-{schemaHash}-{userBranch}`) collapses. `blake3` is declared as a dependency but never imported.
-- **Client ID is hardcoded zeros** — both `client.ts:560` and `groove-worker.ts:133` send `"00000000-0000-0000-0000-000000000000"` as `client_id` in sync POSTs.
+- ~~**Client ID is hardcoded zeros**~~ ✅ — fixed by generating/validating real UUID client IDs and wiring them through main-thread + worker sync transport.
 - **Nested array relation mapping** — `row-transformer.ts:70–77`: TODO to map nested arrays from array subqueries to relation names. Currently returns unnamed extra values.
-- **Token refresh doesn't reconnect** — `groove-worker.ts:277–280`: `update-auth` message updates `jwtToken` in memory but doesn't reconnect the stream, so the server still sees the old token.
+- ~~**Token refresh doesn't reconnect**~~ ✅ — worker now aborts and reconnects the stream when `update-auth` is received.
 
 ## 4. ~~`#[allow(dead_code)]` Annotations~~ ✅
 
@@ -93,3 +93,37 @@ Investigate: does fixing the schema hash / client ID placeholders also fix persi
 `db.ts:198–204` catches worker bridge init errors with `console.error` but doesn't propagate them. If the bridge fails to init, subsequent operations will fail with unrelated errors instead of a clear "bridge not initialized" failure.
 
 `client.ts:568–574` similarly logs sync POST failures but doesn't surface them to callers.
+
+## 12. Client ID Simplification (HIGH, in progress)
+
+The current client-id path grew extra concepts (`syncClientId`, `serverClientId`, worker-local stream IDs, fallback transport IDs). This makes identity behavior hard to reason about.
+
+### Target model
+
+- Use one stable **sync client ID** per local client identity.
+- Use one ephemeral **connection ID** per stream connection (already server-generated).
+- Keep runtime peer IDs (`runtime.addClient()`) internal to local runtime/worker bridging, not sync identity.
+
+### Why
+
+Primary purpose of client IDs is server-side sync-state continuity across short disconnects and reconnects.
+
+### Implementation plan
+
+1. **TS client identity path**
+   - Resolve a single `sync_client_id` at startup (provided config ID or generated UUID).
+   - Persist and reuse it across reconnects/reloads.
+   - Always use it for both:
+     - `GET /events?client_id=<id>`
+     - `POST /sync { ..., client_id: <id> }`
+   - Stop switching IDs based on `Connected.client_id` (can validate/log mismatch, but do not adopt).
+   - Remove transport-level fallback ID generation.
+
+2. **Server reconnect grace window**
+   - Do not immediately purge client sync state on stream close.
+   - Mark client disconnected and keep state for a short lease window (e.g. 30–120s).
+   - Purge only after lease expiry.
+
+3. **Validation**
+   - Add tests for stable ID reuse across remount/reconnect.
+   - Add tests for server-side short-disconnect resume (state retained within lease, purged after).

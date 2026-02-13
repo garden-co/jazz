@@ -24,6 +24,8 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 export interface DbConfig {
   /** Application identifier (used for isolation) */
   appId: string;
+  /** Optional sync client ID (UUID) */
+  clientId?: string;
   /** Storage driver implementation (optional — storage is in-memory by default) */
   driver?: StorageDriver;
   /** Optional server URL for sync */
@@ -179,6 +181,7 @@ export class Db {
       // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(this.wasmModule, {
         appId: this.config.appId,
+        clientId: this.config.clientId,
         schema,
         driver: this.config.driver,
         // In worker mode, don't connect to server directly — worker handles it
@@ -199,6 +202,7 @@ export class Db {
           .init({
             schemaJson: JSON.stringify(schema),
             appId: this.config.appId,
+            clientId: this.config.clientId,
             env: this.config.env ?? "dev",
             userBranch: this.config.userBranch ?? "main",
             dbName: this.config.dbName ?? this.config.appId,

@@ -8,6 +8,7 @@
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { sendSyncPayload, readBinaryFrames } from "./sync-transport.js";
+import { resolveClientId } from "./client-id.js";
 
 /**
  * Common interface for WASM and NAPI runtimes.
@@ -183,10 +184,13 @@ export class JazzClient {
   private streamAbortController: AbortController | null = null;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
+  private readonly syncClientId: string;
+  private serverClientId: string | null = null;
 
   private constructor(runtime: Runtime, context: AppContext) {
     this.runtime = runtime;
     this.context = context;
+    this.syncClientId = resolveClientId(context.clientId);
   }
 
   /**
@@ -542,6 +546,7 @@ export class JazzClient {
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
       adminSecret: this.context.adminSecret,
+      clientId: this.serverClientId ?? this.syncClientId,
     });
   }
 
@@ -559,23 +564,32 @@ export class JazzClient {
       headers["Authorization"] = `Bearer ${this.context.jwtToken}`;
     }
 
-    this.streamAbortController = new AbortController();
+    const abortController = new AbortController();
+    this.streamAbortController = abortController;
+
+    const params = new URLSearchParams({ client_id: this.serverClientId ?? this.syncClientId });
+    const streamUrl = `${serverUrl}/events?${params.toString()}`;
 
     try {
-      const response = await fetch(`${serverUrl}/events`, {
+      const response = await fetch(streamUrl, {
         headers,
-        signal: this.streamAbortController.signal,
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
         console.error(`Stream connect failed: ${response.status}`);
-        setTimeout(() => this.connectStream(serverUrl), 5000);
+        if (this.streamAbortController === abortController && !abortController.signal.aborted) {
+          setTimeout(() => this.connectStream(serverUrl), 5000);
+        }
         return;
       }
 
       const reader = response.body!.getReader();
       await readBinaryFrames(reader, {
         onSyncMessage: (json) => this.runtime.onSyncMessageReceived(json),
+        onConnected: (clientId) => {
+          this.serverClientId = clientId;
+        },
       });
     } catch (e: any) {
       if (e?.name === "AbortError") return; // Intentional shutdown
@@ -583,7 +597,7 @@ export class JazzClient {
     }
 
     // Reconnect after delay (unless aborted)
-    if (this.streamAbortController && !this.streamAbortController.signal.aborted) {
+    if (this.streamAbortController === abortController && !abortController.signal.aborted) {
       setTimeout(() => this.connectStream(serverUrl), 5000);
     }
   }

@@ -18,6 +18,7 @@ export interface WorkerBridgeOptions {
   env: string;
   userBranch: string;
   dbName: string;
+  clientId?: string;
   serverUrl?: string;
   jwtToken?: string;
   adminSecret?: string;
@@ -78,10 +79,10 @@ export class WorkerBridge {
       env: options.env,
       userBranch: options.userBranch,
       dbName: options.dbName,
+      clientId: options.clientId ?? "",
       serverUrl: options.serverUrl,
       jwtToken: options.jwtToken,
       adminSecret: options.adminSecret,
-      clientId: "", // Worker generates its own client ID for main thread
     };
 
     this.worker.postMessage(initMsg);
