@@ -198,4 +198,21 @@ describe("lensToSql", () => {
 `,
     );
   });
+
+  it("handles add nullable column operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      description: col.add().optional().string({ default: null }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE todos ADD COLUMN description TEXT DEFAULT NULL;
+`,
+    );
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE todos DROP COLUMN description;
+`,
+    );
+  });
 });
