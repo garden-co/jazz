@@ -7,7 +7,7 @@ mod manifest;
 pub mod wasm_bench;
 
 pub use db::{
-    DebugState, KeyPrefixMode, LsmOptions, LsmTree, MergeOperator, ValueCompression,
+    DebugState, KeyPrefixMode, LsmOptions, LsmTree, MergeOperator, RuntimeStats, ValueCompression,
     WriteDurability,
 };
 pub use error::LsmError;

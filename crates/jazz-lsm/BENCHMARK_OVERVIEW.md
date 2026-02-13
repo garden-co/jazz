@@ -207,6 +207,26 @@ Rows with significant throughput noise:
 | wasm | mixed_random_50r_50w_with_updates | 4096 | `16949 / 13514 / 14925` | `11.4%` | `22.7%` |
 | wasm | mixed_random_60r_20w_20d | 256 | `21277 / 18519 / 25641` | `16.5%` | `32.6%` |
 
+### Phase 8 Seeded Noise + Trace Check (3 Samples, Fixed Seed)
+
+Method:
+- Re-ran the same Phase 8 mixed matrix with fixed `--seed 0x1234` for native and wasm/opfs.
+- Included `runtime_stats` in each result (WAL flush, memtable flush, compaction counters/bytes).
+- Same significance rule: throughput `cv >= 10%` or `spread >= 20%`.
+
+Summary:
+- `24` total rows checked.
+- `2` rows showed significant throughput noise (both native; both `4096` value-size mixed rows).
+- `0` wasm rows crossed the significance threshold in the seeded runs.
+- `runtime_stats` were identical across all 3 samples for every row (`trace_variants=1`), so outliers were not caused by differing flush/compaction behavior.
+
+Rows with significant throughput noise (seeded):
+
+| Engine | Scenario | Value Size (bytes) | ops/s samples (s1/s2/s3) | CV | Spread | Runtime Trace (stable across 3 samples) |
+|---|---|---:|---:|---:|---:|---|
+| native | mixed_random_50r_50w_with_updates | 4096 | `9308 / 7064 / 8488` | `13.7%` | `27.1%` | `wal_flushes=90`, `memtable_flushes=6`, `compaction_steps=1`, compaction bytes in/out `2070268/2070062` |
+| native | mixed_random_60r_20w_20d | 4096 | `12535 / 18158 / 16982` | `18.7%` | `35.4%` | `wal_flushes=72`, `memtable_flushes=5`, `compaction_steps=1`, compaction bytes in/out `2070268/2070062` |
+
 ## Progress Tracking
 
 - Use this mixed baseline table as the source of truth for Phase 1+ changes.
@@ -262,6 +282,10 @@ Rows with significant throughput noise:
 - Phase 8 noise check native x3 (1MB): `for i in 1 2 3; do cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json > /tmp/jazz_phase8_noise_native_1mb_${i}.json; done`
 - Phase 8 noise check wasm/opfs x3 (32/256/4096): `for i in 1 2 3; do pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json > /tmp/jazz_phase8_noise_wasm_std_${i}.json; done`
 - Phase 8 noise check wasm/opfs x3 (1MB): `for i in 1 2 3; do pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress > /tmp/jazz_phase8_noise_wasm_1mb_${i}.json; done`
+- Phase 8 seeded noise check native x3 (32/256/4096): `for i in 1 2 3; do cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --seed 0x1234 --json > /tmp/jazz_seednoise_native_std_${i}.json; done`
+- Phase 8 seeded noise check native x3 (1MB): `for i in 1 2 3; do cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --seed 0x1234 --json > /tmp/jazz_seednoise_native_1mb_${i}.json; done`
+- Phase 8 seeded noise check wasm/opfs x3 (32/256/4096): `for i in 1 2 3; do pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --seed 0x1234 --json > /tmp/jazz_seednoise_wasm_std_${i}.json; done`
+- Phase 8 seeded noise check wasm/opfs x3 (1MB): `for i in 1 2 3; do pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --seed 0x1234 --json --progress > /tmp/jazz_seednoise_wasm_1mb_${i}.json; done`
 - WASM harness progress + bootstrap-fix validation: `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 1 --value-sizes 32 --progress`
 - WASM 1MB instrumented sanity (`basic`, `count=1`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 1 --value-sizes 1048576 --json --progress`
 - WASM 1MB instrumented sanity (`basic`, `count=2`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 2 --value-sizes 1048576 --json --progress`
