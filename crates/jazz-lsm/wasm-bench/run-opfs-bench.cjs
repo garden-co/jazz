@@ -7,11 +7,13 @@ const { chromium } = require("playwright");
 
 const DEFAULT_COUNT = 5000;
 const DEFAULT_VALUE_SIZES = [32, 256, 4096];
+const DEFAULT_PROFILE = "basic";
 
 function parseArgs(argv) {
   const out = {
     count: DEFAULT_COUNT,
     valueSizes: DEFAULT_VALUE_SIZES,
+    profile: DEFAULT_PROFILE,
     json: false,
   };
 
@@ -53,6 +55,16 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg === "--profile") {
+      const next = String(argv[i + 1] || "").trim();
+      if (!["basic", "mixed", "all"].includes(next)) {
+        throw new Error("`--profile` must be one of: basic, mixed, all");
+      }
+      out.profile = next;
+      i += 1;
+      continue;
+    }
+
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -78,14 +90,33 @@ function contentType(filePath) {
 }
 
 function printTable(results) {
-  const headers = ["operation", "value_size", "count", "elapsed_ms", "ops_per_sec"];
-  const rows = results.map((r) => [
-    String(r.operation),
-    String(r.value_size),
-    String(r.count),
-    String(r.elapsed_ms),
-    r.ops_per_sec.toFixed(2),
-  ]);
+  const preferredHeaders = [
+    "operation",
+    "value_size",
+    "count",
+    "elapsed_ms",
+    "ops_per_sec",
+    "p95_op_ms",
+    "reads",
+    "read_hits",
+    "read_misses",
+    "writes",
+    "deletes",
+  ];
+  const headers = preferredHeaders.filter((h) =>
+    results.some((r) => r[h] !== undefined && r[h] !== null)
+  );
+
+  const rows = results.map((r) =>
+    headers.map((h) => {
+      const v = r[h];
+      if (v === undefined || v === null) return "";
+      if (h === "ops_per_sec") return Number(v).toFixed(2);
+      if (h === "elapsed_ms") return Number(v).toFixed(3);
+      if (h === "p95_op_ms") return Number(v).toFixed(4);
+      return String(v);
+    })
+  );
 
   const widths = headers.map((h, idx) =>
     Math.max(h.length, ...rows.map((row) => row[idx].length))
@@ -106,7 +137,8 @@ import init, {
   bench_opfs_sequential_write,
   bench_opfs_random_write,
   bench_opfs_sequential_read,
-  bench_opfs_random_read
+  bench_opfs_random_read,
+  bench_opfs_mixed_scenario
 } from "/pkg/jazz_lsm.js";
 
 await init();
@@ -114,21 +146,38 @@ await init();
 self.onmessage = async (e) => {
   const count = Number(e.data?.count ?? 5000);
   const valueSizes = Array.isArray(e.data?.valueSizes) ? e.data.valueSizes : [32, 256, 4096];
+  const profile = String(e.data?.profile ?? "basic");
 
-  const runs = [
+  const basicRuns = [
     ["seq_write", bench_opfs_sequential_write],
     ["random_write", bench_opfs_random_write],
     ["seq_read", bench_opfs_sequential_read],
     ["random_read", bench_opfs_random_read]
   ];
+  const mixedScenarios = [
+    "mixed_random_70r_30w",
+    "mixed_random_50r_50w_with_updates",
+    "mixed_random_60r_20w_20d"
+  ];
 
   try {
     const out = [];
     for (const valueSize of valueSizes) {
-      for (const [name, fn] of runs) {
-        const result = await fn(count, valueSize);
-        out.push(result);
-        self.postMessage({ type: "result", result: { ...result, operation: name } });
+      if (profile === "basic" || profile === "all") {
+        for (const [name, fn] of basicRuns) {
+          const result = await fn(count, valueSize);
+          const withName = { ...result, operation: result.operation || name };
+          out.push(withName);
+          self.postMessage({ type: "result", result: withName });
+        }
+      }
+
+      if (profile === "mixed" || profile === "all") {
+        for (const scenario of mixedScenarios) {
+          const result = await bench_opfs_mixed_scenario(scenario, count, valueSize);
+          out.push(result);
+          self.postMessage({ type: "result", result });
+        }
       }
     }
 
@@ -140,7 +189,7 @@ self.onmessage = async (e) => {
 `;
 }
 
-function createHtml(count, valueSizes) {
+function createHtml(count, valueSizes, profile) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>jazz-lsm wasm opfs bench</title>
@@ -167,7 +216,7 @@ worker.onerror = (e) => {
   window.__benchDone = true;
   window.__benchError = e.message || "worker error";
 };
-worker.postMessage({ count: ${count}, valueSizes: [${valueSizes.join(",")}] });
+worker.postMessage({ count: ${count}, valueSizes: [${valueSizes.join(",")}], profile: "${profile}" });
 </script>`;
 }
 
@@ -178,7 +227,7 @@ async function run() {
   ensureBuiltPkg(pkgDir);
 
   const workerScript = createWorkerScript();
-  const html = createHtml(args.count, args.valueSizes);
+  const html = createHtml(args.count, args.valueSizes, args.profile);
 
   const server = http.createServer((req, res) => {
     const url = req.url || "/";

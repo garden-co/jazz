@@ -44,6 +44,8 @@ Compile checks used during development:
   - Optional env overrides:
     - `JAZZ_LSM_BENCH_KEY_COUNT`
     - `JAZZ_LSM_BENCH_VALUE_SIZES` (comma-separated bytes, e.g. `32,256,4096`)
+- Native mixed benchmark matrix (ops/s + p95 op latency + operation counters):
+  - `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 5000 --value-sizes 32,256,4096 --json`
 - Native comparative benchmark (same workload matrix across `jazz-lsm`, `bf-tree`, `rocksdb`, `fjall`):
   - `cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
   - Uses the same optional env overrides:
@@ -55,3 +57,4 @@ Compile checks used during development:
   - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm`
   - Optional args passed to the runner:
     - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --count 1000 --value-sizes 32,256 --json`
+    - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 1000 --value-sizes 32,256 --json`
