@@ -3,6 +3,7 @@ import {
   CANVAS_WIDTH,
   CANVAS_HEIGHT,
   INITIAL_ALTITUDE,
+  GRAVITY,
   type PlayerMode,
 } from "./game/constants.js";
 
@@ -34,9 +35,27 @@ export function Game() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear to background colour
-    ctx.fillStyle = "#0a0a0f";
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    let lastTime = performance.now();
+    let rafId = 0;
+
+    const gameLoop = (now: number) => {
+      const dt = Math.min((now - lastTime) / 1000, 0.05); // Cap delta to avoid spiral
+      lastTime = now;
+
+      // --- Physics ---
+      if (modeRef.current === "descending") {
+        velYRef.current += GRAVITY * dt;
+        posXRef.current += velXRef.current * dt;
+        posYRef.current += velYRef.current * dt;
+      }
+
+      // --- Render ---
+      ctx.fillStyle = "#0a0a0f";
+      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      rafId = requestAnimationFrame(gameLoop);
+    };
+    rafId = requestAnimationFrame(gameLoop);
 
     // Sync exposed state periodically so data attributes update
     const syncId = setInterval(() => {
@@ -50,7 +69,10 @@ export function Game() {
       });
     }, 50);
 
-    return () => clearInterval(syncId);
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearInterval(syncId);
+    };
   }, []);
 
   return (
