@@ -7,7 +7,7 @@ Package jazz2 for React Native with native storage.
 React Native can't use OPFS or Web Workers. Need a native module approach:
 
 - Use `groove-napi` (or a C FFI) compiled for iOS/Android via Hermes/JSI
-- Native BfTree storage on device filesystem
+- Native legacy storage storage on device filesystem
 - Bridge between JS thread and native Rust runtime
 - Same React hooks API as web (`react_bindings.md`) but backed by native storage
 

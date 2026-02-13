@@ -1,7 +1,7 @@
 //! jazz-lsm-backed Storage implementation.
 //!
-//! Uses the same key namespace as BfTreeStorage so object, commit, ack, and
-//! index persistence semantics remain aligned across backends.
+//! Uses the canonical key namespace so object, commit, ack, and index
+//! persistence semantics remain aligned across backends.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -255,7 +255,7 @@ impl Storage for JazzLsmStorage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
-        // Branch existence is tied to object metadata, matching BfTreeStorage behavior.
+        // Branch existence is tied to object metadata, matching other backends.
         let meta_key = Self::obj_meta_key(object_id);
         if self.tree_get(&meta_key)?.is_none() {
             return Ok(None);

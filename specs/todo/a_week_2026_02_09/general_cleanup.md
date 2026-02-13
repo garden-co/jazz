@@ -32,7 +32,7 @@ Removed all actionable dead code:
 - **groove**: deleted `SubscriptionMode` enum + `mode` field, two unused `load_row_from_object_multi_branch*` methods, `array_column_name` field, `parse_object_id_hex` function
 - **jazz-rs**: removed blanket `#![allow(dead_code)]` from transport.rs, deleted `context` field from `JazzClient`, `query`/`server_query_id` from `SubscriptionState`, `handle` from `SubscriptionStream`, `connection_id` field + `connection_id()`/`has_backend_secret()` methods. Also fixed stringly-typed metadata in `is_catalogue_payload`.
 
-Remaining `#[allow(dead_code)]` are acceptable: bf-tree internals, Axum extractors, benchmark helpers, test utilities.
+Remaining `#[allow(dead_code)]` are acceptable: legacy storage internals, Axum extractors, benchmark helpers, test utilities.
 
 ## 5. ~~`delete()` vs `delete_with_session()` Duplication~~ ✅
 

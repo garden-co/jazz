@@ -2,7 +2,6 @@ use std::hint::black_box;
 use std::path::Path;
 use std::str::FromStr;
 
-use bf_tree::{BfTree, Config as BfConfig, LeafInsertResult, LeafReadResult};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fjall::{Config as FjallConfig, PartitionCreateOptions, PersistMode};
 use jazz_lsm::{LsmOptions, LsmTree, StdFs, WriteDurability};
@@ -11,8 +10,6 @@ use tempfile::TempDir;
 
 const DEFAULT_VALUE_SIZES: [usize; 3] = [32, 256, 4096];
 const DEFAULT_KEY_COUNT: usize = 5_000;
-const BF_TREE_CACHE_BYTES: usize = 32 * 1024 * 1024;
-const BF_TREE_MAX_VALUE_SIZE: usize = 30 * 1024;
 
 fn key_count() -> usize {
     std::env::var("JAZZ_LSM_BENCH_KEY_COUNT")
@@ -74,56 +71,6 @@ impl Engine for LsmEngine {
     fn finish_writes(&mut self) {
         self.db.flush().expect("lsm flush");
     }
-}
-
-struct BfTreeEngine {
-    tree: BfTree,
-    read_buffer: Vec<u8>,
-}
-
-impl BfTreeEngine {
-    fn open(path: &Path, max_value_size: usize) -> Self {
-        let mut config = BfConfig::new(path.join("bftree.index"), BF_TREE_CACHE_BYTES);
-        config.cb_min_record_size(4);
-        // Keep cb_max_record_size within bf-tree leaf constraints:
-        // cb_max_record_size + key_len must fit in leaf payload.
-        let target_record = max_value_size + 64;
-        let mut leaf_page_size = 16 * 1024;
-        while leaf_page_size < target_record * 2 {
-            leaf_page_size *= 2;
-        }
-        let max_record_size = target_record.min((leaf_page_size / 2).saturating_sub(128));
-        config.leaf_page_size(leaf_page_size);
-        config.cb_max_record_size(max_record_size);
-
-        let tree = BfTree::with_config(config, None).expect("open bf-tree");
-        Self {
-            tree,
-            read_buffer: vec![0u8; max_value_size.saturating_add(1024)],
-        }
-    }
-}
-
-impl Engine for BfTreeEngine {
-    fn put(&mut self, key: &[u8], value: &[u8]) {
-        let result = self.tree.insert(key, value);
-        assert!(
-            matches!(result, LeafInsertResult::Success),
-            "bf-tree insert failed: {:?}",
-            result
-        );
-    }
-
-    fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        match self.tree.read(key, &mut self.read_buffer) {
-            LeafReadResult::Found(len) => self.read_buffer[..(len as usize)].to_vec(),
-            LeafReadResult::Deleted => panic!("bf-tree key unexpectedly deleted"),
-            LeafReadResult::NotFound => panic!("bf-tree key missing"),
-            LeafReadResult::InvalidKey => panic!("bf-tree invalid key"),
-        }
-    }
-
-    fn finish_writes(&mut self) {}
 }
 
 struct RocksDbEngine {
@@ -232,16 +179,10 @@ fn shuffled_indices(n: usize) -> Vec<usize> {
 }
 
 fn engine_factories(
-    max_value_size: usize,
+    _max_value_size: usize,
 ) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
     let mut out: Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> = Vec::new();
     out.push(("jazz_lsm", Box::new(|path| Box::new(LsmEngine::open(path)))));
-    if max_value_size <= BF_TREE_MAX_VALUE_SIZE {
-        out.push((
-            "bf_tree",
-            Box::new(move |path| Box::new(BfTreeEngine::open(path, max_value_size))),
-        ));
-    }
     out.push((
         "rocksdb",
         Box::new(|path| Box::new(RocksDbEngine::open(path))),

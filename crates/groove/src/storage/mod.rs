@@ -9,10 +9,6 @@
 //! Storage instance. Cross-thread communication uses the sync protocol over
 //! postMessage, not shared mutable state.
 
-#[cfg(feature = "bftree")]
-mod bftree;
-#[cfg(feature = "bftree")]
-pub use bftree::BfTreeStorage;
 #[cfg(feature = "jazz-lsm")]
 mod jazzlsm;
 #[cfg(feature = "jazz-lsm")]

@@ -5,12 +5,10 @@ edition = "2024"
 
 [features]
 default = []
-bftree = ["bf-tree"]
 jazz-lsm = ["dep:jazz-lsm"]
 rocksdb = ["dep:rocksdb"]
 
 [dependencies]
-bf-tree = { path = "../bf-tree", optional = true, features = ["tracing"] }
 jazz-lsm = { path = "../jazz-lsm", optional = true }
 futures = "0.3"
 tracing = "0.1"

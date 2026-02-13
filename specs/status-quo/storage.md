@@ -25,7 +25,7 @@ HashMap-backed, used for tests and the browser main thread (acts as cache of wor
 
 ### BfTreeStorage
 
-bf-tree is our own B-tree key-value store, purpose-built for this use case. It supports both native (file-backed) and WASM (OPFS-backed) storage.
+legacy storage is our own B-tree key-value store, purpose-built for this use case. It supports both native (file-backed) and WASM (OPFS-backed) storage.
 
 The key insight is using composite keys so that B-tree range scans naturally give us index lookups:
 
@@ -35,8 +35,8 @@ idx:{table}:{column}:{branch}:{encoded_value}:{row_id}
 
 A range scan over a prefix like `idx:todos:done:main:` returns all row IDs in the `done` index for the `todos` table on branch `main`. No separate index data structure needed — the B-tree IS the index.
 
-> `crates/groove/src/storage/bftree.rs`
-> `crates/bf-tree/` (underlying KV store, with WASM feature)
+> `crates/groove/src/storage/legacy storage.rs`
+> `crates/legacy storage/` (underlying KV store, with WASM feature)
 
 ## Deployment Topology
 
@@ -89,7 +89,7 @@ WASM bindings exposing RuntimeCore via WasmRuntime. WasmScheduler uses `spawn_lo
 
 | Decision            | Choice                                        | Rationale                                                               |
 | ------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| Index encoding      | Composite keys in bf-tree                     | Range queries give index scans naturally                                |
+| Index encoding      | Composite keys in legacy storage              | Range queries give index scans naturally                                |
 | Durability default  | Fire-and-forget                               | Optimistic local-first; `_persisted()` variants for explicit durability |
 | Native architecture | Single process                                | No worker overhead needed                                               |
 | Tab coordination    | Single tab owns OPFS (leader election future) | `SyncAccessHandle` is an exclusive lock                                 |

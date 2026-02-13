@@ -4,7 +4,7 @@ Storage adapter for serverless platforms that lack filesystem access.
 
 ## Overview
 
-Not all deployment targets have a real filesystem for BfTree. Serverless environments (Cloudflare Workers, Vercel Edge, Deno Deploy) often provide:
+Not all deployment targets have a real filesystem for legacy storage. Serverless environments (Cloudflare Workers, Vercel Edge, Deno Deploy) often provide:
 
 - KV stores (Cloudflare KV, Vercel KV)
 - SQLite adapters (Cloudflare D1, Turso)

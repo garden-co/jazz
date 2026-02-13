@@ -59,7 +59,7 @@ All persistence is **synchronous** via the `Storage` trait. There are no request
 
 - `Storage` trait: `crates/groove/src/storage/mod.rs:67-195`
 - `MemoryStorage`: `crates/groove/src/storage/mod.rs:321-553`
-- `BfTreeStorage`: `crates/groove/src/storage/bftree.rs` (persistent B-tree pages via OPFS/disk)
+- `BfTreeStorage`: `crates/groove/src/storage/legacy storage.rs` (persistent B-tree pages via OPFS/disk)
 
 Key Storage methods: `append_commit()`, `delete_commit()`, `set_branch_tails()`, `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`.
 

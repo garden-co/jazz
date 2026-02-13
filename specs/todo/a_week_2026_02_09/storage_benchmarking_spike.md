@@ -1,19 +1,19 @@
 # Storage Benchmarking Spike — TODO (This Week)
 
-Establish baseline performance numbers for bf-tree and identify whether it's the right long-term storage backend.
+Establish baseline performance numbers for legacy storage and identify whether it's the right long-term storage backend.
 
 ## Motivation
 
 We need to de-risk storage before building more on top. Specific concerns:
 
-- bf-tree performance characteristics under realistic workloads are unknown
+- legacy storage performance characteristics under realistic workloads are unknown
 - Objects with long commit histories (many snapshots) may blow up storage/memory
 - Memory duplication if similar snapshots are retained in history
 - Alternative backends (fjall, LSM-based) may be better suited
 
 ## Benchmarks to Run
 
-### 1. bf-tree baseline
+### 1. legacy storage baseline
 
 - Write throughput: insert N objects of varying sizes
 - Read throughput: random and sequential object_get
@@ -35,11 +35,11 @@ We need to de-risk storage before building more on top. Specific concerns:
 ## Expected Output
 
 - Numbers in a markdown table (rough is fine, not publishable)
-- Go/no-go recommendation: keep bf-tree, investigate alternatives, or both
+- Go/no-go recommendation: keep legacy storage, investigate alternatives, or both
 - Identified bottlenecks to feed into `../b_mvp/benchmarks_and_performance.md`
 
 ## Non-Goals
 
 - Publishable benchmarks (that's launch-phase)
 - Full integration of an alternative backend
-- Optimizing bf-tree (first understand, then decide)
+- Optimizing legacy storage (first understand, then decide)

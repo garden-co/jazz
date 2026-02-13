@@ -1,8 +1,8 @@
-# BfTree WASM persistence: fundamental viability problem
+# legacy storage WASM persistence: fundamental viability problem
 
 ## Finding
 
-BfTree's persistence model relies on two mechanisms working together:
+legacy storage's persistence model relies on two mechanisms working together:
 
 1. **WAL** (write-ahead log) — cheap append-only buffer flushed to disk, captures every write
 2. **Snapshot** — expensive full serialization of the tree to disk, after which the WAL can be safely truncated
@@ -38,21 +38,21 @@ The WAL is architecturally a _delta log between snapshots_. Without snapshots, i
 
 ## Root cause
 
-BfTree's `CircularBuffer` and `snapshot()` are designed for multi-threaded native environments. The eviction/drain machinery uses locks, condition variables, and spin-wait patterns that assume other threads can make progress concurrently. None of this works on WASM's single-threaded, cooperative-multitasking runtime.
+legacy storage's `CircularBuffer` and `snapshot()` are designed for multi-threaded native environments. The eviction/drain machinery uses locks, condition variables, and spin-wait patterns that assume other threads can make progress concurrently. None of this works on WASM's single-threaded, cooperative-multitasking runtime.
 
 ## Options
 
-1. **Make snapshot work on WASM** — Rewrite `CircularBuffer::drain()` to not spin-wait. This is deep in bf-tree internals and may require rethinking the eviction design for single-threaded contexts.
+1. **Make snapshot work on WASM** — Rewrite `CircularBuffer::drain()` to not spin-wait. This is deep in legacy storage internals and may require rethinking the eviction design for single-threaded contexts.
 
 2. **Bypass CircularBuffer for WASM snapshots** — Write a WASM-specific snapshot path that directly serializes the tree without going through the CB drain. The tree structure (page table, inner nodes, leaf nodes) is all accessible; the CB drain is an optimization for evicting cached pages to disk, which may not be needed when we're writing everything anyway.
 
-3. **Replace BfTree on WASM** — Use a simpler key-value store that doesn't need multi-threaded buffer management. Options include a sorted log-structured store, a simple B-tree without the circular buffer, or direct OPFS key-value serialization.
+3. **Replace legacy storage on WASM** — Use a simpler key-value store that doesn't need multi-threaded buffer management. Options include a sorted log-structured store, a simple B-tree without the circular buffer, or direct OPFS key-value serialization.
 
 4. **Hybrid: WAL with periodic compaction** — Keep the WAL-only approach but add a compaction step that rewrites the WAL as a fresh minimal log (current state only, no history). This avoids the snapshot machinery but requires writing a custom compaction pass.
 
 ## Current state
 
-- Writes reach BfTree in-memory ✓
+- Writes reach legacy storage in-memory ✓
 - `flush_wal()` writes WAL to OPFS ✓
 - WAL replay on open recovers data ✓
 - But fresh WAL overwrites old entries → data survives exactly one reload
