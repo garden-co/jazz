@@ -29,7 +29,13 @@ importers:
         specifier: ^2
         version: 2.18.4
 
-  crates/groove-wasm/pkg: {}
+  crates/groove-wasm: {}
+
+  crates/jazz-lsm:
+    devDependencies:
+      playwright:
+        specifier: ^1.58.2
+        version: 1.58.2
 
   examples/todo-client-localfirst-react:
     dependencies:
@@ -156,7 +162,7 @@ importers:
         version: 2.1.7
       groove-wasm:
         specifier: workspace:*
-        version: link:../../crates/groove-wasm/pkg
+        version: link:../../crates/groove-wasm
       tsx:
         specifier: ^4.0.0
         version: 4.21.0
