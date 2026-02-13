@@ -13,6 +13,10 @@ export type CorrectionCallback = (
   correction: CoValueKnownState,
 ) => NewContentMessage[] | undefined;
 
+export type StorageReconciliationAcquireResult =
+  | { acquired: true; lastProcessedOffset: number }
+  | { acquired: false; reason: "not_due" | "lock_held" };
+
 /**
  * Deletion work queue status for `deletedCoValues` (SQLite).
  *
@@ -87,6 +91,52 @@ export interface StorageAPI {
   stopTrackingSyncState(id: RawCoID): void;
 
   /**
+   * Get a batch of CoValue IDs from storage.
+   * Used for full storage reconciliation. Call repeatedly with increasing offset
+   * until the returned batch has length < limit (or 0) to enumerate all IDs.
+   * @param limit - Max number of IDs to return (e.g. 100).
+   * @param offset - Number of IDs to skip (0 for first batch).
+   * @param callback - Called with the batch. Ordering must be stable (e.g. by id).
+   */
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void;
+
+  /**
+   * Get the total number of CoValues in storage.
+   */
+  getCoValueCount(callback: (count: number) => void): void;
+
+  /**
+   * Try to acquire the storage reconciliation lock for a given peer.
+   * Atomically checks if reconciliation is due for this peer (lastRun older than 30 days or missing)
+   * and if no other process/tab holds the lock for this peer, then acquires it.
+   */
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    callback: (result: StorageReconciliationAcquireResult) => void,
+  ): void;
+
+  /**
+   * Update the last processed offset for the storage reconciliation lock held for this peer.
+   * Only call after a batch has been acked; used to resume from this offset on interrupt.
+   */
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void;
+
+  /**
+   * Release the storage reconciliation lock for a peer and record completion. Only call on successful completion.
+   * On failure/interrupt, do not call; the lock expires after LOCK_TTL_MS and another process can retry for this peer.
+   */
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void;
+
+  /**
    * Load only the knownState (header presence + session counters) for a CoValue.
    * This is more efficient than load() when we only need to check if a peer needs new content.
    *
@@ -136,6 +186,15 @@ export type SignatureAfterRow = {
   signature: Signature;
 };
 
+export type StorageReconciliationLockRow = {
+  key: string;
+  holderSessionId: SessionID;
+  acquiredAt: number;
+  releasedAt?: number;
+  /** Offset up to which all batches have been acked; used to resume after interrupt. */
+  lastProcessedOffset: number;
+};
+
 export interface DBTransactionInterfaceAsync {
   getSingleCoValueSession(
     coValueRowId: number,
@@ -176,6 +235,14 @@ export interface DBTransactionInterfaceAsync {
   deleteCoValueContent(
     coValueRow: Pick<StoredCoValueRow, "rowID" | "id">,
   ): Promise<unknown>;
+
+  getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined>;
+
+  putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void>;
 }
 
 export interface DBClientInterfaceAsync {
@@ -232,6 +299,26 @@ export interface DBClientInterfaceAsync {
   getCoValueKnownState(
     coValueId: string,
   ): Promise<CoValueKnownState | undefined>;
+
+  getCoValueIDs(limit: number, offset: number): Promise<{ id: RawCoID }[]>;
+
+  getCoValueCount(): Promise<number>;
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<StorageReconciliationAcquireResult>;
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): Promise<void>;
+
+  releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): Promise<void>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -270,6 +357,12 @@ export interface DBTransactionInterfaceSync {
     idx: number;
     signature: Signature;
   }): number | undefined | unknown;
+
+  getStorageReconciliationLock(
+    key: string,
+  ): StorageReconciliationLockRow | undefined;
+
+  putStorageReconciliationLock(entry: StorageReconciliationLockRow): void;
 }
 
 export interface DBClientInterfaceSync {
@@ -317,4 +410,21 @@ export interface DBClientInterfaceSync {
    * Returns undefined if the CoValue doesn't exist.
    */
   getCoValueKnownState(coValueId: string): CoValueKnownState | undefined;
+
+  getCoValueIDs(limit: number, offset: number): { id: RawCoID }[];
+
+  getCoValueCount(): number;
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+  ): StorageReconciliationAcquireResult;
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void;
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void;
 }

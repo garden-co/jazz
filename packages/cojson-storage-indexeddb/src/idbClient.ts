@@ -9,10 +9,13 @@ import type {
   DBClientInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
+  StorageReconciliationLockRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
+  StorageReconciliationAcquireResult,
 } from "cojson";
+import { cojsonInternals } from "cojson";
 import {
   CoJsonIDBTransaction,
   putIndexedDbStore,
@@ -216,6 +219,22 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
   }): Promise<void> {
     await this.run((tx) => tx.getObjectStore("unsyncedCoValues").put(record));
   }
+
+  async getStorageReconciliationLock(
+    key: string,
+  ): Promise<StorageReconciliationLockRow | undefined> {
+    return this.run((tx) =>
+      tx.getObjectStore("storageReconciliationLocks").get(key),
+    );
+  }
+
+  async putStorageReconciliationLock(
+    entry: StorageReconciliationLockRow,
+  ): Promise<void> {
+    await this.run((tx) =>
+      tx.getObjectStore("storageReconciliationLocks").put(entry),
+    );
+  }
 }
 
 export class IDBClient implements DBClientInterfaceAsync {
@@ -363,6 +382,24 @@ export class IDBClient implements DBClientInterfaceAsync {
     await this.transaction((tx) => tx.deleteCoValueContent(coValue));
   }
 
+  async getCoValueIDs(
+    limit: number,
+    offset: number,
+  ): Promise<{ id: RawCoID }[]> {
+    const rows = await queryIndexedDbStore<StoredCoValueRow[]>(
+      this.db,
+      "coValues",
+      (store) =>
+        // Include upper bound but not lower bound (offset starts at 0)
+        store.getAll(IDBKeyRange.bound(offset, offset + limit, true, false)),
+    );
+    return rows.map((row) => ({ id: row.id }));
+  }
+
+  async getCoValueCount(): Promise<number> {
+    return queryIndexedDbStore(this.db, "coValues", (store) => store.count());
+  }
+
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
     const records = await queryIndexedDbStore<
       { rowID: number; coValueId: RawCoID; peerId: string }[]
@@ -386,6 +423,94 @@ export class IDBClient implements DBClientInterfaceAsync {
         );
       },
       ["unsyncedCoValues"],
+    );
+  }
+
+  async tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+  ): Promise<StorageReconciliationAcquireResult> {
+    const lockKey = `lock#${peerId}`;
+    const now = Date.now();
+    const { LOCK_TTL_MS, RECONCILIATION_INTERVAL_MS } =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG;
+
+    let result: StorageReconciliationAcquireResult;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (
+          lock?.releasedAt &&
+          now - lock.releasedAt < RECONCILIATION_INTERVAL_MS
+        ) {
+          result = { acquired: false, reason: "not_due" };
+          return;
+        }
+        const expiresAt = lock ? lock.acquiredAt + LOCK_TTL_MS : 0;
+        const isLockHeldByOtherSession = lock?.holderSessionId !== sessionId;
+        if (
+          lock &&
+          !lock.releasedAt &&
+          expiresAt >= now &&
+          isLockHeldByOtherSession
+        ) {
+          result = { acquired: false, reason: "lock_held" };
+          return;
+        }
+        const lastProcessedOffset =
+          lock && !lock.releasedAt ? (lock.lastProcessedOffset ?? 0) : 0;
+        await tx.putStorageReconciliationLock({
+          key: lockKey,
+          holderSessionId: sessionId,
+          acquiredAt: now,
+          lastProcessedOffset,
+        });
+        result = { acquired: true, lastProcessedOffset };
+      },
+      ["storageReconciliationLocks"],
+    );
+    return result!;
+  }
+
+  async renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+    offset: number,
+  ): Promise<void> {
+    const lockKey = `lock#${peerId}`;
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (lock && lock.holderSessionId === sessionId && !lock.releasedAt) {
+          await tx.putStorageReconciliationLock({
+            ...lock,
+            lastProcessedOffset: offset,
+          });
+        }
+      },
+      ["storageReconciliationLocks"],
+    );
+  }
+
+  async releaseStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: string,
+  ): Promise<void> {
+    const lockKey = `lock#${peerId}`;
+    const releasedAt = Date.now();
+
+    await this.transaction(
+      async (tx) => {
+        const lock = await tx.getStorageReconciliationLock(lockKey);
+        if (lock?.holderSessionId === sessionId) {
+          await tx.putStorageReconciliationLock({
+            ...lock,
+            releasedAt,
+            lastProcessedOffset: 0,
+          });
+        }
+      },
+      ["storageReconciliationLocks"],
     );
   }
 

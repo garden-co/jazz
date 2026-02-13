@@ -1,4 +1,10 @@
-import { LocalNode, StorageApiAsync, cojsonInternals } from "cojson";
+import {
+  LocalNode,
+  RawCoMap,
+  StorageApiAsync,
+  StorageReconciliationAcquireResult,
+  cojsonInternals,
+} from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
@@ -18,12 +24,18 @@ let syncMessages: ReturnType<typeof trackMessages>;
 
 let dbName: string;
 
+const originalStorageReconciliationBatchSize =
+  cojsonInternals.STORAGE_RECONCILIATION_CONFIG.BATCH_SIZE;
+
 beforeEach(() => {
   dbName = `test-${crypto.randomUUID()}`;
   internal_setDatabaseName(dbName);
   syncMessages = trackMessages();
   cojsonInternals.setSyncStateTrackingBatchDelay(0);
   cojsonInternals.setCoValueLoadingRetryDelay(10);
+  cojsonInternals.setStorageReconciliationBatchSize(
+    originalStorageReconciliationBatchSize,
+  );
 });
 
 afterEach(async () => {
@@ -776,5 +788,298 @@ describe("sync resumption", () => {
     );
 
     await node2.gracefulShutdown();
+  });
+});
+
+describe("getCoValueIDs", () => {
+  test("returns CoValue IDs in batch from storage", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const group = node1.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world");
+    await map.core.waitForSync();
+
+    const ids = await new Promise<{ id: string }[]>((resolve) => {
+      node1.storage!.getCoValueIDs(100, 0, resolve);
+    });
+
+    expect(ids.map((e) => e.id)).toContain(group.id);
+    expect(ids.map((e) => e.id)).toContain(map.id);
+    expect(ids.length).toEqual(2);
+  });
+
+  test("paginates when there are more CoValues than the limit and returns each ID only once", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const group = node1.createGroup();
+    const expectedIds = new Set<string>([group.id]);
+    const maps: ReturnType<typeof group.createMap>[] = [];
+    for (let i = 0; i < 4; i++) {
+      const map = group.createMap();
+      map.set(`key${i}`, `value${i}`);
+      maps.push(map);
+      expectedIds.add(map.id);
+    }
+    await maps[maps.length - 1]!.core.waitForSync();
+
+    const limit = 2;
+    const allIds: string[] = [];
+    await new Promise<void>((resolve) => {
+      const fetchBatch = (offset: number) => {
+        node1.storage!.getCoValueIDs(limit, offset, (batch) => {
+          for (const { id } of batch) {
+            allIds.push(id);
+          }
+          if (batch.length >= limit) {
+            fetchBatch(offset + batch.length);
+          } else {
+            resolve();
+          }
+        });
+      };
+      fetchBatch(0);
+    });
+
+    expect(allIds).toHaveLength(expectedIds.size);
+    const seen = new Set<string>();
+    for (const id of allIds) {
+      expect(seen.has(id)).toBe(false);
+      seen.add(id);
+      expect(expectedIds.has(id)).toBe(true);
+    }
+  });
+});
+
+describe("getCoValueCount", () => {
+  test("returns 0 when storage has no CoValues", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const count = await new Promise<number>((resolve) => {
+      node1.storage!.getCoValueCount(resolve);
+    });
+
+    expect(count).toBe(0);
+  });
+
+  test("returns CoValue count after storing CoValues", async () => {
+    const node1 = createTestNode();
+    node1.setStorage(await getIndexedDBStorage());
+
+    const countEmpty = await new Promise<number>((resolve) => {
+      node1.storage!.getCoValueCount(resolve);
+    });
+    expect(countEmpty).toBe(0);
+
+    const group = node1.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world");
+    await map.core.waitForSync();
+
+    const countTwo = await new Promise<number>((resolve) => {
+      node1.storage!.getCoValueCount(resolve);
+    });
+    expect(countTwo).toBe(2);
+  });
+});
+
+describe("full storage reconciliation", () => {
+  test("syncs CoValues in storage", async () => {
+    const client = createTestNode();
+    const storage = await getIndexedDBStorage();
+    client.setStorage(storage);
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    const anotherClient = createTestNode();
+    anotherClient.setStorage(storage);
+    const syncServer = createTestNode();
+    connectToSyncServer(anotherClient, syncServer, true);
+
+    expect(syncServer.hasCoValue(group.id)).toBe(false);
+    expect(syncServer.hasCoValue(map.id)).toBe(false);
+
+    const serverPeer = Object.values(anotherClient.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    anotherClient.syncManager.startStorageReconciliation(serverPeer);
+
+    await waitFor(() => syncServer.hasCoValue(group.id));
+    await waitFor(() => syncServer.hasCoValue(map.id));
+  });
+
+  test("sends reconcile messages in multiple batches", async () => {
+    cojsonInternals.setStorageReconciliationBatchSize(2);
+
+    const client = createTestNode();
+    const storage = await getIndexedDBStorage();
+    client.setStorage(storage);
+
+    const group = client.createGroup();
+    const maps: RawCoMap[] = [];
+    for (let i = 0; i < 4; i++) {
+      const m = group.createMap();
+      m.set("i", i, "trusting");
+      maps.push(m);
+    }
+
+    await Promise.all(maps.map((m) => m.core.waitForSync()));
+
+    const anotherClient = createTestNode();
+    anotherClient.setStorage(storage);
+    const syncServer = createTestNode();
+    connectToSyncServer(anotherClient, syncServer, true);
+
+    const serverPeer = Object.values(anotherClient.syncManager.peers).find(
+      (p) => p.role === "server" && p.persistent,
+    )!;
+    anotherClient.syncManager.startStorageReconciliation(serverPeer);
+
+    await waitFor(() => syncServer.hasCoValue(group.id));
+    for (const map of maps) {
+      await waitFor(() => syncServer.hasCoValue(map.id));
+    }
+  });
+
+  describe("scheduling", () => {
+    const originalLockTTL =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG.LOCK_TTL_MS;
+    const originalInterval =
+      cojsonInternals.STORAGE_RECONCILIATION_CONFIG.RECONCILIATION_INTERVAL_MS;
+
+    beforeEach(() => {
+      cojsonInternals.setStorageReconciliationLockTTL(originalLockTTL);
+      cojsonInternals.setStorageReconciliationInterval(originalInterval);
+    });
+
+    function tryAcquireStorageReconciliationLock(
+      client: LocalNode,
+    ): Promise<StorageReconciliationAcquireResult> {
+      const sessionId = client.currentSessionID;
+      const peerId = Object.values(client.syncManager.peers).find(
+        (p) => p.role === "server" && p.persistent,
+      )!.id;
+      return new Promise((resolve) => {
+        client.storage!.tryAcquireStorageReconciliationLock(
+          sessionId,
+          peerId,
+          resolve,
+        );
+      });
+    }
+
+    test("full storage reconciliation is run when adding a new persistent server peer", async () => {
+      const client = createTestNode({ enableFullStorageReconciliation: true });
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      const group = client.createGroup();
+      const map = group.createMap();
+      map.set("hello", "world", "trusting");
+
+      await map.core.waitForSync();
+
+      const anotherClient = createTestNode({
+        enableFullStorageReconciliation: true,
+      });
+      anotherClient.setStorage(storage);
+
+      const syncServer = createTestNode();
+      connectToSyncServer(anotherClient, syncServer, false);
+
+      await waitFor(() => syncServer.hasCoValue(group.id));
+      await waitFor(() => syncServer.hasCoValue(map.id));
+    });
+
+    test("reconciliation is not run again until the reconciliation interval passed", async () => {
+      cojsonInternals.setStorageReconciliationInterval(200);
+
+      const syncServer = createTestNode();
+      const client = createTestNode({ enableFullStorageReconciliation: true });
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      connectToSyncServer(client, syncServer, false);
+
+      const group = client.createGroup();
+      await group.core.waitForSync();
+
+      // Lock cannot be acquired after reconciliation was completed
+      await waitFor(async () => {
+        const lock = await tryAcquireStorageReconciliationLock(client);
+        return lock.acquired === false && lock.reason === "not_due";
+      });
+
+      // Wait for the reconciliation interval to pass
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const lock = await tryAcquireStorageReconciliationLock(client);
+      expect(lock.acquired).toBe(true);
+    });
+
+    test("if reconciliation is interrupted, it won't be started by another client until the lock TTL expires", async () => {
+      cojsonInternals.setStorageReconciliationInterval(0);
+      cojsonInternals.setStorageReconciliationLockTTL(100);
+
+      const syncServer = createTestNode();
+      let client = createTestNode({ enableFullStorageReconciliation: true });
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      const group = client.createGroup();
+      await group.core.waitForSync();
+
+      connectToSyncServer(client, syncServer, false);
+
+      // Kill the node before the reconciliation completes
+      client.gracefulShutdown();
+
+      const anotherClient = createTestNode({
+        enableFullStorageReconciliation: true,
+      });
+      anotherClient.setStorage(storage);
+      connectToSyncServer(anotherClient, syncServer, false);
+
+      const lockResult =
+        await tryAcquireStorageReconciliationLock(anotherClient);
+      expect(lockResult.acquired).toBe(false);
+      if (!lockResult.acquired) {
+        expect(lockResult.reason).toBe("lock_held");
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const lockResult2 =
+        await tryAcquireStorageReconciliationLock(anotherClient);
+      expect(lockResult2.acquired).toBe(true);
+    });
+
+    test("if reconciliation is interrupted, it can be resumed by the same client", async () => {
+      cojsonInternals.setStorageReconciliationInterval(0);
+      cojsonInternals.setStorageReconciliationLockTTL(100);
+
+      const syncServer = createTestNode();
+      let client = createTestNode({ enableFullStorageReconciliation: true });
+      const storage = await getIndexedDBStorage();
+      client.setStorage(storage);
+
+      const group = client.createGroup();
+      await group.core.waitForSync();
+
+      connectToSyncServer(client, syncServer, false);
+
+      // Kill the node before the reconciliation completes
+      client.gracefulShutdown();
+
+      const lockResult = await tryAcquireStorageReconciliationLock(client);
+      expect(lockResult.acquired).toBe(true);
+    });
   });
 });
