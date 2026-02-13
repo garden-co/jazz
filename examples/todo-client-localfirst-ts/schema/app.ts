@@ -54,41 +54,41 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  "tables": {
-    "todos": {
-      "columns": [
+  tables: {
+    todos: {
+      columns: [
         {
-          "name": "title",
-          "column_type": {
-            "type": "Text"
+          name: "title",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "done",
-          "column_type": {
-            "type": "Boolean"
+          name: "done",
+          column_type: {
+            type: "Boolean",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "description",
-          "column_type": {
-            "type": "Text"
+          name: "description",
+          column_type: {
+            type: "Text",
           },
-          "nullable": true
+          nullable: true,
         },
         {
-          "name": "parent",
-          "column_type": {
-            "type": "Uuid"
+          name: "parent",
+          column_type: {
+            type: "Uuid",
           },
-          "nullable": true,
-          "references": "todos"
-        }
-      ]
-    }
-  }
+          nullable: true,
+          references: "todos",
+        },
+      ],
+    },
+  },
 };
 
 export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<Todo> {
