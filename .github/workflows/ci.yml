@@ -16,19 +16,19 @@ concurrency:
 jobs:
   validate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version-file: .nvmrc
 
       - run: corepack enable
 
@@ -42,6 +42,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       - run: pnpm install --frozen-lockfile
+      - run: cargo install wasm-pack
 
       - run: pnpm format:check
       - run: pnpm oxlint .
