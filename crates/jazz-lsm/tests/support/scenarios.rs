@@ -63,6 +63,41 @@ where
     Ok(())
 }
 
+pub async fn wal_replay_survives_second_restart_without_flush<FS, Open, OpenFut>(
+    mut open: Open,
+) -> TestResult
+where
+    FS: SyncFs + Clone + 'static,
+    Open: FnMut() -> OpenFut,
+    OpenFut: Future<Output = TestResult<LsmTree<FS>>>,
+{
+    // First run: write + durable WAL sync, but do not checkpoint to SST.
+    {
+        let mut db = open().await?;
+        db.put(b"k1", b"v1")?;
+        db.flush_wal()?;
+    }
+
+    // First restart: record is recovered from WAL into memory.
+    // Simulate a second hard crash before any flush/checkpoint.
+    {
+        let db = open().await?;
+        assert_eq!(db.get(b"k1")?, Some(b"v1".to_vec()));
+        assert!(
+            db.debug_state()?.wal_bytes > 0,
+            "WAL should still exist before checkpointing"
+        );
+    }
+
+    // Second restart: record must still be recovered from WAL.
+    {
+        let db = open().await?;
+        assert_eq!(db.get(b"k1")?, Some(b"v1".to_vec()));
+    }
+
+    Ok(())
+}
+
 pub async fn unknown_merge_operator_rejected_on_open<
     FS,
     OpenWith,
