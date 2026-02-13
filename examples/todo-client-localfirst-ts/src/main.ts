@@ -79,16 +79,18 @@ export async function startApp(
   form.appendChild(btn);
   container.appendChild(form);
 
+  const selectedProjectId = db.insert(app.projects, { name: "Default Project" });
+
   const list = document.createElement("ul");
   list.id = "todo-list";
   container.appendChild(list);
-
-  // Subscribe to all todos
-  db.subscribeAll(app.todos, ({ all }) => {
-    const ordered = orderTodosWithDepth(all);
+  // Subscribe to the project & all its todos
+  const query = app.todos.where({ project: selectedProjectId });
+  db.subscribeAll(query, ({ all: todos }) => {
+    const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);
-    for (const todo of all) {
+    for (const todo of todos) {
       const option = document.createElement("option");
       option.value = todo.id;
       option.textContent = todo.title;
@@ -117,6 +119,7 @@ export async function startApp(
     db.insert(app.todos, {
       title: input.value,
       done: false,
+      project: selectedProjectId,
       ...(selectedParentId ? { parent: selectedParentId } : {}),
     });
     input.value = "";
