@@ -149,7 +149,6 @@ impl ServerConnection {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
-
 }
 
 /// Check if a sync payload is for a catalogue object (schema or lens).
@@ -157,7 +156,9 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
     match payload {
         SyncPayload::ObjectUpdated { metadata, .. } => {
             if let Some(meta) = metadata
-                && let Some(type_str) = meta.metadata.get(groove::metadata::MetadataKey::Type.as_str())
+                && let Some(type_str) = meta
+                    .metadata
+                    .get(groove::metadata::MetadataKey::Type.as_str())
             {
                 return type_str == groove::metadata::ObjectType::CatalogueSchema.as_str()
                     || type_str == groove::metadata::ObjectType::CatalogueLens.as_str();

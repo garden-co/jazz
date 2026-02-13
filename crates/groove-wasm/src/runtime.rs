@@ -31,11 +31,11 @@ use groove::query_manager::types::Row;
 #[cfg(target_arch = "wasm32")]
 use groove::query_manager::types::RowDescriptor;
 use groove::query_manager::types::{Schema, Value};
-use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(any(target_arch = "wasm32", test))]
 use groove::runtime_core::SubscriptionDelta;
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::SubscriptionHandle;
+use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::BfTreeStorage;
 use groove::sync_manager::{
@@ -621,7 +621,8 @@ impl WasmRuntime {
 
             let descriptor = &delta.descriptor;
             let mut ids = current_ids.borrow_mut();
-            let delta_json = build_wasm_delta_json(&delta, &mut ids, |row| row_to_json(row, descriptor));
+            let delta_json =
+                build_wasm_delta_json(&delta, &mut ids, |row| row_to_json(row, descriptor));
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
                 let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
@@ -825,11 +826,7 @@ mod tests {
         }
     }
 
-    fn delta(
-        added: Vec<Row>,
-        removed: Vec<Row>,
-        updated: Vec<(Row, Row)>,
-    ) -> SubscriptionDelta {
+    fn delta(added: Vec<Row>, removed: Vec<Row>, updated: Vec<(Row, Row)>) -> SubscriptionDelta {
         SubscriptionDelta {
             handle: SubscriptionHandle(0),
             delta: RowDelta {
@@ -850,9 +847,11 @@ mod tests {
         let mut current_ids = vec![id_a, id_b];
         let d = delta(vec![row(id_c)], vec![], vec![]);
 
-        let json = build_wasm_delta_json(&d, &mut current_ids, |r| {
-            serde_json::json!({ "id": r.id.uuid().to_string() })
-        });
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
 
         assert_eq!(json["added"][0]["index"], serde_json::json!(2));
         assert_eq!(json["pending"], serde_json::json!(false));
@@ -868,9 +867,11 @@ mod tests {
         let mut current_ids = vec![id_a, id_b, id_c];
         let d = delta(vec![], vec![row(id_b)], vec![]);
 
-        let json = build_wasm_delta_json(&d, &mut current_ids, |r| {
-            serde_json::json!({ "id": r.id.uuid().to_string() })
-        });
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
 
         assert_eq!(json["removed"][0]["index"], serde_json::json!(1));
         assert_eq!(current_ids, vec![id_a, id_c]);
@@ -885,9 +886,11 @@ mod tests {
         let mut current_ids = vec![id_a, id_b];
         let d = delta(vec![], vec![], vec![(row(id_b), row(id_c))]);
 
-        let json = build_wasm_delta_json(&d, &mut current_ids, |r| {
-            serde_json::json!({ "id": r.id.uuid().to_string() })
-        });
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
 
         assert_eq!(json["updated"][0]["old_index"], serde_json::json!(1));
         assert_eq!(json["updated"][0]["new_index"], serde_json::json!(1));
@@ -907,9 +910,11 @@ mod tests {
         // Expected post with current wasm delta semantics: [A, C, B]
         let d = delta(vec![], vec![], vec![(row(id_b), row(id_b))]);
 
-        let json = build_wasm_delta_json(&d, &mut current_ids, |r| {
-            serde_json::json!({ "id": r.id.uuid().to_string() })
-        });
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
 
         assert_eq!(json["updated"][0]["old_index"], serde_json::json!(1));
         assert_eq!(json["updated"][0]["new_index"], serde_json::json!(2));
@@ -928,15 +933,13 @@ mod tests {
         // Operation: Remove B, Add New, Add B.
         // This simulates moving B to the end and inserting New before it.
         // Result should be [A, New, B].
-        let d = delta(
-            vec![row(id_new), row(id_b)],
-            vec![row(id_b)],
-            vec![],
-        );
+        let d = delta(vec![row(id_new), row(id_b)], vec![row(id_b)], vec![]);
 
-        let json = build_wasm_delta_json(&d, &mut current_ids, |r| {
-            serde_json::json!({ "id": r.id.uuid().to_string() })
-        });
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
 
         // Verify State
         assert_eq!(current_ids, vec![id_a, id_new, id_b]);
