@@ -10,7 +10,7 @@ use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
-use groove::storage::{BfTreeStorage, Storage};
+use groove::storage::{RocksDbStorage, Storage};
 use groove::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
 };
@@ -26,7 +26,7 @@ use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, Subscri
 /// Combines local persistence with server sync.
 pub struct JazzClient {
     /// Handle to the local runtime.
-    runtime: TokioRuntime<BfTreeStorage>,
+    runtime: TokioRuntime<RocksDbStorage>,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
     /// Active subscriptions (metadata).
@@ -103,8 +103,8 @@ impl JazzClient {
         };
 
         // Create persistent storage
-        let db_path = context.data_dir.join("groove.bftree");
-        let storage = BfTreeStorage::open(&db_path, 64 * 1024 * 1024)
+        let db_path = context.data_dir.join("groove.rocksdb");
+        let storage = RocksDbStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| JazzError::Storage(format!("{:?}", e)))?;
 
         // Clone server connection for sync callback
@@ -312,10 +312,7 @@ impl JazzClient {
         // Track subscription metadata
         {
             let mut subs = self.subscriptions.write().await;
-            subs.insert(
-                handle,
-                SubscriptionState { runtime_handle },
-            );
+            subs.insert(handle, SubscriptionState { runtime_handle });
         }
 
         Ok(SubscriptionStream::new(rx))
@@ -406,7 +403,7 @@ impl JazzClient {
             .await
             .map_err(|e| JazzError::Connection(e.to_string()))?;
 
-        // Snapshot bf-tree storage to disk for persistence
+        // Flush RocksDB data to disk for persistence
         self.runtime
             .with_storage(|storage| storage.flush())
             .map_err(|e| JazzError::Storage(e.to_string()))?;
@@ -466,7 +463,7 @@ impl<'a> SessionClient<'a> {
 }
 
 /// Handle incoming server events.
-fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<BfTreeStorage>) -> Result<()> {
+fn handle_server_event(event: ServerEvent, runtime: &TokioRuntime<RocksDbStorage>) -> Result<()> {
     match event {
         ServerEvent::Connected {
             connection_id,

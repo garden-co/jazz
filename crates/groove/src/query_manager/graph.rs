@@ -1179,6 +1179,9 @@ impl QueryGraph {
         F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)>,
     {
         let order = self.topo_sort_dirty();
+        if !order.is_empty() {
+            tracing::trace!(dirty_nodes = order.len(), table = %self.table, "settling query graph");
+        }
         let mut tuple_deltas: AHashMap<NodeId, TupleDelta> = AHashMap::new();
 
         let ctx = SourceContext { storage };

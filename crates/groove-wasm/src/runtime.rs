@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `BfTreeStorage` provides synchronous storage (from groove::storage)
+//! - `JazzLsmStorage` provides synchronous storage (from groove::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -15,10 +15,23 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::Once;
 
 use js_sys::Function;
 use serde::Serialize;
+use tracing::{debug_span, info, info_span};
 use wasm_bindgen::prelude::*;
+
+/// Initialize wasm-tracing exactly once (idempotent across multiple WasmRuntime instances).
+fn init_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let config = wasm_tracing::WasmLayerConfig::new()
+            .with_max_level(tracing::Level::TRACE)
+            .with_console_group_spans();
+        let _ = wasm_tracing::set_as_global_default_with_config(config);
+    });
+}
 
 use groove::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
@@ -31,7 +44,7 @@ use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::BfTreeStorage;
+use groove::storage::JazzLsmStorage;
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -57,7 +70,7 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<JazzLsmStorage, WasmScheduler, JsSyncSender>;
 
 // ============================================================================
 // WasmScheduler
@@ -146,19 +159,21 @@ impl SyncSender for JsSyncSender {
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps `Rc<RefCell<RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>>>`.
+/// Wraps `Rc<RefCell<RuntimeCore<JazzLsmStorage, WasmScheduler, JsSyncSender>>>`.
 /// All methods borrow the core, call RuntimeCore, and return.
 /// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    /// Label for tracing (e.g. "worker", "edge", or "client").
+    tier_label: &'static str,
 }
 
 #[wasm_bindgen]
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
-    /// Storage is synchronous (in-memory via BfTreeStorage).
+    /// Storage is synchronous (in-memory via JazzLsmStorage).
     ///
     /// # Arguments
     /// * `schema_json` - JSON-encoded schema definition
@@ -177,6 +192,23 @@ impl WasmRuntime {
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = match tier.as_deref() {
+            Some("worker") => "worker",
+            Some("edge") => "edge",
+            Some("core") => "core",
+            _ => "client",
+        };
+        let _span = info_span!(
+            "WasmRuntime::new",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch
+        )
+        .entered();
+        info!("creating in-memory runtime");
 
         // Parse schema
         let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
@@ -207,13 +239,14 @@ impl WasmRuntime {
 
         // Create components
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32MB
-        let storage = BfTreeStorage::memory(DEFAULT_CACHE_SIZE)
+        let storage = JazzLsmStorage::memory(DEFAULT_CACHE_SIZE)
             .map_err(|e| JsError::new(&format!("Storage init: {:?}", e)))?;
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -229,7 +262,10 @@ impl WasmRuntime {
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
 
-        Ok(WasmRuntime { core: core_rc })
+        Ok(WasmRuntime {
+            core: core_rc,
+            tier_label,
+        })
     }
 
     /// Called by JS when a sync message arrives from the server.
@@ -238,6 +274,7 @@ impl WasmRuntime {
     /// * `message_json` - JSON-encoded SyncPayload
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
     pub fn on_sync_message_received(&self, message_json: &str) -> Result<(), JsError> {
+        let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
         let payload: SyncPayload = serde_json::from_str(message_json)
             .map_err(|e| JsError::new(&format!("Invalid sync message: {}", e)))?;
 
@@ -261,6 +298,12 @@ impl WasmRuntime {
         client_id: &str,
         message_json: &str,
     ) -> Result<(), JsError> {
+        let _span = debug_span!(
+            "wasm::onSyncMessageReceivedFromClient",
+            tier = self.tier_label,
+            client_id
+        )
+        .entered();
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
@@ -293,6 +336,7 @@ impl WasmRuntime {
     /// The new row's ObjectId as a UUID string.
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<String, JsError> {
+        let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
         let wasm_values: Vec<WasmValue> = serde_wasm_bindgen::from_value(values)?;
         let groove_values: Vec<Value> = wasm_values
             .into_iter()
@@ -318,6 +362,7 @@ impl WasmRuntime {
         session_json: Option<String>,
         settled_tier: Option<String>,
     ) -> Result<js_sys::Promise, JsError> {
+        let _span = debug_span!("wasm::query", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
         let session = if let Some(json) = session_json {
@@ -364,6 +409,7 @@ impl WasmRuntime {
     /// Update a row by ObjectId.
     #[wasm_bindgen]
     pub fn update(&self, object_id: &str, values: JsValue) -> Result<(), JsError> {
+        let _span = debug_span!("wasm::update", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -389,6 +435,7 @@ impl WasmRuntime {
     /// Delete a row by ObjectId.
     #[wasm_bindgen]
     pub fn delete(&self, object_id: &str) -> Result<(), JsError> {
+        let _span = debug_span!("wasm::delete", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
@@ -520,6 +567,7 @@ impl WasmRuntime {
         session_json: Option<String>,
         settled_tier: Option<String>,
     ) -> Result<f64, JsError> {
+        let _span = debug_span!("wasm::subscribe", tier = self.tier_label).entered();
         let query = parse_query(query_json).map_err(|e| JsError::new(&e))?;
 
         let session = if let Some(json) = session_json {
@@ -592,6 +640,7 @@ impl WasmRuntime {
     /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
     pub fn add_server(&self) {
+        let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
         let server_id = ServerId::new();
         let mut core = self.core.borrow_mut();
         core.add_server(server_id);
@@ -601,7 +650,9 @@ impl WasmRuntime {
     /// Add a client connection (for server-side use in tests).
     #[wasm_bindgen(js_name = addClient)]
     pub fn add_client(&self) -> String {
+        let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
         let client_id = ClientId::new();
+        info!(%client_id, "generated client id");
         let mut core = self.core.borrow_mut();
         core.add_client(client_id, None);
         client_id.0.to_string()
@@ -654,20 +705,21 @@ impl WasmRuntime {
     /// Flush all data to persistent storage (snapshot).
     #[wasm_bindgen]
     pub fn flush(&self) {
+        let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
         self.core.borrow().flush_storage();
     }
 
     /// Flush only the WAL buffer to OPFS (not the snapshot).
     #[wasm_bindgen(js_name = flushWal)]
     pub fn flush_wal(&self) {
+        let _span = debug_span!("wasm::flushWal", tier = self.tier_label).entered();
         self.core.borrow().flush_wal();
     }
 
     /// Create a persistent WasmRuntime backed by OPFS.
     ///
-    /// Opens two OPFS files: `{db_name}.bftree` (tree data) and
-    /// `{db_name}.wal` (write-ahead log). Handles fresh start and
-    /// crash recovery automatically.
+    /// Opens one OPFS container file: `{db_name}.jazzlsmfs`.
+    /// Handles fresh start and crash recovery automatically.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openPersistent)]
     pub async fn open_persistent(
@@ -680,6 +732,24 @@ impl WasmRuntime {
     ) -> Result<WasmRuntime, JsError> {
         #[cfg(feature = "console_error_panic_hook")]
         console_error_panic_hook::set_once();
+        init_tracing();
+
+        let tier_label = match tier.as_deref() {
+            Some("worker") => "worker",
+            Some("edge") => "edge",
+            Some("core") => "core",
+            _ => "client",
+        };
+        let _span = info_span!(
+            "WasmRuntime::openPersistent",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
+        info!("opening persistent OPFS runtime");
 
         // Parse schema
         let wasm_schema: WasmSchema = serde_json::from_str(schema_json)
@@ -708,23 +778,17 @@ impl WasmRuntime {
         )
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
-        // Open OPFS files (async)
-        let tree_vfs = bf_tree::OpfsVfs::open(&format!("{}.bftree", db_name))
-            .await
-            .map_err(|e| JsError::new(&format!("OPFS tree: {:?}", e)))?;
-        let wal_vfs = bf_tree::OpfsVfs::open(&format!("{}.wal", db_name))
-            .await
-            .map_err(|e| JsError::new(&format!("OPFS WAL: {:?}", e)))?;
-
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
-        let storage = BfTreeStorage::with_opfs(tree_vfs, wal_vfs, DEFAULT_CACHE_SIZE)
+        let storage = JazzLsmStorage::with_opfs(db_name, DEFAULT_CACHE_SIZE)
+            .await
             .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?;
 
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        core.set_tier_label(tier_label);
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -740,6 +804,9 @@ impl WasmRuntime {
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
 
-        Ok(WasmRuntime { core: core_rc })
+        Ok(WasmRuntime {
+            core: core_rc,
+            tier_label,
+        })
     }
 }

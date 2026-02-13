@@ -1,19 +1,19 @@
 //! groove-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<BfTreeStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<RocksDbStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `BfTreeStorage` provides persistent on-disk storage
+//! - `RocksDbStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
-//! - `NapiRuntime` wraps `Arc<Mutex<RuntimeCore<...>>>`
+//! - `NapiRuntime` wraps `Arc<Mutex<Option<RuntimeCore<...>>>>` for deterministic close
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use napi::Env;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -28,7 +28,7 @@ use groove::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::{BfTreeStorage, Storage};
+use groove::storage::{RocksDbStorage, Storage};
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -303,14 +303,15 @@ fn parse_query(json: &str) -> napi::Result<Query> {
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<BfTreeStorage, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<RocksDbStorage, NapiScheduler, NapiSyncSender>;
+type NapiCoreCell = Mutex<Option<NapiCoreType>>;
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
 /// does the actual work. Debounced: only one tick is pending at a time.
 pub struct NapiScheduler {
     scheduled: Arc<AtomicBool>,
-    core_ref: Weak<Mutex<NapiCoreType>>,
+    core_ref: Weak<NapiCoreCell>,
     tsfn: Option<ThreadsafeFunction<(), ErrorStrategy::CalleeHandled>>,
 }
 
@@ -323,7 +324,7 @@ impl NapiScheduler {
         }
     }
 
-    fn set_core_ref(&mut self, core_ref: Weak<Mutex<NapiCoreType>>) {
+    fn set_core_ref(&mut self, core_ref: Weak<NapiCoreCell>) {
         self.core_ref = core_ref;
     }
 
@@ -383,12 +384,20 @@ impl SyncSender for NapiSyncSender {
 
 #[napi]
 pub struct NapiRuntime {
-    core: Arc<Mutex<NapiCoreType>>,
+    core: Arc<NapiCoreCell>,
+}
+
+impl NapiRuntime {
+    fn lock_core(&self) -> napi::Result<MutexGuard<'_, Option<NapiCoreType>>> {
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))
+    }
 }
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with BfTree-backed persistent storage.
+    /// Create a new NapiRuntime with RocksDB-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -425,9 +434,9 @@ impl NapiRuntime {
             napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e))
         })?;
 
-        // Create BfTreeStorage
+        // Create RocksDbStorage
         let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = BfTreeStorage::open(&data_path, cache_size)
+        let storage = RocksDbStorage::open(&data_path, cache_size)
             .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))?;
 
         // Create components
@@ -436,7 +445,7 @@ impl NapiRuntime {
 
         // Create RuntimeCore and wrap
         let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
-        let core_arc = Arc::new(Mutex::new(core));
+        let core_arc = Arc::new(Mutex::new(Some(core)));
 
         // Set up the scheduler's TSFN
         {
@@ -445,7 +454,12 @@ impl NapiRuntime {
                 let core_guard = core_arc
                     .lock()
                     .map_err(|_| napi::Error::from_reason("lock"))?;
-                core_guard.scheduler().scheduled.clone()
+                core_guard
+                    .as_ref()
+                    .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?
+                    .scheduler()
+                    .scheduled
+                    .clone()
             };
 
             // Create a noop JS function to wrap in a TSFN.
@@ -463,7 +477,8 @@ impl NapiRuntime {
                     // Reset flag first so new ticks can be scheduled
                     flag_for_tsfn.store(false, Ordering::SeqCst);
                     if let Some(core_arc) = core_ref_for_tsfn.upgrade()
-                        && let Ok(mut core) = core_arc.lock()
+                        && let Ok(mut core_guard) = core_arc.lock()
+                        && let Some(core) = core_guard.as_mut()
                     {
                         core.batched_tick();
                     }
@@ -479,11 +494,14 @@ impl NapiRuntime {
             let mut core_guard = core_arc
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core_guard.scheduler_mut().set_core_ref(core_weak);
-            core_guard.scheduler_mut().set_tsfn(tsfn);
+            let core = core_guard
+                .as_mut()
+                .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
+            core.scheduler_mut().set_core_ref(core_weak);
+            core.scheduler_mut().set_tsfn(tsfn);
 
             // Persist schema to catalogue for server sync
-            core_guard.persist_schema();
+            core.persist_schema();
         }
 
         Ok(NapiRuntime { core: core_arc })
@@ -503,10 +521,10 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let groove_values = convert_values(js_values)?;
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         let result = core
             .insert(&table, groove_values, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
@@ -528,10 +546,10 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
         let updates = convert_updates(partial_values)?;
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.update(oid, updates, None)
             .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
 
@@ -544,10 +562,10 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.delete(oid, None)
             .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
 
@@ -580,10 +598,10 @@ impl NapiRuntime {
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
         let future = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let mut core_guard = self.lock_core()?;
+            let core = core_guard
+                .as_mut()
+                .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
             core.query(query, session, tier)
         };
 
@@ -682,10 +700,10 @@ impl NapiRuntime {
             tsfn.call(Ok(delta_obj), ThreadsafeFunctionCallMode::NonBlocking);
         };
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         let handle = core
             .subscribe_with_settled_tier(query, callback, session, tier)
             .map_err(|e| napi::Error::from_reason(format!("Subscribe failed: {:?}", e)))?;
@@ -695,10 +713,10 @@ impl NapiRuntime {
 
     #[napi]
     pub fn unsubscribe(&self, handle: f64) -> napi::Result<()> {
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.unsubscribe(SubscriptionHandle(handle as u64));
         Ok(())
     }
@@ -722,10 +740,10 @@ impl NapiRuntime {
         let groove_values = convert_values(js_values)?;
 
         let (object_id, receiver) = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let mut core_guard = self.lock_core()?;
+            let core = core_guard
+                .as_mut()
+                .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
             core.insert_persisted(&table, groove_values, None, persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?
         };
@@ -759,10 +777,10 @@ impl NapiRuntime {
         let updates = convert_updates(partial_values)?;
 
         let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let mut core_guard = self.lock_core()?;
+            let core = core_guard
+                .as_mut()
+                .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
             core.update_persisted(oid, updates, None, persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
         };
@@ -790,10 +808,10 @@ impl NapiRuntime {
         let oid = ObjectId::from_uuid(uuid);
 
         let receiver = {
-            let mut core = self
-                .core
-                .lock()
-                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let mut core_guard = self.lock_core()?;
+            let core = core_guard
+                .as_mut()
+                .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
             core.delete_persisted(oid, None, persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
         };
@@ -821,10 +839,10 @@ impl NapiRuntime {
             payload,
         };
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.park_sync_message(entry);
         Ok(())
     }
@@ -848,10 +866,10 @@ impl NapiRuntime {
             payload,
         };
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.park_sync_message(entry);
         Ok(())
     }
@@ -867,10 +885,10 @@ impl NapiRuntime {
                 Ok(vec![val])
             })?;
 
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.sync_sender().set_callback(tsfn);
         Ok(())
     }
@@ -878,10 +896,10 @@ impl NapiRuntime {
     #[napi(js_name = "addServer")]
     pub fn add_server(&self) -> napi::Result<()> {
         let server_id = ServerId::new();
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.add_server(server_id);
         Ok(())
     }
@@ -889,10 +907,10 @@ impl NapiRuntime {
     #[napi(js_name = "addClient")]
     pub fn add_client(&self) -> napi::Result<String> {
         let client_id = ClientId::new();
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.add_client(client_id, None);
         Ok(client_id.0.to_string())
     }
@@ -918,10 +936,10 @@ impl NapiRuntime {
             }
         };
 
-        let mut core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let mut core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         core.set_client_role_by_name(cid, client_role);
         Ok(())
     }
@@ -932,10 +950,10 @@ impl NapiRuntime {
 
     #[napi(js_name = "getSchema", ts_return_type = "any")]
     pub fn get_schema(&self, env: Env) -> napi::Result<napi::JsUnknown> {
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let core_guard = self.lock_core()?;
+        let core = core_guard
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("Runtime is closed"))?;
         let schema = core.current_schema();
         let js_schema = groove_schema_to_js(schema);
         env.to_js_value(&js_schema)
@@ -943,11 +961,24 @@ impl NapiRuntime {
 
     #[napi]
     pub fn flush(&self) -> napi::Result<()> {
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.storage().flush();
+        let core_guard = self.lock_core()?;
+        if let Some(core) = core_guard.as_ref() {
+            core.storage().flush();
+        }
+        Ok(())
+    }
+
+    #[napi]
+    pub fn close(&self) -> napi::Result<()> {
+        let core_to_drop = {
+            let mut core_guard = self.lock_core()?;
+            if let Some(core) = core_guard.as_ref() {
+                core.storage().flush();
+            }
+            core_guard.take()
+        };
+
+        drop(core_to_drop);
         Ok(())
     }
 }

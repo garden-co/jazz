@@ -1,0 +1,14 @@
+{
+  "name": "@jazz/jazz-lsm",
+  "private": true,
+  "scripts": {
+    "bench:wasm:build": "RUSTFLAGS='--cfg=web_sys_unstable_apis' wasm-pack build --target web --out-dir wasm-bench/pkg --release",
+    "bench:wasm:opfs": "node wasm-bench/run-opfs-bench.cjs",
+    "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs",
+    "bench:native:quick": "cargo bench -p jazz-lsm --bench lsm_native -- --quick",
+    "bench:native:compare:quick": "cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2"
+  }
+}

@@ -62,7 +62,7 @@ Read the status-quo specs in the order below — each builds on the ones before 
 │  │   └── QueryManager (reactive query graphs)           │
 │  ├── SyncManager     (roles, scoped sync, ack/settled)  │
 │  ├── ObjectManager   (DAG: branches, commits)           │
-│  └── Storage         (BfTree native / WASM+OPFS)        │
+│  └── Storage         (legacy storage native / WASM+OPFS)        │
 └─────────────────────────────────────────────────────────┘
 ```
 

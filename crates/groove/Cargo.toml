@@ -5,11 +5,13 @@ edition = "2024"
 
 [features]
 default = []
-bftree = ["bf-tree"]
+jazz-lsm = ["dep:jazz-lsm"]
+rocksdb = ["dep:rocksdb"]
 
 [dependencies]
-bf-tree = { path = "../bf-tree", optional = true }
+jazz-lsm = { path = "../jazz-lsm", optional = true }
 futures = "0.3"
+tracing = "0.1"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }
 blake3 = "1"
 hex = "0.4"
@@ -23,6 +25,9 @@ web-time = "1.1"
 small-map = "0.1"
 bitvec = "1.0"
 ahash = "0.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

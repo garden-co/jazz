@@ -112,6 +112,15 @@ impl SourceNode for IndexScanNode {
             .copied()
             .collect();
 
+        tracing::trace!(
+            table = %self.table,
+            branch = %self.branch,
+            scanned = new_ids.len(),
+            added = added.len(),
+            removed = removed.len(),
+            "IndexScan results"
+        );
+
         self.last_scanned_ids = new_ids;
         self.current_tuples = self
             .last_scanned_ids

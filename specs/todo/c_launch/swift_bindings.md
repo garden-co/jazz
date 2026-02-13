@@ -8,7 +8,7 @@ Native Swift integration for iOS, macOS, watchOS, tvOS:
 
 - Rust → C FFI → Swift wrapper (or UniFFI for auto-generated bindings)
 - Swift-idiomatic API: `@Observable` classes, async/await, Combine publishers
-- BfTree storage on device (Documents or Application Support directory)
+- legacy storage storage on device (Documents or Application Support directory)
 - SwiftUI integration: property wrappers like `@Query` for reactive views
 - SPM (Swift Package Manager) distribution with pre-built xcframeworks
 

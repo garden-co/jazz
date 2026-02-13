@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/bf-tree",
+  "crates/jazz-lsm",
   "crates/groove",
   "crates/groove-tokio",
   "crates/groove-wasm",
@@ -9,6 +9,6 @@ members = [
   "crates/jazz-cli",
   "crates/jazz-rs",
   "crates/groove-napi",
+  "crates/wasm-tracing",
   "examples/todo-server-rs",
 ]
-exclude = ["crates/bf-tree/tests/wasm"]

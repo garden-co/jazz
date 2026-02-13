@@ -132,6 +132,7 @@ async fn events_handler(
             .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
         None => groove::sync_manager::ClientId::new(),
     };
+    tracing::info!(%client_id, "events stream connecting");
 
     // Extract session from headers (JWT or backend impersonation)
     let session = match extract_session(&headers, &state.auth_config) {
@@ -275,6 +276,7 @@ async fn sync_handler(
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
+    tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
 
     // Check admin secret — if present and valid, promote client to Admin role
     let is_admin = {

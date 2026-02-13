@@ -41,6 +41,8 @@ export interface Runtime {
   addServer(): void;
   addClient(): string;
   getSchema(): any;
+  close?(): void;
+  free?(): void;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
 }
@@ -520,6 +522,13 @@ export class JazzClient {
     // Close driver if it supports it
     if (this.context.driver?.close) {
       await this.context.driver.close();
+    }
+
+    // Release native/WASM runtime resources deterministically when supported.
+    if (this.runtime.close) {
+      this.runtime.close();
+    } else if (this.runtime.free) {
+      this.runtime.free();
     }
   }
 
