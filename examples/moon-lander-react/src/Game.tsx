@@ -4,6 +4,8 @@ import {
   CANVAS_HEIGHT,
   INITIAL_ALTITUDE,
   GRAVITY,
+  THRUST_POWER,
+  THRUST_POWER_X,
   type PlayerMode,
 } from "./game/constants.js";
 
@@ -29,6 +31,20 @@ export function Game() {
     ly: 0,
   });
 
+  // Track which keys are currently held
+  const keysRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => keysRef.current.add(e.code);
+    const onKeyUp = (e: KeyboardEvent) => keysRef.current.delete(e.code);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keyup", onKeyUp);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -41,9 +57,21 @@ export function Game() {
     const gameLoop = (now: number) => {
       const dt = Math.min((now - lastTime) / 1000, 0.05); // Cap delta to avoid spiral
       lastTime = now;
+      const keys = keysRef.current;
 
       // --- Physics ---
       if (modeRef.current === "descending") {
+        // Thrust
+        if (keys.has("ArrowUp") || keys.has("KeyW")) {
+          velYRef.current -= THRUST_POWER * dt;
+        }
+        if (keys.has("ArrowLeft") || keys.has("KeyA")) {
+          velXRef.current -= THRUST_POWER_X * dt;
+        }
+        if (keys.has("ArrowRight") || keys.has("KeyD")) {
+          velXRef.current += THRUST_POWER_X * dt;
+        }
+
         velYRef.current += GRAVITY * dt;
         posXRef.current += velXRef.current * dt;
         posYRef.current += velYRef.current * dt;
