@@ -79,7 +79,7 @@ export async function startApp(
   form.appendChild(btn);
   container.appendChild(form);
 
-  const selectedProjectId = db.insert(app.projects, { name: "Default Project" });
+  const selectedProjectId = "00000000-0000-0000-0000-000000000000";
 
   const list = document.createElement("ul");
   list.id = "todo-list";
