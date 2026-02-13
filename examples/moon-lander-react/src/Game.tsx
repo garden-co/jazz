@@ -4,8 +4,10 @@ import {
   CANVAS_HEIGHT,
   INITIAL_ALTITUDE,
   GRAVITY,
+  GROUND_LEVEL,
   THRUST_POWER,
   THRUST_POWER_X,
+  MAX_LANDING_VELOCITY,
   type PlayerMode,
 } from "./game/constants.js";
 
@@ -75,6 +77,19 @@ export function Game() {
         velYRef.current += GRAVITY * dt;
         posXRef.current += velXRef.current * dt;
         posYRef.current += velYRef.current * dt;
+
+        // Landing detection
+        if (posYRef.current >= GROUND_LEVEL) {
+          posYRef.current = GROUND_LEVEL;
+          if (Math.abs(velYRef.current) <= MAX_LANDING_VELOCITY) {
+            modeRef.current = "landed";
+          }
+          // TODO: crash if too fast
+          velXRef.current = 0;
+          velYRef.current = 0;
+          landerXRef.current = posXRef.current;
+          landerYRef.current = GROUND_LEVEL;
+        }
       }
 
       // --- Render ---
