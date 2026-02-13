@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/bf-tree",
+  "crates/jazz-lsm",
   "crates/groove",
   "crates/groove-tokio",
   "crates/groove-wasm",

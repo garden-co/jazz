@@ -1484,6 +1484,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-lsm"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "criterion",
+ "futures",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen 0.6.5",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
 name = "jazz-rs"
 version = "0.1.0"
 dependencies = [
