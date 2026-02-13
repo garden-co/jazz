@@ -141,6 +141,72 @@ Phase 6 values below compare against Phase 5 where a Phase 5 baseline exists.
 | mixed_random_50r_50w_with_updates | 1,048,576 | `38.544 -> 74.406` (`+93.0%`) | `122.174 -> 50.933` (`-58.3%`) | N/A -> `138.562` | N/A -> `23.200` | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
 | mixed_random_60r_20w_20d | 1,048,576 | `61.520 -> 122.286` (`+98.8%`) | `78.449 -> 44.676` (`-43.1%`) | N/A -> `286.123` | N/A -> `19.000` | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
 
+## Phase 7 Results (range-scoped compaction + per-step compaction budget)
+
+Phase 7 values below compare against Phase 6.
+
+| Scenario | Value Size (bytes) | Native ops/s (P6 -> P7) | Native p95 ms (P6 -> P7) | WASM ops/s (P6 -> P7) | WASM p95 ms (P6 -> P7) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `13546.587 -> 14107.921` (`+4.1%`) | `0.042 -> 0.015` (`-64.2%`) | `14285.714 -> 14084.507` (`-1.4%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `16396.108 -> 13675.728` (`-16.6%`) | `0.029 -> 0.015` (`-47.1%`) | `22222.222 -> 20000.000` (`-10.0%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `16452.623 -> 18646.483` (`+13.3%`) | `0.029 -> 0.016` (`-46.4%`) | `20408.163 -> 26315.790` (`+28.9%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `18244.596 -> 20330.403` (`+11.4%`) | `0.010 -> 0.006` (`-41.2%`) | `24390.244 -> 29411.765` (`+20.6%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 256 | `18303.872 -> 19641.381` (`+7.3%`) | `0.009 -> 0.006` (`-31.0%`) | `23255.814 -> 33333.333` (`+43.3%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 256 | `18319.464 -> 16406.600` (`-10.4%`) | `0.010 -> 0.006` (`-35.4%`) | `25641.026 -> 30303.030` (`+18.2%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 4096 | `17609.018 -> 8670.721` (`-50.8%`) | `0.024 -> 0.037` (`+54.9%`) | `14285.714 -> 17857.143` (`+25.0%`) | `0.200 -> 0.200` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 4096 | `10286.937 -> 6634.277` (`-35.5%`) | `0.035 -> 0.063` (`+80.5%`) | `14705.882 -> 17857.143` (`+21.4%`) | `0.200 -> 0.200` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 4096 | `19627.471 -> 8404.792` (`-57.2%`) | `0.020 -> 0.037` (`+86.2%`) | `16129.032 -> 20408.163` (`+26.5%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 1,048,576 | `112.378 -> 81.529` (`-27.5%`) | `46.181 -> 50.610` (`+9.6%`) | `249.501 -> 244.141` (`-2.1%`) | `21.100 -> 22.300` (`+5.7%`) | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `74.406 -> 55.806` (`-25.0%`) | `50.933 -> 50.249` (`-1.3%`) | `138.562 -> 138.870` (`+0.2%`) | `23.200 -> 23.000` (`-0.9%`) | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+| mixed_random_60r_20w_20d | 1,048,576 | `122.286 -> 104.713` (`-14.4%`) | `44.676 -> 42.546` (`-4.8%`) | `286.123 -> 274.650` (`-4.0%`) | `19.000 -> 22.000` (`+15.8%`) | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+
+## Phase 8 Results (`phase_2_6_some_4`: selective Phase 4 + keep Phase 2/6, drop Phase 7)
+
+Phase 8 values below compare against Phase 6.
+
+Phase 8 tuning notes:
+- Rejected variant: `64 KiB` SST blocks with bloom disabled by default (strong regressions).
+- Final variant below: `32 KiB` SST blocks with bloom enabled by default.
+- Cleanup pass: removed the experimental bloom-disable code path from the implementation (always writes/reads bloom in SST v2).
+- Latest table reflects a fresh post-cleanup rerun on February 13, 2026.
+
+| Scenario | Value Size (bytes) | Native ops/s (P6 -> P8) | Native p95 ms (P6 -> P8) | WASM ops/s (P6 -> P8) | WASM p95 ms (P6 -> P8) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `13546.587 -> 12626.302` (`-6.8%`) | `0.042 -> 0.068` (`+60.7%`) | `14285.714 -> 12195.122` (`-14.6%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `16396.108 -> 11951.953` (`-27.1%`) | `0.029 -> 0.075` (`+157.2%`) | `22222.222 -> 13698.630` (`-38.4%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `16452.623 -> 12277.697` (`-25.4%`) | `0.029 -> 0.065` (`+125.3%`) | `20408.163 -> 22727.273` (`+11.4%`) | `0.100 -> 0.100` (`-0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `18244.596 -> 16222.245` (`-11.1%`) | `0.010 -> 0.019` (`+91.7%`) | `24390.244 -> 19230.769` (`-21.2%`) | `0.100 -> 0.100` (`-0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 256 | `18303.872 -> 16230.187` (`-11.3%`) | `0.009 -> 0.021` (`+127.8%`) | `23255.814 -> 22222.222` (`-4.4%`) | `0.100 -> 0.100` (`-0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 256 | `18319.464 -> 15169.481` (`-17.2%`) | `0.010 -> 0.023` (`+133.8%`) | `25641.026 -> 23809.524` (`-7.1%`) | `0.100 -> 0.100` (`-0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 4096 | `17609.018 -> 8944.997` (`-49.2%`) | `0.024 -> 0.061` (`+154.0%`) | `14285.714 -> 14084.507` (`-1.4%`) | `0.200 -> 0.200` (`-0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 4096 | `10286.937 -> 4769.887` (`-53.6%`) | `0.035 -> 0.129` (`+267.6%`) | `14705.882 -> 14492.754` (`-1.4%`) | `0.200 -> 0.200` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 4096 | `19627.471 -> 12189.052` (`-37.9%`) | `0.020 -> 0.054` (`+169.8%`) | `16129.032 -> 16393.443` (`+1.6%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 1,048,576 | `112.378 -> 90.564` (`-19.4%`) | `46.181 -> 54.167` (`+17.3%`) | `249.501 -> 200.642` (`-19.6%`) | `21.100 -> 25.200` (`+19.4%`) | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `74.406 -> 72.647` (`-2.4%`) | `50.933 -> 51.147` (`+0.4%`) | `138.562 -> 133.049` (`-4.0%`) | `23.200 -> 24.100` (`+3.9%`) | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+| mixed_random_60r_20w_20d | 1,048,576 | `122.286 -> 112.528` (`-8.0%`) | `44.676 -> 49.563` (`+10.9%`) | `286.123 -> 265.463` (`-7.2%`) | `19.000 -> 22.000` (`+15.8%`) | Native `count=64`; WASM `count=100` via instrumented/progress-enabled harness |
+
+### Phase 8 Noise Check (3 Samples)
+
+Method:
+- Re-ran the same Phase 8 mixed commands 3 times for native and wasm/opfs on February 13, 2026.
+- Marked a row as significant noise when throughput `cv >= 10%` or `spread >= 20%`.
+
+Summary:
+- `24` total engine/scenario/size rows checked.
+- `6` rows showed significant throughput noise (`3` native, `3` wasm).
+- Median throughput noise: native `cv=5.17%`, wasm `cv=7.58%`.
+
+Rows with significant throughput noise:
+
+| Engine | Scenario | Value Size (bytes) | ops/s samples (s1/s2/s3) | CV | Spread |
+|---|---|---:|---:|---:|---:|
+| native | mixed_random_50r_50w_with_updates | 256 | `16983 / 18927 / 14018` | `14.9%` | `29.5%` |
+| native | mixed_random_60r_20w_20d | 32 | `12994 / 15876 / 14858` | `10.0%` | `19.8%` |
+| native | mixed_random_60r_20w_20d | 256 | `13807 / 18835 / 14840` | `16.8%` | `31.8%` |
+| wasm | mixed_random_50r_50w_with_updates | 256 | `22727 / 8696 / 26316` | `48.4%` | `91.5%` |
+| wasm | mixed_random_50r_50w_with_updates | 4096 | `16949 / 13514 / 14925` | `11.4%` | `22.7%` |
+| wasm | mixed_random_60r_20w_20d | 256 | `21277 / 18519 / 25641` | `16.5%` | `32.6%` |
+
 ## Progress Tracking
 
 - Use this mixed baseline table as the source of truth for Phase 1+ changes.
@@ -184,6 +250,18 @@ Phase 6 values below compare against Phase 5 where a Phase 5 baseline exists.
 - Phase 6 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
 - Phase 6 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
 - Phase 6 mixed wasm/opfs rerun (1MB): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress`
+- Phase 7 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 7 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 7 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
+- Phase 7 mixed wasm/opfs rerun (1MB): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress`
+- Phase 8 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 8 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 8 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
+- Phase 8 mixed wasm/opfs rerun (1MB): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress`
+- Phase 8 noise check native x3 (32/256/4096): `for i in 1 2 3; do cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json > /tmp/jazz_phase8_noise_native_std_${i}.json; done`
+- Phase 8 noise check native x3 (1MB): `for i in 1 2 3; do cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json > /tmp/jazz_phase8_noise_native_1mb_${i}.json; done`
+- Phase 8 noise check wasm/opfs x3 (32/256/4096): `for i in 1 2 3; do pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json > /tmp/jazz_phase8_noise_wasm_std_${i}.json; done`
+- Phase 8 noise check wasm/opfs x3 (1MB): `for i in 1 2 3; do pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress > /tmp/jazz_phase8_noise_wasm_1mb_${i}.json; done`
 - WASM harness progress + bootstrap-fix validation: `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 1 --value-sizes 32 --progress`
 - WASM 1MB instrumented sanity (`basic`, `count=1`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 1 --value-sizes 1048576 --json --progress`
 - WASM 1MB instrumented sanity (`basic`, `count=2`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile basic --count 2 --value-sizes 1048576 --json --progress`
