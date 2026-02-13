@@ -65,21 +65,27 @@ class RefBuilder {
 // Add Builder (for migration context)
 // ============================================================================
 
-class AddBuilder {
-  string(opts: { default: string }): AddOp {
+type MaybeOptional<T, Optional extends boolean> = Optional extends true ? T | null : T;
+
+class AddBuilder<Optional extends boolean = false> {
+  string(opts: { default: MaybeOptional<string, Optional> }): AddOp {
     return { _type: "add", sqlType: "TEXT", default: opts.default };
   }
 
-  int(opts: { default: number }): AddOp {
+  int(opts: { default: MaybeOptional<number, Optional> }): AddOp {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
-  boolean(opts: { default: boolean }): AddOp {
+  boolean(opts: { default: MaybeOptional<boolean, Optional> }): AddOp {
     return { _type: "add", sqlType: "BOOLEAN", default: opts.default };
   }
 
-  float(opts: { default: number }): AddOp {
+  float(opts: { default: MaybeOptional<number, Optional> }): AddOp {
     return { _type: "add", sqlType: "REAL", default: opts.default };
+  }
+
+  optional(): AddBuilder<true> {
+    return this as AddBuilder<true>;
   }
 }
 
