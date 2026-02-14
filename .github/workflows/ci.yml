@@ -16,10 +16,14 @@ jobs:
     timeout-minutes: 15
     container:
       image: mcr.microsoft.com/playwright:v1.58.2-noble
-      options: --user 1001
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install Rust build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
