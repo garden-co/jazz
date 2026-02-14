@@ -40,6 +40,7 @@ export interface Runtime {
   removeServer(): void;
   addClient(): string;
   getSchema(): any;
+  getSchemaHash(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
@@ -471,10 +472,9 @@ export class JazzClient {
    * @internal
    */
   getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
-    // TODO: Compute actual schema hash
     return {
       env: this.context.env ?? "dev",
-      schema_hash: "0".repeat(64), // Placeholder - should compute from schema
+      schema_hash: this.runtime.getSchemaHash(),
       user_branch: this.context.userBranch ?? "main",
     };
   }
