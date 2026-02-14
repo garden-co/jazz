@@ -40,7 +40,16 @@ jobs:
       - name: Ensure wasm-pack is available
         run: |
           if ! command -v wasm-pack >/dev/null; then
-            cargo install wasm-pack
+            WASM_PACK_VERSION=0.14.0
+            WASM_PACK_TARGET=x86_64-unknown-linux-musl
+            WASM_PACK_TAR="wasm-pack-v${WASM_PACK_VERSION}-${WASM_PACK_TARGET}.tar.gz"
+            WASM_PACK_URL="https://github.com/drager/wasm-pack/releases/download/v${WASM_PACK_VERSION}/${WASM_PACK_TAR}"
+            TMP_DIR="$(mktemp -d)"
+            mkdir -p "${CARGO_HOME}/bin"
+            curl -sSfL "${WASM_PACK_URL}" -o "${TMP_DIR}/${WASM_PACK_TAR}"
+            tar -xzf "${TMP_DIR}/${WASM_PACK_TAR}" -C "${TMP_DIR}"
+            install -m 0755 "${TMP_DIR}/wasm-pack-v${WASM_PACK_VERSION}-${WASM_PACK_TARGET}/wasm-pack" "${CARGO_HOME}/bin/wasm-pack"
+            rm -rf "${TMP_DIR}"
           fi
           wasm-pack --version
 
