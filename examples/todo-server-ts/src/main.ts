@@ -108,11 +108,11 @@ function buildQuery(table: string) {
 /**
  * Create a todo server.
  *
- * @param dataPath Optional path to BfTree database file. If omitted, uses a temp directory.
+ * @param dataPath Optional path to SurrealKV database directory. If omitted, uses a temp directory.
  * @returns TodoServer with app, client, and shutdown function
  */
 export async function createServer(dataPath?: string): Promise<TodoServer> {
-  // Create BfTree-backed runtime via NAPI
+  // Create SurrealKV-backed runtime via NAPI
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
   const runtime = new NapiRuntime(JSON.stringify(schema), "todo-server-ts", "dev", "main", dbPath);
 
@@ -334,6 +334,11 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     client,
     shutdown: async () => {
       await client.shutdown();
+      try {
+        runtime.close();
+      } catch {
+        // runtime may already be closed by higher-level shutdown plumbing
+      }
     },
     flush: () => {
       runtime.flush();

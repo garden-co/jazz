@@ -37,6 +37,7 @@ impl QueryManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<InsertHandle, QueryError> {
+        let _span = tracing::debug_span!("QM::insert", table).entered();
         let table_name = TableName::new(table);
         let table_schema = self
             .schema
@@ -102,6 +103,7 @@ impl QueryManager {
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
 
+        tracing::debug!(%object_id, branch = self.current_branch(), "row created");
         Ok(InsertHandle {
             row_id: object_id,
             row_commit_id,
@@ -359,6 +361,7 @@ impl QueryManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
+        let _span = tracing::debug_span!("QM::update", %id).entered();
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -507,6 +510,7 @@ impl QueryManager {
         id: ObjectId,
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
+        let _span = tracing::debug_span!("QM::delete", %id).entered();
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));

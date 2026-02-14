@@ -579,6 +579,7 @@ impl Storage for BfTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         let key = Self::index_entry_key(table, column, branch, value, row_id);
+        tracing::trace!(table, column, branch, %row_id, %key, "index_insert");
         // Sentinel byte — bf-tree requires non-empty values; existence is the signal
         self.tree_insert(&key, &[0x01])
     }
@@ -673,12 +674,24 @@ impl Storage for BfTreeStorage {
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
         let prefix = Self::index_prefix(table, column, branch);
+        tracing::trace!(table, column, branch, %prefix, "index_scan_all");
         match self.tree_scan_keys(&prefix) {
-            Ok(keys) => keys
-                .iter()
-                .filter_map(|k| parse_uuid_from_index_key(k))
-                .collect(),
-            Err(_) => Vec::new(),
+            Ok(keys) => {
+                let ids: Vec<ObjectId> = keys
+                    .iter()
+                    .filter_map(|k| parse_uuid_from_index_key(k))
+                    .collect();
+                tracing::trace!(
+                    prefix_matches = keys.len(),
+                    parsed_ids = ids.len(),
+                    "index_scan_all result"
+                );
+                ids
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "index_scan_all error");
+                Vec::new()
+            }
         }
     }
 

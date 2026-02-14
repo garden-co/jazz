@@ -39,6 +39,7 @@ export interface Runtime {
   addServer(): void;
   addClient(): string;
   getSchema(): any;
+  close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, message_json: string): void;
 }
@@ -515,6 +516,11 @@ export class JazzClient {
     // Close driver if it supports it
     if (this.context.driver?.close) {
       await this.context.driver.close();
+    }
+
+    // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
+    if (this.runtime.close) {
+      await this.runtime.close();
     }
   }
 

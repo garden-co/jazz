@@ -2,6 +2,7 @@ packages:
   - packages/*
   - examples/*
   - crates
+  - crates/jazz-lsm
   - crates/groove-wasm
   - crates/groove-napi
 
