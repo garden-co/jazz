@@ -8,7 +8,7 @@
  * { table, branches, disjuncts, order_by, offset, include_deleted, array_subqueries, joins }
  */
 
-import type { WasmSchema } from "../drivers/types.js";
+import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 
 /**
@@ -23,10 +23,31 @@ interface BuilderOutput {
   offset?: number;
 }
 
+function getColumnType(
+  schema: WasmSchema,
+  table: string,
+  column: string,
+): ColumnType["type"] | undefined {
+  // All tables have an implicit UUID primary key `id`.
+  if (column === "id") return "Uuid";
+  const tableSchema = schema.tables[table];
+  if (!tableSchema) return undefined;
+  const col = tableSchema.columns.find((c) => c.name === column);
+  return col?.column_type?.type;
+}
+
+/**
+ * Map public QueryBuilder columns to runtime/internal column names.
+ */
+function toRuntimeColumn(column: string): string {
+  // Runtime indices use "_id" for the implicit row id column.
+  return column === "id" ? "_id" : column;
+}
+
 /**
  * Translate a JavaScript value to WasmValue format.
  */
-function toWasmValue(value: unknown): object {
+function toWasmValue(value: unknown, columnType?: ColumnType["type"]): object {
   if (value === null || value === undefined) {
     return { Null: null };
   }
@@ -34,10 +55,16 @@ function toWasmValue(value: unknown): object {
     return { Boolean: value };
   }
   if (typeof value === "number") {
+    if (columnType === "Timestamp") {
+      return { Timestamp: value };
+    }
     // Use Integer for all numbers - WASM will handle type coercion
     return { Integer: value };
   }
   if (typeof value === "string") {
+    if (columnType === "Uuid") {
+      return { Uuid: value };
+    }
     return { Text: value };
   }
   throw new Error(`Unsupported value type: ${typeof value}`);
@@ -46,30 +73,38 @@ function toWasmValue(value: unknown): object {
 /**
  * Translate operator string to Condition enum variant.
  */
-function toCondition(cond: { column: string; op: string; value: unknown }): object {
-  const value = toWasmValue(cond.value);
+function toCondition(
+  cond: { column: string; op: string; value: unknown },
+  schema: WasmSchema,
+  table: string,
+): object {
+  const columnType = getColumnType(schema, table, cond.column);
+  const value = toWasmValue(cond.value, columnType);
+  const runtimeColumn = toRuntimeColumn(cond.column);
 
   switch (cond.op) {
     case "eq":
-      return { Eq: { column: cond.column, value } };
+      return { Eq: { column: runtimeColumn, value } };
     case "ne":
-      return { Ne: { column: cond.column, value } };
+      return { Ne: { column: runtimeColumn, value } };
     case "gt":
-      return { Gt: { column: cond.column, value } };
+      return { Gt: { column: runtimeColumn, value } };
     case "gte":
-      return { Ge: { column: cond.column, value } };
+      return { Ge: { column: runtimeColumn, value } };
     case "lt":
-      return { Lt: { column: cond.column, value } };
+      return { Lt: { column: runtimeColumn, value } };
     case "lte":
-      return { Le: { column: cond.column, value } };
+      return { Le: { column: runtimeColumn, value } };
     case "isNull":
-      return { IsNull: { column: cond.column } };
+      return { IsNull: { column: runtimeColumn } };
     case "contains":
-      return { Contains: { column: cond.column, value } };
+      return { Contains: { column: runtimeColumn, value } };
     case "in":
       // Handle IN operator with array of values
       if (Array.isArray(cond.value)) {
-        return { In: { column: cond.column, values: cond.value.map(toWasmValue) } };
+        return {
+          In: { column: runtimeColumn, values: cond.value.map((v) => toWasmValue(v, columnType)) },
+        };
       }
       throw new Error(`"in" operator requires an array value`);
     default:
@@ -160,7 +195,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     branches: [],
     disjuncts: [
       {
-        conditions: builder.conditions.map(toCondition),
+        conditions: builder.conditions.map((cond) => toCondition(cond, schema, builder.table)),
       },
     ],
     order_by: builder.orderBy.map(([col, dir]) => [
