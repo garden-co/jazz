@@ -36,13 +36,19 @@ fn init_tracing() {
 use groove::object::ObjectId;
 #[cfg(target_arch = "wasm32")]
 use groove::query_manager::encoding::decode_row;
+#[cfg(any(target_arch = "wasm32", test))]
+use groove::query_manager::graph_nodes::output::index_row_delta;
 use groove::query_manager::session::Session;
+#[cfg(any(target_arch = "wasm32", test))]
+use groove::query_manager::types::Row;
 #[cfg(target_arch = "wasm32")]
-use groove::query_manager::types::{Row, RowDescriptor};
+use groove::query_manager::types::RowDescriptor;
 use groove::query_manager::types::{Schema, Value};
-use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
+#[cfg(any(target_arch = "wasm32", test))]
+use groove::runtime_core::SubscriptionDelta;
 #[cfg(target_arch = "wasm32")]
-use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
+use groove::runtime_core::SubscriptionHandle;
+use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::OpfsBTreeStorage;
 use groove::sync_manager::{
@@ -63,6 +69,73 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
             tier
         ))),
     }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn build_wasm_delta_json<F>(
+    delta: &SubscriptionDelta,
+    current_ids: &mut Vec<ObjectId>,
+    mut row_to_json: F,
+) -> serde_json::Value
+where
+    F: FnMut(&Row) -> serde_json::Value,
+{
+    let indexed = index_row_delta(current_ids, &delta.delta);
+
+    let added = delta
+        .delta
+        .added
+        .iter()
+        .map(|row| {
+            let row_json = row_to_json(row);
+            let index = indexed.post_index_by_id.get(&row.id).copied().unwrap_or(0);
+            serde_json::json!({
+                "row": row_json,
+                "index": index
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let removed = delta
+        .delta
+        .removed
+        .iter()
+        .map(|row| {
+            let row_json = row_to_json(row);
+            let index = indexed.pre_index_by_id.get(&row.id).copied().unwrap_or(0);
+            serde_json::json!({
+                "row": row_json,
+                "index": index
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let updated = delta
+        .delta
+        .updated
+        .iter()
+        .map(|(old, new)| {
+            let old_json = row_to_json(old);
+            let new_json = row_to_json(new);
+            let old_index = indexed.pre_index_by_id.get(&old.id).copied().unwrap_or(0);
+            let new_index = indexed.post_index_by_id.get(&new.id).copied().unwrap_or(0);
+            serde_json::json!({
+                "old_row": old_json,
+                "new_row": new_json,
+                "old_index": old_index,
+                "new_index": new_index
+            })
+        })
+        .collect::<Vec<_>>();
+
+    *current_ids = indexed.post_ids;
+
+    serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "updated": updated,
+        "pending": false
+    })
 }
 
 // ============================================================================
@@ -583,6 +656,8 @@ impl WasmRuntime {
 
         let tier = settled_tier.as_deref().map(parse_tier).transpose()?;
 
+        let current_ids: Rc<RefCell<Vec<ObjectId>>> = Rc::new(RefCell::new(Vec::new()));
+
         let callback = move |delta: SubscriptionDelta| {
             let row_to_json = |row: &Row, descriptor: &RowDescriptor| -> serde_json::Value {
                 let values = decode_row(descriptor, &row.data)
@@ -595,18 +670,9 @@ impl WasmRuntime {
             };
 
             let descriptor = &delta.descriptor;
-
-            let delta_json = serde_json::json!({
-                "added": delta.delta.added.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "removed": delta.delta.removed.iter()
-                    .map(|row| row_to_json(row, descriptor))
-                    .collect::<Vec<_>>(),
-                "updated": delta.delta.updated.iter()
-                    .map(|(old, new)| [row_to_json(old, descriptor), row_to_json(new, descriptor)])
-                    .collect::<Vec<_>>()
-            });
+            let mut ids = current_ids.borrow_mut();
+            let delta_json =
+                build_wasm_delta_json(&delta, &mut ids, |row| row_to_json(row, descriptor));
 
             if let Ok(json_str) = serde_json::to_string(&delta_json) {
                 let _ = on_update.call1(&JsValue::NULL, &JsValue::from_str(&json_str));
