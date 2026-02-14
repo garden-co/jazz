@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::BTreeError;
 use crate::file::SyncFile;
@@ -75,7 +75,7 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
-    pages: BTreeMap<PageId, Page>,
+    pages: HashMap<PageId, Page>,
     dirty_pages: HashSet<PageId>,
     free_pages: Vec<PageId>,
     free_set: HashSet<PageId>,
@@ -111,7 +111,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             active,
             root_page_id: None,
             total_pages: 2,
-            pages: BTreeMap::new(),
+            pages: HashMap::new(),
             dirty_pages: HashSet::new(),
             free_pages: Vec::new(),
             free_set: HashSet::new(),
