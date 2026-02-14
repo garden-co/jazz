@@ -467,14 +467,6 @@ impl QueryManager {
         &self.schema
     }
 
-    /// Test accessor for subscriptions (internal testing only).
-    #[cfg(test)]
-    pub(crate) fn test_subscriptions(
-        &self,
-    ) -> &HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
-        &self.subscriptions
-    }
-
     /// Get subscription results as decoded rows with ObjectIds (for testing).
     /// Process pending changes and settle all subscription graphs.
     ///

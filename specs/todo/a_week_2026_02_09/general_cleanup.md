@@ -60,55 +60,24 @@ Done. `new()` now delegates to `with_object_manager(ObjectManager::new())`.
 - Direct targeted Vitest runs still hard-fail if artifacts are missing, with an explicit instruction to run `pnpm --filter @jazz/rust build:crates` first.
 - For local focused runs, do a one-time `pnpm build` (or the crate-only build above) before `pnpm --filter jazz-ts exec vitest ...`.
 
-**Weak assertions** — direct `assert!(...is_ok())` / `assert!(...is_some())` patterns in `crates/groove/src/*tests*` were removed in recent passes. Follow-up audit should still look for equivalent weak forms (`matches!(...)`, `len()`-only checks, etc.).
+**Current status (after #7 hardening passes):**
 
-**Implementation-coupled tests** — ~20 tests use internal APIs (`test_get_row_if_loaded`, `is_indexed`, `test_subscriptions`) instead of observable query results. These will break on internal refactors even when external behavior is unchanged.
+- Direct weak forms (`assert!(...is_ok())` / `assert!(...is_some())`) were removed from target suites, and many assertions were upgraded from shape-only to identity/content checks.
+- QueryManager tests no longer rely on internal test hooks for core CRUD coverage; `test_get_row_if_loaded` and `test_subscriptions` usage was removed, and the corresponding test-only accessors were deleted.
+- SchemaManager integration tests were moved off manual object/index mutation. The suite now uses `ingest_remote_row(...)` and real `insert(...)` / `outbox -> inbox` flows instead of `create_with_id(...) + add_commit(...) + index_insert(...)`.
+- Join-path edge coverage was expanded:
+  - join fails without `ON`
+  - join fails for invalid columns
+  - join fails for circular/self join chains
+- Runtime behavior edge coverage was expanded:
+  - concurrent inserts in `RuntimeCore`
+  - non-cascading delete behavior across related tables
+- The previously documented synced-update reactivity gap was closed in tests (`synced_update_emits_subscription_delta`), so this is no longer treated as an accepted gap.
 
-Additional examples from this pass:
+**Remaining follow-up audit items:**
 
-- `schema_manager/integration_tests.rs:1898–1905` “E2E” coverage checks `row_is_indexed_on_branch(...)` (internal index state) instead of asserting query-visible behavior.
-
-**Boundary-bypassing setup in “integration” tests** — tests manually build low-level object/index state that production code normally constructs:
-
-- `schema_manager/integration_tests.rs:564–593` uses `object_manager.create_with_id(...)`, `add_commit(...)`, and direct `index_insert(...)` with a comment that this bypasses real `handle_object_update` flow.
-- `schema_manager/integration_tests.rs:1490–1493` explicitly skips A↔B sync pumping and manually exercises transform logic instead of full message-path behavior.
-
-**Under-specified assertions** — still present in parts of the suite; continue converting shape-only checks into content/identity assertions.
-
-**Known behavior gaps currently accepted by tests**:
-
-- `manager_tests.rs:681–684` documents that synced content updates do not emit subscription deltas yet (“not wired into settle flow”), so test coverage validates query visibility but not subscription reactivity.
-
-**Low-hanging fixes completed in this pass**:
-
-- `sync_manager/tests.rs:1475+` (`regular_object_still_syncs_to_server`) now validates destination, object id, branch, commit id, and metadata contents (not only outbox length).
-- `manager_tests.rs:2676+` (`join_produces_combined_tuples`) now validates base-row identity and verifies payload includes both base-table and joined-table text values.
-- `rebac_tests.rs:624+` (`rebac_exists_clause_denies_non_matching_insert`) now asserts a single deterministic postcondition (`get_tip_ids(..., "main")` is an error) instead of allowing multiple outcomes.
-- `schema_manager/integration_tests.rs:e2e_catalogue_sync_with_data_query` now uses real `outbox -> inbox` row sync from client A to client B instead of manually calling the row transformer.
-- `schema_manager/integration_tests.rs:e2e_two_clients_server_schema_sync` now asserts query-visible behavior by verifying the server emits `ObjectUpdated` to subscribed client B, replacing the internal `row_is_indexed_on_branch(...)` check.
-- `manager_tests.rs:217+` (`insert_returns_handle_with_commit_id`) now asserts the loaded row content matches inserted values, not just presence.
-- `manager_tests.rs:276+` (`can_register_query_immediately`) now unwraps subscription registration and asserts subscription tracking state.
-- `manager_tests.rs:340+` (`multiple_inserts_all_visible_in_query`) now verifies all inserted row identities and values, not just `is_some()`.
-- `manager_tests.rs:2287+` (`include_deleted_query_returns_soft_deleted_rows`) now uses a deterministic `expect(...)` path for the soft-deleted row assertion.
-- `manager_tests.rs:2648+` (`join_subscription_marks_dirty_for_joined_table`) now asserts observable post-insert subscription delta output instead of mutating/inspecting internal dirty-node state.
-- `manager_tests.rs:2750+` (`join_filter_on_joined_table_column`) now validates matched row identity and joined payload contents (Bob + Learning Rust), not just row count.
-- `manager_tests.rs:4328+` (`index_key_includes_branch`) now verifies branch isolation via query-visible results instead of internal index-state checks.
-- `schema_manager/integration_tests.rs:336+` (`context_validation`) now asserts live hash membership and lens-path reachability before final context validation.
-- `rebac_tests.rs:230+` (`rebac_insert_denied_by_simple_policy`) now uses deterministic `expect(...)` for the error response target before matching payload shape.
-- `schema_manager/integration_tests.rs:478+` (`query_graph_compile_with_schema_context`) now uses `expect(...)` for graph compilation success instead of a separate `is_some()` assertion.
-- `sync_manager/tests.rs:52+` (`add_server_receives_existing_objects`) now validates metadata object id and empty metadata map for first-sync payloads.
-- `sync_manager/tests.rs:1170+` (`metadata_sent_only_once_per_destination`) now validates first-sync metadata id and key/value content.
-- `sync_manager/tests.rs:1575+` (`set_query_scope_stores_session`) now unwraps stored session and asserts `user_id` directly.
-- `sync_manager/tests.rs:1606+` (`send_query_subscription_includes_session`) now unwraps payload session and asserts `user_id` directly.
-- `sync_manager/tests.rs:1788+` (`persistence_ack_direct`) now unwraps commit presence before checking tier ack state.
-- Removed `QueryManager::test_subscriptions_mut()` test-only accessor after converting join reactivity coverage to observable behavior assertions.
-
-**Missing edge cases:**
-
-- No concurrency tests for runtime_core
-- No cascade delete tests
-- No tests for invalid join conditions or circular joins
-- Schema migration tests only cover happy paths
+- Continue scanning for weak equivalents (`matches!(...)` with broad patterns, `len()`-only assertions without content checks) in older tests not yet touched by this pass.
+- Add a few negative-path schema/catalogue cases (malformed catalogue payloads, incomplete lens chains under sync pressure) to complement the current happy-path-heavy migration E2E coverage.
 
 ## 8. Large Files (LOW — awareness)
 
