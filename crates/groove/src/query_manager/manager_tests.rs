@@ -213,8 +213,12 @@ fn insert_returns_handle_with_commit_id() {
         )
         .unwrap();
 
-    // Handle should have the row ID
-    assert!(qm.test_get_row_if_loaded(handle.row_id).is_some());
+    // Handle should reference the inserted row and preserve row content.
+    let row = qm
+        .test_get_row_if_loaded(handle.row_id)
+        .expect("Inserted row should be loaded");
+    assert_eq!(row[0], Value::Text("Alice".into()));
+    assert_eq!(row[1], Value::Integer(100));
 
     // Handle should have a valid row commit ID
     assert!(handle.row_commit_id.0 != [0; 32]);
@@ -269,8 +273,13 @@ fn can_register_query_immediately() {
 
     // Can register a query subscription immediately
     let query = qm.query("users").build();
-    let sub_id = qm.subscribe(query);
-    assert!(sub_id.is_ok());
+    let sub_id = qm
+        .subscribe(query)
+        .expect("Registering a simple query should succeed");
+    assert!(
+        qm.test_subscriptions().contains_key(&sub_id),
+        "Subscription should be tracked after registration"
+    );
 }
 
 #[test]
@@ -330,10 +339,22 @@ fn multiple_inserts_all_visible_in_query() {
         )
         .unwrap();
 
-    // All rows visible via get() immediately
-    assert!(qm.test_get_row_if_loaded(h1.row_id).is_some());
-    assert!(qm.test_get_row_if_loaded(h2.row_id).is_some());
-    assert!(qm.test_get_row_if_loaded(h3.row_id).is_some());
+    // All rows visible via get() immediately with expected values.
+    let r1 = qm
+        .test_get_row_if_loaded(h1.row_id)
+        .expect("Alice row should be loaded");
+    let r2 = qm
+        .test_get_row_if_loaded(h2.row_id)
+        .expect("Bob row should be loaded");
+    let r3 = qm
+        .test_get_row_if_loaded(h3.row_id)
+        .expect("Charlie row should be loaded");
+    assert_eq!(r1[0], Value::Text("Alice".into()));
+    assert_eq!(r2[0], Value::Text("Bob".into()));
+    assert_eq!(r3[0], Value::Text("Charlie".into()));
+    assert_eq!(r1[1], Value::Integer(100));
+    assert_eq!(r2[1], Value::Integer(50));
+    assert_eq!(r3[1], Value::Integer(75));
 
     // Query returns all rows
     let query = qm.query("users").build();
@@ -2277,9 +2298,9 @@ fn include_deleted_query_returns_soft_deleted_rows() {
     // Verify Alice's data is preserved
     let alice_result = results
         .iter()
-        .find(|r| r.1[0] == Value::Text("Alice".into()));
-    assert!(alice_result.is_some());
-    assert_eq!(alice_result.unwrap().1[1], Value::Integer(100));
+        .find(|r| r.1[0] == Value::Text("Alice".into()))
+        .expect("include_deleted query should include the soft-deleted Alice row");
+    assert_eq!(alice_result.1[1], Value::Integer(100));
 
     // Verify that Alice is in the _id_deleted index
     assert!(qm.row_is_deleted(&storage, "users", handle1.row_id));
@@ -2605,17 +2626,21 @@ fn multi_join_query_compiles() {
 
 #[test]
 fn join_subscription_marks_dirty_for_joined_table() {
-    // This test verifies that inserts into a JOINED table (not the base table)
-    // mark the join subscription as dirty. This is a regression test for a bug
-    // where only the base table would trigger reactivity.
-    //
-    // We test this by checking that the subscription's index scan nodes for the
-    // joined table get marked dirty when we insert into that table.
+    // Inserts into a JOINED table should trigger observable updates for join subscriptions.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
-    // Subscribe to a join query: users JOIN posts ON users.id = posts.author_id
+    // Seed base table row so a later post insert can produce a join match.
+    let user_handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .unwrap();
+
+    // Subscribe to a join query: users JOIN posts ON users.id = posts.author_id.
     let query = qm
         .query("users")
         .join("posts")
@@ -2623,35 +2648,11 @@ fn join_subscription_marks_dirty_for_joined_table() {
         .build();
     let sub_id = qm.subscribe(query).unwrap();
 
-    // Process once to settle initial state
+    // Process once to settle initial state and clear bootstrap updates.
     qm.process(&mut storage);
     let _ = qm.take_updates();
 
-    // Verify the subscription has index scan nodes for BOTH tables
-    let subscription = qm.test_subscriptions().get(&sub_id).unwrap();
-    let tables_in_subscription: Vec<&str> = subscription
-        .graph
-        .index_scan_nodes
-        .iter()
-        .map(|(_, table, _)| table.as_str())
-        .collect();
-    assert!(
-        tables_in_subscription.contains(&"users"),
-        "Subscription should have index scan for users"
-    );
-    assert!(
-        tables_in_subscription.contains(&"posts"),
-        "Subscription should have index scan for posts"
-    );
-
-    // Clear dirty nodes
-    qm.test_subscriptions_mut()
-        .get_mut(&sub_id)
-        .unwrap()
-        .graph
-        .clear_dirty();
-
-    // Insert into the JOINED table (posts), not the base table (users)
+    // Insert into the JOINED table (posts), not the base table (users).
     qm.insert(
         &mut storage,
         "posts",
@@ -2663,12 +2664,35 @@ fn join_subscription_marks_dirty_for_joined_table() {
     )
     .unwrap();
 
-    // BUG: mark_subscriptions_dirty() only checks subscription.graph.table.0 == "posts"
-    // but the base table is "users", so the subscription won't be marked dirty.
-    let subscription = qm.test_subscriptions().get(&sub_id).unwrap();
+    qm.process(&mut storage);
+    let updates = qm.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Join subscription should emit an update after joined-table insert");
+    assert_eq!(
+        delta.added.len(),
+        1,
+        "Joined insert should add one joined row"
+    );
+
+    let row = &delta.added[0];
+    assert_eq!(
+        row.id, user_handle.row_id,
+        "Join output should still be keyed by base-table row id"
+    );
     assert!(
-        subscription.graph.has_dirty_nodes(),
-        "Join subscription should be marked dirty when joined table is modified"
+        row.data
+            .windows("Alice".len())
+            .any(|window| window == "Alice".as_bytes()),
+        "Joined row payload should contain base-table value"
+    );
+    assert!(
+        row.data
+            .windows("Test Post".len())
+            .any(|window| window == "Test Post".as_bytes()),
+        "Joined row payload should contain joined-table value"
     );
 }
 
@@ -2751,7 +2775,6 @@ fn join_produces_combined_tuples() {
 #[test]
 fn join_filter_on_joined_table_column() {
     // Test filtering on a column from the JOINED table (not the base table).
-    // FilterNode now uses TupleDescriptor to resolve column indices to correct tuple elements.
     let sync_manager = SyncManager::new();
     let schema = join_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
@@ -2763,14 +2786,13 @@ fn join_filter_on_joined_table_column() {
         &[Value::Integer(1), Value::Text("Alice".into())],
     )
     .unwrap();
-    qm.insert(
-        &mut storage,
-        "users",
-        &[Value::Integer(2), Value::Text("Bob".into())],
-    )
-    .unwrap();
-
-    // Insert posts - one should match filter, one should not
+    let bob_handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(2), Value::Text("Bob".into())],
+        )
+        .unwrap();
     qm.insert(
         &mut storage,
         "posts",
@@ -2793,14 +2815,11 @@ fn join_filter_on_joined_table_column() {
     .unwrap();
 
     // Join with filter on posts.title
-    // TODO: This filter won't work correctly - it will try to match "Rust"
-    // against users.id column because evaluate_tuple only looks at element[0]
     let query = qm
         .query("users")
         .join("posts")
         .on("id", "author_id")
-        // This filter SHOULD match posts.title containing "Rust"
-        // but currently it compares against users table
+        // This filter should match only the joined post title.
         .filter_eq("title", Value::Text("Learning Rust".into()))
         .build();
 
@@ -2818,6 +2837,23 @@ fn join_filter_on_joined_table_column() {
         delta.added.len(),
         1,
         "Filter on joined table column should work"
+    );
+    let row = &delta.added[0];
+    assert_eq!(
+        row.id, bob_handle.row_id,
+        "Only Bob's joined row should match Learning Rust"
+    );
+    assert!(
+        row.data
+            .windows("Bob".len())
+            .any(|window| window == "Bob".as_bytes()),
+        "Joined row should include Bob's name"
+    );
+    assert!(
+        row.data
+            .windows("Learning Rust".len())
+            .any(|window| window == "Learning Rust".as_bytes()),
+        "Joined row should include the matching post title"
     );
 }
 
@@ -4287,34 +4323,38 @@ fn table_without_policy_returns_all_rows() {
 
 #[test]
 fn index_key_includes_branch() {
-    // Verify that indices are keyed by (table, column, branch)
-    // We test this by inserting a row and then querying with different branches.
-    // The query should only find the row on the branch it was inserted on.
+    // Verify branch isolation through observable query results.
+    // A row inserted on the current branch should not appear on another branch.
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
-    // Insert on the schema's branch
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
+    // Insert on the schema's branch.
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
 
-    // Verify the row is indexed on the schema's branch
     let branch = get_branch(&qm);
-    assert!(
-        qm.row_is_indexed_on_branch(&storage, "users", &branch, handle.row_id),
-        "Should have row indexed on schema branch"
+    let current_branch_query = qm.query("users").branch(&branch).build();
+    let current_branch_results =
+        execute_query(&mut qm, &mut storage, current_branch_query).unwrap();
+    assert_eq!(
+        current_branch_results.len(),
+        1,
+        "Should find row on current branch"
     );
+    assert_eq!(current_branch_results[0].1[0], Value::Text("Alice".into()));
 
-    // Verify the row is NOT indexed on a different branch
+    // Verify the row is NOT visible on a different branch.
+    let other_branch_query = qm.query("users").branch("some-other-branch").build();
+    let other_branch_results = execute_query(&mut qm, &mut storage, other_branch_query).unwrap();
     assert!(
-        !qm.row_is_indexed_on_branch(&storage, "users", "some-other-branch", handle.row_id),
-        "Should NOT have row indexed on different branch"
+        other_branch_results.is_empty(),
+        "Should NOT find row on a different branch"
     );
 }
 

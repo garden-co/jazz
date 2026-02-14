@@ -232,11 +232,10 @@ fn rebac_insert_denied_by_simple_policy() {
     let outbox = qm.sync_manager_mut().take_outbox();
     let error = outbox
         .iter()
-        .find(|e| matches!(e.destination, Destination::Client(id) if id == client_id));
+        .find(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .expect("Should receive error response");
 
-    assert!(error.is_some(), "Should receive error response");
-
-    match &error.unwrap().payload {
+    match &error.payload {
         SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
             assert!(
                 reason.contains("denied by policy"),
