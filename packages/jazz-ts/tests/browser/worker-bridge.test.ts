@@ -22,7 +22,11 @@ const schema: WasmSchema = {
       columns: [
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
       ],
+    },
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
     },
   },
 };
@@ -31,22 +35,43 @@ interface Todo {
   id: string;
   title: string;
   done: boolean;
+  project?: string;
 }
 
 interface TodoInit {
   title: string;
   done: boolean;
+  project?: string;
+}
+
+interface Project {
+  id: string;
+  name: string;
+}
+
+interface ProjectInit {
+  name: string;
 }
 
 const todos: TableProxy<Todo, TodoInit> = {
   _table: "todos",
   _schema: schema,
+  _rowType: {} as Todo,
+  _initType: {} as TodoInit,
+};
+
+const projects: TableProxy<Project, ProjectInit> = {
+  _table: "projects",
+  _schema: schema,
+  _rowType: {} as Project,
+  _initType: {} as ProjectInit,
 };
 
 /** QueryBuilder that selects all todos. */
 const allTodos: QueryBuilder<Todo> = {
   _table: "todos",
   _schema: schema,
+  _rowType: {} as Todo,
   _build() {
     return JSON.stringify({
       table: "todos",
@@ -56,6 +81,47 @@ const allTodos: QueryBuilder<Todo> = {
     });
   },
 };
+
+/** QueryBuilder that selects all todos by project. */
+function todosByProject(projectId: string): QueryBuilder<Todo> {
+  return {
+    _table: "todos",
+    _schema: schema,
+    _rowType: {} as Todo,
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "project", op: "eq", value: projectId }],
+        includes: {},
+        orderBy: [],
+      });
+    },
+  };
+}
+
+function projectsWithTodos(projectId: string): QueryBuilder<Project> {
+  return {
+    _table: "projects",
+    _schema: schema,
+    _rowType: {} as Project,
+    _build() {
+      return JSON.stringify({
+        table: "projects",
+        conditions: [
+          {
+            column: "id",
+            op: "eq",
+            value: projectId,
+          },
+        ],
+        includes: {
+          todosViaProject: true,
+        },
+        orderBy: [],
+      });
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,6 +198,18 @@ describe("Worker Bridge with OPFS", () => {
 
     const titles = results.map((r) => r.title).sort();
     expect(titles).toEqual(["Task A", "Task B", "Task C"]);
+  });
+
+  it("queries by id", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-id") }));
+
+    const id = db.insert(projects, { name: "Project A" });
+
+    const results = await db.all(projectsWithTodos(id));
+    expect(results.length).toBe(1);
+
+    expect(results[0].id).toBe(id);
+    expect(results[0].name).toBe("Project A");
   });
 
   // -------------------------------------------------------------------------
@@ -262,10 +340,38 @@ describe("Worker Bridge with OPFS", () => {
       received.push([...delta.all]);
     });
 
-    // Give subscription time to register
-    await new Promise((r) => setTimeout(r, 100));
-
     db.insert(todos, { title: "Observed", done: false });
+
+    // Wait for subscription to fire
+    await waitForCondition(
+      async () => received.some((r) => r.length > 0),
+      3000,
+      "Subscription should fire after insert",
+    );
+
+    const last = received[received.length - 1];
+    expect(last.length).toBe(1);
+    expect(last[0].title).toBe("Observed");
+
+    unsub();
+  });
+
+  it("subscriptions fire when using queries with filters", async () => {
+    const db = track(await createDb({ appId: "test-app", dbName: uniqueDbName("subscribe") }));
+
+    const received: Todo[][] = [];
+
+    const projectId = "00000000-0000-0000-0000-000000000123";
+    const unsub = db.subscribeAll(
+      todosByProject(projectId) as QueryBuilder<Todo & { id: string }>,
+      (delta) => {
+        received.push([...delta.all]);
+      },
+    );
+
+    db.insert(todos, { title: "Observed", done: false, project: projectId });
+    const anotherProjectId = "00000000-0000-0000-0000-000000000456";
+    db.insert(todos, { title: "Not observed", done: false, project: anotherProjectId });
 
     // Wait for subscription to fire
     await waitForCondition(

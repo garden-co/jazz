@@ -1,6 +1,6 @@
 # Codegen Relations Demo — TODO (MVP)
 
-The example schema (`examples/todo-client-localfirst-ts/schema/current.ts`) doesn't use `col.ref()`. The generated `app.ts` therefore lacks relation types, Include types, and reverse relations. Update the example to show:
+The example schema (`examples/todo-client-localfirst-ts/schema/current.ts`) doesn't use `col.ref()`. The generated `app.ts` therefore lacks relation types. Include types, and reverse relations. Update the example to show:
 
 - Schema with `col.ref()` (self-referential + cross-table)
 - Generated code with Include/Relations types
