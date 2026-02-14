@@ -96,11 +96,14 @@ These files are getting unwieldy but don't need immediate action:
 
 Resolved by removing the TypeScript-side `blake3` dependency and using Rust hashing via runtime bindings.
 
-## 10. Examples Lose Data on Reload (MEDIUM)
+## 10. ~~Examples Lose Data on Reload~~ ✅
 
-The example apps (e.g., `todo-client-localfirst-ts`) lose all data when the page reloads, despite browser persistence tests passing. Previously suspected root cause was the hardcoded schema hash/client ID placeholders in item 3.
+Re-verified OPFS persistence behavior in both example apps after the schema hash/client ID fixes:
 
-Schema hash and client ID placeholders are now fixed. Re-verify reload persistence in examples and close this item if behavior is now stable.
+- `todo-client-localfirst-ts` browser E2E suite passes, including `persists todos across app destroy and remount (OPFS)`.
+- `todo-client-localfirst-react` browser E2E persistence case passes: `persists todos across app unmount and remount (OPFS)`.
+
+No data-loss-on-reload behavior reproduced in current example harness.
 
 ## 11. Worker Bridge Error Swallowing (LOW)
 
