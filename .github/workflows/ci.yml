@@ -14,6 +14,9 @@ jobs:
   validate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-noble
+      options: --user 1001
 
     steps:
       - uses: actions/checkout@v6
@@ -42,10 +45,4 @@ jobs:
       - run: pnpm oxlint .
       - run: pnpm build
       - run: cargo clippy --workspace -- -D warnings
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: playwright-${{ runner.os }}-
-      - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test
