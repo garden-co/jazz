@@ -76,6 +76,7 @@ pub struct OpfsBTree<F: SyncFile> {
     root_page_id: Option<PageId>,
     total_pages: u64,
     pages: BTreeMap<PageId, Page>,
+    dirty_pages: HashSet<PageId>,
     free_pages: Vec<PageId>,
     free_set: HashSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
@@ -111,6 +112,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             root_page_id: None,
             total_pages: 2,
             pages: BTreeMap::new(),
+            dirty_pages: HashSet::new(),
             free_pages: Vec::new(),
             free_set: HashSet::new(),
             freelist_meta_pages: Vec::new(),
@@ -175,7 +177,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 next: None,
             };
             ensure_page_fits(&leaf, self.options.page_size, "initial leaf")?;
-            self.pages.insert(root_page_id, leaf);
+            self.set_dirty_page(root_page_id, leaf);
             self.root_page_id = Some(root_page_id);
             return Ok(());
         }
@@ -188,7 +190,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 children: vec![root_page_id, split.right_page_id],
             };
             ensure_page_fits(&new_root, self.options.page_size, "new root")?;
-            self.pages.insert(new_root_page_id, new_root);
+            self.set_dirty_page(new_root_page_id, new_root);
             self.root_page_id = Some(new_root_page_id);
         }
 
@@ -218,7 +220,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         if let Page::Leaf { entries, .. } = root_page
             && entries.is_empty()
         {
-            self.pages.remove(&root_page_id);
+            self.remove_page(root_page_id);
             self.add_free_page(root_page_id);
             self.root_page_id = None;
         }
@@ -266,14 +268,18 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
+        let mut dirty_page_ids: Vec<PageId> = self.dirty_pages.iter().copied().collect();
+        dirty_page_ids.sort_unstable();
         let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
-        self.write_pages_to_disk(&freelist_pages)?;
+        self.write_pages_to_disk(&dirty_page_ids, &freelist_pages)?;
         self.file.flush()?;
         self.checkpoint_superblock(
             self.root_page_id.unwrap_or(0),
             freelist_head_page_id,
             self.total_pages,
-        )
+        )?;
+        self.dirty_pages.clear();
+        Ok(())
     }
 
     pub fn checkpoint_state(&self) -> CheckpointState {
@@ -316,7 +322,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     next,
                 };
                 if page_fits(&candidate, self.options.page_size)? {
-                    self.pages.insert(page_id, candidate);
+                    self.set_dirty_page(page_id, candidate);
                     return Ok(None);
                 }
 
@@ -346,8 +352,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ensure_page_fits(&left_page, self.options.page_size, "left leaf split")?;
                 ensure_page_fits(&right_page, self.options.page_size, "right leaf split")?;
 
-                self.pages.insert(page_id, left_page);
-                self.pages.insert(right_page_id, right_page);
+                self.set_dirty_page(page_id, left_page);
+                self.set_dirty_page(right_page_id, right_page);
                 Ok(Some(SplitResult {
                     separator: split_key,
                     right_page_id,
@@ -378,7 +384,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     children: children.clone(),
                 };
                 if page_fits(&candidate, self.options.page_size)? {
-                    self.pages.insert(page_id, candidate);
+                    self.set_dirty_page(page_id, candidate);
                     return Ok(None);
                 }
 
@@ -405,8 +411,8 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ensure_page_fits(&right_page, self.options.page_size, "right internal split")?;
 
                 let right_page_id = self.alloc_page();
-                self.pages.insert(page_id, left_page);
-                self.pages.insert(right_page_id, right_page);
+                self.set_dirty_page(page_id, left_page);
+                self.set_dirty_page(right_page_id, right_page);
 
                 Ok(Some(SplitResult {
                     separator: promoted,
@@ -437,7 +443,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 };
                 let (_, value) = entries.remove(idx);
                 self.free_value_cell(value)?;
-                self.pages.insert(page_id, Page::Leaf { entries, next });
+                self.set_dirty_page(page_id, Page::Leaf { entries, next });
                 Ok(true)
             }
             Page::Internal { keys, children } => {
@@ -525,7 +531,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
-            let page = self.pages.remove(&current).ok_or_else(|| {
+            let page = self.remove_page(current).ok_or_else(|| {
                 BTreeError::Corrupt(format!("overflow page {} missing while freeing", current))
             })?;
             let (_, next) = expect_overflow(&page)?;
@@ -566,8 +572,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             remaining = &remaining[consume..];
 
             let next = page_ids.get(idx + 1).copied();
-            self.pages
-                .insert(*page_id, Page::Overflow { data: chunk, next });
+            self.set_dirty_page(*page_id, Page::Overflow { data: chunk, next });
         }
 
         let head_page_id = *page_ids
@@ -662,7 +667,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
         }
 
-        self.pages.insert(page_id, page);
+        self.cache_loaded_page(page_id, page);
 
         for child in children {
             self.load_tree_recursive(child, visited)?;
@@ -704,7 +709,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     )));
                 }
             };
-            self.pages.insert(current, page);
+            self.cache_loaded_page(current, page);
             current = next.unwrap_or(0);
         }
 
@@ -751,7 +756,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         decode_page(&raw, self.options.page_size)
     }
 
-    fn write_pages_to_disk(&mut self, freelist_pages: &[(PageId, Page)]) -> Result<(), BTreeError> {
+    fn write_pages_to_disk(
+        &mut self,
+        dirty_page_ids: &[PageId],
+        freelist_pages: &[(PageId, Page)],
+    ) -> Result<(), BTreeError> {
         let mut max_page_id = 1u64;
         if let Some(max_live) = self.pages.keys().max().copied() {
             max_page_id = max_page_id.max(max_live);
@@ -773,8 +782,10 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.file.truncate(required_len)?;
         }
 
-        for (page_id, page) in &self.pages {
-            self.write_single_page(*page_id, page)?;
+        for page_id in dirty_page_ids {
+            if let Some(page) = self.pages.get(page_id) {
+                self.write_single_page(*page_id, page)?;
+            }
         }
         for (page_id, page) in freelist_pages {
             self.write_single_page(*page_id, page)?;
@@ -802,6 +813,20 @@ impl<F: SyncFile> OpfsBTree<F> {
             .checked_mul(self.options.page_size as u64)
             .ok_or_else(|| BTreeError::Io("page write offset overflow".to_string()))?;
         self.file.write_all_at(offset, &raw)
+    }
+
+    fn set_dirty_page(&mut self, page_id: PageId, page: Page) {
+        self.pages.insert(page_id, page);
+        self.dirty_pages.insert(page_id);
+    }
+
+    fn remove_page(&mut self, page_id: PageId) -> Option<Page> {
+        self.dirty_pages.remove(&page_id);
+        self.pages.remove(&page_id)
+    }
+
+    fn cache_loaded_page(&mut self, page_id: PageId, page: Page) {
+        self.pages.insert(page_id, page);
     }
 
     fn build_freelist_pages(&mut self) -> Result<(PageId, Vec<(PageId, Page)>), BTreeError> {
@@ -1037,6 +1062,9 @@ fn write_slot<F: SyncFile>(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
     use crate::file::{MemoryFile, SyncFile};
 
@@ -1045,6 +1073,53 @@ mod tests {
             page_size: 4 * 1024,
             cache_bytes: 4 * 1024 * 8,
             overflow_threshold: 128,
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CountingFile {
+        inner: MemoryFile,
+        writes: Rc<RefCell<Vec<(u64, usize)>>>,
+    }
+
+    impl CountingFile {
+        fn new() -> Self {
+            Self {
+                inner: MemoryFile::new(),
+                writes: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        fn data_page_write_count(&self, page_size: usize) -> usize {
+            let min_data_offset = (2 * page_size) as u64;
+            self.writes
+                .borrow()
+                .iter()
+                .filter(|(offset, _)| *offset >= min_data_offset)
+                .count()
+        }
+    }
+
+    impl SyncFile for CountingFile {
+        fn len(&self) -> Result<u64, BTreeError> {
+            self.inner.len()
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+            self.writes.borrow_mut().push((offset, buf.len()));
+            self.inner.write_all_at(offset, buf)
+        }
+
+        fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+            self.inner.truncate(len)
+        }
+
+        fn flush(&self) -> Result<(), BTreeError> {
+            self.inner.flush()
         }
     }
 
@@ -1234,6 +1309,27 @@ mod tests {
         assert!(state.generation >= 2);
         assert!(state.root_page_id >= 2);
         assert!(state.total_pages > 2);
+    }
+
+    #[test]
+    fn checkpoint_writes_only_dirty_data_pages() {
+        let options = small_options();
+        let file = CountingFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        tree.put(b"k", b"v1").expect("put v1");
+        tree.checkpoint().expect("checkpoint v1");
+        let writes_after_v1 = file.data_page_write_count(options.page_size);
+        assert_eq!(writes_after_v1, 1);
+
+        tree.checkpoint().expect("checkpoint without changes");
+        let writes_after_noop = file.data_page_write_count(options.page_size);
+        assert_eq!(writes_after_noop, writes_after_v1);
+
+        tree.put(b"k", b"v2").expect("put v2");
+        tree.checkpoint().expect("checkpoint v2");
+        let writes_after_v2 = file.data_page_write_count(options.page_size);
+        assert_eq!(writes_after_v2, writes_after_noop + 1);
     }
 
     #[test]

@@ -565,7 +565,7 @@ impl Storage for OpfsBTreeStorage {
     }
 
     fn flush_wal(&self) {
-        // opfs-btree has no separate WAL flush API yet; use full checkpoint.
+        // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
         self.flush();
     }
 }
