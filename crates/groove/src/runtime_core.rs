@@ -1058,6 +1058,42 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_core_concurrent_inserts_from_multiple_callers() {
+        use std::thread;
+
+        let core = Arc::new(Mutex::new(create_test_runtime()));
+        let workers = 8;
+        let mut handles = Vec::new();
+
+        for i in 0..workers {
+            let core_ref = Arc::clone(&core);
+            handles.push(thread::spawn(move || {
+                let mut locked = core_ref.lock().unwrap();
+                let values = vec![
+                    Value::Uuid(ObjectId::new()),
+                    Value::Text(format!("User-{i}")),
+                ];
+                locked.insert("users", values, None).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("worker thread should complete");
+        }
+
+        let mut locked = core.lock().unwrap();
+        locked.immediate_tick();
+        locked.batched_tick();
+
+        let results = execute_query(&mut locked, Query::new("users"));
+        assert_eq!(
+            results.len(),
+            workers,
+            "All concurrent inserts should be visible"
+        );
+    }
+
+    #[test]
     fn test_runtime_core_update_delete() {
         let mut core = create_test_runtime();
 
