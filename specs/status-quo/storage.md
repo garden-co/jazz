@@ -23,9 +23,15 @@ HashMap-backed, used for tests and the browser main thread (acts as cache of wor
 
 > `crates/groove/src/storage/mod.rs:200+`
 
-### BfTreeStorage
+### SurrealKvStorage (native)
 
-bf-tree is our own B-tree key-value store, purpose-built for this use case. It supports both native (file-backed) and WASM (OPFS-backed) storage.
+Native server/CLI/client processes use SurrealKV for durable local storage.
+
+> `crates/groove/src/storage/surrealkv.rs`
+
+### OpfsBTreeStorage (browser worker)
+
+Browser workers use `opfs-btree` with `FileSystemSyncAccessHandle` for synchronous OPFS durability.
 
 The key insight is using composite keys so that B-tree range scans naturally give us index lookups:
 
@@ -33,10 +39,10 @@ The key insight is using composite keys so that B-tree range scans naturally giv
 idx:{table}:{column}:{branch}:{encoded_value}:{row_id}
 ```
 
-A range scan over a prefix like `idx:todos:done:main:` returns all row IDs in the `done` index for the `todos` table on branch `main`. No separate index data structure needed — the B-tree IS the index.
+A range scan over a prefix like `idx:todos:done:main:` returns all row IDs in the `done` index for the `todos` table on branch `main`.
 
-> `crates/groove/src/storage/bftree.rs`
-> `crates/bf-tree/` (underlying KV store, with WASM feature)
+> `crates/groove/src/storage/opfs_btree.rs`
+> `crates/opfs-btree/` (underlying synchronous OPFS B-tree crate)
 
 ## Deployment Topology
 
@@ -51,25 +57,25 @@ The browser case is the interesting one. We can't block the main thread on stora
 └──────────────────┬───────────────────────────────────┘
               postMessage (sync protocol)
 ┌──────────────────┴───────────────────────────────────┐
-│ DEDICATED WORKER: Groove (BfTreeStorage/OPFS)         │
+│ DEDICATED WORKER: Groove (OpfsBTreeStorage/OPFS)      │
 │  - Durable via FileSystemSyncAccessHandle             │
 │  - Upstream server connection                         │
 └──────────────────┬───────────────────────────────────┘
                    │ HTTP/SSE
                    ▼
-           Edge Server (Groove + BfTreeStorage)
+           Edge Server (Groove + SurrealKvStorage)
 ```
 
 OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Workers — no need for async storage abstractions.
 
-> `crates/groove-wasm/src/runtime.rs` (WasmRuntime with BfTreeStorage)
+> `crates/groove-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
 > `packages/jazz-ts/src/worker/groove-worker.ts` (worker entry point)
 
 ### Native (Node.js / Rust)
 
-Single process, no worker needed. BfTreeStorage backed by regular files.
+Single process, no worker needed. SurrealKvStorage backed by regular files.
 
-> `crates/groove-tokio/src/lib.rs` (TokioRuntime with BfTreeStorage)
+> `crates/groove-tokio/src/lib.rs` (TokioRuntime with SurrealKvStorage)
 
 ## Platform Bindings
 
@@ -89,7 +95,7 @@ WASM bindings exposing RuntimeCore via WasmRuntime. WasmScheduler uses `spawn_lo
 
 | Decision            | Choice                                        | Rationale                                                               |
 | ------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| Index encoding      | Composite keys in bf-tree                     | Range queries give index scans naturally                                |
+| Index encoding      | Composite key prefixes across storage engines | Range queries give index scans naturally                                |
 | Durability default  | Fire-and-forget                               | Optimistic local-first; `_persisted()` variants for explicit durability |
 | Native architecture | Single process                                | No worker overhead needed                                               |
 | Tab coordination    | Single tab owns OPFS (leader election future) | `SyncAccessHandle` is an exclusive lock                                 |
