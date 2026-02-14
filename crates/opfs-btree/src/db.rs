@@ -138,7 +138,22 @@ impl<F: SyncFile> OpfsBTree<F> {
         tree.total_pages = tree.active.total_pages.max(2);
         if tree.active.root_page_id != 0 {
             tree.root_page_id = Some(tree.active.root_page_id);
-            tree.load_tree_from_disk(tree.active.root_page_id)?;
+            tree.ensure_page_loaded(tree.active.root_page_id)?;
+            let root_page = tree.pages.get(&tree.active.root_page_id).ok_or_else(|| {
+                BTreeError::Corrupt(format!(
+                    "root page {} missing after load",
+                    tree.active.root_page_id
+                ))
+            })?;
+            match root_page {
+                Page::Leaf { .. } | Page::Internal { .. } => {}
+                Page::Overflow { .. } | Page::Freelist { .. } => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "root page {} has invalid kind",
+                        tree.active.root_page_id
+                    )));
+                }
+            }
         }
         if tree.active.freelist_head_page_id != 0 {
             tree.load_freelist_from_disk(tree.active.freelist_head_page_id)?;
@@ -148,24 +163,25 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(tree)
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
+    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
         let leaf_page_id = match self.find_leaf_page_id(key)? {
             Some(id) => id,
             None => return Ok(None),
         };
 
+        self.ensure_page_loaded(leaf_page_id)?;
         let leaf = self.pages.get(&leaf_page_id).ok_or_else(|| {
             BTreeError::Corrupt(format!("leaf page {} missing in memory", leaf_page_id))
         })?;
         let (entries, _) = expect_leaf(leaf)?;
 
-        match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
-            Ok(idx) => {
-                let value = self.materialize_value(&entries[idx].1)?;
-                Ok(Some(value))
-            }
-            Err(_) => Ok(None),
-        }
+        let value_cell = match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
+            Ok(idx) => Some(entries[idx].1.clone()),
+            Err(_) => None,
+        };
+        value_cell
+            .map(|cell| self.materialize_value(&cell))
+            .transpose()
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BTreeError> {
@@ -213,6 +229,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             None => return Ok(()),
         };
 
+        self.ensure_page_loaded(root_page_id)?;
         let root_page = self.pages.get(&root_page_id).ok_or_else(|| {
             BTreeError::Corrupt(format!("root page {} missing after delete", root_page_id))
         })?;
@@ -228,7 +245,12 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
-    pub fn range(&self, start: &[u8], end: &[u8], limit: usize) -> Result<Vec<KvPair>, BTreeError> {
+    pub fn range(
+        &mut self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KvPair>, BTreeError> {
         if limit == 0 || start >= end {
             return Ok(Vec::new());
         }
@@ -244,24 +266,27 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
+            self.ensure_page_loaded(page_id)?;
             let page = self.pages.get(&page_id).ok_or_else(|| {
                 BTreeError::Corrupt(format!("leaf page {} missing during range", page_id))
             })?;
             let (entries, next) = expect_leaf(page)?;
+            let entries = entries.to_vec();
+            let next = *next;
 
             for (key, value) in entries {
                 if key.as_slice() >= end {
                     return Ok(out);
                 }
                 if key.as_slice() >= start {
-                    out.push((key.clone(), self.materialize_value(value)?));
+                    out.push((key.clone(), self.materialize_value(&value)?));
                     if out.len() == limit {
                         return Ok(out);
                     }
                 }
             }
 
-            current = *next;
+            current = next;
         }
 
         Ok(out)
@@ -302,6 +327,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<SplitResult>, BTreeError> {
+        self.ensure_page_loaded(page_id)?;
         let page = self.pages.get(&page_id).cloned().ok_or_else(|| {
             BTreeError::Corrupt(format!("page {} missing during insert", page_id))
         })?;
@@ -431,6 +457,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
+        self.ensure_page_loaded(page_id)?;
         let page = self.pages.get(&page_id).cloned().ok_or_else(|| {
             BTreeError::Corrupt(format!("page {} missing during delete", page_id))
         })?;
@@ -467,7 +494,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
-    fn materialize_value(&self, value: &ValueCell) -> Result<Vec<u8>, BTreeError> {
+    fn materialize_value(&mut self, value: &ValueCell) -> Result<Vec<u8>, BTreeError> {
         match value {
             ValueCell::Inline(value) => Ok(value.clone()),
             ValueCell::Overflow {
@@ -478,7 +505,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn read_overflow_value(
-        &self,
+        &mut self,
         head_page_id: PageId,
         expected_len: usize,
     ) -> Result<Vec<u8>, BTreeError> {
@@ -493,6 +520,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
+            self.ensure_page_loaded(current)?;
             let page = self.pages.get(&current).ok_or_else(|| {
                 BTreeError::Corrupt(format!("overflow page {} missing in memory", current))
             })?;
@@ -531,6 +559,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
+            self.ensure_page_loaded(current)?;
             let page = self.remove_page(current).ok_or_else(|| {
                 BTreeError::Corrupt(format!("overflow page {} missing while freeing", current))
             })?;
@@ -585,13 +614,14 @@ impl<F: SyncFile> OpfsBTree<F> {
         })
     }
 
-    fn find_leaf_page_id(&self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+    fn find_leaf_page_id(&mut self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
         let mut current = match self.root_page_id {
             Some(id) => id,
             None => return Ok(None),
         };
 
         loop {
+            self.ensure_page_loaded(current)?;
             let page = self.pages.get(&current).ok_or_else(|| {
                 BTreeError::Corrupt(format!("page {} missing while descending", current))
             })?;
@@ -622,97 +652,12 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
-    fn load_tree_from_disk(&mut self, root_page_id: PageId) -> Result<(), BTreeError> {
-        let mut visited = HashSet::new();
-        self.load_tree_recursive(root_page_id, &mut visited)
-    }
-
-    fn load_tree_recursive(
-        &mut self,
-        page_id: PageId,
-        visited: &mut HashSet<PageId>,
-    ) -> Result<(), BTreeError> {
-        if !visited.insert(page_id) {
-            return Err(BTreeError::Corrupt(
-                "tree pages contain a cycle".to_string(),
-            ));
+    fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        if self.pages.contains_key(&page_id) {
+            return Ok(());
         }
-
         let page = self.read_page_from_disk(page_id)?;
-        let mut children = Vec::new();
-        let mut overflow_heads = Vec::new();
-
-        match &page {
-            Page::Internal { children: c, .. } => {
-                children.extend(c.iter().copied());
-            }
-            Page::Leaf { entries, .. } => {
-                for (_, value) in entries {
-                    if let ValueCell::Overflow { head_page_id, .. } = value {
-                        overflow_heads.push(*head_page_id);
-                    }
-                }
-            }
-            Page::Overflow { .. } => {
-                return Err(BTreeError::Corrupt(format!(
-                    "root/tree page {} is overflow",
-                    page_id
-                )));
-            }
-            Page::Freelist { .. } => {
-                return Err(BTreeError::Corrupt(format!(
-                    "root/tree page {} is freelist",
-                    page_id
-                )));
-            }
-        }
-
         self.cache_loaded_page(page_id, page);
-
-        for child in children {
-            self.load_tree_recursive(child, visited)?;
-        }
-        for head_page_id in overflow_heads {
-            self.load_overflow_chain_from_disk(head_page_id)?;
-        }
-
-        Ok(())
-    }
-
-    fn load_overflow_chain_from_disk(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
-        let mut current = head_page_id;
-        let mut seen = HashSet::new();
-
-        while current != 0 {
-            if self.pages.contains_key(&current) {
-                let page = self.pages.get(&current).ok_or_else(|| {
-                    BTreeError::Corrupt(format!("overflow page {} disappeared", current))
-                })?;
-                let (_, next) = expect_overflow(page)?;
-                current = next.unwrap_or(0);
-                continue;
-            }
-
-            if !seen.insert(current) {
-                return Err(BTreeError::Corrupt(
-                    "overflow pages contain a cycle".to_string(),
-                ));
-            }
-
-            let page = self.read_page_from_disk(current)?;
-            let next = match &page {
-                Page::Overflow { next, .. } => *next,
-                _ => {
-                    return Err(BTreeError::Corrupt(format!(
-                        "expected overflow page {}, found different kind",
-                        current
-                    )));
-                }
-            };
-            self.cache_loaded_page(current, page);
-            current = next.unwrap_or(0);
-        }
-
         Ok(())
     }
 
@@ -1279,7 +1224,7 @@ mod tests {
         assert_eq!(slice.len(), 100);
 
         tree.checkpoint().expect("checkpoint");
-        let reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(
             reopened.get(b"k01999").expect("reopen get last"),
             Some(b"v01999".to_vec())
@@ -1295,7 +1240,7 @@ mod tests {
         tree.put(b"k2", b"value2").expect("put k2");
         tree.checkpoint().expect("checkpoint");
 
-        let reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(
             reopened.get(b"k1").expect("get k1"),
             Some(b"value1".to_vec())
@@ -1344,7 +1289,7 @@ mod tests {
         tree.put(b"k2", b"v3").expect("put v3");
         tree.checkpoint().expect("checkpoint v2");
 
-        let reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(reopened.get(b"k").expect("get k"), Some(b"v2".to_vec()));
         assert_eq!(reopened.get(b"k2").expect("get k2"), Some(b"v3".to_vec()));
     }
@@ -1369,7 +1314,8 @@ mod tests {
             recovered.put(b"ephemeral", b"temp").expect("put ephemeral");
         }
 
-        let reopened = OpfsBTree::open(file, small_options()).expect("reopen after second crash");
+        let mut reopened =
+            OpfsBTree::open(file, small_options()).expect("reopen after second crash");
         assert_eq!(
             reopened
                 .get(b"persist")

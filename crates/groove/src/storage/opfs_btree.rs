@@ -143,16 +143,6 @@ impl OpfsBTreeStorage {
         }
     }
 
-    fn with_tree<R>(
-        &self,
-        f: impl FnOnce(&OpfsBTree<AnyFile>) -> Result<R, StorageError>,
-    ) -> Result<R, StorageError> {
-        let tree = self.tree.try_borrow().map_err(|_| {
-            StorageError::IoError("opfs-btree already mutably borrowed".to_string())
-        })?;
-        f(&tree)
-    }
-
     fn with_tree_mut<R>(
         &self,
         f: impl FnOnce(&mut OpfsBTree<AnyFile>) -> Result<R, StorageError>,
@@ -234,7 +224,7 @@ impl OpfsBTreeStorage {
     }
 
     fn tree_read(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        self.with_tree(|tree| tree.get(key.as_bytes()).map_err(map_storage_err))
+        self.with_tree_mut(|tree| tree.get(key.as_bytes()).map_err(map_storage_err))
     }
 
     fn tree_delete(&self, key: &str) -> Result<(), StorageError> {
@@ -273,7 +263,7 @@ impl OpfsBTreeStorage {
             return Ok(Vec::new());
         }
 
-        self.with_tree(|tree| {
+        self.with_tree_mut(|tree| {
             let entries = tree
                 .range(start, end, usize::MAX)
                 .map_err(map_storage_err)?;
