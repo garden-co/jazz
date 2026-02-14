@@ -93,6 +93,12 @@ Additional examples from this pass:
 
 - `manager_tests.rs:681–684` documents that synced content updates do not emit subscription deltas yet (“not wired into settle flow”), so test coverage validates query visibility but not subscription reactivity.
 
+**Low-hanging fixes completed in this pass**:
+
+- `sync_manager/tests.rs:1475+` (`regular_object_still_syncs_to_server`) now validates destination, object id, branch, commit id, and metadata contents (not only outbox length).
+- `manager_tests.rs:2676+` (`join_produces_combined_tuples`) now validates base-row identity and verifies payload includes both base-table and joined-table text values.
+- `rebac_tests.rs:624+` (`rebac_exists_clause_denies_non_matching_insert`) now asserts a single deterministic postcondition (`get_tip_ids(..., "main")` is an error) instead of allowing multiple outcomes.
+
 **Missing edge cases:**
 
 - No concurrency tests for runtime_core

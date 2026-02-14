@@ -621,14 +621,18 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         other => panic!("Expected PermissionDenied error, got {:?}", other),
     }
 
-    // Commit should NOT be applied
+    // Commit should NOT be applied to the branch.
+    assert!(
+        qm.sync_manager_mut().object_manager.get(obj_id).is_some(),
+        "Object should still exist after denied insert"
+    );
     let tips = qm
         .sync_manager_mut()
         .object_manager
         .get_tip_ids(obj_id, "main");
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
-        "Non-admin insert should be denied by EXISTS policy"
+        tips.is_err(),
+        "Denied insert should not create tips on branch main"
     );
 }
 

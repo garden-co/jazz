@@ -1487,7 +1487,8 @@ fn regular_object_still_syncs_to_server() {
         ),
     );
     let author = ObjectId::new();
-    sm.object_manager
+    let commit_id = sm
+        .object_manager
         .add_commit(
             &mut io,
             obj_id,
@@ -1505,6 +1506,43 @@ fn regular_object_still_syncs_to_server() {
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1, "regular object should sync to server");
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    metadata,
+                    branch_name,
+                    commits,
+                },
+        } => {
+            assert_eq!(
+                *id, server_id,
+                "message should target the newly added server"
+            );
+            assert_eq!(
+                *object_id, obj_id,
+                "synced object id should match created object"
+            );
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
+            assert_eq!(commits[0].id(), commit_id);
+
+            let metadata = metadata
+                .as_ref()
+                .expect("first sync for regular object should include metadata");
+            assert_eq!(metadata.id, obj_id);
+            assert_eq!(
+                metadata.metadata.get("key").map(String::as_str),
+                Some("value")
+            );
+        }
+        other => panic!(
+            "Expected ObjectUpdated payload to server after add_server, got {:?}",
+            other
+        ),
+    }
 }
 
 // ========================================================================

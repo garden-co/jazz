@@ -2722,16 +2722,30 @@ fn join_produces_combined_tuples() {
     // Should have one joined row
     assert_eq!(delta.added.len(), 1, "Should have one joined result");
 
-    // The delta should contain columns from both tables
-    // For now we can verify the row exists; combined descriptor testing
-    // requires more infrastructure
+    // Validate row identity and ensure payload carries values from both sides of the join.
     let row = &delta.added[0];
-    assert!(!row.data.is_empty());
-
-    // Verify we got a result (the join produced data)
-    // Note: With joins, output currently uses base table descriptor,
-    // so row.id will be the base table object ID (user_id).
-    let _ = (user_id, post_id); // Both IDs were used in the join
+    assert_eq!(
+        row.id, user_id.row_id,
+        "Join output should be keyed by base table row id"
+    );
+    assert_ne!(
+        row.id, post_id.row_id,
+        "Join output should not be keyed by joined table row id"
+    );
+    assert_eq!(
+        row.data
+            .windows("Alice".len())
+            .any(|w| w == "Alice".as_bytes()),
+        true,
+        "Joined row payload should contain base-table text value"
+    );
+    assert_eq!(
+        row.data
+            .windows("Hello World".len())
+            .any(|w| w == "Hello World".as_bytes()),
+        true,
+        "Joined row payload should contain joined-table text value"
+    );
 }
 
 #[test]
