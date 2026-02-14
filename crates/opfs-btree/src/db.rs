@@ -10,7 +10,7 @@ use crate::superblock::{Superblock, SuperblockSlot};
 
 const MIN_PAGE_SIZE: usize = 4 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
-const DEFAULT_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 8 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 

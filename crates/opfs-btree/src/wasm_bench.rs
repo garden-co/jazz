@@ -1,5 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
+use std::cell::Cell;
+
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -60,8 +62,13 @@ const MIXED_SCENARIOS: [MixedScenario; 3] = [
 ];
 
 const DEFAULT_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
+const DEFAULT_BENCH_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const RANGE_WINDOW_KEYS: usize = 128;
 const RANGE_RESULT_LIMIT: usize = 64;
+
+thread_local! {
+    static BENCH_CACHE_BYTES: Cell<usize> = const { Cell::new(DEFAULT_BENCH_CACHE_BYTES) };
+}
 
 #[derive(Debug, Clone, Copy)]
 enum OpChoice {
@@ -100,7 +107,7 @@ impl DeterministicRng {
 fn benchmark_options() -> BTreeOptions {
     BTreeOptions {
         page_size: 16 * 1024,
-        cache_bytes: 8 * 1024 * 1024,
+        cache_bytes: BENCH_CACHE_BYTES.with(|bytes| bytes.get()),
         overflow_threshold: 8 * 1024,
     }
 }
@@ -900,6 +907,29 @@ async fn run_range_scan(
 #[wasm_bindgen]
 pub async fn bench_opfs_sequential_write(count: u32, value_size: u32) -> Result<JsValue, JsValue> {
     to_js_value(&run_seq_write(count, value_size).await?)
+}
+
+#[wasm_bindgen]
+pub fn bench_set_cache_bytes(cache_bytes: u32) -> Result<(), JsValue> {
+    let cache_bytes = cache_bytes as usize;
+    if cache_bytes < 16 * 1024 {
+        return Err(JsValue::from_str(
+            "cache_bytes must be at least one page (16384 bytes)",
+        ));
+    }
+
+    BENCH_CACHE_BYTES.with(|bytes| bytes.set(cache_bytes));
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub fn bench_get_cache_bytes() -> u32 {
+    BENCH_CACHE_BYTES.with(|bytes| bytes.get() as u32)
+}
+
+#[wasm_bindgen]
+pub fn bench_reset_cache_bytes() {
+    BENCH_CACHE_BYTES.with(|bytes| bytes.set(DEFAULT_BENCH_CACHE_BYTES));
 }
 
 #[wasm_bindgen]
