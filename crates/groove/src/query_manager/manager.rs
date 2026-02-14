@@ -629,20 +629,18 @@ impl QueryManager {
                 // First delivery — full current state snapshot
                 subscription.settled_once = true;
                 let full_result = subscription.graph.current_result_as_delta();
-                // For settled_tier=None, deliver even if empty (preserves current behavior
-                // where one-shot queries get an initial callback)
-                if !full_result.is_empty() || subscription.settled_tier.is_none() {
-                    tracing::debug!(
-                        sub_id = sub_id.0,
-                        added = full_result.added.len(),
-                        "first delivery (snapshot)"
-                    );
-                    self.update_outbox.push(QueryUpdate {
-                        subscription_id: *sub_id,
-                        delta: full_result,
-                        descriptor: subscription.graph.combined_descriptor.clone(),
-                    });
-                }
+                // Always emit the first snapshot once tier is satisfied, even if empty.
+                // This guarantees one-shot queries can resolve to [] instead of hanging.
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = full_result.added.len(),
+                    "first delivery (snapshot)"
+                );
+                self.update_outbox.push(QueryUpdate {
+                    subscription_id: *sub_id,
+                    delta: full_result,
+                    descriptor: subscription.graph.combined_descriptor.clone(),
+                });
             } else if !delta.is_empty() {
                 tracing::debug!(
                     sub_id = sub_id.0,
