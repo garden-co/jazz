@@ -549,7 +549,11 @@ export class JazzClient {
 
       // Only send server-bound messages
       if (parsed.destination && "Server" in parsed.destination) {
-        this.sendSyncMessage(serverUrl, payload);
+        void this.sendSyncMessage(serverUrl, payload).catch((error) => {
+          console.error("Sync POST error:", error);
+          this.detachServer();
+          this.scheduleReconnect();
+        });
       }
     });
 

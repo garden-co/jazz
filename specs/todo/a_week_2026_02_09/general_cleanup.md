@@ -105,8 +105,13 @@ Re-verified OPFS persistence behavior in both example apps after the schema hash
 
 No data-loss-on-reload behavior reproduced in current example harness.
 
-## 11. Worker Bridge Error Swallowing (LOW)
+## 11. ~~Worker Bridge Error Swallowing~~ ✅
 
-`db.ts:198–204` catches worker bridge init errors with `console.error` but doesn't propagate them. If the bridge fails to init, subsequent operations will fail with unrelated errors instead of a clear "bridge not initialized" failure.
+Done. Error swallowing removed in both bridge init and sync POST transport:
 
-`client.ts:568–574` similarly logs sync POST failures but doesn't surface them to callers.
+- `db.ts` now stores `bridge.init(...)` directly in `bridgeReady` (no `.catch(console.error)`), so bridge init failures reject and propagate through `ensureBridgeReady()`.
+- `sync-transport.ts:sendSyncPayload()` now throws on network errors and non-2xx responses instead of logging and continuing.
+- `client.ts` and `worker/groove-worker.ts` now catch rejected sync POSTs at the call site, log once, and trigger reconnect (`detachServer()` + `scheduleReconnect()`), avoiding silent drop behavior.
+- Added `sync-transport` tests covering both rejection paths:
+  - non-2xx response rejects
+  - fetch/network failure rejects

@@ -47,4 +47,24 @@ describe("sync-transport", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.client_id).toBe(providedClientId);
   });
+
+  it("throws on non-2xx sync POST responses", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
+      "Sync POST failed: 503 Service Unavailable",
+    );
+  });
+
+  it("throws when fetch rejects", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(sendSyncPayload("http://localhost:3000", { Ping: {} }, {})).rejects.toThrow(
+      "Sync POST failed: network down",
+    );
+  });
 });
