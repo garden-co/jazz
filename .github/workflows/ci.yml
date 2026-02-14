@@ -45,6 +45,13 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Reuse container Playwright browsers
+        run: |
+          mkdir -p "${HOME}/.cache"
+          rm -rf "${HOME}/.cache/ms-playwright"
+          ln -s /ms-playwright "${HOME}/.cache/ms-playwright"
+          ls -1 /ms-playwright
+
       - run: pnpm install --frozen-lockfile
       - name: Ensure wasm-pack is available
         run: |
