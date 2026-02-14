@@ -7,7 +7,7 @@
 //!
 //! # Architecture
 //!
-//! - `BfTreeStorage` provides synchronous storage (from groove::storage)
+//! - `OpfsBTreeStorage` provides synchronous storage (from groove::storage)
 //! - `WasmScheduler` implements `Scheduler` using `spawn_local` (debounced)
 //! - `JsSyncSender` implements `SyncSender` bridging to a JS callback
 //! - `WasmRuntime` wraps `Rc<RefCell<RuntimeCore<...>>>`
@@ -44,7 +44,7 @@ use groove::runtime_core::{RuntimeCore, Scheduler, SyncSender};
 #[cfg(target_arch = "wasm32")]
 use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::BfTreeStorage;
+use groove::storage::OpfsBTreeStorage;
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -70,7 +70,7 @@ fn parse_tier(tier: &str) -> Result<PersistenceTier, JsError> {
 // ============================================================================
 
 /// Concrete RuntimeCore type for WASM.
-type WasmCoreType = RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>;
+type WasmCoreType = RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>;
 
 // ============================================================================
 // WasmScheduler
@@ -159,7 +159,7 @@ impl SyncSender for JsSyncSender {
 
 /// Main runtime for JavaScript applications.
 ///
-/// Wraps `Rc<RefCell<RuntimeCore<BfTreeStorage, WasmScheduler, JsSyncSender>>>`.
+/// Wraps `Rc<RefCell<RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>>>`.
 /// All methods borrow the core, call RuntimeCore, and return.
 /// Async scheduling happens via WasmScheduler.schedule_batched_tick().
 #[wasm_bindgen]
@@ -173,7 +173,7 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     /// Create a new WasmRuntime.
     ///
-    /// Storage is synchronous (in-memory via BfTreeStorage).
+    /// Storage is synchronous (in-memory via OpfsBTreeStorage).
     ///
     /// # Arguments
     /// * `schema_json` - JSON-encoded schema definition
@@ -200,7 +200,14 @@ impl WasmRuntime {
             Some("core") => "core",
             _ => "client",
         };
-        let _span = info_span!("WasmRuntime::new", tier = tier_label, app_id, env, user_branch).entered();
+        let _span = info_span!(
+            "WasmRuntime::new",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch
+        )
+        .entered();
         info!("creating in-memory runtime");
 
         // Parse schema
@@ -232,7 +239,7 @@ impl WasmRuntime {
 
         // Create components
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024; // 32MB
-        let storage = BfTreeStorage::memory(DEFAULT_CACHE_SIZE)
+        let storage = OpfsBTreeStorage::memory(DEFAULT_CACHE_SIZE)
             .map_err(|e| JsError::new(&format!("Storage init: {:?}", e)))?;
         let scheduler = WasmScheduler::new();
         let sync_sender = JsSyncSender::new();
@@ -255,7 +262,10 @@ impl WasmRuntime {
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
 
-        Ok(WasmRuntime { core: core_rc, tier_label })
+        Ok(WasmRuntime {
+            core: core_rc,
+            tier_label,
+        })
     }
 
     /// Called by JS when a sync message arrives from the server.
@@ -288,7 +298,12 @@ impl WasmRuntime {
         client_id: &str,
         message_json: &str,
     ) -> Result<(), JsError> {
-        let _span = debug_span!("wasm::onSyncMessageReceivedFromClient", tier = self.tier_label, client_id).entered();
+        let _span = debug_span!(
+            "wasm::onSyncMessageReceivedFromClient",
+            tier = self.tier_label,
+            client_id
+        )
+        .entered();
         let uuid = uuid::Uuid::parse_str(client_id)
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
@@ -703,9 +718,8 @@ impl WasmRuntime {
 
     /// Create a persistent WasmRuntime backed by OPFS.
     ///
-    /// Opens two OPFS files: `{db_name}.bftree` (tree data) and
-    /// `{db_name}.wal` (write-ahead log). Handles fresh start and
-    /// crash recovery automatically.
+    /// Opens a single OPFS file namespace and restores state from the latest
+    /// durable checkpoint.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openPersistent)]
     pub async fn open_persistent(
@@ -726,7 +740,15 @@ impl WasmRuntime {
             Some("core") => "core",
             _ => "client",
         };
-        let _span = info_span!("WasmRuntime::openPersistent", tier = tier_label, app_id, env, user_branch, db_name).entered();
+        let _span = info_span!(
+            "WasmRuntime::openPersistent",
+            tier = tier_label,
+            app_id,
+            env,
+            user_branch,
+            db_name
+        )
+        .entered();
         info!("opening persistent OPFS runtime");
 
         // Parse schema
@@ -756,16 +778,9 @@ impl WasmRuntime {
         )
         .map_err(|e| JsError::new(&format!("Failed to create SchemaManager: {:?}", e)))?;
 
-        // Open OPFS files (async)
-        let tree_vfs = bf_tree::OpfsVfs::open(&format!("{}.bftree", db_name))
-            .await
-            .map_err(|e| JsError::new(&format!("OPFS tree: {:?}", e)))?;
-        let wal_vfs = bf_tree::OpfsVfs::open(&format!("{}.wal", db_name))
-            .await
-            .map_err(|e| JsError::new(&format!("OPFS WAL: {:?}", e)))?;
-
         const DEFAULT_CACHE_SIZE: usize = 32 * 1024 * 1024;
-        let storage = BfTreeStorage::with_opfs(tree_vfs, wal_vfs, DEFAULT_CACHE_SIZE)
+        let storage = OpfsBTreeStorage::open_opfs(db_name, DEFAULT_CACHE_SIZE)
+            .await
             .map_err(|e| JsError::new(&format!("Storage: {:?}", e)))?;
 
         let scheduler = WasmScheduler::new();
@@ -789,6 +804,9 @@ impl WasmRuntime {
         // Persist schema to catalogue for server sync
         core_rc.borrow_mut().persist_schema();
 
-        Ok(WasmRuntime { core: core_rc, tier_label })
+        Ok(WasmRuntime {
+            core: core_rc,
+            tier_label,
+        })
     }
 }
