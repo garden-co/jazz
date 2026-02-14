@@ -917,15 +917,6 @@ impl QueryManager {
         Some((table, values))
     }
 
-    /// Test helper: get a row by ID if loaded in ObjectManager.
-    ///
-    /// Production code should use queries to read data, not this method.
-    /// This exists only to verify test expectations about what's loaded.
-    #[cfg(test)]
-    pub fn test_get_row_if_loaded(&self, id: ObjectId) -> Option<Vec<Value>> {
-        self.get_row(id).map(|(_, values)| values)
-    }
-
     /// Check if a row is indexed on a specific branch (appears in the _id index).
     pub fn row_is_indexed_on_branch(
         &self,

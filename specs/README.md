@@ -42,9 +42,9 @@ Read the status-quo specs in the order below — each builds on the ones before 
 
 **[TypeScript Client Codegen](status-quo/ts_client_codegen.md)** — Generates a typed TypeScript client (`schema/app.ts`) from schema definitions. Produces type-safe query builders with `.where()`, `.include()`, `.orderBy()`. Runtime: `createDb()` → async init, sync mutations, delta-aware subscriptions. Worker bridge manages WASM + OPFS in the browser.
 
-### 8. Testing Philosophy
+### 8. Testing
 
-**[Making Tests More E2E](status-quo/making_tests_more_e2e.md)** — Why RuntimeCore is the primary correctness layer (not unit tests on internals). 20+ RuntimeCore tests use realistic 3-tier setups. Browser E2E tests exercise the full stack through Chromium + WASM + Worker + OPFS.
+Testing details are documented in the layer specs above (especially Query/Sync integration and RuntimeCore orchestration), and active test-hardening follow-up is tracked in **[Weak Tests](todo/a_week_2026_02_09/weak_tests.md)**.
 
 ## Architecture Diagram
 

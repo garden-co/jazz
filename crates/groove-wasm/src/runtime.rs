@@ -43,7 +43,7 @@ use groove::query_manager::session::Session;
 use groove::query_manager::types::Row;
 #[cfg(target_arch = "wasm32")]
 use groove::query_manager::types::RowDescriptor;
-use groove::query_manager::types::{Schema, Value};
+use groove::query_manager::types::{Schema, SchemaHash, Value};
 #[cfg(any(target_arch = "wasm32", test))]
 use groove::runtime_core::SubscriptionDelta;
 #[cfg(target_arch = "wasm32")]
@@ -789,6 +789,14 @@ impl WasmRuntime {
         let schema = core.current_schema();
         let wasm_schema = WasmSchema::from(schema);
         Ok(serde_wasm_bindgen::to_value(&wasm_schema)?)
+    }
+
+    /// Get the canonical schema hash (64-char hex).
+    #[wasm_bindgen(js_name = getSchemaHash)]
+    pub fn get_schema_hash(&self) -> String {
+        let core = self.core.borrow();
+        let schema = core.current_schema();
+        SchemaHash::compute(schema).to_string()
     }
 
     /// Flush all data to persistent storage (snapshot).

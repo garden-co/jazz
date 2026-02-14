@@ -75,6 +75,18 @@ Server forwards received `QuerySubscription` to upstream servers. Tracks which c
 > `crates/groove/src/sync_manager.rs:671-704` (forwarding methods)
 > `crates/groove/src/sync_manager.rs:1191-1204` (QuerySettled relay)
 
+## Reconnect/Resubscribe Convergence
+
+Active subscriptions are treated as desired state, not one-shot network events.
+
+- `QueryManager::add_server()` calls `SyncManager::add_server()` and then replays all active local and downstream query subscriptions to the new upstream.
+- Replay behavior is deterministic across connection timing: if a subscription is active when upstream reconnects, it is replayed; if it was unsubscribed, it is not replayed.
+- This gives anti-entropy for query forwarding without requiring subscribe/connect timing coordination.
+
+> `crates/groove/src/query_manager/subscriptions.rs:190-240` (add_server + replay_active_query_subscriptions_to_server)
+> `crates/groove/src/query_manager/manager_tests.rs:5116-5160` (add_server_replays_existing_local_query_subscriptions)
+> `crates/groove/src/runtime_core.rs:1539-1594` (replay on reconnect + no replay after unsubscribe)
+
 ## Lazy Schema Activation (Server Mode)
 
 Servers don't know schemas in advance — they discover them from clients via catalogue sync. When the first client connects with schema v1, the server receives the schema object and lazily activates it. This means servers need no deployment coordination when clients ship new schema versions.
