@@ -44,6 +44,8 @@ Expected impact:
 
 - Evaluate switching `jazz-napi` CI validation path from release build to debug build for PR workflows.
 - Keep release build coverage in release/publish workflow.
+- Track release-side follow-up in:
+  - `specs/todo/b_mvp/release_ci_flow.md`
 
 Expected impact:
 
