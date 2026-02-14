@@ -14,6 +14,7 @@
 //!     app_id: AppId::from_name("my-app"),
 //!     schema: my_schema,
 //!     server_url: "http://localhost:1625".to_string(),
+//!     server_path_prefix: None,
 //!     data_dir: PathBuf::from("./data"),
 //! };
 //!
@@ -64,6 +65,9 @@ pub struct AppContext {
     pub schema: Schema,
     /// Server URL for sync (e.g., "http://localhost:1625").
     pub server_url: String,
+    /// Optional path prefix for sync/events routes on multi-tenant servers.
+    /// Example: Some("/apps/<app_id>".to_string()).
+    pub server_path_prefix: Option<String>,
     /// Local data directory for SurrealKV storage.
     pub data_dir: PathBuf,
 
@@ -162,6 +166,7 @@ mod tests {
             client_id: None,
             schema: test_schema(),
             server_url: String::new(), // No server
+            server_path_prefix: None,
             data_dir: temp_dir.path().to_path_buf(),
             jwt_token: None,
             backend_secret: None,
@@ -215,6 +220,7 @@ mod tests {
                 client_id: None,
                 schema: test_schema(),
                 server_url: String::new(),
+                server_path_prefix: None,
                 data_dir: data_path.clone(),
                 jwt_token: None,
                 backend_secret: None,
@@ -241,6 +247,7 @@ mod tests {
                 client_id: None,
                 schema: test_schema(),
                 server_url: String::new(),
+                server_path_prefix: None,
                 data_dir: data_path,
                 jwt_token: None,
                 backend_secret: None,
