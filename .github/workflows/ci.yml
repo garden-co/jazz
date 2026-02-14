@@ -14,21 +14,9 @@ jobs:
   validate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
-    env:
-      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
-      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-    container:
-      image: mcr.microsoft.com/playwright:v1.58.2-noble
 
     steps:
       - uses: actions/checkout@v6
-
-      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Install Rust build deps
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -45,32 +33,19 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Reuse container Playwright browsers
-        run: |
-          mkdir -p "${HOME}/.cache"
-          rm -rf "${HOME}/.cache/ms-playwright"
-          ln -s /ms-playwright "${HOME}/.cache/ms-playwright"
-          ls -1 /ms-playwright
-
       - run: pnpm install --frozen-lockfile
-      - name: Ensure wasm-pack is available
-        run: |
-          if ! command -v wasm-pack >/dev/null; then
-            WASM_PACK_VERSION=0.14.0
-            WASM_PACK_TARGET=x86_64-unknown-linux-musl
-            WASM_PACK_TAR="wasm-pack-v${WASM_PACK_VERSION}-${WASM_PACK_TARGET}.tar.gz"
-            WASM_PACK_URL="https://github.com/drager/wasm-pack/releases/download/v${WASM_PACK_VERSION}/${WASM_PACK_TAR}"
-            TMP_DIR="$(mktemp -d)"
-            mkdir -p "${CARGO_HOME}/bin"
-            curl -sSfL "${WASM_PACK_URL}" -o "${TMP_DIR}/${WASM_PACK_TAR}"
-            tar -xzf "${TMP_DIR}/${WASM_PACK_TAR}" -C "${TMP_DIR}"
-            install -m 0755 "${TMP_DIR}/wasm-pack-v${WASM_PACK_VERSION}-${WASM_PACK_TARGET}/wasm-pack" "${CARGO_HOME}/bin/wasm-pack"
-            rm -rf "${TMP_DIR}"
-          fi
-          wasm-pack --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - run: pnpm format:check
       - run: pnpm oxlint .
       - run: pnpm build
       - run: cargo clippy --workspace -- -D warnings
+      - name: Mount Playwright sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-playwright-browsers-${{ runner.os }}-v1
+          path: ~/.cache/ms-playwright
+      - run: pnpm exec playwright install chromium
       - run: pnpm test
