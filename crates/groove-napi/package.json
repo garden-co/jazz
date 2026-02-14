@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "napi build --release",
+    "build": "node scripts/build.js",
     "build:debug": "napi build"
   },
   "devDependencies": {
