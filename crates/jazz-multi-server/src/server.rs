@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,8 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
+const WORKER_APP_QUANTUM: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -52,24 +54,136 @@ pub struct ServerConfig {
 
 #[derive(Debug)]
 struct WorkerPool {
-    workers: usize,
+    workers: Vec<WorkerHandle>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerHandle {
+    ingress: tokio::sync::mpsc::Sender<QueuedSyncEntry>,
+}
+
+struct QueuedSyncEntry {
+    app_id: AppId,
+    app: Arc<AppRuntime>,
+    entry: InboxEntry,
+}
+
+#[derive(Debug)]
+enum WorkerEnqueueError {
+    QueueFull { worker: usize },
+    WorkerClosed { worker: usize },
+}
+
+#[derive(Debug)]
+struct FairAppQueue<T> {
+    pending_by_app: HashMap<AppId, VecDeque<T>>,
+    runnable_apps: VecDeque<AppId>,
+    pending_total: usize,
+}
+
+impl<T> Default for FairAppQueue<T> {
+    fn default() -> Self {
+        Self {
+            pending_by_app: HashMap::new(),
+            runnable_apps: VecDeque::new(),
+            pending_total: 0,
+        }
+    }
+}
+
+impl<T> FairAppQueue<T> {
+    fn push(&mut self, app_id: AppId, item: T) {
+        let queue = self.pending_by_app.entry(app_id).or_default();
+        if queue.is_empty() {
+            self.runnable_apps.push_back(app_id);
+        }
+        queue.push_back(item);
+        self.pending_total += 1;
+    }
+
+    fn pop_batch(&mut self, quantum: usize) -> Option<Vec<T>> {
+        let quantum = quantum.max(1);
+        while let Some(app_id) = self.runnable_apps.pop_front() {
+            let mut queue = match self.pending_by_app.remove(&app_id) {
+                Some(queue) => queue,
+                None => continue,
+            };
+
+            if queue.is_empty() {
+                continue;
+            }
+
+            let take = queue.len().min(quantum);
+            let mut batch = Vec::with_capacity(take);
+            for _ in 0..take {
+                if let Some(item) = queue.pop_front() {
+                    batch.push(item);
+                }
+            }
+
+            self.pending_total = self.pending_total.saturating_sub(batch.len());
+
+            if !queue.is_empty() {
+                self.pending_by_app.insert(app_id, queue);
+                self.runnable_apps.push_back(app_id);
+            }
+
+            return Some(batch);
+        }
+
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending_total == 0
+    }
 }
 
 impl WorkerPool {
     fn new(workers: usize) -> Self {
-        Self {
-            workers: workers.max(1),
+        let worker_count = workers.max(1);
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for worker_idx in 0..worker_count {
+            let (ingress_tx, ingress_rx) =
+                tokio::sync::mpsc::channel::<QueuedSyncEntry>(WORKER_SYNC_QUEUE_CAPACITY);
+            tokio::spawn(run_worker_loop(worker_idx, ingress_rx));
+            handles.push(WorkerHandle {
+                ingress: ingress_tx,
+            });
         }
+
+        Self { workers: handles }
+    }
+
+    fn enqueue_sync(
+        &self,
+        app_id: AppId,
+        app: Arc<AppRuntime>,
+        entry: InboxEntry,
+    ) -> Result<(), WorkerEnqueueError> {
+        let worker = self.worker_for_app(&app_id);
+        self.workers[worker]
+            .ingress
+            .try_send(QueuedSyncEntry { app_id, app, entry })
+            .map_err(|err| match err {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    WorkerEnqueueError::QueueFull { worker }
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    WorkerEnqueueError::WorkerClosed { worker }
+                }
+            })
     }
 
     fn worker_count(&self) -> usize {
-        self.workers
+        self.workers.len()
     }
 
     fn worker_for_app(&self, app_id: &AppId) -> usize {
         let mut hasher = DefaultHasher::new();
         app_id.hash(&mut hasher);
-        (hasher.finish() as usize) % self.workers
+        (hasher.finish() as usize) % self.workers.len()
     }
 }
 
@@ -448,6 +562,46 @@ impl AppRuntime {
             next_connection_id: AtomicU64::new(1),
             sync_broadcast: sync_tx,
         }))
+    }
+}
+
+async fn run_worker_loop(
+    worker: usize,
+    mut ingress_rx: tokio::sync::mpsc::Receiver<QueuedSyncEntry>,
+) {
+    let mut fair_queue = FairAppQueue::<QueuedSyncEntry>::default();
+
+    loop {
+        if fair_queue.is_empty() {
+            match ingress_rx.recv().await {
+                Some(entry) => fair_queue.push(entry.app_id, entry),
+                None => {
+                    info!(worker, "sync worker stopped");
+                    return;
+                }
+            }
+        }
+
+        while let Ok(entry) = ingress_rx.try_recv() {
+            fair_queue.push(entry.app_id, entry);
+        }
+
+        let Some(batch) = fair_queue.pop_batch(WORKER_APP_QUANTUM) else {
+            continue;
+        };
+
+        for queued in batch {
+            if let Err(err) = queued.app.runtime.push_sync_inbox(queued.entry) {
+                warn!(
+                    worker,
+                    app_id = %queued.app_id,
+                    error = %err,
+                    "failed to enqueue sync message in app runtime"
+                );
+            }
+        }
+
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1183,11 +1337,20 @@ async fn sync_handler(
         payload: request.payload,
     };
 
-    match app.runtime.push_sync_inbox(entry) {
+    match state.workers.enqueue_sync(app_id, app, entry) {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(e) => (
+        Err(WorkerEnqueueError::QueueFull { worker }) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::internal(format!(
+                "sync queue is full for worker {worker}",
+            ))),
+        )
+            .into_response(),
+        Err(WorkerEnqueueError::WorkerClosed { worker }) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
+            Json(ErrorResponse::internal(format!(
+                "sync worker {worker} is unavailable",
+            ))),
         )
             .into_response(),
     }
@@ -1451,4 +1614,45 @@ async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespo
         "apps": state.app_count().await,
         "workers": state.workers.worker_count(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fair_app_queue_round_robins_apps_with_quantum_one() {
+        let app_a = AppId::from_name("app-a");
+        let app_b = AppId::from_name("app-b");
+        let mut queue = FairAppQueue::default();
+
+        queue.push(app_a, "a1");
+        queue.push(app_a, "a2");
+        queue.push(app_b, "b1");
+        queue.push(app_b, "b2");
+
+        assert_eq!(queue.pop_batch(1), Some(vec!["a1"]));
+        assert_eq!(queue.pop_batch(1), Some(vec!["b1"]));
+        assert_eq!(queue.pop_batch(1), Some(vec!["a2"]));
+        assert_eq!(queue.pop_batch(1), Some(vec!["b2"]));
+        assert_eq!(queue.pop_batch(1), None);
+    }
+
+    #[test]
+    fn fair_app_queue_honors_quantum_then_requeues_app() {
+        let app_a = AppId::from_name("app-a");
+        let app_b = AppId::from_name("app-b");
+        let mut queue = FairAppQueue::default();
+
+        queue.push(app_a, 1);
+        queue.push(app_a, 2);
+        queue.push(app_a, 3);
+        queue.push(app_b, 9);
+        queue.push(app_b, 10);
+
+        assert_eq!(queue.pop_batch(2), Some(vec![1, 2]));
+        assert_eq!(queue.pop_batch(2), Some(vec![9, 10]));
+        assert_eq!(queue.pop_batch(2), Some(vec![3]));
+        assert_eq!(queue.pop_batch(2), None);
+    }
 }
