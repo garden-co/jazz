@@ -8,7 +8,7 @@ name = "jazz"
 path = "src/main.rs"
 
 [dependencies]
-groove = { path = "../groove", features = ["bftree"] }
+groove = { path = "../groove", features = ["surrealkv"] }
 groove-tokio = { path = "../groove-tokio" }
 jazz-transport = { path = "../jazz-transport" }
 

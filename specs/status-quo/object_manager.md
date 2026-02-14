@@ -59,7 +59,8 @@ All persistence is **synchronous** via the `Storage` trait. There are no request
 
 - `Storage` trait: `crates/groove/src/storage/mod.rs:67-195`
 - `MemoryStorage`: `crates/groove/src/storage/mod.rs:321-553`
-- `BfTreeStorage`: `crates/groove/src/storage/bftree.rs` (persistent B-tree pages via OPFS/disk)
+- `SurrealKvStorage`: `crates/groove/src/storage/surrealkv.rs` (native durable storage)
+- `OpfsBTreeStorage`: `crates/groove/src/storage/opfs_btree.rs` (WASM + OPFS durable storage)
 
 Key Storage methods: `append_commit()`, `delete_commit()`, `set_branch_tails()`, `index_insert()`, `index_remove()`, `index_lookup()`, `index_range()`, `index_scan_all()`.
 
@@ -139,7 +140,7 @@ Note: the old async-era errors (`ObjectNotReady`, `BranchNotLoaded`) no longer e
 1. **Content-addressed commits**: BLAKE3 hashing gives deduplication, integrity verification, and deterministic IDs. Two clients creating the same commit independently produce the same CommitId — sync can detect this and skip duplicates.
 2. **Synchronous persistence**: All writes go to Storage immediately. Within a single node, there's no window where data is "committed but not persisted." This simplifies the query engine enormously — see [Storage](storage.md).
 3. **Explicit tip/tail tracking**: Tips (the frontier) tell sync "what's new since last time." Tails let us bound history size without losing data integrity.
-4. **Pluggable storage via trait**: `Storage` trait decouples ObjectManager from backend (MemoryStorage, BfTreeStorage). The same ObjectManager code runs in browser WASM and native Rust.
+4. **Pluggable storage via trait**: `Storage` trait decouples ObjectManager from backend (MemoryStorage, SurrealKvStorage, OpfsBTreeStorage). The same ObjectManager code runs in browser WASM and native Rust.
 5. **Monotonic timestamps**: `next_timestamp()` guarantees causal ordering within a single manager instance. (`object_manager.rs:151-164`)
 
 ## Test Coverage

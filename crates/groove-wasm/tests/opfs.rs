@@ -49,7 +49,7 @@ async fn cleanup_opfs(db_name: &str) {
             .unwrap()
             .unchecked_into();
 
-    for suffix in &[".bftree", ".wal"] {
+    for suffix in &[".opfsbtree"] {
         let name = format!("{}{}", db_name, suffix);
         let opts = js_sys::Object::new();
         js_sys::Reflect::set(&opts, &"recursive".into(), &true.into()).unwrap();

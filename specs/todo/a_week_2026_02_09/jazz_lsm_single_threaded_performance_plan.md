@@ -129,7 +129,7 @@ Goal: keep the strongest low/medium-complexity wins while avoiding recent native
 
 - Multi-worker write/compaction architecture
 - Lock-free or thread-parallel internals
-- RocksDB parity across all workloads
+- Cross-engine parity across all workloads
 
 ## Acceptance gates
 
@@ -141,5 +141,5 @@ Progress to next item only if gates pass:
 
 ## Notes
 
-- Native production can use RocksDB where available.
+- Native production uses SurrealKV; `jazz-lsm` remains focused on browser/runtime-specific needs.
 - `jazz-lsm` target remains: predictable single-threaded browser engine with materially better mixed workload behavior than current prototype.

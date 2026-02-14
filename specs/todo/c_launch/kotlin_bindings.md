@@ -8,7 +8,7 @@ Native Kotlin integration for Android and server-side JVM:
 
 - Rust → JNI (via `jni` crate) → Kotlin wrapper
 - Kotlin-idiomatic API: coroutines, Flow for reactive queries, suspend functions
-- BfTree storage on device (Android internal storage)
+- SurrealKV storage on device (Android internal storage)
 - Jetpack Compose integration: `collectAsState()` from query Flows
 - Maven Central / Gradle distribution with pre-built `.so` for Android ABIs
 

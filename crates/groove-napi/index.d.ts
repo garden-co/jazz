@@ -7,7 +7,7 @@ export declare function generateId(): string
 export declare function currentTimestamp(): number
 export declare function parseSchema(json: string): any
 export declare class NapiRuntime {
-  /** Create a new NapiRuntime with BfTree-backed persistent storage. */
+  /** Create a new NapiRuntime with SurrealKV-backed persistent storage. */
   constructor(schemaJson: string, appId: string, grooveEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   insert(table: string, values: any): string
   update(objectId: string, values: any): void
