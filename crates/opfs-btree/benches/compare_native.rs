@@ -145,7 +145,7 @@ impl BfTreeEngine {
         config.leaf_page_size(leaf_page_size);
         config.cb_max_record_size(max_record_size);
 
-        let tree = BfTree::with_config(config, None).expect("open bf-tree");
+        let tree = BfTree::new_from_snapshot(config, None).expect("open bf-tree");
         Self {
             tree,
             read_buffer: vec![0u8; max_value_size.saturating_add(1024)],
@@ -488,22 +488,30 @@ fn engine_factories(
     out
 }
 
-fn cold_read_engine_factories() -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
-    vec![
-        (
-            "opfs_btree",
-            Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
-        ),
-        (
-            "rocksdb",
-            Box::new(|path| Box::new(RocksDbEngine::open(path))),
-        ),
-        (
-            "surrealkv",
-            Box::new(|path| Box::new(SurrealKvEngine::open(path))),
-        ),
-        ("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))),
-    ]
+fn cold_read_engine_factories(
+    max_value_size: usize,
+) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
+    let mut out: Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> = Vec::new();
+    out.push((
+        "opfs_btree",
+        Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
+    ));
+    if max_value_size <= BF_TREE_MAX_VALUE_SIZE {
+        out.push((
+            "bf_tree",
+            Box::new(move |path| Box::new(BfTreeEngine::open(path, max_value_size))),
+        ));
+    }
+    out.push((
+        "rocksdb",
+        Box::new(|path| Box::new(RocksDbEngine::open(path))),
+    ));
+    out.push((
+        "surrealkv",
+        Box::new(|path| Box::new(SurrealKvEngine::open(path))),
+    ));
+    out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
+    out
 }
 
 fn bench_seq_write(c: &mut Criterion) {
@@ -681,7 +689,7 @@ fn bench_cold_seq_read(c: &mut Criterion) {
     let value_sizes = value_sizes();
 
     for value_size in value_sizes {
-        let factories = cold_read_engine_factories();
+        let factories = cold_read_engine_factories(value_size);
         group.throughput(Throughput::Elements(key_count as u64));
         for (engine_name, factory) in &factories {
             group.bench_with_input(
@@ -729,7 +737,7 @@ fn bench_cold_random_read(c: &mut Criterion) {
     let order = shuffled_indices(key_count);
 
     for value_size in value_sizes {
-        let factories = cold_read_engine_factories();
+        let factories = cold_read_engine_factories(value_size);
         group.throughput(Throughput::Elements(key_count as u64));
         for (engine_name, factory) in &factories {
             group.bench_with_input(
