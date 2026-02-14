@@ -50,6 +50,27 @@ and
 
 [7] Current `opfs-btree wasm/opfs` mixed rows reflect the lazy-page-loading phase A/B medians over 3 runs (same seed/commands as [6]), with baseline at commit `b3fe6ae`.
 
+[8] Range benchmarks are currently measured for `opfs-btree wasm/opfs` only via `--profile range`, with medians across 3 runs.
+
+## Range Query Benchmarks (opfs-btree wasm/opfs)
+
+Workload details:
+
+- `range_seq_window_64`: deterministic sequential start positions.
+- `range_random_window_64`: random start positions from deterministic RNG.
+- Both use a prefilled keyspace and execute bounded range queries with `limit=64`.
+
+| operation              | value_size | count | median K/s | median p95 ms |
+| ---------------------- | ---------: | ----: | ---------: | ------------: |
+| range_seq_window_64    |         32 |  2000 |       58.0 |         0.100 |
+| range_seq_window_64    |        256 |  2000 |       87.3 |         0.100 |
+| range_seq_window_64    |       4096 |  2000 |       39.9 |         0.100 |
+| range_seq_window_64    |    1048576 |   128 |        0.3 |         3.100 |
+| range_random_window_64 |         32 |  2000 |       66.4 |         0.100 |
+| range_random_window_64 |        256 |  2000 |       80.0 |         0.100 |
+| range_random_window_64 |       4096 |  2000 |       34.2 |         0.100 |
+| range_random_window_64 |    1048576 |   128 |        0.4 |         3.000 |
+
 ## Phase: Incremental Checkpoint (Before/After)
 
 Before = `HEAD` at `71e16af`.

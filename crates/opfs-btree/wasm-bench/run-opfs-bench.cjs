@@ -93,8 +93,8 @@ function parseArgs(argv) {
 
     if (arg === "--profile") {
       const next = String(argv[i + 1] || "").trim();
-      if (!["basic", "mixed", "all"].includes(next)) {
-        throw new Error("`--profile` must be one of: basic, mixed, all");
+      if (!["basic", "mixed", "range", "all"].includes(next)) {
+        throw new Error("`--profile` must be one of: basic, mixed, range, all");
       }
       out.profile = next;
       i += 1;
@@ -189,7 +189,9 @@ import init, {
   bench_opfs_random_read,
   bench_opfs_cold_sequential_read,
   bench_opfs_cold_random_read,
-  bench_opfs_mixed_scenario
+  bench_opfs_mixed_scenario,
+  bench_opfs_range_seq_window,
+  bench_opfs_range_random_window
 } from "/pkg/opfs_btree.js";
 
 const pendingRequests = [];
@@ -210,6 +212,10 @@ const mixedScenarios = [
   "mixed_random_70r_30w",
   "mixed_random_50r_50w_with_updates",
   "mixed_random_60r_20w_20d"
+];
+const rangeRuns = [
+  ["range_seq_window_64", bench_opfs_range_seq_window],
+  ["range_random_window_64", bench_opfs_range_random_window]
 ];
 
 async function runRequest(payload) {
@@ -257,6 +263,25 @@ async function runRequest(payload) {
             phase_times_ms: result.phase_times_ms || []
           });
           self.postMessage({ type: "result", result });
+        }
+      }
+
+      if (profile === "range" || profile === "all") {
+        for (const [name, fn] of rangeRuns) {
+          const startedAt = performance.now();
+          self.postMessage({ type: "progress", event: "start", operation: name, value_size: valueSize });
+          const result = await fn(count, valueSize);
+          const withName = { ...result, operation: result.operation || name };
+          out.push(withName);
+          self.postMessage({
+            type: "progress",
+            event: "end",
+            operation: withName.operation,
+            value_size: valueSize,
+            elapsed_ms: performance.now() - startedAt,
+            phase_times_ms: withName.phase_times_ms || []
+          });
+          self.postMessage({ type: "result", result: withName });
         }
       }
 
