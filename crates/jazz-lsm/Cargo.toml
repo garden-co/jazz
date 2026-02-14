@@ -7,13 +7,7 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-compare-native = [
-  "dep:bf-tree",
-  "dep:rocksdb",
-  "dep:fjall",
-  "dep:surrealkv",
-  "dep:tokio",
-]
+compare-native = ["dep:bf-tree", "dep:rocksdb", "dep:fjall", "dep:surrealkv", "dep:tokio"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -29,11 +23,12 @@ futures = "0.3"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-bf-tree = { path = "../bf-tree", optional = true }
+bf-tree = { version = "0.4.7", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4"], optional = true }
 fjall = { version = "2", optional = true }
 surrealkv = { version = "0.19", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+opfs-btree = { path = "../opfs-btree" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

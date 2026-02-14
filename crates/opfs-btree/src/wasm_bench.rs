@@ -1,47 +1,14 @@
 #![cfg(target_arch = "wasm32")]
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use serde::Serialize;
-use wasm_bindgen::{JsCast, prelude::*};
+use wasm_bindgen::prelude::*;
 
-use crate::{FsError, LsmOptions, LsmTree, OpfsFs, RuntimeStats, SyncFs, WriteDurability};
+use crate::{BTreeOptions, OpfsBTree, OpfsFile};
 
 #[derive(Debug, Clone, Serialize)]
 struct PhaseTiming {
     phase: String,
     elapsed_ms: f64,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct FsOpStats {
-    calls: u64,
-    bytes: u64,
-    elapsed_ms: f64,
-}
-
-impl FsOpStats {
-    fn record(&mut self, bytes: u64, elapsed_ms: f64) {
-        self.calls = self.calls.saturating_add(1);
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.elapsed_ms += elapsed_ms;
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-struct FsStats {
-    read_all: FsOpStats,
-    read_range: FsOpStats,
-    write_all: FsOpStats,
-    write_atomic: FsOpStats,
-    append: FsOpStats,
-    file_len: FsOpStats,
-    truncate: FsOpStats,
-    remove_file: FsOpStats,
-    list_files: FsOpStats,
-    sync_file: FsOpStats,
-    sync_dir: FsOpStats,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,8 +28,6 @@ struct BenchmarkResult {
     deletes: u32,
     checksum: u64,
     phase_times_ms: Vec<PhaseTiming>,
-    fs_stats: FsStats,
-    runtime_stats: RuntimeStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -93,6 +58,7 @@ const MIXED_SCENARIOS: [MixedScenario; 3] = [
         update_pct: 80,
     },
 ];
+
 const DEFAULT_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
 
 #[derive(Debug, Clone, Copy)]
@@ -129,15 +95,11 @@ impl DeterministicRng {
     }
 }
 
-fn benchmark_options() -> LsmOptions {
-    LsmOptions {
-        max_memtable_bytes: 512 * 1024,
-        max_wal_bytes: 8 * 1024 * 1024,
-        level0_file_limit: 4,
-        level_fanout: 4,
-        max_levels: 4,
-        write_durability: WriteDurability::Buffered,
-        ..Default::default()
+fn benchmark_options() -> BTreeOptions {
+    BTreeOptions {
+        page_size: 16 * 1024,
+        cache_bytes: 8 * 1024 * 1024,
+        overflow_threshold: 8 * 1024,
     }
 }
 
@@ -212,131 +174,6 @@ fn push_phase(phase_times: &mut Vec<PhaseTiming>, phase: &str, start_ms: f64) {
     });
 }
 
-#[derive(Debug, Clone)]
-struct TrackingFs<F: SyncFs> {
-    inner: F,
-    stats: Rc<RefCell<FsStats>>,
-}
-
-impl<F: SyncFs> TrackingFs<F> {
-    fn new(inner: F) -> Self {
-        Self {
-            inner,
-            stats: Rc::new(RefCell::new(FsStats::default())),
-        }
-    }
-
-    fn snapshot(&self) -> FsStats {
-        self.stats.borrow().clone()
-    }
-}
-
-impl<F: SyncFs> SyncFs for TrackingFs<F> {
-    fn read_all(&self, path: &str) -> Result<Vec<u8>, FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.read_all(path);
-        let elapsed_ms = high_res_now_ms() - start;
-        let bytes = out.as_ref().map(|buf| buf.len() as u64).unwrap_or(0);
-        self.stats.borrow_mut().read_all.record(bytes, elapsed_ms);
-        out
-    }
-
-    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.read_range(path, offset, len);
-        let elapsed_ms = high_res_now_ms() - start;
-        let bytes = out.as_ref().map(|buf| buf.len() as u64).unwrap_or(0);
-        self.stats.borrow_mut().read_range.record(bytes, elapsed_ms);
-        out
-    }
-
-    fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.write_all(path, data);
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats
-            .borrow_mut()
-            .write_all
-            .record(data.len() as u64, elapsed_ms);
-        out
-    }
-
-    fn write_atomic(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.write_atomic(path, data);
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats
-            .borrow_mut()
-            .write_atomic
-            .record(data.len() as u64, elapsed_ms);
-        out
-    }
-
-    fn append(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.append(path, data);
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats
-            .borrow_mut()
-            .append
-            .record(data.len() as u64, elapsed_ms);
-        out
-    }
-
-    fn file_len(&self, path: &str) -> Result<u64, FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.file_len(path);
-        let elapsed_ms = high_res_now_ms() - start;
-        let bytes = out.as_ref().copied().unwrap_or(0);
-        self.stats.borrow_mut().file_len.record(bytes, elapsed_ms);
-        out
-    }
-
-    fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.truncate(path, len);
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats.borrow_mut().truncate.record(len, elapsed_ms);
-        out
-    }
-
-    fn remove_file(&self, path: &str) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.remove_file(path);
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats.borrow_mut().remove_file.record(0, elapsed_ms);
-        out
-    }
-
-    fn list_files(&self, prefix: &str) -> Result<Vec<String>, FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.list_files(prefix);
-        let elapsed_ms = high_res_now_ms() - start;
-        let bytes = out
-            .as_ref()
-            .map(|files| files.iter().map(|f| f.len() as u64).sum::<u64>())
-            .unwrap_or(0);
-        self.stats.borrow_mut().list_files.record(bytes, elapsed_ms);
-        out
-    }
-
-    fn sync_file(&self, path: &str) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.sync_file(path);
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats.borrow_mut().sync_file.record(0, elapsed_ms);
-        out
-    }
-
-    fn sync_dir(&self) -> Result<(), FsError> {
-        let start = high_res_now_ms();
-        let out = self.inner.sync_dir();
-        let elapsed_ms = high_res_now_ms() - start;
-        self.stats.borrow_mut().sync_dir.record(0, elapsed_ms);
-        out
-    }
-}
-
 fn percentile_ms(latencies_ms: &mut [f64], percentile: f64) -> f64 {
     if latencies_ms.is_empty() {
         return 0.0;
@@ -363,16 +200,11 @@ fn find_mixed_scenario(name: &str) -> Option<MixedScenario> {
     MIXED_SCENARIOS.iter().copied().find(|s| s.name == name)
 }
 
-async fn open_db(
-    namespace: &str,
-) -> Result<(LsmTree<TrackingFs<OpfsFs>>, TrackingFs<OpfsFs>), JsValue> {
-    let fs = OpfsFs::open(namespace)
+async fn open_db(namespace: &str) -> Result<OpfsBTree<OpfsFile>, JsValue> {
+    let file = OpfsFile::open(namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let tracked = TrackingFs::new(fs);
-    let db = LsmTree::open(tracked.clone(), benchmark_options(), Vec::new())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok((db, tracked))
+    OpfsBTree::open(file, benchmark_options()).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 fn to_js_value(result: &BenchmarkResult) -> Result<JsValue, JsValue> {
@@ -385,13 +217,13 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("seq-write");
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "seq_write", value_size);
@@ -408,18 +240,17 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
     push_phase(&mut phase_times_ms, "op_put_loop", op_start);
 
     let flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "final_flush", flush_start);
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "final_checkpoint", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
-    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -438,8 +269,6 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         deletes: 0,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 
@@ -448,13 +277,13 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("rand-write");
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "random_write", value_size);
@@ -472,18 +301,17 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
     push_phase(&mut phase_times_ms, "op_put_loop", op_start);
 
     let flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "final_flush", flush_start);
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "final_checkpoint", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
-    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -502,8 +330,6 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         deletes: 0,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 
@@ -512,13 +338,13 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("seq-read");
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "seq_read", value_size);
@@ -531,9 +357,14 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
-    let prefill_flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
+    let prefill_checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_checkpoint",
+        prefill_checkpoint_start,
+    );
 
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
@@ -548,14 +379,12 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
-    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -574,8 +403,6 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
         deletes: 0,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 
@@ -584,13 +411,13 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("rand-read");
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "random_read", value_size);
@@ -603,9 +430,14 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
-    let prefill_flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
+    let prefill_checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_checkpoint",
+        prefill_checkpoint_start,
+    );
 
     let order = shuffled_indices(count as usize, seed);
 
@@ -622,14 +454,12 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
-    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -648,8 +478,6 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
         deletes: 0,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 
@@ -658,18 +486,13 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("cold-seq-read");
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let fs = OpfsFs::open(&namespace)
-        .await
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let tracked_fs = TrackingFs::new(fs);
-    let mut db = LsmTree::open(tracked_fs.clone(), benchmark_options(), Vec::new())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db_prefill", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "cold_seq_read", value_size);
@@ -682,21 +505,21 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
-    let prefill_flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
+    let prefill_checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_checkpoint",
+        prefill_checkpoint_start,
+    );
     drop(db);
 
     // Cold-read window includes reopen + read loop.
     let op_start = high_res_now_ms();
     let reopen_start = high_res_now_ms();
-    let db = LsmTree::open(tracked_fs.clone(), benchmark_options(), Vec::new())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(
-        &mut phase_times_ms,
-        "reopen_db_for_cold_read",
-        reopen_start,
-    );
+    let db = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "reopen_db_for_cold_read", reopen_start);
 
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
@@ -710,14 +533,12 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
-    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -736,8 +557,6 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
         deletes: 0,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 
@@ -746,18 +565,13 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("cold-rand-read");
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let fs = OpfsFs::open(&namespace)
-        .await
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let tracked_fs = TrackingFs::new(fs);
-    let mut db = LsmTree::open(tracked_fs.clone(), benchmark_options(), Vec::new())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db_prefill", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "cold_random_read", value_size);
@@ -770,21 +584,21 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
-    let prefill_flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
+    let prefill_checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_checkpoint",
+        prefill_checkpoint_start,
+    );
     drop(db);
 
     // Cold-read window includes reopen + read loop.
     let op_start = high_res_now_ms();
     let reopen_start = high_res_now_ms();
-    let db = LsmTree::open(tracked_fs.clone(), benchmark_options(), Vec::new())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(
-        &mut phase_times_ms,
-        "reopen_db_for_cold_read",
-        reopen_start,
-    );
+    let db = open_db(&namespace).await?;
+    push_phase(&mut phase_times_ms, "reopen_db_for_cold_read", reopen_start);
 
     let order = shuffled_indices(count as usize, seed);
     let mut checksum = 0u64;
@@ -799,14 +613,12 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
 
-    let runtime_stats = db.runtime_stats();
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -825,8 +637,6 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
         deletes: 0,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 
@@ -840,13 +650,13 @@ async fn run_mixed_scenario(
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace(scenario.name);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "cleanup_destroy", phase_start);
 
     let phase_start = high_res_now_ms();
-    let (mut db, tracked_fs) = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "open_db", phase_start);
     let size = value_size as usize;
     let seed = derive_seed(base_seed, scenario.name, value_size);
@@ -860,9 +670,14 @@ async fn run_mixed_scenario(
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     push_phase(&mut phase_times_ms, "prefill_put_loop", prefill_puts_start);
-    let prefill_flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "prefill_flush", prefill_flush_start);
+    let prefill_checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(
+        &mut phase_times_ms,
+        "prefill_checkpoint",
+        prefill_checkpoint_start,
+    );
 
     let mut rng = DeterministicRng::new(seed);
     let mut key_space = initial_key_space;
@@ -875,10 +690,10 @@ async fn run_mixed_scenario(
     let mut checksum = 0u64;
     let mut op_latencies_ms = Vec::with_capacity(count as usize);
 
-    let op_start = high_res_now_ms();
+    let mixed_start = high_res_now_ms();
     for step in 0..(count as usize) {
         let op = choose_operation(scenario, rng.next_u8() % 100);
-        let op_start = high_res_now_ms();
+        let per_op_start = high_res_now_ms();
 
         match op {
             OpChoice::Read => {
@@ -920,22 +735,23 @@ async fn run_mixed_scenario(
             }
         }
 
-        op_latencies_ms.push(high_res_now_ms() - op_start);
+        op_latencies_ms.push(high_res_now_ms() - per_op_start);
     }
-    push_phase(&mut phase_times_ms, "op_mixed_loop", op_start);
-    let flush_start = high_res_now_ms();
-    db.flush().map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(&mut phase_times_ms, "final_flush", flush_start);
-    let elapsed_ms = high_res_now_ms() - op_start;
+    push_phase(&mut phase_times_ms, "op_mixed_loop", mixed_start);
 
-    let runtime_stats = db.runtime_stats();
+    let checkpoint_start = high_res_now_ms();
+    db.checkpoint()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    push_phase(&mut phase_times_ms, "final_checkpoint", checkpoint_start);
+
+    let elapsed_ms = high_res_now_ms() - mixed_start;
+
     drop(db);
     let phase_start = high_res_now_ms();
-    OpfsFs::destroy(&namespace)
+    OpfsFile::destroy(&namespace)
         .await
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "teardown_destroy", phase_start);
-    let fs_stats = tracked_fs.snapshot();
     let wall_elapsed_ms = high_res_now_ms() - wall_start;
 
     Ok(BenchmarkResult {
@@ -954,8 +770,6 @@ async fn run_mixed_scenario(
         deletes,
         checksum,
         phase_times_ms,
-        fs_stats,
-        runtime_stats,
     })
 }
 

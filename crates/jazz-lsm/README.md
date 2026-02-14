@@ -15,7 +15,7 @@ A simple synchronous LSM-tree prototype for Jazz.
 
 ## Non-goals for this prototype
 
-- RocksDB-class performance
+- High performance on native and WASM/OPFS
 - Bloom filters, block indexes, or advanced compaction heuristics
 - Concurrent writers
 
@@ -44,10 +44,17 @@ Compile checks used during development:
   - Optional env overrides:
     - `JAZZ_LSM_BENCH_KEY_COUNT`
     - `JAZZ_LSM_BENCH_VALUE_SIZES` (comma-separated bytes, e.g. `32,256,4096`)
-- Native mixed benchmark matrix (ops/s + p95 op latency + operation counters):
+- Native mixed benchmark matrix (ops/s + p95 op latency + operation counters) across `jazz_lsm` and `opfs_btree`:
   - `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 5000 --value-sizes 32,256,4096 --json`
-- Native comparative benchmark (same workload matrix across `jazz-lsm`, `bf-tree`, `rocksdb`, `surrealkv`, `fjall`):
+  - Optional engine filter:
+    - `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --engines jazz_lsm,opfs_btree --count 5000 --value-sizes 32,256,4096 --json`
+  - Comparative engines (`bf_tree`, `rocksdb`, `surrealkv`, `fjall`) are available with `compare-native`:
+    - `cargo run -p jazz-lsm --release --features compare-native --bin mixed_bench_native -- --engines all --count 500 --value-sizes 32,256,4096 --json`
+  - Optional cold read scenarios:
+    - `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 5000 --value-sizes 32,256,4096 --include-cold-read --json`
+- Native comparative benchmark (same workload matrix across `jazz-lsm`, `opfs_btree`, `bf-tree`, `rocksdb`, `surrealkv`, `fjall`):
   - `cargo bench -p jazz-lsm --features compare-native --bench compare_native -- --quick`
+  - Includes `compare_native_cold_seq_read` and `compare_native_cold_random_read` groups (cold groups currently exclude `bf-tree` because reopen validation is unstable there).
   - Uses the same optional env overrides:
     - `JAZZ_LSM_BENCH_KEY_COUNT`
     - `JAZZ_LSM_BENCH_VALUE_SIZES`
@@ -58,3 +65,4 @@ Compile checks used during development:
   - Optional args passed to the runner:
     - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --count 1000 --value-sizes 32,256 --json`
     - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 1000 --value-sizes 32,256 --json`
+    - `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --count 1000 --value-sizes 32,256 --include-cold-read --json`

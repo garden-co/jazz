@@ -87,6 +87,9 @@ struct SplitResult {
     right_page_id: PageId,
 }
 
+type KvPair = (Vec<u8>, Vec<u8>);
+type LeafEntry = (Vec<u8>, ValueCell);
+
 impl<F: SyncFile> OpfsBTree<F> {
     pub fn open(file: F, options: BTreeOptions) -> Result<Self, BTreeError> {
         options.validate()?;
@@ -212,23 +215,18 @@ impl<F: SyncFile> OpfsBTree<F> {
             BTreeError::Corrupt(format!("root page {} missing after delete", root_page_id))
         })?;
 
-        if let Page::Leaf { entries, .. } = root_page {
-            if entries.is_empty() {
-                self.pages.remove(&root_page_id);
-                self.add_free_page(root_page_id);
-                self.root_page_id = None;
-            }
+        if let Page::Leaf { entries, .. } = root_page
+            && entries.is_empty()
+        {
+            self.pages.remove(&root_page_id);
+            self.add_free_page(root_page_id);
+            self.root_page_id = None;
         }
 
         Ok(())
     }
 
-    pub fn range(
-        &self,
-        start: &[u8],
-        end: &[u8],
-        limit: usize,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BTreeError> {
+    pub fn range(&self, start: &[u8], end: &[u8], limit: usize) -> Result<Vec<KvPair>, BTreeError> {
         if limit == 0 || start >= end {
             return Ok(Vec::new());
         }
@@ -940,7 +938,7 @@ fn child_index(keys: &[Vec<u8>], key: &[u8]) -> usize {
     keys.partition_point(|separator| separator.as_slice() <= key)
 }
 
-fn expect_leaf(page: &Page) -> Result<(&Vec<(Vec<u8>, ValueCell)>, &Option<PageId>), BTreeError> {
+fn expect_leaf(page: &Page) -> Result<(&[LeafEntry], &Option<PageId>), BTreeError> {
     match page {
         Page::Leaf { entries, next } => Ok((entries, next)),
         _ => Err(BTreeError::Corrupt("expected leaf page".to_string())),
