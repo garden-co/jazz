@@ -18,6 +18,10 @@ struct Cli {
     #[arg(long, env = "JAZZ_INTERNAL_API_SECRET")]
     internal_api_secret: String,
 
+    /// Key used to hash backend/admin secrets in meta-app storage.
+    #[arg(long, env = "JAZZ_SECRET_HASH_KEY")]
+    secret_hash_key: String,
+
     /// Number of worker threads used for app placement and fairness scheduling.
     #[arg(long)]
     worker_threads: Option<usize>,
@@ -41,6 +45,10 @@ async fn main() {
         );
         std::process::exit(1);
     }
+    if cli.secret_hash_key.is_empty() {
+        eprintln!("Missing secret hash key. Set --secret-hash-key or JAZZ_SECRET_HASH_KEY.");
+        std::process::exit(1);
+    }
 
     let worker_threads = cli.worker_threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -52,6 +60,7 @@ async fn main() {
         port: cli.port,
         data_root: cli.data_root,
         internal_api_secret: cli.internal_api_secret,
+        secret_hash_key: cli.secret_hash_key,
         worker_threads,
     };
 
