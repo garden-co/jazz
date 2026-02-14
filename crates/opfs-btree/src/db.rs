@@ -1,7 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::BTreeError;
 use crate::file::SyncFile;
+use crate::page::{
+    Page, PageId, ValueCell, decode_page, encode_page, freelist_ids_per_page,
+    overflow_chunk_capacity, page_fits,
+};
 use crate::superblock::{Superblock, SuperblockSlot};
 
 const MIN_PAGE_SIZE: usize = 4 * 1024;
@@ -9,9 +13,6 @@ const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 8 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
-
-const SNAPSHOT_MAGIC: [u8; 8] = *b"OBSNAP01";
-const SNAPSHOT_HEADER_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
@@ -72,7 +73,18 @@ pub struct OpfsBTree<F: SyncFile> {
     options: BTreeOptions,
     active_slot: SuperblockSlot,
     active: Superblock,
-    data: BTreeMap<Vec<u8>, Vec<u8>>,
+    root_page_id: Option<PageId>,
+    total_pages: u64,
+    pages: BTreeMap<PageId, Page>,
+    free_pages: Vec<PageId>,
+    free_set: HashSet<PageId>,
+    freelist_meta_pages: Vec<PageId>,
+}
+
+#[derive(Debug)]
+struct SplitResult {
+    separator: Vec<u8>,
+    right_page_id: PageId,
 }
 
 impl<F: SyncFile> OpfsBTree<F> {
@@ -93,7 +105,12 @@ impl<F: SyncFile> OpfsBTree<F> {
             options,
             active_slot,
             active,
-            data: BTreeMap::new(),
+            root_page_id: None,
+            total_pages: 2,
+            pages: BTreeMap::new(),
+            free_pages: Vec::new(),
+            free_set: HashSet::new(),
+            freelist_meta_pages: Vec::new(),
         };
 
         if tree.active.generation == 0 {
@@ -109,24 +126,100 @@ impl<F: SyncFile> OpfsBTree<F> {
             tree.file.flush()?;
             tree.active_slot = SuperblockSlot::A;
             tree.active = bootstrap;
+            tree.total_pages = 2;
             return Ok(tree);
         }
 
-        tree.data = load_snapshot(&tree.file, tree.options.page_size, tree.active)?;
+        tree.total_pages = tree.active.total_pages.max(2);
+        if tree.active.root_page_id != 0 {
+            tree.root_page_id = Some(tree.active.root_page_id);
+            tree.load_tree_from_disk(tree.active.root_page_id)?;
+        }
+        if tree.active.freelist_head_page_id != 0 {
+            tree.load_freelist_from_disk(tree.active.freelist_head_page_id)?;
+        }
+        tree.sanitize_free_pages();
+
         Ok(tree)
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, BTreeError> {
-        Ok(self.data.get(key).cloned())
+        let leaf_page_id = match self.find_leaf_page_id(key)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let leaf = self.pages.get(&leaf_page_id).ok_or_else(|| {
+            BTreeError::Corrupt(format!("leaf page {} missing in memory", leaf_page_id))
+        })?;
+        let (entries, _) = expect_leaf(leaf)?;
+
+        match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
+            Ok(idx) => {
+                let value = self.materialize_value(&entries[idx].1)?;
+                Ok(Some(value))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BTreeError> {
-        self.data.insert(key.to_vec(), value.to_vec());
+        if self.root_page_id.is_none() {
+            let root_page_id = self.alloc_page();
+            let value_cell = self.build_value_cell(value)?;
+            let leaf = Page::Leaf {
+                entries: vec![(key.to_vec(), value_cell)],
+                next: None,
+            };
+            ensure_page_fits(&leaf, self.options.page_size, "initial leaf")?;
+            self.pages.insert(root_page_id, leaf);
+            self.root_page_id = Some(root_page_id);
+            return Ok(());
+        }
+
+        let root_page_id = self.root_page_id.expect("root must exist");
+        if let Some(split) = self.insert_recursive(root_page_id, key, value)? {
+            let new_root_page_id = self.alloc_page();
+            let new_root = Page::Internal {
+                keys: vec![split.separator],
+                children: vec![root_page_id, split.right_page_id],
+            };
+            ensure_page_fits(&new_root, self.options.page_size, "new root")?;
+            self.pages.insert(new_root_page_id, new_root);
+            self.root_page_id = Some(new_root_page_id);
+        }
+
         Ok(())
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<(), BTreeError> {
-        self.data.remove(key);
+        let root_page_id = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let removed = self.delete_recursive(root_page_id, key)?;
+        if !removed {
+            return Ok(());
+        }
+
+        let root_page_id = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let root_page = self.pages.get(&root_page_id).ok_or_else(|| {
+            BTreeError::Corrupt(format!("root page {} missing after delete", root_page_id))
+        })?;
+
+        if let Page::Leaf { entries, .. } = root_page {
+            if entries.is_empty() {
+                self.pages.remove(&root_page_id);
+                self.add_free_page(root_page_id);
+                self.root_page_id = None;
+            }
+        }
+
         Ok(())
     }
 
@@ -141,25 +234,48 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
 
         let mut out = Vec::new();
-        for (k, v) in &self.data {
-            let key = k.as_slice();
-            if key < start {
-                continue;
+        let mut current = self.find_leaf_page_id(start)?;
+        let mut visited = HashSet::new();
+
+        while let Some(page_id) = current {
+            if !visited.insert(page_id) {
+                return Err(BTreeError::Corrupt(
+                    "leaf chain contains a cycle".to_string(),
+                ));
             }
-            if key >= end {
-                break;
+
+            let page = self.pages.get(&page_id).ok_or_else(|| {
+                BTreeError::Corrupt(format!("leaf page {} missing during range", page_id))
+            })?;
+            let (entries, next) = expect_leaf(page)?;
+
+            for (key, value) in entries {
+                if key.as_slice() >= end {
+                    return Ok(out);
+                }
+                if key.as_slice() >= start {
+                    out.push((key.clone(), self.materialize_value(value)?));
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
+                }
             }
-            out.push((k.clone(), v.clone()));
-            if out.len() == limit {
-                break;
-            }
+
+            current = *next;
         }
+
         Ok(out)
     }
 
     pub fn checkpoint(&mut self) -> Result<(), BTreeError> {
-        let (root_page_id, total_pages) = self.write_snapshot()?;
-        self.checkpoint_superblock(root_page_id, 0, total_pages)
+        let (freelist_head_page_id, freelist_pages) = self.build_freelist_pages()?;
+        self.write_pages_to_disk(&freelist_pages)?;
+        self.file.flush()?;
+        self.checkpoint_superblock(
+            self.root_page_id.unwrap_or(0),
+            freelist_head_page_id,
+            self.total_pages,
+        )
     }
 
     pub fn checkpoint_state(&self) -> CheckpointState {
@@ -176,41 +292,618 @@ impl<F: SyncFile> OpfsBTree<F> {
         self.file
     }
 
-    fn write_snapshot(&self) -> Result<(u64, u64), BTreeError> {
-        let snapshot = serialize_snapshot(&self.data)?;
-        let page_size = self.options.page_size;
-        let page_count = div_ceil(snapshot.len(), page_size)? as u64;
-        let start_page_id = self.active.total_pages.max(2);
-        let total_pages = start_page_id
-            .checked_add(page_count)
-            .ok_or_else(|| BTreeError::Io("page count overflow".to_string()))?;
+    fn insert_recursive(
+        &mut self,
+        page_id: PageId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Option<SplitResult>, BTreeError> {
+        let page = self.pages.get(&page_id).cloned().ok_or_else(|| {
+            BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+        })?;
 
-        let required_file_len = total_pages
-            .checked_mul(page_size as u64)
-            .ok_or_else(|| BTreeError::Io("file length overflow".to_string()))?;
+        match page {
+            Page::Leaf { mut entries, next } => {
+                let new_value = self.build_value_cell(value)?;
+                match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
+                    Ok(idx) => {
+                        let old_value = std::mem::replace(&mut entries[idx].1, new_value);
+                        self.free_value_cell(old_value)?;
+                    }
+                    Err(idx) => entries.insert(idx, (key.to_vec(), new_value)),
+                }
 
-        if self.file.len()? < required_file_len {
-            self.file.truncate(required_file_len)?;
-        }
+                let candidate = Page::Leaf {
+                    entries: entries.clone(),
+                    next,
+                };
+                if page_fits(&candidate, self.options.page_size)? {
+                    self.pages.insert(page_id, candidate);
+                    return Ok(None);
+                }
 
-        let mut page = vec![0u8; page_size];
-        for i in 0..page_count {
-            page.fill(0);
-            let src_start = (i as usize)
-                .checked_mul(page_size)
-                .ok_or_else(|| BTreeError::Io("snapshot offset overflow".to_string()))?;
-            let src_end = src_start.saturating_add(page_size).min(snapshot.len());
-            if src_end > src_start {
-                page[..(src_end - src_start)].copy_from_slice(&snapshot[src_start..src_end]);
+                if entries.len() < 2 {
+                    return Err(BTreeError::InvalidOptions(
+                        "single leaf entry exceeds page size".to_string(),
+                    ));
+                }
+
+                let split_at = entries.len() / 2;
+                let right_entries = entries.split_off(split_at);
+                let split_key = right_entries
+                    .first()
+                    .map(|(k, _)| k.clone())
+                    .ok_or_else(|| BTreeError::Corrupt("right leaf split empty".to_string()))?;
+
+                let right_page_id = self.alloc_page();
+                let left_page = Page::Leaf {
+                    entries,
+                    next: Some(right_page_id),
+                };
+                let right_page = Page::Leaf {
+                    entries: right_entries,
+                    next,
+                };
+
+                ensure_page_fits(&left_page, self.options.page_size, "left leaf split")?;
+                ensure_page_fits(&right_page, self.options.page_size, "right leaf split")?;
+
+                self.pages.insert(page_id, left_page);
+                self.pages.insert(right_page_id, right_page);
+                Ok(Some(SplitResult {
+                    separator: split_key,
+                    right_page_id,
+                }))
             }
-            let offset = (start_page_id + i)
-                .checked_mul(page_size as u64)
-                .ok_or_else(|| BTreeError::Io("page write offset overflow".to_string()))?;
-            self.file.write_all_at(offset, &page)?;
+            Page::Internal {
+                mut keys,
+                mut children,
+            } => {
+                let child_idx = child_index(&keys, key);
+                let child_page_id = *children.get(child_idx).ok_or_else(|| {
+                    BTreeError::Corrupt(format!(
+                        "internal page {} missing child {}",
+                        page_id, child_idx
+                    ))
+                })?;
+
+                let split = self.insert_recursive(child_page_id, key, value)?;
+                let Some(split) = split else {
+                    return Ok(None);
+                };
+
+                keys.insert(child_idx, split.separator);
+                children.insert(child_idx + 1, split.right_page_id);
+
+                let candidate = Page::Internal {
+                    keys: keys.clone(),
+                    children: children.clone(),
+                };
+                if page_fits(&candidate, self.options.page_size)? {
+                    self.pages.insert(page_id, candidate);
+                    return Ok(None);
+                }
+
+                if keys.len() < 2 {
+                    return Err(BTreeError::InvalidOptions(
+                        "internal split requires at least two keys".to_string(),
+                    ));
+                }
+
+                let mid = keys.len() / 2;
+                let promoted = keys[mid].clone();
+
+                let right_keys = keys.split_off(mid + 1);
+                let _ = keys.pop();
+                let right_children = children.split_off(mid + 1);
+
+                let left_page = Page::Internal { keys, children };
+                let right_page = Page::Internal {
+                    keys: right_keys,
+                    children: right_children,
+                };
+
+                ensure_page_fits(&left_page, self.options.page_size, "left internal split")?;
+                ensure_page_fits(&right_page, self.options.page_size, "right internal split")?;
+
+                let right_page_id = self.alloc_page();
+                self.pages.insert(page_id, left_page);
+                self.pages.insert(right_page_id, right_page);
+
+                Ok(Some(SplitResult {
+                    separator: promoted,
+                    right_page_id,
+                }))
+            }
+            Page::Overflow { .. } => Err(BTreeError::Corrupt(format!(
+                "insert reached overflow page {}",
+                page_id
+            ))),
+            Page::Freelist { .. } => Err(BTreeError::Corrupt(format!(
+                "insert reached freelist page {}",
+                page_id
+            ))),
+        }
+    }
+
+    fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
+        let page = self.pages.get(&page_id).cloned().ok_or_else(|| {
+            BTreeError::Corrupt(format!("page {} missing during delete", page_id))
+        })?;
+
+        match page {
+            Page::Leaf { mut entries, next } => {
+                let idx = match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
+                    Ok(idx) => idx,
+                    Err(_) => return Ok(false),
+                };
+                let (_, value) = entries.remove(idx);
+                self.free_value_cell(value)?;
+                self.pages.insert(page_id, Page::Leaf { entries, next });
+                Ok(true)
+            }
+            Page::Internal { keys, children } => {
+                let child_idx = child_index(&keys, key);
+                let child_page_id = *children.get(child_idx).ok_or_else(|| {
+                    BTreeError::Corrupt(format!(
+                        "internal page {} missing child {}",
+                        page_id, child_idx
+                    ))
+                })?;
+                self.delete_recursive(child_page_id, key)
+            }
+            Page::Overflow { .. } => Err(BTreeError::Corrupt(format!(
+                "delete reached overflow page {}",
+                page_id
+            ))),
+            Page::Freelist { .. } => Err(BTreeError::Corrupt(format!(
+                "delete reached freelist page {}",
+                page_id
+            ))),
+        }
+    }
+
+    fn materialize_value(&self, value: &ValueCell) -> Result<Vec<u8>, BTreeError> {
+        match value {
+            ValueCell::Inline(value) => Ok(value.clone()),
+            ValueCell::Overflow {
+                head_page_id,
+                total_len,
+            } => self.read_overflow_value(*head_page_id, *total_len as usize),
+        }
+    }
+
+    fn read_overflow_value(
+        &self,
+        head_page_id: PageId,
+        expected_len: usize,
+    ) -> Result<Vec<u8>, BTreeError> {
+        let mut out = Vec::with_capacity(expected_len);
+        let mut current = head_page_id;
+        let mut seen = HashSet::new();
+
+        while current != 0 && out.len() < expected_len {
+            if !seen.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "overflow chain contains a cycle".to_string(),
+                ));
+            }
+
+            let page = self.pages.get(&current).ok_or_else(|| {
+                BTreeError::Corrupt(format!("overflow page {} missing in memory", current))
+            })?;
+            let (chunk, next) = expect_overflow(page)?;
+            out.extend_from_slice(chunk);
+            current = next.unwrap_or(0);
         }
 
-        self.file.flush()?;
-        Ok((start_page_id, total_pages))
+        if out.len() < expected_len {
+            return Err(BTreeError::Corrupt(format!(
+                "overflow payload truncated: expected {}, found {}",
+                expected_len,
+                out.len()
+            )));
+        }
+
+        out.truncate(expected_len);
+        Ok(out)
+    }
+
+    fn free_value_cell(&mut self, value: ValueCell) -> Result<(), BTreeError> {
+        if let ValueCell::Overflow { head_page_id, .. } = value {
+            self.free_overflow_chain(head_page_id)?;
+        }
+        Ok(())
+    }
+
+    fn free_overflow_chain(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
+        let mut current = head_page_id;
+        let mut seen = HashSet::new();
+
+        while current != 0 {
+            if !seen.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "overflow free encountered a cycle".to_string(),
+                ));
+            }
+
+            let page = self.pages.remove(&current).ok_or_else(|| {
+                BTreeError::Corrupt(format!("overflow page {} missing while freeing", current))
+            })?;
+            let (_, next) = expect_overflow(&page)?;
+            self.add_free_page(current);
+            current = next.unwrap_or(0);
+        }
+
+        Ok(())
+    }
+
+    fn build_value_cell(&mut self, value: &[u8]) -> Result<ValueCell, BTreeError> {
+        if value.len() <= self.options.overflow_threshold {
+            return Ok(ValueCell::Inline(value.to_vec()));
+        }
+
+        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
+        if max_chunk == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "page size too small for overflow pages".to_string(),
+            ));
+        }
+
+        let total_len = u32::try_from(value.len())
+            .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
+
+        let mut remaining = value;
+        let mut page_ids = Vec::new();
+        while !remaining.is_empty() {
+            page_ids.push(self.alloc_page());
+            let consume = remaining.len().min(max_chunk);
+            remaining = &remaining[consume..];
+        }
+
+        remaining = value;
+        for (idx, page_id) in page_ids.iter().enumerate() {
+            let consume = remaining.len().min(max_chunk);
+            let chunk = remaining[..consume].to_vec();
+            remaining = &remaining[consume..];
+
+            let next = page_ids.get(idx + 1).copied();
+            self.pages
+                .insert(*page_id, Page::Overflow { data: chunk, next });
+        }
+
+        let head_page_id = *page_ids
+            .first()
+            .ok_or_else(|| BTreeError::Corrupt("overflow page id allocation failed".to_string()))?;
+
+        Ok(ValueCell::Overflow {
+            head_page_id,
+            total_len,
+        })
+    }
+
+    fn find_leaf_page_id(&self, key: &[u8]) -> Result<Option<PageId>, BTreeError> {
+        let mut current = match self.root_page_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        loop {
+            let page = self.pages.get(&current).ok_or_else(|| {
+                BTreeError::Corrupt(format!("page {} missing while descending", current))
+            })?;
+            match page {
+                Page::Leaf { .. } => return Ok(Some(current)),
+                Page::Internal { keys, children } => {
+                    let idx = child_index(keys, key);
+                    current = *children.get(idx).ok_or_else(|| {
+                        BTreeError::Corrupt(format!(
+                            "internal page {} missing child {}",
+                            current, idx
+                        ))
+                    })?;
+                }
+                Page::Overflow { .. } => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected overflow page {} in tree path",
+                        current
+                    )));
+                }
+                Page::Freelist { .. } => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "unexpected freelist page {} in tree path",
+                        current
+                    )));
+                }
+            }
+        }
+    }
+
+    fn load_tree_from_disk(&mut self, root_page_id: PageId) -> Result<(), BTreeError> {
+        let mut visited = HashSet::new();
+        self.load_tree_recursive(root_page_id, &mut visited)
+    }
+
+    fn load_tree_recursive(
+        &mut self,
+        page_id: PageId,
+        visited: &mut HashSet<PageId>,
+    ) -> Result<(), BTreeError> {
+        if !visited.insert(page_id) {
+            return Err(BTreeError::Corrupt(
+                "tree pages contain a cycle".to_string(),
+            ));
+        }
+
+        let page = self.read_page_from_disk(page_id)?;
+        let mut children = Vec::new();
+        let mut overflow_heads = Vec::new();
+
+        match &page {
+            Page::Internal { children: c, .. } => {
+                children.extend(c.iter().copied());
+            }
+            Page::Leaf { entries, .. } => {
+                for (_, value) in entries {
+                    if let ValueCell::Overflow { head_page_id, .. } = value {
+                        overflow_heads.push(*head_page_id);
+                    }
+                }
+            }
+            Page::Overflow { .. } => {
+                return Err(BTreeError::Corrupt(format!(
+                    "root/tree page {} is overflow",
+                    page_id
+                )));
+            }
+            Page::Freelist { .. } => {
+                return Err(BTreeError::Corrupt(format!(
+                    "root/tree page {} is freelist",
+                    page_id
+                )));
+            }
+        }
+
+        self.pages.insert(page_id, page);
+
+        for child in children {
+            self.load_tree_recursive(child, visited)?;
+        }
+        for head_page_id in overflow_heads {
+            self.load_overflow_chain_from_disk(head_page_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn load_overflow_chain_from_disk(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
+        let mut current = head_page_id;
+        let mut seen = HashSet::new();
+
+        while current != 0 {
+            if self.pages.contains_key(&current) {
+                let page = self.pages.get(&current).ok_or_else(|| {
+                    BTreeError::Corrupt(format!("overflow page {} disappeared", current))
+                })?;
+                let (_, next) = expect_overflow(page)?;
+                current = next.unwrap_or(0);
+                continue;
+            }
+
+            if !seen.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "overflow pages contain a cycle".to_string(),
+                ));
+            }
+
+            let page = self.read_page_from_disk(current)?;
+            let next = match &page {
+                Page::Overflow { next, .. } => *next,
+                _ => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "expected overflow page {}, found different kind",
+                        current
+                    )));
+                }
+            };
+            self.pages.insert(current, page);
+            current = next.unwrap_or(0);
+        }
+
+        Ok(())
+    }
+
+    fn load_freelist_from_disk(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
+        let mut current = head_page_id;
+        let mut seen = HashSet::new();
+
+        while current != 0 {
+            if !seen.insert(current) {
+                return Err(BTreeError::Corrupt(
+                    "freelist pages contain a cycle".to_string(),
+                ));
+            }
+
+            let page = self.read_page_from_disk(current)?;
+            let (ids, next) = expect_freelist(&page)?;
+            self.freelist_meta_pages.push(current);
+            for id in ids {
+                self.add_free_page(*id);
+            }
+            current = next.unwrap_or(0);
+        }
+
+        Ok(())
+    }
+
+    fn read_page_from_disk(&self, page_id: PageId) -> Result<Page, BTreeError> {
+        if page_id < 2 || page_id >= self.total_pages {
+            return Err(BTreeError::Corrupt(format!(
+                "page id {} out of bounds for total_pages {}",
+                page_id, self.total_pages
+            )));
+        }
+
+        let offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
+
+        let mut raw = vec![0u8; self.options.page_size];
+        self.file.read_exact_at(offset, &mut raw)?;
+        decode_page(&raw, self.options.page_size)
+    }
+
+    fn write_pages_to_disk(&mut self, freelist_pages: &[(PageId, Page)]) -> Result<(), BTreeError> {
+        let mut max_page_id = 1u64;
+        if let Some(max_live) = self.pages.keys().max().copied() {
+            max_page_id = max_page_id.max(max_live);
+        }
+        if let Some(max_free) = self.free_set.iter().max().copied() {
+            max_page_id = max_page_id.max(max_free);
+        }
+        if let Some(max_freelist) = freelist_pages.iter().map(|(id, _)| *id).max() {
+            max_page_id = max_page_id.max(max_freelist);
+        }
+
+        self.total_pages = self.total_pages.max(max_page_id.saturating_add(1)).max(2);
+
+        let required_len = self
+            .total_pages
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("file size overflow".to_string()))?;
+        if self.file.len()? < required_len {
+            self.file.truncate(required_len)?;
+        }
+
+        for (page_id, page) in &self.pages {
+            self.write_single_page(*page_id, page)?;
+        }
+        for (page_id, page) in freelist_pages {
+            self.write_single_page(*page_id, page)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_single_page(&self, page_id: PageId, page: &Page) -> Result<(), BTreeError> {
+        if page_id < 2 {
+            return Err(BTreeError::Corrupt(format!(
+                "attempt to write reserved page {}",
+                page_id
+            )));
+        }
+        if page_id >= self.total_pages {
+            return Err(BTreeError::Corrupt(format!(
+                "attempt to write page {} beyond total_pages {}",
+                page_id, self.total_pages
+            )));
+        }
+
+        let raw = encode_page(page, self.options.page_size)?;
+        let offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Io("page write offset overflow".to_string()))?;
+        self.file.write_all_at(offset, &raw)
+    }
+
+    fn build_freelist_pages(&mut self) -> Result<(PageId, Vec<(PageId, Page)>), BTreeError> {
+        let old_meta_pages = std::mem::take(&mut self.freelist_meta_pages);
+        for page_id in old_meta_pages {
+            self.add_free_page(page_id);
+        }
+
+        self.sanitize_free_pages();
+
+        let mut free_ids: Vec<PageId> = self.free_set.iter().copied().collect();
+        free_ids.sort_unstable();
+
+        let capacity = freelist_ids_per_page(self.options.page_size)?;
+        if capacity == 0 && !free_ids.is_empty() {
+            return Err(BTreeError::InvalidOptions(
+                "page size too small for freelist pages".to_string(),
+            ));
+        }
+
+        let mut meta_count = 0usize;
+        while meta_count
+            .checked_mul(capacity)
+            .ok_or_else(|| BTreeError::Io("freelist capacity overflow".to_string()))?
+            < free_ids.len().saturating_sub(meta_count)
+        {
+            meta_count += 1;
+        }
+
+        let mut meta_page_ids = Vec::with_capacity(meta_count);
+        for _ in 0..meta_count {
+            let page_id = free_ids.pop().ok_or_else(|| {
+                BTreeError::Corrupt("freelist meta page allocation underflow".to_string())
+            })?;
+            meta_page_ids.push(page_id);
+        }
+        meta_page_ids.sort_unstable();
+
+        let remaining_free = free_ids;
+        self.free_set.clear();
+        self.free_pages.clear();
+        for page_id in &remaining_free {
+            self.free_set.insert(*page_id);
+            self.free_pages.push(*page_id);
+        }
+
+        self.freelist_meta_pages = meta_page_ids.clone();
+        let head_page_id = *meta_page_ids.first().unwrap_or(&0);
+
+        let mut freelist_pages = Vec::with_capacity(meta_page_ids.len());
+        for (idx, page_id) in meta_page_ids.iter().enumerate() {
+            let start = idx
+                .checked_mul(capacity)
+                .ok_or_else(|| BTreeError::Io("freelist chunk start overflow".to_string()))?;
+            let end = ((idx + 1)
+                .checked_mul(capacity)
+                .ok_or_else(|| BTreeError::Io("freelist chunk end overflow".to_string()))?)
+            .min(remaining_free.len());
+            let ids = if start < end {
+                remaining_free[start..end].to_vec()
+            } else {
+                Vec::new()
+            };
+            let next = meta_page_ids.get(idx + 1).copied();
+            freelist_pages.push((*page_id, Page::Freelist { ids, next }));
+        }
+
+        Ok((head_page_id, freelist_pages))
+    }
+
+    fn sanitize_free_pages(&mut self) {
+        let live_page_ids: HashSet<PageId> = self.pages.keys().copied().collect();
+        self.free_set.retain(|page_id| {
+            *page_id >= 2 && *page_id < self.total_pages && !live_page_ids.contains(page_id)
+        });
+
+        self.free_pages.clear();
+        self.free_pages.extend(self.free_set.iter().copied());
+        self.free_pages.sort_unstable();
+    }
+
+    fn alloc_page(&mut self) -> PageId {
+        while let Some(page_id) = self.free_pages.pop() {
+            if self.free_set.remove(&page_id) {
+                return page_id;
+            }
+        }
+
+        let page_id = self.total_pages;
+        self.total_pages = self.total_pages.saturating_add(1);
+        page_id
+    }
+
+    fn add_free_page(&mut self, page_id: PageId) {
+        if page_id < 2 {
+            return;
+        }
+        if self.free_set.insert(page_id) {
+            self.free_pages.push(page_id);
+        }
     }
 
     fn checkpoint_superblock(
@@ -243,201 +936,40 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 }
 
-fn div_ceil(len: usize, step: usize) -> Result<usize, BTreeError> {
-    if step == 0 {
-        return Err(BTreeError::InvalidOptions("step must be > 0".to_string()));
-    }
-    let len_minus_one = len
-        .checked_sub(1)
-        .ok_or_else(|| BTreeError::Io("length underflow".to_string()))?;
-    let pages = (len_minus_one / step)
-        .checked_add(1)
-        .ok_or_else(|| BTreeError::Io("page count overflow".to_string()))?;
-    Ok(pages)
+fn child_index(keys: &[Vec<u8>], key: &[u8]) -> usize {
+    keys.partition_point(|separator| separator.as_slice() <= key)
 }
 
-fn load_snapshot<F: SyncFile>(
-    file: &F,
-    page_size: usize,
-    active: Superblock,
-) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, BTreeError> {
-    if active.root_page_id == 0 {
-        return Ok(BTreeMap::new());
+fn expect_leaf(page: &Page) -> Result<(&Vec<(Vec<u8>, ValueCell)>, &Option<PageId>), BTreeError> {
+    match page {
+        Page::Leaf { entries, next } => Ok((entries, next)),
+        _ => Err(BTreeError::Corrupt("expected leaf page".to_string())),
     }
-
-    if active.root_page_id < 2 || active.root_page_id >= active.total_pages {
-        return Err(BTreeError::Corrupt(format!(
-            "invalid root page id {} for total_pages {}",
-            active.root_page_id, active.total_pages
-        )));
-    }
-
-    let root_offset = active
-        .root_page_id
-        .checked_mul(page_size as u64)
-        .ok_or_else(|| BTreeError::Corrupt("root offset overflow".to_string()))?;
-
-    let mut first_page = vec![0u8; page_size];
-    file.read_exact_at(root_offset, &mut first_page)?;
-
-    if first_page.len() < SNAPSHOT_HEADER_BYTES {
-        return Err(BTreeError::Corrupt("snapshot header too small".to_string()));
-    }
-    if first_page[..8] != SNAPSHOT_MAGIC {
-        return Err(BTreeError::Corrupt("snapshot magic mismatch".to_string()));
-    }
-
-    let payload_len = u64::from_le_bytes(
-        first_page[8..16]
-            .try_into()
-            .expect("snapshot payload length slice"),
-    );
-
-    let total_len_u64 = (SNAPSHOT_HEADER_BYTES as u64)
-        .checked_add(payload_len)
-        .ok_or_else(|| BTreeError::Corrupt("snapshot length overflow".to_string()))?;
-    let total_len = usize::try_from(total_len_u64)
-        .map_err(|_| BTreeError::Corrupt("snapshot too large for platform".to_string()))?;
-
-    let page_count = div_ceil(total_len, page_size)? as u64;
-    let end_page = active
-        .root_page_id
-        .checked_add(page_count)
-        .ok_or_else(|| BTreeError::Corrupt("snapshot page range overflow".to_string()))?;
-    if end_page > active.total_pages {
-        return Err(BTreeError::Corrupt(
-            "snapshot extends beyond total_pages".to_string(),
-        ));
-    }
-
-    let mut raw = vec![0u8; (page_count as usize) * page_size];
-    for i in 0..page_count {
-        let offset = (active.root_page_id + i)
-            .checked_mul(page_size as u64)
-            .ok_or_else(|| BTreeError::Corrupt("snapshot read offset overflow".to_string()))?;
-        let start = (i as usize)
-            .checked_mul(page_size)
-            .ok_or_else(|| BTreeError::Corrupt("snapshot read start overflow".to_string()))?;
-        file.read_exact_at(offset, &mut raw[start..start + page_size])?;
-    }
-
-    raw.truncate(total_len);
-    deserialize_snapshot(&raw)
 }
 
-fn serialize_snapshot(data: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<Vec<u8>, BTreeError> {
-    let mut payload = Vec::new();
-    let count = u32::try_from(data.len())
-        .map_err(|_| BTreeError::Io("too many entries for snapshot format".to_string()))?;
-    payload.extend_from_slice(&count.to_le_bytes());
-
-    for (key, value) in data {
-        let key_len = u32::try_from(key.len())
-            .map_err(|_| BTreeError::Io("key too large for snapshot format".to_string()))?;
-        let value_len = u32::try_from(value.len())
-            .map_err(|_| BTreeError::Io("value too large for snapshot format".to_string()))?;
-        payload.extend_from_slice(&key_len.to_le_bytes());
-        payload.extend_from_slice(&value_len.to_le_bytes());
-        payload.extend_from_slice(key);
-        payload.extend_from_slice(value);
+fn expect_overflow(page: &Page) -> Result<(&Vec<u8>, &Option<PageId>), BTreeError> {
+    match page {
+        Page::Overflow { data, next } => Ok((data, next)),
+        _ => Err(BTreeError::Corrupt("expected overflow page".to_string())),
     }
-
-    let payload_len = u64::try_from(payload.len())
-        .map_err(|_| BTreeError::Io("snapshot payload too large".to_string()))?;
-
-    let mut out = Vec::with_capacity(SNAPSHOT_HEADER_BYTES + payload.len());
-    out.extend_from_slice(&SNAPSHOT_MAGIC);
-    out.extend_from_slice(&payload_len.to_le_bytes());
-    out.extend_from_slice(&payload);
-    Ok(out)
 }
 
-fn deserialize_snapshot(raw: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, BTreeError> {
-    if raw.len() < SNAPSHOT_HEADER_BYTES {
-        return Err(BTreeError::Corrupt("snapshot buffer too small".to_string()));
+fn expect_freelist(page: &Page) -> Result<(&Vec<PageId>, &Option<PageId>), BTreeError> {
+    match page {
+        Page::Freelist { ids, next } => Ok((ids, next)),
+        _ => Err(BTreeError::Corrupt("expected freelist page".to_string())),
     }
-    if raw[..8] != SNAPSHOT_MAGIC {
-        return Err(BTreeError::Corrupt("snapshot magic mismatch".to_string()));
+}
+
+fn ensure_page_fits(page: &Page, page_size: usize, context: &str) -> Result<(), BTreeError> {
+    if page_fits(page, page_size)? {
+        Ok(())
+    } else {
+        Err(BTreeError::InvalidOptions(format!(
+            "{} does not fit in page",
+            context
+        )))
     }
-
-    let payload_len = u64::from_le_bytes(
-        raw[8..16]
-            .try_into()
-            .expect("snapshot payload length slice"),
-    );
-    let payload_len = usize::try_from(payload_len)
-        .map_err(|_| BTreeError::Corrupt("snapshot payload too large".to_string()))?;
-
-    let expected_total = SNAPSHOT_HEADER_BYTES
-        .checked_add(payload_len)
-        .ok_or_else(|| BTreeError::Corrupt("snapshot length overflow".to_string()))?;
-    if raw.len() != expected_total {
-        return Err(BTreeError::Corrupt(format!(
-            "snapshot length mismatch: expected {}, found {}",
-            expected_total,
-            raw.len()
-        )));
-    }
-
-    let payload = &raw[SNAPSHOT_HEADER_BYTES..];
-    if payload.len() < 4 {
-        return Err(BTreeError::Corrupt(
-            "snapshot payload missing entry count".to_string(),
-        ));
-    }
-
-    let entry_count =
-        u32::from_le_bytes(payload[..4].try_into().expect("snapshot entry count slice")) as usize;
-
-    let mut cursor = 4usize;
-    let mut out = BTreeMap::new();
-    for _ in 0..entry_count {
-        let lens_end = cursor
-            .checked_add(8)
-            .ok_or_else(|| BTreeError::Corrupt("snapshot cursor overflow".to_string()))?;
-        if lens_end > payload.len() {
-            return Err(BTreeError::Corrupt(
-                "snapshot truncated while reading key/value lengths".to_string(),
-            ));
-        }
-
-        let key_len = u32::from_le_bytes(
-            payload[cursor..cursor + 4]
-                .try_into()
-                .expect("snapshot key len slice"),
-        ) as usize;
-        let value_len = u32::from_le_bytes(
-            payload[cursor + 4..cursor + 8]
-                .try_into()
-                .expect("snapshot value len slice"),
-        ) as usize;
-        cursor = lens_end;
-
-        let key_end = cursor
-            .checked_add(key_len)
-            .ok_or_else(|| BTreeError::Corrupt("snapshot key overflow".to_string()))?;
-        let value_end = key_end
-            .checked_add(value_len)
-            .ok_or_else(|| BTreeError::Corrupt("snapshot value overflow".to_string()))?;
-        if value_end > payload.len() {
-            return Err(BTreeError::Corrupt(
-                "snapshot truncated while reading key/value bytes".to_string(),
-            ));
-        }
-
-        let key = payload[cursor..key_end].to_vec();
-        let value = payload[key_end..value_end].to_vec();
-        out.insert(key, value);
-        cursor = value_end;
-    }
-
-    if cursor != payload.len() {
-        return Err(BTreeError::Corrupt(
-            "snapshot trailing bytes after entries".to_string(),
-        ));
-    }
-
-    Ok(out)
 }
 
 fn choose_active(
@@ -509,6 +1041,14 @@ fn write_slot<F: SyncFile>(
 mod tests {
     use super::*;
     use crate::file::{MemoryFile, SyncFile};
+
+    fn small_options() -> BTreeOptions {
+        BTreeOptions {
+            page_size: 4 * 1024,
+            cache_bytes: 4 * 1024 * 8,
+            overflow_threshold: 128,
+        }
+    }
 
     fn corrupt_slot(file: &MemoryFile, slot: SuperblockSlot, page_size: usize) {
         let offset = slot.byte_offset(page_size) + 8;
@@ -592,9 +1132,9 @@ mod tests {
     }
 
     #[test]
-    fn put_get_delete_and_range_work_in_memory() {
+    fn put_get_delete_and_range_work() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file, BTreeOptions::default()).expect("open tree");
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
 
         tree.put(b"a", b"1").expect("put a");
         tree.put(b"b", b"2").expect("put b");
@@ -620,15 +1160,69 @@ mod tests {
     }
 
     #[test]
+    fn overflow_values_round_trip() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+
+        let big = vec![7u8; 25_000];
+        tree.put(b"big", &big).expect("put big");
+        tree.checkpoint().expect("checkpoint");
+
+        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        assert_eq!(reopened.get(b"big").expect("get big"), Some(big.clone()));
+
+        reopened.delete(b"big").expect("delete big");
+        reopened.checkpoint().expect("checkpoint delete");
+        assert_eq!(reopened.get(b"big").expect("get big after delete"), None);
+    }
+
+    #[test]
+    fn many_inserts_create_multiple_levels() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+
+        for i in 0..2_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("v{:05}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put key");
+        }
+
+        assert_eq!(
+            tree.get(b"k00000").expect("get first"),
+            Some(b"v00000".to_vec())
+        );
+        assert_eq!(
+            tree.get(b"k01000").expect("get middle"),
+            Some(b"v01000".to_vec())
+        );
+        assert_eq!(
+            tree.get(b"k01999").expect("get last"),
+            Some(b"v01999".to_vec())
+        );
+
+        let slice = tree
+            .range(b"k00500", b"k00600", 500)
+            .expect("range 500..600");
+        assert_eq!(slice.len(), 100);
+
+        tree.checkpoint().expect("checkpoint");
+        let reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        assert_eq!(
+            reopened.get(b"k01999").expect("reopen get last"),
+            Some(b"v01999".to_vec())
+        );
+    }
+
+    #[test]
     fn checkpoint_persists_data_across_reopen() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
+        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
 
         tree.put(b"k1", b"value1").expect("put k1");
         tree.put(b"k2", b"value2").expect("put k2");
         tree.checkpoint().expect("checkpoint");
 
-        let reopened = OpfsBTree::open(file, BTreeOptions::default()).expect("reopen tree");
+        let reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(
             reopened.get(b"k1").expect("get k1"),
             Some(b"value1".to_vec())
@@ -647,7 +1241,7 @@ mod tests {
     #[test]
     fn latest_checkpoint_wins_across_reopen() {
         let file = MemoryFile::new();
-        let mut tree = OpfsBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
+        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
 
         tree.put(b"k", b"v1").expect("put v1");
         tree.checkpoint().expect("checkpoint v1");
@@ -656,7 +1250,7 @@ mod tests {
         tree.put(b"k2", b"v3").expect("put v3");
         tree.checkpoint().expect("checkpoint v2");
 
-        let reopened = OpfsBTree::open(file, BTreeOptions::default()).expect("reopen tree");
+        let reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
         assert_eq!(reopened.get(b"k").expect("get k"), Some(b"v2".to_vec()));
         assert_eq!(reopened.get(b"k2").expect("get k2"), Some(b"v3".to_vec()));
     }
@@ -666,25 +1260,22 @@ mod tests {
         let file = MemoryFile::new();
 
         {
-            let mut tree =
-                OpfsBTree::open(file.clone(), BTreeOptions::default()).expect("open tree");
+            let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
             tree.put(b"persist", b"v1").expect("put persist");
             tree.checkpoint().expect("checkpoint persist");
         }
 
         {
-            let mut recovered = OpfsBTree::open(file.clone(), BTreeOptions::default())
-                .expect("reopen after first crash");
+            let mut recovered =
+                OpfsBTree::open(file.clone(), small_options()).expect("reopen after first crash");
             assert_eq!(
                 recovered.get(b"persist").expect("get persisted"),
                 Some(b"v1".to_vec())
             );
             recovered.put(b"ephemeral", b"temp").expect("put ephemeral");
-            // Simulate crash before checkpoint: drop without checkpoint.
         }
 
-        let reopened =
-            OpfsBTree::open(file, BTreeOptions::default()).expect("reopen after second crash");
+        let reopened = OpfsBTree::open(file, small_options()).expect("reopen after second crash");
         assert_eq!(
             reopened
                 .get(b"persist")
