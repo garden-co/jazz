@@ -8,16 +8,16 @@ Current `opfs-btree` default cache is `32MB`.
 | Scenario                          | Value Size (bytes) | opfs-btree native | opfs-btree wasm/opfs | bf-tree native | rocksdb native | surrealkv native | fjall native | Notes      |
 | --------------------------------- | -----------------: | ----------------: | -------------------: | -------------: | -------------: | ---------------: | -----------: | ---------- |
 | mixed_random_70r_30w              |                 32 |              40.7 |                125.5 |           81.9 |          214.0 |             75.5 |          2.2 | [1][5][9]  |
-| mixed_random_70r_30w              |                256 |              48.0 |                117.6 |           89.8 |          256.5 |             81.8 |          2.2 | [1][5][9]  |
-| mixed_random_70r_30w              |              4,096 |              32.6 |                 31.8 |           66.2 |          153.1 |             57.6 |          2.2 | [1][5][9]  |
+| mixed_random_70r_30w              |                256 |              48.0 |                209.8 |           89.8 |          256.5 |             81.8 |          2.2 | [1][5][9]  |
+| mixed_random_70r_30w              |              4,096 |              32.6 |                 39.1 |           66.2 |          153.1 |             57.6 |          2.2 | [1][5][9]  |
 | mixed_random_70r_30w              |          1,048,576 |               0.9 |                  0.1 |            N/A |            1.8 |              1.4 |          0.2 | [2][5][9]  |
-| mixed_random_50r_50w_with_updates |                 32 |              40.3 |                 92.9 |           98.1 |          265.2 |             77.3 |          2.2 | [1][5][9]  |
-| mixed_random_50r_50w_with_updates |                256 |              47.6 |                106.4 |           77.4 |          263.0 |             84.1 |          2.2 | [1][5][9]  |
-| mixed_random_50r_50w_with_updates |              4,096 |              32.3 |                 21.4 |           56.4 |          143.2 |             49.3 |          2.3 | [1][5][9]  |
+| mixed_random_50r_50w_with_updates |                 32 |              40.3 |                 97.7 |           98.1 |          265.2 |             77.3 |          2.2 | [1][5][9]  |
+| mixed_random_50r_50w_with_updates |                256 |              47.6 |                175.4 |           77.4 |          263.0 |             84.1 |          2.2 | [1][5][9]  |
+| mixed_random_50r_50w_with_updates |              4,096 |              32.3 |                 29.4 |           56.4 |          143.2 |             49.3 |          2.3 | [1][5][9]  |
 | mixed_random_50r_50w_with_updates |          1,048,576 |               0.8 |                  0.1 |            N/A |            1.8 |              1.3 |          0.2 | [2][5][9]  |
-| mixed_random_60r_20w_20d          |                 32 |              40.4 |                145.6 |           95.2 |          298.1 |             78.7 |          2.2 | [1][5][9]  |
-| mixed_random_60r_20w_20d          |                256 |              48.1 |                118.6 |           90.3 |          256.3 |             85.5 |          2.2 | [1][5][9]  |
-| mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 25.2 |           71.7 |          176.4 |             63.3 |          2.2 | [1][5][9]  |
+| mixed_random_60r_20w_20d          |                 32 |              40.4 |                160.4 |           95.2 |          298.1 |             78.7 |          2.2 | [1][5][9]  |
+| mixed_random_60r_20w_20d          |                256 |              48.1 |                214.3 |           90.3 |          256.3 |             85.5 |          2.2 | [1][5][9]  |
+| mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 32.2 |           71.7 |          176.4 |             63.3 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  0.1 |            N/A |            3.4 |              3.0 |          0.2 | [2][5][9]  |
 | range_seq_window_64               |                 32 |             151.9 |                111.1 |          302.4 |           89.6 |            110.3 |          9.0 | [8][11]    |
 | range_seq_window_64               |                256 |             148.9 |                113.0 |          268.2 |           75.7 |            109.2 |          9.0 | [8][11]    |
@@ -62,9 +62,10 @@ and
 
 [8] Range benchmarks are currently measured for `opfs-btree wasm/opfs` only via `--profile range`, with medians across 3 runs.
 
-[9] Current top-table `opfs-btree wasm/opfs` mixed rows reflect cache tuning results at `32MB` cache:
-3-run medians with seed `0xA5A5A5A501234567`,
-`count=3000` for `32/256/4096` and `count=64` for `1,048,576`.
+[9] Current top-table `opfs-btree wasm/opfs` mixed rows for `32/256/4096`
+reflect the latest checkpoint-write-coalescing run with `pin_internal_pages=true`,
+seed `0xA5A5A5A501234567`, `count=3000`, `cache=32MB` (single run).
+`1,048,576` rows are still carried forward from the prior baseline (`count=64`).
 
 [10] Top-table wasm cold rows are currently carried forward from the prior baseline run (before cache-sizing phase re-measurement).
 
@@ -225,3 +226,40 @@ Command shape (before/after): `--profile basic --include-cold-read --count 3000 
 | cold_random_read |        4.8 |       8.3 |  +74.3% |              6003 |             3004 |          -50.0% |
 
 This stress run confirms the intended mechanism: pinning internal pages can materially reduce OPFS read call volume under heavy eviction pressure.
+
+## Phase: Checkpoint Write Coalescing
+
+Changes in this phase:
+
+- Checkpoint now groups contiguous dirty/freelist pages into page runs and writes each run with one `write_all_at` call.
+- Total bytes written are unchanged; OPFS write call count is reduced.
+
+### A/B: Mixed Profile (32MB cache, single run, fixed seed)
+
+Before was captured on previous code at the same settings.
+After uses coalesced checkpoint writes.
+
+Command shape: `--profile mixed --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --json`
+
+| scenario                          | value_size | before K/s | after K/s |  delta |
+| --------------------------------- | ---------: | ---------: | --------: | -----: |
+| mixed_random_70r_30w              |         32 |      121.0 |     125.5 |  +3.8% |
+| mixed_random_70r_30w              |        256 |      110.3 |     209.8 | +90.2% |
+| mixed_random_70r_30w              |       4096 |       31.8 |      39.1 | +22.9% |
+| mixed_random_50r_50w_with_updates |         32 |       95.2 |      97.7 |  +2.6% |
+| mixed_random_50r_50w_with_updates |        256 |      103.4 |     175.4 | +69.6% |
+| mixed_random_50r_50w_with_updates |       4096 |       21.0 |      29.4 | +40.3% |
+| mixed_random_60r_20w_20d          |         32 |      147.1 |     160.4 |  +9.1% |
+| mixed_random_60r_20w_20d          |        256 |      114.5 |     214.3 | +87.1% |
+| mixed_random_60r_20w_20d          |       4096 |       24.5 |      32.2 | +31.1% |
+
+Aggregate (sum of rows): `768.8 K/s -> 1083.9 K/s` (`+41.0%`).
+
+### OPFS IO Counter Delta (same mixed run)
+
+| metric                 | before | after |  delta |
+| ---------------------- | -----: | ----: | -----: |
+| opfs write calls       |   2481 |  1090 | -56.1% |
+| opfs write bytes (MiB) |   38.8 |  38.8 |  +0.0% |
+
+Interpretation: coalescing reduced call overhead substantially while writing the same amount of data.
