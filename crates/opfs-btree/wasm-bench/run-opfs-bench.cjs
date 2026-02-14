@@ -19,6 +19,7 @@ const DEFAULT_COUNT = 5000;
 const DEFAULT_VALUE_SIZES = [32, 256, 4096];
 const DEFAULT_PROFILE = "basic";
 const DEFAULT_SEED = "0xA5A5A5A501234567";
+const DEFAULT_CACHE_MB = 32;
 
 function parseSeed(raw) {
   const text = String(raw || "").trim();
@@ -43,6 +44,7 @@ function parseArgs(argv) {
     valueSizes: DEFAULT_VALUE_SIZES,
     profile: DEFAULT_PROFILE,
     seed: DEFAULT_SEED,
+    cacheMb: DEFAULT_CACHE_MB,
     includeColdRead: false,
     json: false,
     progress: false,
@@ -107,6 +109,16 @@ function parseArgs(argv) {
         throw new Error("`--seed` requires a value");
       }
       out.seed = parseSeed(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--cache-mb") {
+      const next = Number(argv[i + 1]);
+      if (!Number.isFinite(next) || next <= 0) {
+        throw new Error("`--cache-mb` must be a positive number");
+      }
+      out.cacheMb = next;
       i += 1;
       continue;
     }
@@ -191,7 +203,8 @@ import init, {
   bench_opfs_cold_random_read,
   bench_opfs_mixed_scenario,
   bench_opfs_range_seq_window,
-  bench_opfs_range_random_window
+  bench_opfs_range_random_window,
+  bench_set_cache_bytes
 } from "/pkg/opfs_btree.js";
 
 const pendingRequests = [];
@@ -224,7 +237,10 @@ async function runRequest(payload) {
   const profile = String(payload?.profile ?? "basic");
   const seedRaw = String(payload?.seed ?? "${DEFAULT_SEED}");
   const includeColdRead = Boolean(payload?.includeColdRead ?? false);
+  const cacheMb = Number(payload?.cacheMb ?? ${DEFAULT_CACHE_MB});
   const seed = BigInt(seedRaw);
+  const cacheBytes = Math.max(1, Math.round(cacheMb * 1024 * 1024));
+  await bench_set_cache_bytes(cacheBytes);
 
   try {
     const out = [];
@@ -342,7 +358,7 @@ self.onmessage = (e) => {
 `;
 }
 
-function createHtml(count, valueSizes, profile, seed, progress, includeColdRead) {
+function createHtml(count, valueSizes, profile, seed, cacheMb, progress, includeColdRead) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>opfs-btree wasm opfs bench</title>
@@ -397,6 +413,7 @@ worker.postMessage({
   valueSizes: [${valueSizes.join(",")}],
   profile: "${profile}",
   seed: "${seed}",
+  cacheMb: ${cacheMb},
   includeColdRead: ${includeColdRead ? "true" : "false"}
 });
 </script>`;
@@ -414,6 +431,7 @@ async function run() {
     args.valueSizes,
     args.profile,
     args.seed,
+    args.cacheMb,
     args.progress,
     args.includeColdRead,
   );
