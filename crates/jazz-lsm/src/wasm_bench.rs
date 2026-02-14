@@ -692,11 +692,7 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
     let reopen_start = high_res_now_ms();
     let db = LsmTree::open(tracked_fs.clone(), benchmark_options(), Vec::new())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(
-        &mut phase_times_ms,
-        "reopen_db_for_cold_read",
-        reopen_start,
-    );
+    push_phase(&mut phase_times_ms, "reopen_db_for_cold_read", reopen_start);
 
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
@@ -780,11 +776,7 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
     let reopen_start = high_res_now_ms();
     let db = LsmTree::open(tracked_fs.clone(), benchmark_options(), Vec::new())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    push_phase(
-        &mut phase_times_ms,
-        "reopen_db_for_cold_read",
-        reopen_start,
-    );
+    push_phase(&mut phase_times_ms, "reopen_db_for_cold_read", reopen_start);
 
     let order = shuffled_indices(count as usize, seed);
     let mut checksum = 0u64;

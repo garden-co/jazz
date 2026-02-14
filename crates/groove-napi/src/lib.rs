@@ -384,6 +384,7 @@ impl SyncSender for NapiSyncSender {
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
+    upstream_server_id: Mutex<Option<ServerId>>,
 }
 
 #[napi]
@@ -486,7 +487,10 @@ impl NapiRuntime {
             core_guard.persist_schema();
         }
 
-        Ok(NapiRuntime { core: core_arc })
+        Ok(NapiRuntime {
+            core: core_arc,
+            upstream_server_id: Mutex::new(None),
+        })
     }
 
     // =========================================================================
@@ -877,12 +881,45 @@ impl NapiRuntime {
 
     #[napi(js_name = "addServer")]
     pub fn add_server(&self) -> napi::Result<()> {
-        let server_id = ServerId::new();
+        let server_id = {
+            let mut slot = self
+                .upstream_server_id
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            if let Some(server_id) = *slot {
+                server_id
+            } else {
+                let server_id = ServerId::new();
+                *slot = Some(server_id);
+                server_id
+            }
+        };
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
+        // Re-attach semantics: remove existing upstream edge then add again so
+        // replay/full-sync runs on every successful reconnect.
+        core.remove_server(server_id);
         core.add_server(server_id);
+        Ok(())
+    }
+
+    #[napi(js_name = "removeServer")]
+    pub fn remove_server(&self) -> napi::Result<()> {
+        let Some(server_id) = *self
+            .upstream_server_id
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+        else {
+            return Ok(());
+        };
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.remove_server(server_id);
         Ok(())
     }
 
@@ -948,6 +985,20 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.storage().flush();
+        Ok(())
+    }
+
+    /// Flush and close the underlying storage, releasing filesystem locks.
+    #[napi]
+    pub fn close(&self) -> napi::Result<()> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.storage().flush();
+        core.storage()
+            .close()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
         Ok(())
     }
 }

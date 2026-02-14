@@ -57,6 +57,17 @@ function addTodo(container: HTMLElement, title: string) {
   form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 }
 
+/** Submit a child todo by selecting a parent title first. */
+function addTodoWithParent(container: HTMLElement, title: string, parentTitle: string) {
+  const parentSelect = container.querySelector<HTMLSelectElement>("#parent-select")!;
+  const parentOption = [...parentSelect.options].find((opt) => opt.textContent === parentTitle);
+  if (!parentOption?.value) {
+    throw new Error(`Parent option "${parentTitle}" not found`);
+  }
+  parentSelect.value = parentOption.value;
+  addTodo(container, title);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -131,6 +142,32 @@ describe("Vanilla TS Todo App E2E", () => {
     const li = el.querySelector("#todo-list li")!;
     expect(li.querySelector("span")!.textContent).toBe("Buy milk");
     expect(li.classList.contains("done")).toBe(false);
+  });
+
+  it("renders child todos directly under their parent with nesting depth", async () => {
+    const el = await mount({ dbName: uniqueDbName("parent-child") });
+
+    addTodo(el, "Parent task");
+
+    await waitFor(
+      () => el.querySelectorAll("#todo-list li").length === 1,
+      3000,
+      "Parent todo should appear",
+    );
+
+    addTodoWithParent(el, "Child task", "Parent task");
+
+    await waitFor(
+      () => el.querySelectorAll("#todo-list li").length === 2,
+      3000,
+      "Child todo should appear",
+    );
+
+    const items = [...el.querySelectorAll<HTMLLIElement>("#todo-list li")];
+    const titles = items.map((li) => li.querySelector("span")!.textContent);
+    expect(titles).toEqual(["Parent task", "Child task"]);
+    expect(items[0].dataset.depth).toBe("0");
+    expect(items[1].dataset.depth).toBe("1");
   });
 
   // -------------------------------------------------------------------------
