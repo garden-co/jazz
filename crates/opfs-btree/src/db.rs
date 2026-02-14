@@ -267,22 +267,33 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
 
             self.ensure_page_loaded(page_id)?;
-            let page = self.pages.get(&page_id).ok_or_else(|| {
-                BTreeError::Corrupt(format!("leaf page {} missing during range", page_id))
-            })?;
-            let (entries, next) = expect_leaf(page)?;
-            let entries = entries.to_vec();
-            let next = *next;
+            let (next, staged_entries) = {
+                let page = self.pages.get(&page_id).ok_or_else(|| {
+                    BTreeError::Corrupt(format!("leaf page {} missing during range", page_id))
+                })?;
+                let (entries, next) = expect_leaf(page)?;
 
-            for (key, value) in entries {
-                if key.as_slice() >= end {
-                    return Ok(out);
-                }
-                if key.as_slice() >= start {
-                    out.push((key.clone(), self.materialize_value(&value)?));
-                    if out.len() == limit {
-                        return Ok(out);
+                let remaining = limit.saturating_sub(out.len());
+                let mut staged = Vec::with_capacity(remaining.min(entries.len()));
+                for (key, value) in entries {
+                    if key.as_slice() >= end {
+                        break;
                     }
+                    if key.as_slice() >= start {
+                        staged.push((key.clone(), value.clone()));
+                        if staged.len() == remaining {
+                            break;
+                        }
+                    }
+                }
+
+                (*next, staged)
+            };
+
+            for (key, value) in staged_entries {
+                out.push((key, self.materialize_value(&value)?));
+                if out.len() == limit {
+                    return Ok(out);
                 }
             }
 
