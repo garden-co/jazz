@@ -207,7 +207,7 @@ async function waitForRows(
   queryJson: string,
   predicate: (rows: Row[]) => boolean,
   timeoutMs = 20000,
-  settledTier: "edge" | undefined = undefined,
+  settledTier: "edge" | undefined = "edge",
 ): Promise<Row[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: Row[] = [];
@@ -357,6 +357,47 @@ describe("multi-server integration (Jazz TS)", () => {
   );
 
   maybeIt(
+    "resolves empty settled-tier query snapshots",
+    async () => {
+      const jwks = await JwksServer.start(JWT_SECRET);
+      const dataRoot = allocTempDir("jazz-ts-multi-server-empty-query-");
+      const server = await startMultiServer({ dataRoot });
+      const queryAllTodos = translateQuery(
+        JSON.stringify({
+          table: "todos",
+          conditions: [],
+          includes: {},
+          orderBy: [],
+          offset: 0,
+        }),
+        TEST_SCHEMA,
+      );
+
+      let client: JazzClient | null = null;
+      try {
+        const app = await createApp(server.baseUrl, jwks.url);
+        client = await connectClient(
+          makeContext(app.app_id, server.baseUrl, signJwt("empty-snapshot", JWT_SECRET)),
+        );
+
+        const rows = await waitForRows(
+          client,
+          queryAllTodos,
+          (all) => all.length === 0,
+          20000,
+          "edge",
+        );
+        expect(rows).toEqual([]);
+      } finally {
+        if (client) await client.shutdown();
+        await stopProcess(server.child);
+        await jwks.stop();
+      }
+    },
+    30000,
+  );
+
+  maybeIt(
     "syncs queries and mutations between two TS clients via multi-server",
     async () => {
       const jwks = await JwksServer.start(JWT_SECRET);
@@ -410,13 +451,7 @@ describe("multi-server integration (Jazz TS)", () => {
         expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
 
         await clientA.deletePersisted(rowId, "edge");
-        await waitForRows(
-          clientB,
-          queryAllTodos,
-          (rows) => !rows.some((row) => row.id === rowId),
-          20000,
-          undefined,
-        );
+        await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
       } finally {
         if (clientA) await clientA.shutdown();
         if (clientB) await clientB.shutdown();
@@ -424,7 +459,7 @@ describe("multi-server integration (Jazz TS)", () => {
         await jwks.stop();
       }
     },
-    90000,
+    30000,
   );
 
   maybeIt(
