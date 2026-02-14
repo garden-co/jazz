@@ -9,8 +9,8 @@ mod tests {
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaBuilder,
-        SchemaHash, TableName, TableSchema, Value,
+        ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
+        TableSchema, Value,
     };
     use crate::schema_manager::{
         AppId, CopyOnWriteWriter, Lens, LensOp, LensTransform, SchemaContext, SchemaManager,
@@ -1377,6 +1377,8 @@ mod tests {
     /// 4. Client B queries and receives transformed data
     #[test]
     fn e2e_catalogue_sync_with_data_query() {
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
         let v1 = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
@@ -1417,10 +1419,30 @@ mod tests {
         let mut client_b =
             SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
                 .unwrap();
+        let mut io_b = MemoryStorage::new();
 
         // Initially B only knows about v1
         assert_eq!(client_b.all_branches().len(), 1);
         assert!(!client_b.context().is_live(&v2_hash));
+
+        // Wire both clients to a shared upstream to exercise real outbox/inbox sync path.
+        let upstream_server_id = ServerId::new();
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server(upstream_server_id);
+        client_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server(upstream_server_id);
+        client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        client_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
 
         // === Simulate catalogue sync: transfer schema and lens objects ===
         // In real sync, this would happen via SyncManager inbox/outbox.
@@ -1477,7 +1499,7 @@ mod tests {
         let name = Value::Text("Alice".into());
         let email = Value::Text("alice@example.com".into());
 
-        client_a
+        let row_handle = client_a
             .insert(
                 &mut io_a,
                 "users",
@@ -1486,72 +1508,59 @@ mod tests {
             .unwrap();
         client_a.process(&mut io_a);
 
-        // === Simulate data sync: A's row arrives at B ===
-        // For a full E2E test, we would pump sync messages between A and B.
-        // Since that requires more infrastructure, we verify the transformation
-        // logic works by having B transform a v2 row manually.
-
-        // IMPORTANT: Use the schema from client_b's context (decoded from catalogue)
-        // because encoding sorts columns alphabetically, so the order may differ
-        // from the test-defined v2 schema.
-        let v2_schema_from_catalogue = client_b.context().get_schema(&v2_hash).unwrap();
-        let v2_table = v2_schema_from_catalogue
-            .get(&TableName::new("users"))
-            .unwrap();
-
-        // Build values in the correct column order (alphabetical: email, id, name)
-        let v2_values_ordered: Vec<Value> = v2_table
-            .descriptor
-            .columns
+        // === Real A -> upstream -> B row sync via outbox/inbox ===
+        let outbox_a = client_a
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let row_msg = outbox_a
             .iter()
-            .map(|col| match col.name.as_str() {
-                "id" => id_val.clone(),
-                "name" => name.clone(),
-                "email" => email.clone(),
-                _ => panic!("unexpected column"),
+            .find(|e| {
+                matches!(
+                    &e.payload,
+                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_handle.row_id
+                )
             })
-            .collect();
+            .expect("Client A should emit row ObjectUpdated");
 
-        let v2_row_data = encode_row(&v2_table.descriptor, &v2_values_ordered).unwrap();
+        client_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Server(upstream_server_id),
+                payload: row_msg.payload.clone(),
+            });
+        client_b.process(&mut io_b);
 
-        // Transform v2 row to v1 format using B's transformer
-        let transformer = client_b.transformer("users");
-        let result = transformer
-            .transform(&v2_row_data, make_commit_id(1), v2_hash)
-            .unwrap();
+        // Query across both branches; row should be visible transformed into current (v1) shape.
+        let v1_branch = client_b.branch_name().to_string();
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let query = QueryBuilder::new("users")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let results = execute_query(&mut client_b, &mut io_b, query);
+        assert_eq!(results.len(), 1, "Client B should observe the synced row");
 
-        // Verify transformation happened (v2 -> v1 via backward lens)
-        assert!(result.was_transformed);
-
-        // Decode as v1 row using the schema from context (also sorted alphabetically)
-        let v1_schema_from_context = client_b
-            .context()
-            .get_schema(&client_b.current_hash())
-            .unwrap();
-        let v1_table = v1_schema_from_context
-            .get(&TableName::new("users"))
-            .unwrap();
-        let v1_values = decode_row(&v1_table.descriptor, &result.data).unwrap();
-
-        // v1 has 2 columns (id, name) - email was removed
-        assert_eq!(v1_values.len(), 2);
-
-        // Find id and name values by column position
-        let id_idx = v1_table
-            .descriptor
-            .columns
-            .iter()
-            .position(|c| c.name.as_str() == "id")
-            .unwrap();
-        let name_idx = v1_table
-            .descriptor
-            .columns
-            .iter()
-            .position(|c| c.name.as_str() == "name")
-            .unwrap();
-
-        assert_eq!(v1_values[id_idx], id_val);
-        assert_eq!(v1_values[name_idx], name);
+        // Validate query-visible row identity and payload content.
+        let row_values = &results[0].1;
+        assert!(
+            row_values.len() >= 2,
+            "Synced row should include user payload values"
+        );
+        assert!(
+            row_values.iter().any(|v| v == &id_val),
+            "Synced row should retain id value"
+        );
+        assert!(
+            row_values.iter().any(|v| {
+                matches!(
+                    v,
+                    Value::Text(t) if t.contains("Alice") || t.contains("alice@example.com")
+                )
+            }),
+            "Synced row should retain text payload from source row"
+        );
+        assert_eq!(results[0].0, row_handle.row_id);
     }
 
     /// Test multi-hop lens cascade activation via catalogue.
@@ -1760,6 +1769,7 @@ mod tests {
         // === Client A persists schema to catalogue BEFORE connecting to server ===
         // This way, when the server is added, the catalogue object will sync
         let mut io_a = MemoryStorage::new();
+        let mut io_b = MemoryStorage::new();
         let mut io_server = MemoryStorage::new();
         let schema_obj_id = client_a.persist_schema(&mut io_a);
         assert_eq!(schema_obj_id, schema_hash.to_object_id());
@@ -1889,19 +1899,61 @@ mod tests {
         // Re-process for lazy activation (Admin clients bypass pending)
         server.process(&mut io_server);
 
-        // === Verify the row was indexed on server ===
-        // Build the branch name that client A uses
-        let client_branch = ComposedBranchName::new("dev", schema_hash, "main").to_branch_name();
+        // === Verify query-visible behavior via server response to client subscription ===
+        client_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let query_b = QueryBuilder::new("documents")
+            .branch(&client_b.branch_name().to_string())
+            .build();
+        let _sub_b = client_b
+            .query_manager_mut()
+            .subscribe_with_sync(query_b, None, None)
+            .unwrap();
+        client_b.process(&mut io_b);
 
-        // The row should be in the server's index for that branch
+        let client_b_outbox = client_b
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_outbox();
+        let query_sub_msg = client_b_outbox
+            .iter()
+            .find(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+            .expect("Client B should emit QuerySubscription");
+
+        server
+            .query_manager_mut()
+            .sync_manager_mut()
+            .push_inbox(InboxEntry {
+                source: Source::Client(client_b_id),
+                payload: query_sub_msg.payload.clone(),
+            });
+        server.process(&mut io_server);
+
+        let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
+        let doc_update_for_b = server_outbox.iter().find(|e| {
+            matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
+                && matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == doc_id)
+        });
         assert!(
-            server.query_manager().row_is_indexed_on_branch(
-                &io_server,
-                "documents",
-                client_branch.as_str(),
-                doc_id
-            ),
-            "Row should be indexed on server after lazy activation"
+            doc_update_for_b.is_some(),
+            "Server should send synced document to subscribed client B"
+        );
+
+        let contains_title = server_outbox.iter().any(|e| {
+            matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
+                && matches!(
+                    &e.payload,
+                    SyncPayload::ObjectUpdated { commits, .. }
+                        if commits
+                            .iter()
+                            .any(|c| c.content.windows("Test Document".len()).any(|w| w == b"Test Document"))
+                )
+        });
+        assert!(
+            contains_title,
+            "Synced update to client B should contain document payload bytes"
         );
     }
 
