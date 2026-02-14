@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { translateQuery } from "./query-adapter.js";
 import { sendSyncPayload } from "./sync-transport.js";
 import { hasGrooveWasmBuild } from "./testing/wasm-runtime-test-utils.js";
@@ -95,6 +95,30 @@ function findMultiServerBinary(): string | null {
   if (existsSync(basePath)) return basePath;
   if (existsSync(`${basePath}.exe`)) return `${basePath}.exe`;
   return null;
+}
+
+function assertIntegrationPrerequisites(): void {
+  const hasWasm = hasGrooveWasmBuild();
+  const binaryPath = findMultiServerBinary();
+  if (hasWasm && binaryPath) return;
+
+  const missing: string[] = [];
+  if (!hasWasm) {
+    missing.push("missing Groove WASM runtime artifacts");
+  }
+  if (!binaryPath) {
+    missing.push("missing jazz-multi-server debug binary at target/debug/jazz-multi-server");
+  }
+
+  throw new Error(
+    [
+      "Multi-server TS integration prerequisites are missing:",
+      ...missing.map((entry) => `- ${entry}`),
+      "Build prerequisites, then rerun tests:",
+      "1. pnpm --filter @jazz/rust build:crates",
+      "2. cargo build -p jazz-multi-server",
+    ].join("\n"),
+  );
 }
 
 function getFreePort(): Promise<number> {
@@ -307,9 +331,6 @@ function makeContext(appId: string, serverUrl: string, jwtToken: string): AppCon
   };
 }
 
-const CAN_RUN_INTEGRATION = hasGrooveWasmBuild() && !!findMultiServerBinary();
-const maybeIt = CAN_RUN_INTEGRATION ? it : it.skip;
-
 afterEach(() => {
   while (tempDirsToCleanup.length > 0) {
     const dir = tempDirsToCleanup.pop()!;
@@ -322,204 +343,192 @@ afterEach(() => {
 });
 
 describe("multi-server integration (Jazz TS)", () => {
-  maybeIt(
-    "routes sync requests through serverPathPrefix with JWT auth",
-    async () => {
-      const jwks = await JwksServer.start(JWT_SECRET);
-      const dataRoot = allocTempDir("jazz-ts-multi-server-");
-      const server = await startMultiServer({ dataRoot });
+  beforeAll(() => {
+    assertIntegrationPrerequisites();
+  });
 
-      try {
-        const app = await createApp(server.baseUrl, jwks.url);
-        const pathPrefix = `/apps/${app.app_id}`;
+  it("routes sync requests through serverPathPrefix with JWT auth", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-multi-server-");
+    const server = await startMultiServer({ dataRoot });
 
-        await sendSyncPayload(
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      const pathPrefix = `/apps/${app.app_id}`;
+
+      await sendSyncPayload(
+        server.baseUrl,
+        makeSyncPayload(),
+        { jwtToken: signJwt("valid-user", JWT_SECRET), pathPrefix },
+        "[valid] ",
+      );
+
+      await expect(
+        sendSyncPayload(
           server.baseUrl,
           makeSyncPayload(),
-          { jwtToken: signJwt("valid-user", JWT_SECRET), pathPrefix },
-          "[valid] ",
-        );
+          { jwtToken: signJwt("invalid-user", "wrong-secret"), pathPrefix },
+          "[invalid] ",
+        ),
+      ).rejects.toThrow("401");
+    } finally {
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 30000);
 
-        await expect(
-          sendSyncPayload(
-            server.baseUrl,
-            makeSyncPayload(),
-            { jwtToken: signJwt("invalid-user", "wrong-secret"), pathPrefix },
-            "[invalid] ",
-          ),
-        ).rejects.toThrow("401");
-      } finally {
-        await stopProcess(server.child);
-        await jwks.stop();
-      }
-    },
-    30000,
-  );
+  it("resolves empty settled-tier query snapshots", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-multi-server-empty-query-");
+    const server = await startMultiServer({ dataRoot });
+    const queryAllTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+      }),
+      TEST_SCHEMA,
+    );
 
-  maybeIt(
-    "resolves empty settled-tier query snapshots",
-    async () => {
-      const jwks = await JwksServer.start(JWT_SECRET);
-      const dataRoot = allocTempDir("jazz-ts-multi-server-empty-query-");
-      const server = await startMultiServer({ dataRoot });
-      const queryAllTodos = translateQuery(
-        JSON.stringify({
-          table: "todos",
-          conditions: [],
-          includes: {},
-          orderBy: [],
-          offset: 0,
-        }),
-        TEST_SCHEMA,
+    let client: JazzClient | null = null;
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      client = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("empty-snapshot", JWT_SECRET)),
       );
 
-      let client: JazzClient | null = null;
-      try {
-        const app = await createApp(server.baseUrl, jwks.url);
-        client = await connectClient(
-          makeContext(app.app_id, server.baseUrl, signJwt("empty-snapshot", JWT_SECRET)),
-        );
+      const rows = await waitForRows(
+        client,
+        queryAllTodos,
+        (all) => all.length === 0,
+        20000,
+        "edge",
+      );
+      expect(rows).toEqual([]);
+    } finally {
+      if (client) await client.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 30000);
 
-        const rows = await waitForRows(
-          client,
-          queryAllTodos,
-          (all) => all.length === 0,
-          20000,
-          "edge",
-        );
-        expect(rows).toEqual([]);
-      } finally {
-        if (client) await client.shutdown();
-        await stopProcess(server.child);
-        await jwks.stop();
-      }
-    },
-    30000,
-  );
+  it("syncs queries and mutations between two TS clients via multi-server", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-multi-server-");
+    const server = await startMultiServer({ dataRoot });
 
-  maybeIt(
-    "syncs queries and mutations between two TS clients via multi-server",
-    async () => {
-      const jwks = await JwksServer.start(JWT_SECRET);
-      const dataRoot = allocTempDir("jazz-ts-multi-server-");
-      const server = await startMultiServer({ dataRoot });
+    const queryAllTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+      }),
+      TEST_SCHEMA,
+    );
 
-      const queryAllTodos = translateQuery(
-        JSON.stringify({
-          table: "todos",
-          conditions: [],
-          includes: {},
-          orderBy: [],
-          offset: 0,
-        }),
-        TEST_SCHEMA,
+    let clientA: JazzClient | null = null;
+    let clientB: JazzClient | null = null;
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      clientA = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("a", JWT_SECRET)),
+      );
+      clientB = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
       );
 
-      let clientA: JazzClient | null = null;
-      let clientB: JazzClient | null = null;
+      const rowId = await clientA.createPersisted(
+        "todos",
+        [
+          { type: "Text", value: "shared-item" },
+          { type: "Boolean", value: false },
+        ],
+        "edge",
+      );
 
+      const rowsAfterCreate = await waitForRows(clientB, queryAllTodos, (rows) =>
+        rows.some((row) => row.id === rowId),
+      );
+      const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
+      expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
+
+      await clientA.updatePersisted(rowId, { done: { type: "Boolean", value: true } }, "edge");
+      const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
+        const row = rows.find((r) => r.id === rowId);
+        return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
+      });
+      const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
+      expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
+
+      await clientA.deletePersisted(rowId, "edge");
+      await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
+    } finally {
+      if (clientA) await clientA.shutdown();
+      if (clientB) await clientB.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 30000);
+
+  it("resyncs data from multi-server after server restart", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-multi-server-restart-");
+    const queryAllTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+      }),
+      TEST_SCHEMA,
+    );
+
+    const appId = await (async () => {
+      const server = await startMultiServer({ dataRoot });
+      let writer: JazzClient | null = null;
       try {
         const app = await createApp(server.baseUrl, jwks.url);
-        clientA = await connectClient(
-          makeContext(app.app_id, server.baseUrl, signJwt("a", JWT_SECRET)),
+        writer = await connectClient(
+          makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
-        clientB = await connectClient(
-          makeContext(app.app_id, server.baseUrl, signJwt("b", JWT_SECRET)),
-        );
-
-        const rowId = await clientA.createPersisted(
+        await writer.createPersisted(
           "todos",
           [
-            { type: "Text", value: "shared-item" },
+            { type: "Text", value: "persisted-item" },
             { type: "Boolean", value: false },
           ],
           "edge",
         );
-
-        const rowsAfterCreate = await waitForRows(clientB, queryAllTodos, (rows) =>
-          rows.some((row) => row.id === rowId),
-        );
-        const createdRow = rowsAfterCreate.find((row) => row.id === rowId);
-        expect(createdRow?.values[0]).toEqual({ type: "Text", value: "shared-item" });
-
-        await clientA.updatePersisted(rowId, { done: { type: "Boolean", value: true } }, "edge");
-        const rowsAfterUpdate = await waitForRows(clientB, queryAllTodos, (rows) => {
-          const row = rows.find((r) => r.id === rowId);
-          return Boolean(row && row.values[1]?.type === "Boolean" && row.values[1].value === true);
-        });
-        const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
-        expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
-
-        await clientA.deletePersisted(rowId, "edge");
-        await waitForRows(clientB, queryAllTodos, (rows) => !rows.some((row) => row.id === rowId));
+        await waitForRows(writer, queryAllTodos, (rows) => rows.length >= 1, 15000);
+        return app.app_id;
       } finally {
-        if (clientA) await clientA.shutdown();
-        if (clientB) await clientB.shutdown();
+        if (writer) await writer.shutdown();
         await stopProcess(server.child);
-        await jwks.stop();
       }
-    },
-    30000,
-  );
+    })();
 
-  maybeIt(
-    "resyncs data from multi-server after server restart",
-    async () => {
-      const jwks = await JwksServer.start(JWT_SECRET);
-      const dataRoot = allocTempDir("jazz-ts-multi-server-restart-");
-      const queryAllTodos = translateQuery(
-        JSON.stringify({
-          table: "todos",
-          conditions: [],
-          includes: {},
-          orderBy: [],
-          offset: 0,
-        }),
-        TEST_SCHEMA,
+    const restarted = await startMultiServer({ dataRoot });
+    let reader: JazzClient | null = null;
+    try {
+      reader = await connectClient(
+        makeContext(appId, restarted.baseUrl, signJwt("reader", JWT_SECRET)),
       );
-
-      const appId = await (async () => {
-        const server = await startMultiServer({ dataRoot });
-        let writer: JazzClient | null = null;
-        try {
-          const app = await createApp(server.baseUrl, jwks.url);
-          writer = await connectClient(
-            makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
-          );
-          await writer.createPersisted(
-            "todos",
-            [
-              { type: "Text", value: "persisted-item" },
-              { type: "Boolean", value: false },
-            ],
-            "edge",
-          );
-          await waitForRows(writer, queryAllTodos, (rows) => rows.length >= 1, 15000);
-          return app.app_id;
-        } finally {
-          if (writer) await writer.shutdown();
-          await stopProcess(server.child);
-        }
-      })();
-
-      const restarted = await startMultiServer({ dataRoot });
-      let reader: JazzClient | null = null;
-      try {
-        reader = await connectClient(
-          makeContext(appId, restarted.baseUrl, signJwt("reader", JWT_SECRET)),
-        );
-        const rows = await waitForRows(reader, queryAllTodos, (all) => all.length >= 1, 20000);
-        expect(
-          rows.some(
-            (row) => row.values[0]?.type === "Text" && row.values[0].value === "persisted-item",
-          ),
-        ).toBe(true);
-      } finally {
-        if (reader) await reader.shutdown();
-        await stopProcess(restarted.child);
-        await jwks.stop();
-      }
-    },
-    90000,
-  );
+      const rows = await waitForRows(reader, queryAllTodos, (all) => all.length >= 1, 20000);
+      expect(
+        rows.some(
+          (row) => row.values[0]?.type === "Text" && row.values[0].value === "persisted-item",
+        ),
+      ).toBe(true);
+    } finally {
+      if (reader) await reader.shutdown();
+      await stopProcess(restarted.child);
+      await jwks.stop();
+    }
+  }, 90000);
 });
