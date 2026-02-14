@@ -133,10 +133,8 @@ export async function startApp(
     if (!id) return;
 
     if (target.classList.contains("toggle")) {
-      const todo = await db.one(app.todos.where({ id }));
-      if (todo) {
-        db.update(app.todos, id, { done: !todo.done });
-      }
+      const checkbox = target as HTMLInputElement;
+      db.update(app.todos, id, { done: checkbox.checked });
     } else if (target.classList.contains("delete-btn")) {
       db.deleteFrom(app.todos, id);
     }

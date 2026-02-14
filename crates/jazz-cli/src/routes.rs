@@ -70,6 +70,7 @@ async fn events_handler(
             .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
         None => groove::sync_manager::ClientId::new(),
     };
+    tracing::info!(%client_id, "events stream connecting");
 
     // Extract session from headers (JWT or backend impersonation)
     let session = match extract_session(&headers, &state.auth_config) {
@@ -120,7 +121,6 @@ async fn events_handler(
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
-    let client_id_cleanup = client_id;
     let connection_id_cleanup = connection_id;
 
     // Capture client_id string for stream
@@ -173,8 +173,12 @@ async fn events_handler(
             let mut connections = state_cleanup.connections.write().await;
             connections.remove(&connection_id_cleanup);
         }
-        let _ = state_cleanup.runtime.remove_client(client_id_cleanup);
-        tracing::debug!("Stream connection {} closed, cleaned up", connection_id_cleanup);
+        // Keep logical client state across disconnects so reconnect with the same
+        // client_id can resume query forwarding state.
+        tracing::debug!(
+            "Stream connection {} closed (client state retained for resume)",
+            connection_id_cleanup
+        );
     };
 
     Ok(axum::response::Response::builder()
@@ -195,6 +199,7 @@ async fn sync_handler(
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
     use groove::sync_manager::{InboxEntry, Source};
+    tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
 
     // Check admin secret — if present and valid, promote client to Admin role
     let is_admin = {

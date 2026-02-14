@@ -14,7 +14,7 @@ More generally: as the system grows, we need a way to understand what's happenin
 - **groove-wasm**: zero tracing/logging
 - **jazz-cli**: `tracing` + `tracing-subscriber` with `env-filter`; ~5 ad-hoc `info!`/`warn!`/`error!` calls in routes
 - **jazz-rs**: `tracing` in Cargo.toml but unused
-- **bf-tree**: optional `tracing` feature, unused in groove
+- **opfs-btree**: trace points available in the storage crate, not fully wired into end-to-end spans yet
 - **TypeScript**: scattered `console.error` for failures, no structured logging
 
 ## Design
@@ -92,10 +92,10 @@ sync_handler    → span: client_id, payload size
   └─ per message → event: message type, object_id/query
 ```
 
-**bf-tree (enable existing `tracing` feature)**
+**opfs-btree**
 
 ```
-Already has optional tracing — enable it via groove's Cargo.toml feature flag.
+Add focused storage spans/events for checkpoint, page allocation, and range scans.
 ```
 
 ### WASM: `tracing-wasm`
@@ -154,7 +154,7 @@ Or just hardcode TRACE during development — the browser console has its own le
 6. Instrument groove core: SyncManager message handling + outbox
 7. Instrument groove core: RuntimeCore::batched_tick
 8. Instrument groove-wasm: all public `WasmRuntime` methods
-9. Enable bf-tree `tracing` feature in groove's Cargo.toml
+9. Add/expand `opfs-btree` tracing hooks used by groove storage adapters
 10. Instrument jazz-cli routes (expand existing sparse tracing)
 11. Add `[main]`/`[worker]` prefixes to TypeScript console calls
 12. Test: run todo example with tracing, verify full write→read flow visible in console

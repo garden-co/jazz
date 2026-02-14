@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
-use crate::sync_manager::PersistenceTier;
+use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 
 #[cfg(test)]
 use super::encoding::decode_row;
@@ -45,6 +45,8 @@ impl QueryManager {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let _span =
+            tracing::debug_span!("QM::subscribe", table = %query.table, ?settled_tier).entered();
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -72,6 +74,7 @@ impl QueryManager {
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
 
+        tracing::debug!(sub_id = id.0, ?branches, "subscription created");
         self.subscriptions.insert(
             id,
             QuerySubscription {
@@ -173,19 +176,24 @@ impl QueryManager {
         // Create local subscription
         let sub_id = self.subscribe_with_session(query.clone(), session.clone(), settled_tier)?;
 
-        // Expand branches for sync payload - server needs explicit branch to resolve schema
-        let mut sync_query = query;
-        if sync_query.branches.is_empty() && self.schema_context.is_initialized() {
-            sync_query.branches = vec![self.schema_context.branch_name().as_str().to_string()];
-        }
+        let sync_query = self.sync_query_payload_for_upstream(&query);
 
         // Send QuerySubscription to all servers
         // Use the subscription ID as the query ID for simplicity
-        let query_id = crate::sync_manager::QueryId(sub_id.0);
+        let query_id = QueryId(sub_id.0);
         self.sync_manager
             .send_query_subscription_to_servers(query_id, sync_query, session);
 
         Ok(sub_id)
+    }
+
+    /// Add an upstream server and replay all active query subscriptions.
+    ///
+    /// This ensures subscriptions that became active before the server connection
+    /// are forwarded once the server is available.
+    pub fn add_server(&mut self, server_id: ServerId) {
+        self.sync_manager.add_server(server_id);
+        self.replay_active_query_subscriptions_to_server(server_id);
     }
 
     /// Unsubscribe from a synced query.
@@ -197,9 +205,53 @@ impl QueryManager {
         self.subscriptions.remove(&id);
 
         // Send QueryUnsubscription to all servers
-        let query_id = crate::sync_manager::QueryId(id.0);
+        let query_id = QueryId(id.0);
         self.sync_manager
             .send_query_unsubscription_to_servers(query_id);
+    }
+
+    /// Build the sync payload query for upstream forwarding.
+    ///
+    /// If branches are not explicitly set, upstream expects the current write branch
+    /// to be included so it can resolve schema context correctly.
+    fn sync_query_payload_for_upstream(&self, query: &Query) -> Query {
+        let mut sync_query = query.clone();
+        if sync_query.branches.is_empty() && self.schema_context.is_initialized() {
+            sync_query.branches = vec![self.schema_context.branch_name().as_str().to_string()];
+        }
+        sync_query
+    }
+
+    /// Replay all currently active local and downstream query subscriptions
+    /// to a newly added upstream server.
+    fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
+        let local_subs: Vec<(QueryId, Query, Option<Session>)> = self
+            .subscriptions
+            .iter()
+            .map(|(sub_id, sub)| {
+                (
+                    QueryId(sub_id.0),
+                    self.sync_query_payload_for_upstream(&sub.query),
+                    sub.session.clone(),
+                )
+            })
+            .collect();
+
+        for (query_id, query, session) in local_subs {
+            self.sync_manager
+                .send_query_subscription_to_server(server_id, query_id, query, session);
+        }
+
+        let downstream_subs: Vec<(QueryId, Query, Option<Session>)> = self
+            .server_subscriptions
+            .iter()
+            .map(|((_, query_id), sub)| (*query_id, sub.query.clone(), sub.session.clone()))
+            .collect();
+
+        for (query_id, query, session) in downstream_subs {
+            self.sync_manager
+                .send_query_subscription_to_server(server_id, query_id, query, session);
+        }
     }
 
     /// Take pending query updates.

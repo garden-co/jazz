@@ -37,6 +37,7 @@ impl QueryManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<InsertHandle, QueryError> {
+        let _span = tracing::debug_span!("QM::insert", table).entered();
         let table_name = TableName::new(table);
         let table_schema = self
             .schema
@@ -102,6 +103,7 @@ impl QueryManager {
         // Mark subscriptions dirty
         self.mark_subscriptions_dirty(table);
 
+        tracing::debug!(%object_id, branch = self.current_branch(), "row created");
         Ok(InsertHandle {
             row_id: object_id,
             row_commit_id,
@@ -359,6 +361,7 @@ impl QueryManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
+        let _span = tracing::debug_span!("QM::update", %id).entered();
         // Get table name from object metadata
         let table = self
             .sync_manager
@@ -507,6 +510,7 @@ impl QueryManager {
         id: ObjectId,
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
+        let _span = tracing::debug_span!("QM::delete", %id).entered();
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -911,15 +915,6 @@ impl QueryManager {
         let table_schema = self.schema.get(&table_name)?;
         let values = decode_row(&table_schema.descriptor, &data).ok()?;
         Some((table, values))
-    }
-
-    /// Test helper: get a row by ID if loaded in ObjectManager.
-    ///
-    /// Production code should use queries to read data, not this method.
-    /// This exists only to verify test expectations about what's loaded.
-    #[cfg(test)]
-    pub fn test_get_row_if_loaded(&self, id: ObjectId) -> Option<Vec<Value>> {
-        self.get_row(id).map(|(_, values)| values)
     }
 
     /// Check if a row is indexed on a specific branch (appears in the _id index).

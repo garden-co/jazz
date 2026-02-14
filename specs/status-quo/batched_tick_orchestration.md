@@ -8,11 +8,11 @@ The central design problem: mutations need to be synchronous (the UI shouldn't w
 
 RuntimeCore is generic over three platform traits. This is how the same core logic runs on native (Tokio), browser (WASM), and tests (no-op) without any `#[cfg]` branching in the business logic:
 
-| Trait        | Purpose                                         | Implementations                                 |
-| ------------ | ----------------------------------------------- | ----------------------------------------------- |
-| `Storage`    | Synchronous data persistence (objects, indices) | MemoryStorage, BfTreeStorage                    |
-| `Scheduler`  | Async batched_tick scheduling with debounce     | TokioScheduler, WasmScheduler, NoopScheduler    |
-| `SyncSender` | Network message dispatch                        | CallbackSyncSender, JsSyncSender, VecSyncSender |
+| Trait        | Purpose                                         | Implementations                                   |
+| ------------ | ----------------------------------------------- | ------------------------------------------------- |
+| `Storage`    | Synchronous data persistence (objects, indices) | MemoryStorage, SurrealKvStorage, OpfsBTreeStorage |
+| `Scheduler`  | Async batched_tick scheduling with debounce     | TokioScheduler, WasmScheduler, NoopScheduler      |
+| `SyncSender` | Network message dispatch                        | CallbackSyncSender, JsSyncSender, VecSyncSender   |
 
 > `crates/groove/src/runtime_core.rs:216-237` (RuntimeCore definition)
 > `crates/groove/src/runtime_core.rs:47-61` (Scheduler and SyncSender traits)

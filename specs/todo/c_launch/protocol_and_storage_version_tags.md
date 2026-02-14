@@ -7,7 +7,7 @@ Ensure all messages, protocols, and storage formats carry version tags for forwa
 Every serialized boundary needs a version indicator so that older clients/servers/storage can detect incompatible data and either migrate or reject gracefully:
 
 - Sync protocol messages (HTTP/SSE payloads, binary sync frames)
-- Storage formats (BfTree pages, WAL entries, snapshots)
+- Storage formats (SurrealKV artifacts, OPFS B-tree pages, manifest/checkpoint data)
 - Catalogue entries (schema definitions, lens definitions)
 - Worker bridge messages
 
