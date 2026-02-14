@@ -7,7 +7,7 @@
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
-      "outputs": ["../target/**", "groove-wasm/pkg/**"]
+      "outputs": ["../target/debug/jazz*"]
     },
     "test": {
       "dependsOn": ["build"],
