@@ -2,7 +2,7 @@
   "name": "@jazz/rust",
   "private": true,
   "scripts": {
-    "build:crates": "cargo build --workspace && wasm-pack build groove-wasm --target web",
+    "build:crates": "cargo build -p jazz-cli",
     "test": "cargo test --workspace"
   }
 }
