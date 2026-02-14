@@ -76,6 +76,8 @@ pub struct OpfsBTree<F: SyncFile> {
     root_page_id: Option<PageId>,
     total_pages: u64,
     pages: HashMap<PageId, Page>,
+    page_access_epoch: HashMap<PageId, u64>,
+    access_epoch: u64,
     dirty_pages: HashSet<PageId>,
     free_pages: Vec<PageId>,
     free_set: HashSet<PageId>,
@@ -112,6 +114,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             root_page_id: None,
             total_pages: 2,
             pages: HashMap::new(),
+            page_access_epoch: HashMap::new(),
+            access_epoch: 0,
             dirty_pages: HashSet::new(),
             free_pages: Vec::new(),
             free_set: HashSet::new(),
@@ -315,6 +319,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.total_pages,
         )?;
         self.dirty_pages.clear();
+        self.evict_pages_if_needed(None);
         Ok(())
     }
 
@@ -665,6 +670,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn ensure_page_loaded(&mut self, page_id: PageId) -> Result<(), BTreeError> {
         if self.pages.contains_key(&page_id) {
+            self.touch_page(page_id);
             return Ok(());
         }
         let page = self.read_page_from_disk(page_id)?;
@@ -774,15 +780,20 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn set_dirty_page(&mut self, page_id: PageId, page: Page) {
         self.pages.insert(page_id, page);
         self.dirty_pages.insert(page_id);
+        self.touch_page(page_id);
+        self.evict_pages_if_needed(Some(page_id));
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Page> {
         self.dirty_pages.remove(&page_id);
+        self.page_access_epoch.remove(&page_id);
         self.pages.remove(&page_id)
     }
 
     fn cache_loaded_page(&mut self, page_id: PageId, page: Page) {
         self.pages.insert(page_id, page);
+        self.touch_page(page_id);
+        self.evict_pages_if_needed(Some(page_id));
     }
 
     fn build_freelist_pages(&mut self) -> Result<(PageId, Vec<(PageId, Page)>), BTreeError> {
@@ -885,6 +896,57 @@ impl<F: SyncFile> OpfsBTree<F> {
         }
     }
 
+    fn max_cached_pages(&self) -> usize {
+        (self.options.cache_bytes / self.options.page_size).max(1)
+    }
+
+    fn touch_page(&mut self, page_id: PageId) {
+        self.access_epoch = self.access_epoch.wrapping_add(1);
+        if self.access_epoch == 0 {
+            self.access_epoch = 1;
+            self.page_access_epoch.clear();
+        }
+        self.page_access_epoch.insert(page_id, self.access_epoch);
+    }
+
+    fn evict_pages_if_needed(&mut self, protected_page: Option<PageId>) {
+        let max_cached_pages = self.max_cached_pages();
+        if self.pages.len() <= max_cached_pages {
+            return;
+        }
+
+        let root_page_id = self.root_page_id;
+        let mut candidates: Vec<(u8, u64, PageId)> = self
+            .pages
+            .iter()
+            .filter_map(|(page_id, page)| {
+                if Some(*page_id) == protected_page
+                    || Some(*page_id) == root_page_id
+                    || self.dirty_pages.contains(page_id)
+                {
+                    return None;
+                }
+
+                Some((
+                    eviction_priority(page),
+                    *self.page_access_epoch.get(page_id).unwrap_or(&0),
+                    *page_id,
+                ))
+            })
+            .collect();
+        candidates.sort_unstable();
+
+        let mut target = self.pages.len().saturating_sub(max_cached_pages);
+        for (_, _, page_id) in candidates {
+            if target == 0 {
+                break;
+            }
+            self.pages.remove(&page_id);
+            self.page_access_epoch.remove(&page_id);
+            target -= 1;
+        }
+    }
+
     fn checkpoint_superblock(
         &mut self,
         root_page_id: u64,
@@ -976,6 +1038,14 @@ fn slot_char(slot: SuperblockSlot) -> char {
     }
 }
 
+fn eviction_priority(page: &Page) -> u8 {
+    match page {
+        Page::Overflow { .. } | Page::Freelist { .. } => 0,
+        Page::Leaf { .. } => 1,
+        Page::Internal { .. } => 2,
+    }
+}
+
 fn read_slot<F: SyncFile>(
     file: &F,
     slot: SuperblockSlot,
@@ -1028,6 +1098,14 @@ mod tests {
         BTreeOptions {
             page_size: 4 * 1024,
             cache_bytes: 4 * 1024 * 8,
+            overflow_threshold: 128,
+        }
+    }
+
+    fn tiny_cache_options() -> BTreeOptions {
+        BTreeOptions {
+            page_size: 4 * 1024,
+            cache_bytes: 4 * 1024 * 2,
             overflow_threshold: 128,
         }
     }
@@ -1334,5 +1412,64 @@ mod tests {
             Some(b"v1".to_vec())
         );
         assert_eq!(reopened.get(b"ephemeral").expect("get ephemeral"), None);
+    }
+
+    #[test]
+    fn cache_eviction_keeps_root_and_budget_after_checkpoint() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
+
+        for i in 0..2_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("value-{}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+
+        tree.checkpoint().expect("checkpoint");
+        let max_cached = tree.max_cached_pages();
+        let root = tree.root_page_id.expect("root exists");
+        assert!(tree.pages.len() <= max_cached);
+        assert!(tree.pages.contains_key(&root));
+
+        for page_id in 2..tree.total_pages {
+            tree.ensure_page_loaded(page_id).expect("load page");
+            assert!(tree.pages.len() <= max_cached);
+            assert!(tree.pages.contains_key(&root));
+        }
+
+        assert_eq!(
+            tree.get(b"k00000").expect("get first"),
+            Some(b"value-0".to_vec())
+        );
+        assert_eq!(
+            tree.get(b"k01999").expect("get last"),
+            Some(b"value-1999".to_vec())
+        );
+        let range = tree.range(b"k01000", b"k01010", 32).expect("range");
+        assert_eq!(range.len(), 10);
+    }
+
+    #[test]
+    fn cache_eviction_never_drops_dirty_pages() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
+        let big = vec![9u8; 9_000];
+
+        for i in 0..8u32 {
+            let key = format!("k{:03}", i);
+            tree.put(key.as_bytes(), &big).expect("put big");
+        }
+
+        assert!(tree.pages.len() > tree.max_cached_pages());
+        let dirty_ids: Vec<PageId> = tree.dirty_pages.iter().copied().collect();
+        tree.evict_pages_if_needed(None);
+
+        for page_id in dirty_ids {
+            assert!(
+                tree.pages.contains_key(&page_id),
+                "dirty page {} was evicted",
+                page_id
+            );
+        }
     }
 }
