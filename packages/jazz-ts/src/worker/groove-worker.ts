@@ -7,7 +7,7 @@
  */
 
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
-import { sendSyncPayload, readBinaryFrames } from "../runtime/sync-transport.js";
+import { sendSyncPayload, readBinaryFrames, generateClientId } from "../runtime/sync-transport.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -22,7 +22,7 @@ let mainClientId: string | null = null;
 let jwtToken: string | undefined;
 let adminSecret: string | undefined;
 let streamAbortController: AbortController | null = null;
-let serverClientId: string | null = null; // Client ID assigned by server (from Connected frame)
+let serverClientId: string = generateClientId();
 let activeServerUrl: string | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
@@ -67,7 +67,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     reconnectAttempt = 0;
     streamAttached = false;
     streamConnecting = false;
-    serverClientId = null;
+    serverClientId = generateClientId();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -140,7 +140,7 @@ async function sendToServer(serverUrl: string, payload: any): Promise<void> {
   await sendSyncPayload(
     serverUrl,
     payload,
-    { jwtToken, adminSecret, clientId: serverClientId ?? undefined },
+    { jwtToken, adminSecret, clientId: serverClientId },
     "[worker] ",
   );
 }
@@ -193,9 +193,7 @@ async function connectStream(): Promise<void> {
   streamAbortController = new AbortController();
 
   try {
-    const eventsUrl = serverClientId
-      ? `${activeServerUrl}/events?client_id=${encodeURIComponent(serverClientId)}`
-      : `${activeServerUrl}/events`;
+    const eventsUrl = `${activeServerUrl}/events?client_id=${encodeURIComponent(serverClientId)}`;
 
     const response = await fetch(eventsUrl, {
       headers,

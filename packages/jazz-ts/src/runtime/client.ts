@@ -7,7 +7,7 @@
 
 import type { AppContext, Session } from "./context.js";
 import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
-import { sendSyncPayload, readBinaryFrames } from "./sync-transport.js";
+import { sendSyncPayload, readBinaryFrames, generateClientId } from "./sync-transport.js";
 
 /**
  * Common interface for WASM and NAPI runtimes.
@@ -188,7 +188,7 @@ export class JazzClient {
   private reconnectAttempt = 0;
   private streamConnecting = false;
   private streamAttached = false;
-  private serverClientId: string | null = null;
+  private serverClientId: string = generateClientId();
   private activeServerUrl: string | null = null;
   private subscriptions = new Map<number, SubscriptionCallback>();
   private context: AppContext;
@@ -561,7 +561,7 @@ export class JazzClient {
     await sendSyncPayload(serverUrl, payload, {
       jwtToken: this.context.jwtToken,
       adminSecret: this.context.adminSecret,
-      clientId: this.serverClientId ?? undefined,
+      clientId: this.serverClientId,
     });
   }
 
@@ -618,9 +618,7 @@ export class JazzClient {
     this.streamAbortController = new AbortController();
 
     try {
-      const eventsUrl = this.serverClientId
-        ? `${serverUrl}/events?client_id=${encodeURIComponent(this.serverClientId)}`
-        : `${serverUrl}/events`;
+      const eventsUrl = `${serverUrl}/events?client_id=${encodeURIComponent(this.serverClientId)}`;
 
       const response = await fetch(eventsUrl, {
         headers,
