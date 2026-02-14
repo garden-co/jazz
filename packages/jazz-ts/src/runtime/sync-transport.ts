@@ -64,35 +64,38 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
-    if (isCataloguePayload(payload)) {
-      if (auth.adminSecret) {
-        headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
-      }
-    } else if (auth.jwtToken) {
-      headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+  if (isCataloguePayload(payload)) {
+    if (auth.adminSecret) {
+      headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
+  } else if (auth.jwtToken) {
+    headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+  }
 
-    const body = JSON.stringify({
-      payload,
-      client_id: auth.clientId ?? fallbackClientId,
-    });
+  const body = JSON.stringify({
+    payload,
+    client_id: auth.clientId ?? fallbackClientId,
+  });
 
-    const response = await fetch(`${serverUrl}/sync`, {
+  let response: Response;
+  try {
+    response = await fetch(`${serverUrl}/sync`, {
       method: "POST",
       headers,
       body,
     });
-
-    if (!response.ok) {
-      console.error(`${logPrefix}Sync POST error:`, response.statusText);
-    }
   } catch (e) {
-    console.error(`${logPrefix}Sync POST error:`, e);
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
+  }
+
+  if (!response.ok) {
+    const statusText = response.statusText ? ` ${response.statusText}` : "";
+    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
   }
 }
 

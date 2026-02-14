@@ -105,7 +105,11 @@ async function handleInit(msg: InitMessage): Promise<void> {
       } else if (parsed.destination && "Server" in parsed.destination) {
         // Server-bound → HTTP POST to upstream
         if (activeServerUrl) {
-          sendToServer(activeServerUrl, parsed.payload);
+          void sendToServer(activeServerUrl, parsed.payload).catch((error) => {
+            console.error("[worker] Sync POST error:", error);
+            detachServer();
+            scheduleReconnect();
+          });
         }
       }
     });

@@ -210,8 +210,7 @@ export class Db {
             jwtToken: this.config.jwtToken,
             adminSecret: this.config.adminSecret,
           })
-          .then(() => {})
-          .catch((e) => console.error("Worker bridge init error:", e));
+          .then(() => undefined);
       }
 
       this.clients.set(key, client);
