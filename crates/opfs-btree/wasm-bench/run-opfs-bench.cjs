@@ -8,7 +8,7 @@ function loadPlaywright() {
   try {
     return require("playwright");
   } catch {
-    const fallback = path.join(__dirname, "..", "..", "jazz-lsm", "node_modules", "playwright");
+    const fallback = path.join(__dirname, "..", "node_modules", "playwright");
     return require(fallback);
   }
 }

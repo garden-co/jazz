@@ -136,7 +136,7 @@ Notes:
 
 - Cache tuning, prefix compression, leaf prefetch for range.
 - Startup hot-leaf hints.
-- Benchmarks against current jazz-lsm wasm/opfs profiles.
+- Benchmarks against current opfs-btree wasm/opfs baseline profiles.
 
 ### Phase 4
 

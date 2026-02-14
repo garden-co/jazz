@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/jazz-lsm",
   "crates/groove",
   "crates/groove-tokio",
   "crates/groove-wasm",
