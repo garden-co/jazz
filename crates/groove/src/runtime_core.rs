@@ -849,7 +849,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         info!(%server_id, "adding server");
         self.schema_manager
             .query_manager_mut()
-            .sync_manager_mut()
             .add_server(server_id);
         self.immediate_tick();
     }
@@ -1357,6 +1356,135 @@ mod tests {
 
         // B → A
         pump_b_to_a(s);
+    }
+
+    #[test]
+    fn rc_replays_downstream_query_when_upstream_added_late() {
+        // Build A <-> B first (no B <-> C yet), so B processes a downstream
+        // query subscription before it has any upstream server.
+        let schema = test_schema();
+        let app_id = AppId::from_name("query-replay-test");
+
+        let mgr_a = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            app_id.clone(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut a = RuntimeCore::new(
+            mgr_a,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
+
+        let mgr_b = SchemaManager::new(
+            SyncManager::new().with_tier(PersistenceTier::Worker),
+            schema.clone(),
+            app_id.clone(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut b = RuntimeCore::new(
+            mgr_b,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
+
+        let mgr_c = SchemaManager::new(
+            SyncManager::new().with_tier(PersistenceTier::EdgeServer),
+            schema,
+            app_id,
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let mut c = RuntimeCore::new(
+            mgr_c,
+            MemoryStorage::new(),
+            NoopScheduler,
+            VecSyncSender::new(),
+        );
+
+        let a_client_of_b = ClientId::new();
+        let b_server_for_a = ServerId::new();
+        let b_client_of_c = ClientId::new();
+        let c_server_for_b = ServerId::new();
+
+        {
+            let sm = b
+                .schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut();
+            sm.add_client(a_client_of_b);
+            sm.set_client_role(a_client_of_b, ClientRole::Peer);
+        }
+        a.schema_manager_mut()
+            .query_manager_mut()
+            .sync_manager_mut()
+            .add_server(b_server_for_a);
+
+        // Clear any startup sync traffic.
+        a.immediate_tick();
+        b.immediate_tick();
+        c.immediate_tick();
+        a.batched_tick();
+        b.batched_tick();
+        c.batched_tick();
+        a.sync_sender().take();
+        b.sync_sender().take();
+        c.sync_sender().take();
+
+        // Downstream client A subscribes before B has an upstream.
+        let _handle = a.subscribe(Query::new("users"), |_delta| {}, None).unwrap();
+
+        // Deliver only A -> B messages.
+        a.batched_tick();
+        for entry in a.sync_sender().take() {
+            if entry.destination == Destination::Server(b_server_for_a) {
+                b.park_sync_message(InboxEntry {
+                    source: Source::Client(a_client_of_b),
+                    payload: entry.payload,
+                });
+            }
+        }
+        b.batched_tick();
+        b.immediate_tick();
+        b.batched_tick();
+        b.sync_sender().take();
+
+        // Bring up B <-> C after B already has active downstream query state.
+        {
+            let sm = c
+                .schema_manager_mut()
+                .query_manager_mut()
+                .sync_manager_mut();
+            sm.add_client(b_client_of_c);
+            sm.set_client_role(b_client_of_c, ClientRole::Peer);
+        }
+        b.add_server(c_server_for_b);
+        b.batched_tick();
+
+        let forwarded_query_subscriptions = b
+            .sync_sender()
+            .take()
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.destination,
+                    Destination::Server(server_id) if *server_id == c_server_for_b
+                ) && matches!(&entry.payload, SyncPayload::QuerySubscription { .. })
+            })
+            .count();
+
+        assert!(
+            forwarded_query_subscriptions > 0,
+            "Expected B to replay existing downstream QuerySubscription(s) when adding upstream"
+        );
     }
 
     #[test]

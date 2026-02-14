@@ -329,16 +329,39 @@ impl SyncManager {
         query: Query,
         session: Option<Session>,
     ) {
-        for &server_id in self.servers.keys() {
-            self.outbox.push(OutboxEntry {
-                destination: Destination::Server(server_id),
-                payload: SyncPayload::QuerySubscription {
-                    query_id,
-                    query: query.clone(),
-                    session: session.clone(),
-                },
-            });
+        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        for server_id in server_ids {
+            self.send_query_subscription_to_server(
+                server_id,
+                query_id,
+                query.clone(),
+                session.clone(),
+            );
         }
+    }
+
+    /// Send a QuerySubscription to one specific server.
+    ///
+    /// Used when replaying existing subscriptions after a late server connect.
+    pub fn send_query_subscription_to_server(
+        &mut self,
+        server_id: ServerId,
+        query_id: QueryId,
+        query: Query,
+        session: Option<Session>,
+    ) {
+        if !self.servers.contains_key(&server_id) {
+            return;
+        }
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id,
+                query,
+                session,
+            },
+        });
     }
 
     /// Send a QueryUnsubscription to all connected servers.
