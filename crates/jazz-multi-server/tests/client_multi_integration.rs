@@ -232,19 +232,16 @@ async fn wait_for_todos_count(
     let mut last = Vec::new();
 
     while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(
+        if let Ok(Ok(rows)) = tokio::time::timeout(
             Duration::from_secs(2),
             client.query(query.clone(), settled_tier),
         )
         .await
         {
-            Ok(Ok(rows)) => {
-                if rows.len() == expected_count {
-                    return rows;
-                }
-                last = rows;
+            if rows.len() == expected_count {
+                return rows;
             }
-            Ok(Err(_)) | Err(_) => {}
+            last = rows;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
