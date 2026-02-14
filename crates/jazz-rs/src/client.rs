@@ -10,7 +10,7 @@ use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{RowDelta, Value};
 use groove::schema_manager::SchemaManager;
-use groove::storage::{Storage, SurrealKvStorage};
+use groove::storage::{Storage, StorageError, SurrealKvStorage};
 use groove::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
 };
@@ -102,10 +102,47 @@ impl JazzClient {
             None
         };
 
-        // Create persistent storage
+        // Create persistent storage.
+        //
+        // SurrealKV lock release can lag slightly after a close() in the same process.
+        // Retry briefly on lock errors so immediate reopen flows remain reliable.
         let db_path = context.data_dir.join("groove.surrealkv");
-        let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
-            .map_err(|e| JazzError::Storage(format!("{:?}", e)))?;
+        let storage = {
+            const MAX_ATTEMPTS: usize = 100;
+            const RETRY_DELAY_MS: u64 = 25;
+
+            let mut opened = None;
+            let mut last_err = None;
+
+            for attempt in 0..MAX_ATTEMPTS {
+                match SurrealKvStorage::open(&db_path, 64 * 1024 * 1024) {
+                    Ok(storage) => {
+                        opened = Some(storage);
+                        break;
+                    }
+                    Err(err) => {
+                        let is_lock_error = matches!(
+                            &err,
+                            StorageError::IoError(msg) if msg.contains("already locked")
+                        );
+                        if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
+                            last_err = Some(err);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
+            }
+
+            if let Some(storage) = opened {
+                storage
+            } else {
+                let err = last_err.unwrap_or_else(|| {
+                    StorageError::IoError("surrealkv open failed without error details".to_string())
+                });
+                return Err(JazzError::Storage(format!("{:?}", err)));
+            }
+        };
 
         // Clone server connection for sync callback
         let server_conn_for_sync = server_connection.clone();
@@ -403,16 +440,10 @@ impl JazzClient {
             .await
             .map_err(|e| JazzError::Connection(e.to_string()))?;
 
-        // Flush buffered data to ensure persistence
+        // Flush storage state to disk for persistence
         self.runtime
             .with_storage(|storage| storage.flush())
             .map_err(|e| JazzError::Storage(e.to_string()))?;
-
-        // Close SurrealKV to release lock files before process shutdown/reopen.
-        self.runtime
-            .with_storage(|storage| storage.close())
-            .map_err(|e| JazzError::Storage(e.to_string()))?
-            .map_err(|e| JazzError::Storage(format!("{:?}", e)))?;
 
         Ok(())
     }

@@ -5,11 +5,10 @@ edition = "2024"
 
 [features]
 default = []
-bftree = ["bf-tree"]
 surrealkv = ["dep:surrealkv", "dep:tokio"]
 
 [dependencies]
-bf-tree = { path = "../bf-tree", optional = true, features = ["tracing"] }
+opfs-btree = { path = "../opfs-btree" }
 futures = "0.3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }
