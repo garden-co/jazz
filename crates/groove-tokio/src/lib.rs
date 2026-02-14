@@ -179,7 +179,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ///
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
-    /// - `storage` - The storage backend (e.g., MemoryStorage, BfTreeStorage)
+    /// - `storage` - The storage backend (e.g., MemoryStorage, SurrealKvStorage)
     /// - `sync_callback` - Called when sync messages need to be sent
     pub fn new<F>(schema_manager: SchemaManager, storage: S, sync_callback: F) -> Self
     where
