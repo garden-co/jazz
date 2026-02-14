@@ -1,11 +1,11 @@
 //! groove-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<BfTreeStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<SurrealKvStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `BfTreeStorage` provides persistent on-disk storage
+//! - `SurrealKvStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
@@ -23,12 +23,12 @@ use groove::object::ObjectId;
 use groove::query_manager::encoding::decode_row;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, Value};
+use groove::query_manager::types::{Schema, SchemaHash, Value};
 use groove::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
 use groove::schema_manager::{AppId, SchemaManager};
-use groove::storage::{BfTreeStorage, Storage};
+use groove::storage::{Storage, SurrealKvStorage};
 use groove::sync_manager::{
     ClientId, InboxEntry, OutboxEntry, PersistenceTier, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -303,7 +303,7 @@ fn parse_query(json: &str) -> napi::Result<Query> {
 // NapiScheduler
 // ============================================================================
 
-type NapiCoreType = RuntimeCore<BfTreeStorage, NapiScheduler, NapiSyncSender>;
+type NapiCoreType = RuntimeCore<SurrealKvStorage, NapiScheduler, NapiSyncSender>;
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
@@ -384,11 +384,12 @@ impl SyncSender for NapiSyncSender {
 #[napi]
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
+    upstream_server_id: Mutex<Option<ServerId>>,
 }
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with BfTree-backed persistent storage.
+    /// Create a new NapiRuntime with SurrealKV-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -425,9 +426,9 @@ impl NapiRuntime {
             napi::Error::from_reason(format!("Failed to create SchemaManager: {:?}", e))
         })?;
 
-        // Create BfTreeStorage
+        // Create SurrealKvStorage
         let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = BfTreeStorage::open(&data_path, cache_size)
+        let storage = SurrealKvStorage::open(&data_path, cache_size)
             .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))?;
 
         // Create components
@@ -486,7 +487,10 @@ impl NapiRuntime {
             core_guard.persist_schema();
         }
 
-        Ok(NapiRuntime { core: core_arc })
+        Ok(NapiRuntime {
+            core: core_arc,
+            upstream_server_id: Mutex::new(None),
+        })
     }
 
     // =========================================================================
@@ -877,12 +881,45 @@ impl NapiRuntime {
 
     #[napi(js_name = "addServer")]
     pub fn add_server(&self) -> napi::Result<()> {
-        let server_id = ServerId::new();
+        let server_id = {
+            let mut slot = self
+                .upstream_server_id
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            if let Some(server_id) = *slot {
+                server_id
+            } else {
+                let server_id = ServerId::new();
+                *slot = Some(server_id);
+                server_id
+            }
+        };
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
+        // Re-attach semantics: remove existing upstream edge then add again so
+        // replay/full-sync runs on every successful reconnect.
+        core.remove_server(server_id);
         core.add_server(server_id);
+        Ok(())
+    }
+
+    #[napi(js_name = "removeServer")]
+    pub fn remove_server(&self) -> napi::Result<()> {
+        let Some(server_id) = *self
+            .upstream_server_id
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+        else {
+            return Ok(());
+        };
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.remove_server(server_id);
         Ok(())
     }
 
@@ -941,6 +978,16 @@ impl NapiRuntime {
         env.to_js_value(&js_schema)
     }
 
+    #[napi(js_name = "getSchemaHash")]
+    pub fn get_schema_hash(&self) -> napi::Result<String> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let schema = core.current_schema();
+        Ok(SchemaHash::compute(schema).to_string())
+    }
+
     #[napi]
     pub fn flush(&self) -> napi::Result<()> {
         let core = self
@@ -948,6 +995,20 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.storage().flush();
+        Ok(())
+    }
+
+    /// Flush and close the underlying storage, releasing filesystem locks.
+    #[napi]
+    pub fn close(&self) -> napi::Result<()> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.storage().flush();
+        core.storage()
+            .close()
+            .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
         Ok(())
     }
 }

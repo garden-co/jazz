@@ -20,6 +20,27 @@ export interface StreamCallbacks {
 }
 
 /**
+ * Generate a UUIDv4 client ID.
+ *
+ * Uses `crypto.randomUUID()` when available and falls back to a
+ * standards-compatible template in older environments.
+ */
+export function generateClientId(): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return cryptoObj.randomUUID();
+  }
+
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+const fallbackClientId = generateClientId();
+
+/**
  * Check if a sync payload is for a catalogue object (schema or lens).
  * Catalogue payloads use admin-secret auth instead of JWT.
  */
@@ -43,35 +64,38 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
-    if (isCataloguePayload(payload)) {
-      if (auth.adminSecret) {
-        headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
-      }
-    } else if (auth.jwtToken) {
-      headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+  if (isCataloguePayload(payload)) {
+    if (auth.adminSecret) {
+      headers["X-Jazz-Admin-Secret"] = auth.adminSecret;
     }
+  } else if (auth.jwtToken) {
+    headers["Authorization"] = `Bearer ${auth.jwtToken}`;
+  }
 
-    const body = JSON.stringify({
-      payload,
-      client_id: auth.clientId ?? "00000000-0000-0000-0000-000000000000",
-    });
+  const body = JSON.stringify({
+    payload,
+    client_id: auth.clientId ?? fallbackClientId,
+  });
 
-    const response = await fetch(`${serverUrl}/sync`, {
+  let response: Response;
+  try {
+    response = await fetch(`${serverUrl}/sync`, {
       method: "POST",
       headers,
       body,
     });
-
-    if (!response.ok) {
-      console.error(`${logPrefix}Sync POST error:`, response.statusText);
-    }
   } catch (e) {
-    console.error(`${logPrefix}Sync POST error:`, e);
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`${logPrefix}Sync POST failed: ${msg}`);
+  }
+
+  if (!response.ok) {
+    const statusText = response.statusText ? ` ${response.statusText}` : "";
+    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
   }
 }
 

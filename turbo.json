@@ -3,7 +3,7 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", "target/**"]
+      "outputs": ["dist/**", "target/**", "pkg/**"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],

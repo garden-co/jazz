@@ -467,22 +467,6 @@ impl QueryManager {
         &self.schema
     }
 
-    /// Test accessor for subscriptions (internal testing only).
-    #[cfg(test)]
-    pub(crate) fn test_subscriptions_mut(
-        &mut self,
-    ) -> &mut HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
-        &mut self.subscriptions
-    }
-
-    /// Test accessor for subscriptions (internal testing only).
-    #[cfg(test)]
-    pub(crate) fn test_subscriptions(
-        &self,
-    ) -> &HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
-        &self.subscriptions
-    }
-
     /// Get subscription results as decoded rows with ObjectIds (for testing).
     /// Process pending changes and settle all subscription graphs.
     ///
@@ -495,6 +479,8 @@ impl QueryManager {
     /// - Marks subscriptions with pending IDs dirty when objects become available
     /// - Settles all subscription graphs (row data loaded on-demand from ObjectManager)
     pub fn process<H: Storage>(&mut self, storage: &mut H) {
+        let _span = tracing::trace_span!("QueryManager::process").entered();
+
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
 
@@ -502,6 +488,9 @@ impl QueryManager {
         // This ensures indices are updated before query subscriptions are processed,
         // so new subscriptions can find data that arrived in the same batch.
         let updates = self.sync_manager.object_manager.take_all_object_updates();
+        if !updates.is_empty() {
+            tracing::debug!(count = updates.len(), "processing object updates");
+        }
         for update in updates {
             self.handle_object_update(storage, update);
         }
@@ -542,6 +531,7 @@ impl QueryManager {
         let branch_schema_map = &self.branch_schema_map;
 
         for (sub_id, subscription) in &mut self.subscriptions {
+            let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = &subscription.branches;
             let table = subscription.graph.table.as_str().to_string();
 
@@ -551,7 +541,12 @@ impl QueryManager {
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
             let row_loader = |id: ObjectId| -> Option<(Vec<u8>, CommitId)> {
-                let obj = om.get_or_load(id, storage_ref, branches)?;
+                let obj = om.get_or_load(id, storage_ref, branches);
+                if obj.is_none() {
+                    tracing::trace!(%id, "row_loader: object not found");
+                    return None;
+                }
+                let obj = obj?;
                 // Find the newest commit across all subscription branches (LWW)
                 // Also track which branch it came from for schema transformation
                 let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
@@ -610,6 +605,14 @@ impl QueryManager {
             };
 
             let delta = subscription.graph.settle(storage_ref, row_loader);
+            if !delta.added.is_empty() || !delta.removed.is_empty() {
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = delta.added.len(),
+                    removed = delta.removed.len(),
+                    "settle delta"
+                );
+            }
 
             let tier_satisfied = match &subscription.settled_tier {
                 None => true, // No tier requirement → immediate (current behavior)
@@ -618,6 +621,7 @@ impl QueryManager {
 
             if !tier_satisfied {
                 // Graph state updated by settle(), but don't deliver yet
+                tracing::trace!("tier not satisfied, holding delivery");
                 continue;
             }
 
@@ -628,6 +632,11 @@ impl QueryManager {
                 // For settled_tier=None, deliver even if empty (preserves current behavior
                 // where one-shot queries get an initial callback)
                 if !full_result.is_empty() || subscription.settled_tier.is_none() {
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = full_result.added.len(),
+                        "first delivery (snapshot)"
+                    );
                     self.update_outbox.push(QueryUpdate {
                         subscription_id: *sub_id,
                         delta: full_result,
@@ -635,6 +644,13 @@ impl QueryManager {
                     });
                 }
             } else if !delta.is_empty() {
+                tracing::debug!(
+                    sub_id = sub_id.0,
+                    added = delta.added.len(),
+                    removed = delta.removed.len(),
+                    updated = delta.updated.len(),
+                    "incremental delivery"
+                );
                 // Incremental delivery
                 self.update_outbox.push(QueryUpdate {
                     subscription_id: *sub_id,

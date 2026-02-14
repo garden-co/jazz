@@ -7,7 +7,7 @@ export declare function generateId(): string;
 export declare function currentTimestamp(): number;
 export declare function parseSchema(json: string): any;
 export declare class NapiRuntime {
-  /** Create a new NapiRuntime with BfTree-backed persistent storage. */
+  /** Create a new NapiRuntime with SurrealKV-backed persistent storage. */
   constructor(
     schemaJson: string,
     appId: string,
@@ -39,9 +39,13 @@ export declare class NapiRuntime {
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
   onSyncMessageToSend(callback: (...args: any[]) => any): void;
   addServer(): void;
+  removeServer(): void;
   addClient(): string;
   /** Set a client's role ("user", "admin", or "peer"). */
   setClientRole(clientId: string, role: string): void;
   getSchema(): any;
+  getSchemaHash(): string;
   flush(): void;
+  /** Flush and close the underlying storage, releasing filesystem locks. */
+  close(): void;
 }

@@ -9,10 +9,12 @@
 //! Storage instance. Cross-thread communication uses the sync protocol over
 //! postMessage, not shared mutable state.
 
-#[cfg(feature = "bftree")]
-mod bftree;
-#[cfg(feature = "bftree")]
-pub use bftree::BfTreeStorage;
+mod opfs_btree;
+pub use opfs_btree::OpfsBTreeStorage;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+mod surrealkv;
+#[cfg(all(feature = "surrealkv", not(target_arch = "wasm32")))]
+pub use surrealkv::SurrealKvStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
@@ -125,7 +127,7 @@ pub trait Storage {
     // ================================================================
     //
     // These replace our entire BTreeIndex implementation.
-    // MemoryStorage uses BTreeMaps. BfTreeStorage (Phase 7) uses bf-tree.
+    // MemoryStorage uses BTreeMaps. OpfsBTreeStorage uses opfs-btree.
     //
     // NOTE: Branch is included in all index methods to support multi-branch
     // scenarios (e.g., user branch vs main branch).

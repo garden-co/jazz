@@ -5,11 +5,12 @@ edition = "2024"
 
 [features]
 default = []
-bftree = ["bf-tree"]
+surrealkv = ["dep:surrealkv", "dep:tokio"]
 
 [dependencies]
-bf-tree = { path = "../bf-tree", optional = true }
+opfs-btree = { path = "../opfs-btree" }
 futures = "0.3"
+tracing = "0.1"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }
 blake3 = "1"
 hex = "0.4"
@@ -23,6 +24,10 @@ web-time = "1.1"
 small-map = "0.1"
 bitvec = "1.0"
 ahash = "0.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+surrealkv = { version = "0.19", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
