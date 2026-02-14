@@ -24,3 +24,6 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 async-stream = "0.3"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "v7"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
