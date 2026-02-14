@@ -29,6 +29,8 @@ use hmac::{Hmac, Mac};
 use jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
+use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tower_http::cors::CorsLayer;
@@ -37,6 +39,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
+const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -389,6 +392,13 @@ struct ConnectionState {
     _client_id: ClientId,
 }
 
+#[derive(Debug, Clone)]
+struct CachedJwks {
+    endpoint: String,
+    fetched_at_us: u64,
+    set: JwkSet,
+}
+
 struct AppRuntime {
     app_id: AppId,
     meta_object_id: ObjectId,
@@ -447,6 +457,8 @@ struct ServerState {
     internal_api_secret: String,
     workers: WorkerPool,
     meta_store: Arc<MetaStore>,
+    jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
+    http_client: reqwest::Client,
 }
 
 impl ServerState {
@@ -531,6 +543,10 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
     );
 
     let workers = WorkerPool::new(config.worker_threads);
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("failed to initialize HTTP client: {e}"))?;
 
     let persisted_rows = meta_store
         .list_apps()
@@ -559,6 +575,8 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         internal_api_secret: config.internal_api_secret,
         workers,
         meta_store,
+        jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
+        http_client,
     });
 
     info!(
@@ -566,6 +584,9 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         data_root = %state.data_root.display(),
         app_count = state.app_count().await,
         "starting multi-tenant Jazz server"
+    );
+    warn!(
+        "TODO(security): JWT auth currently validates signatures only; add claim validation before production."
     );
 
     let app = create_router(state);
@@ -644,10 +665,237 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-fn extract_session(
-    headers: &HeaderMap,
+#[derive(Debug, Deserialize)]
+struct JwtClaims {
+    sub: String,
+    #[serde(default = "default_session_claims")]
+    claims: serde_json::Value,
+}
+
+fn default_session_claims() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug)]
+enum JwtVerificationError {
+    Retryable(String),
+    Fatal(String),
+}
+
+fn map_key_algorithm(alg: KeyAlgorithm) -> Option<Algorithm> {
+    match alg {
+        KeyAlgorithm::HS256 => Some(Algorithm::HS256),
+        KeyAlgorithm::HS384 => Some(Algorithm::HS384),
+        KeyAlgorithm::HS512 => Some(Algorithm::HS512),
+        KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+        KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
+        KeyAlgorithm::RSA1_5 | KeyAlgorithm::RSA_OAEP | KeyAlgorithm::RSA_OAEP_256 => None,
+    }
+}
+
+fn signature_only_validation(alg: Algorithm) -> Validation {
+    let mut validation = Validation::new(alg);
+    // TODO(security): MVP intentionally validates JWT signatures only.
+    // Add exp/nbf/aud/iss/sub policy enforcement before production launch.
+    validation.required_spec_claims.clear();
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation
+}
+
+fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm) -> Vec<&'a Jwk> {
+    let mut candidates = Vec::new();
+
+    for jwk in &jwks.keys {
+        if let Some(expected_kid) = kid
+            && jwk.common.key_id.as_deref() != Some(expected_kid)
+        {
+            continue;
+        }
+
+        if let Some(key_alg) = jwk.common.key_algorithm {
+            match map_key_algorithm(key_alg) {
+                Some(mapped_alg) if mapped_alg == alg => {}
+                Some(_) | None => continue,
+            }
+        }
+
+        candidates.push(jwk);
+    }
+
+    candidates
+}
+
+fn verify_jwt_signature_with_jwks(
+    token: &str,
+    jwks: &JwkSet,
+) -> Result<Session, JwtVerificationError> {
+    let header = decode_header(token)
+        .map_err(|err| JwtVerificationError::Fatal(format!("invalid JWT header: {err}")))?;
+
+    let candidates = select_jwk_candidates(jwks, header.kid.as_deref(), header.alg);
+    if candidates.is_empty() {
+        let reason = match header.kid.as_deref() {
+            Some(kid) => format!("no JWKS key matched token kid '{kid}'"),
+            None => "no compatible JWKS key found for token algorithm".to_string(),
+        };
+        return Err(JwtVerificationError::Retryable(reason));
+    }
+
+    let mut last_error = None;
+    let validation = signature_only_validation(header.alg);
+
+    for jwk in candidates {
+        let decoding_key = match DecodingKey::from_jwk(jwk) {
+            Ok(key) => key,
+            Err(err) => {
+                last_error = Some(format!("failed to build decoding key from JWK: {err}"));
+                continue;
+            }
+        };
+
+        match decode::<JwtClaims>(token, &decoding_key, &validation) {
+            Ok(token_data) => {
+                return Ok(Session {
+                    user_id: token_data.claims.sub,
+                    claims: token_data.claims.claims,
+                });
+            }
+            Err(err) => {
+                last_error = Some(format!("JWT signature verification failed: {err}"));
+            }
+        }
+    }
+
+    Err(JwtVerificationError::Retryable(last_error.unwrap_or_else(
+        || "JWT signature verification failed".to_string(),
+    )))
+}
+
+async fn fetch_jwks(http_client: &reqwest::Client, jwks_endpoint: &str) -> Result<JwkSet, String> {
+    let response = http_client
+        .get(jwks_endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("JWKS request failed: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("JWKS endpoint returned status {status}"));
+    }
+
+    let jwks = response
+        .json::<JwkSet>()
+        .await
+        .map_err(|err| format!("failed to parse JWKS response: {err}"))?;
+
+    if jwks.keys.is_empty() {
+        return Err("JWKS response contained no keys".to_string());
+    }
+
+    Ok(jwks)
+}
+
+async fn load_jwks_for_app(
+    state: &ServerState,
+    app_id: AppId,
+    jwks_endpoint: &str,
+    force_refresh: bool,
+) -> Result<JwkSet, String> {
+    let ttl_us = JWKS_CACHE_TTL.as_micros().min(u128::from(u64::MAX)) as u64;
+
+    if !force_refresh && let Some(cached) = state.jwks_cache.read().await.get(&app_id).cloned() {
+        let age_us = now_timestamp_us().saturating_sub(cached.fetched_at_us);
+        if cached.endpoint == jwks_endpoint && age_us <= ttl_us {
+            return Ok(cached.set);
+        }
+    }
+
+    let jwks = fetch_jwks(&state.http_client, jwks_endpoint).await?;
+
+    state.jwks_cache.write().await.insert(
+        app_id,
+        CachedJwks {
+            endpoint: jwks_endpoint.to_string(),
+            fetched_at_us: now_timestamp_us(),
+            set: jwks.clone(),
+        },
+    );
+
+    Ok(jwks)
+}
+
+async fn validate_jwt_with_jwks(
+    state: &ServerState,
+    app_id: AppId,
     app_config: &AppConfig,
-    meta_store: &MetaStore,
+    token: &str,
+) -> Result<Session, (StatusCode, &'static str)> {
+    let cached_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, false)
+        .await
+        .map_err(|err| {
+            warn!(
+                app_id = %app_id,
+                endpoint = %app_config.jwks_endpoint,
+                error = %err,
+                "failed to load cached JWKS"
+            );
+            (StatusCode::UNAUTHORIZED, "Unable to load JWKS")
+        })?;
+
+    match verify_jwt_signature_with_jwks(token, &cached_jwks) {
+        Ok(session) => return Ok(session),
+        Err(JwtVerificationError::Fatal(err)) => {
+            warn!(app_id = %app_id, error = %err, "JWT validation failed");
+            return Err((StatusCode::UNAUTHORIZED, "Invalid bearer token"));
+        }
+        Err(JwtVerificationError::Retryable(err)) => {
+            warn!(
+                app_id = %app_id,
+                error = %err,
+                "JWT validation failed with cached JWKS; forcing one refresh"
+            );
+        }
+    }
+
+    let refreshed_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, true)
+        .await
+        .map_err(|err| {
+            warn!(
+                app_id = %app_id,
+                endpoint = %app_config.jwks_endpoint,
+                error = %err,
+                "failed to refresh JWKS"
+            );
+            (StatusCode::UNAUTHORIZED, "Unable to refresh JWKS")
+        })?;
+
+    match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
+        Ok(session) => Ok(session),
+        Err(JwtVerificationError::Retryable(err)) | Err(JwtVerificationError::Fatal(err)) => {
+            warn!(
+                app_id = %app_id,
+                error = %err,
+                "JWT validation failed after JWKS refresh"
+            );
+            Err((StatusCode::UNAUTHORIZED, "Invalid bearer token"))
+        }
+    }
+}
+
+async fn extract_session(
+    headers: &HeaderMap,
+    app_id: AppId,
+    app_config: &AppConfig,
+    state: &ServerState,
 ) -> Result<Option<Session>, (StatusCode, &'static str)> {
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
         let backend_secret = headers
@@ -655,7 +903,11 @@ fn extract_session(
             .and_then(|v| v.to_str().ok());
 
         match backend_secret {
-            Some(got) if meta_store.verify_secret(got, &app_config.backend_secret_hash) => {
+            Some(got)
+                if state
+                    .meta_store
+                    .verify_secret(got, &app_config.backend_secret_hash) =>
+            {
                 let session = decode_session_header(session_b64)
                     .ok_or((StatusCode::BAD_REQUEST, "Invalid session format"))?;
                 return Ok(Some(session));
@@ -672,13 +924,16 @@ fn extract_session(
         }
     }
 
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())
-        && auth_value.strip_prefix("Bearer ").is_some()
-    {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "JWT auth via per-app JWKS is not implemented yet (TODO)",
-        ));
+    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        if let Some(token) = auth_value.strip_prefix("Bearer ") {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
+            }
+
+            let session = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
+            return Ok(Some(session));
+        }
     }
 
     Ok(None)
@@ -750,7 +1005,8 @@ async fn events_handler(
         ));
     }
 
-    let session = extract_session(&headers, &cfg, &state.meta_store)
+    let session = extract_session(&headers, app_id, &cfg, &state)
+        .await
         .map_err(|(status, msg)| (status, msg.to_string()))?
         .ok_or((
             StatusCode::UNAUTHORIZED,
@@ -894,7 +1150,7 @@ async fn sync_handler(
                 .into_response();
         }
     } else {
-        let session = match extract_session(&headers, &cfg, &state.meta_store) {
+        let session = match extract_session(&headers, app_id, &cfg, &state).await {
             Ok(Some(session)) => session,
             Ok(None) => {
                 return (
