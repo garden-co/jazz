@@ -73,6 +73,26 @@ Done. `new()` now delegates to `with_object_manager(ObjectManager::new())`.
 
 **Implementation-coupled tests** — ~20 tests use internal APIs (`test_get_row_if_loaded`, `is_indexed`, `test_subscriptions`) instead of observable query results. These will break on internal refactors even when external behavior is unchanged.
 
+Additional examples from this pass:
+
+- `manager_tests.rs:2631–2652` mutates internal subscription graph state (`test_subscriptions_mut().graph.clear_dirty()`) and asserts internal dirty flags rather than observable subscription output.
+- `schema_manager/integration_tests.rs:1898–1905` “E2E” coverage checks `row_is_indexed_on_branch(...)` (internal index state) instead of asserting query-visible behavior.
+
+**Boundary-bypassing setup in “integration” tests** — tests manually build low-level object/index state that production code normally constructs:
+
+- `schema_manager/integration_tests.rs:564–593` uses `object_manager.create_with_id(...)`, `add_commit(...)`, and direct `index_insert(...)` with a comment that this bypasses real `handle_object_update` flow.
+- `schema_manager/integration_tests.rs:1490–1493` explicitly skips A↔B sync pumping and manually exercises transform logic instead of full message-path behavior.
+
+**Under-specified assertions** — tests that can pass while important behavior is wrong:
+
+- `sync_manager/tests.rs:1507` (`regular_object_still_syncs_to_server`) asserts only `outbox.len() == 1` without validating destination/payload/object.
+- `manager_tests.rs:2726–2730` (`join_produces_combined_tuples`) asserts only that one row exists and `row.data` is non-empty; does not verify joined column semantics.
+- `rebac_tests.rs:630` allows two outcomes (`tips.is_err() || !contains(...)`) instead of asserting a single expected postcondition.
+
+**Known behavior gaps currently accepted by tests**:
+
+- `manager_tests.rs:681–684` documents that synced content updates do not emit subscription deltas yet (“not wired into settle flow”), so test coverage validates query visibility but not subscription reactivity.
+
 **Missing edge cases:**
 
 - No concurrency tests for runtime_core
