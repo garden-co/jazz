@@ -45,6 +45,8 @@ impl QueryManager {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let _span =
+            tracing::debug_span!("QM::subscribe", table = %query.table, ?settled_tier).entered();
         // Determine branches
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -72,6 +74,7 @@ impl QueryManager {
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
 
+        tracing::debug!(sub_id = id.0, ?branches, "subscription created");
         self.subscriptions.insert(
             id,
             QuerySubscription {

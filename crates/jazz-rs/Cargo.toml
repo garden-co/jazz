@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-groove = { path = "../groove", features = ["bftree"] }
+groove = { path = "../groove", features = ["surrealkv"] }
 groove-tokio = { path = "../groove-tokio" }
 jazz-transport = { path = "../jazz-transport" }
 
