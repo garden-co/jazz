@@ -11,6 +11,7 @@ export interface SyncAuth {
   jwtToken?: string;
   adminSecret?: string;
   clientId?: string;
+  pathPrefix?: string;
 }
 
 /** Callbacks for stream events. */
@@ -39,6 +40,36 @@ export function generateClientId(): string {
 }
 
 const fallbackClientId = generateClientId();
+
+function trimTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+/**
+ * Normalize an optional route prefix into a leading-slash path with no trailing slash.
+ */
+export function normalizePathPrefix(pathPrefix?: string): string {
+  if (!pathPrefix) return "";
+  const trimmed = pathPrefix.trim();
+  if (!trimmed) return "";
+  const withoutTrailing = trimmed.replace(/\/+$/, "");
+  return withoutTrailing.startsWith("/") ? withoutTrailing : `/${withoutTrailing}`;
+}
+
+/**
+ * Build a server endpoint URL with optional route prefix.
+ */
+export function buildEndpointUrl(serverUrl: string, endpoint: string, pathPrefix?: string): string {
+  const normalizedEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  return `${trimTrailingSlash(serverUrl)}${normalizePathPrefix(pathPrefix)}${normalizedEndpoint}`;
+}
+
+/**
+ * Build the stream URL for binary events.
+ */
+export function buildEventsUrl(serverUrl: string, clientId: string, pathPrefix?: string): string {
+  return `${buildEndpointUrl(serverUrl, "/events", pathPrefix)}?client_id=${encodeURIComponent(clientId)}`;
+}
 
 /**
  * Check if a sync payload is for a catalogue object (schema or lens).
@@ -83,7 +114,7 @@ export async function sendSyncPayload(
 
   let response: Response;
   try {
-    response = await fetch(`${serverUrl}/sync`, {
+    response = await fetch(buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix), {
       method: "POST",
       headers,
       body,
