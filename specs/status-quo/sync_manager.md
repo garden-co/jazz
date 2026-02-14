@@ -93,9 +93,12 @@ Note: the spec originally called these `QueryRegistration`/`QueryUnregistration`
 
 Adding a server triggers `queue_full_sync_to_server()` — pushes all existing objects.
 
+Query subscription replay on upstream reconnect is intentionally owned by QueryManager (via `QueryManager::add_server()`), not SyncManager. SyncManager remains scope-based and only sends query messages it is asked to send.
+
 **Design decision**: downward sync is always query-scoped. Clients receive data ONLY via query subscriptions — no "full dump" path.
 
 > `crates/groove/src/sync_manager.rs:482-510`
+> `crates/groove/src/query_manager/subscriptions.rs:190-240`
 
 ### Client Session Management
 
