@@ -15,7 +15,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
-      # PR validation favors debug N-API builds for speed.
+      # PR validation favors debug N-API builds for speed (release remains in publish paths).
       JAZZ_NAPI_RELEASE: "0"
 
     steps:
