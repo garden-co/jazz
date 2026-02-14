@@ -5,6 +5,7 @@ members = [
   "crates/groove-tokio",
   "crates/groove-wasm",
   "crates/jazz-transport",
+  "crates/jazz-multi-server",
   "crates/jazz-cli",
   "crates/jazz-rs",
   "crates/groove-napi",
