@@ -98,6 +98,8 @@ Additional examples from this pass:
 - `sync_manager/tests.rs:1475+` (`regular_object_still_syncs_to_server`) now validates destination, object id, branch, commit id, and metadata contents (not only outbox length).
 - `manager_tests.rs:2676+` (`join_produces_combined_tuples`) now validates base-row identity and verifies payload includes both base-table and joined-table text values.
 - `rebac_tests.rs:624+` (`rebac_exists_clause_denies_non_matching_insert`) now asserts a single deterministic postcondition (`get_tip_ids(..., "main")` is an error) instead of allowing multiple outcomes.
+- `schema_manager/integration_tests.rs:e2e_catalogue_sync_with_data_query` now uses real `outbox -> inbox` row sync from client A to client B instead of manually calling the row transformer.
+- `schema_manager/integration_tests.rs:e2e_two_clients_server_schema_sync` now asserts query-visible behavior by verifying the server emits `ObjectUpdated` to subscribed client B, replacing the internal `row_is_indexed_on_branch(...)` check.
 
 **Missing edge cases:**
 
