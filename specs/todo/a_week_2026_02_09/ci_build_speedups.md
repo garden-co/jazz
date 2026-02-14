@@ -17,6 +17,7 @@ Current CI is stable and mostly warm-cache friendly, but still spends significan
 - Change build orchestration so crates work runs once and the second pass skips duplicate package builds.
 
 Expected impact:
+
 - Lower `pnpm build` step time.
 - Lower total CI wall time with no coverage regression.
 
@@ -27,6 +28,7 @@ Expected impact:
 - Update `build:crates` output globs to match actual produced paths.
 
 Expected impact:
+
 - Restores meaningful Turbo task caching metadata for the expensive crates aggregation task.
 
 ### 3. Narrow `build:crates` scope
@@ -35,6 +37,7 @@ Expected impact:
 - Validate required binaries/artifacts (`jazz` CLI, wasm package) are still produced where downstream tasks expect them.
 
 Expected impact:
+
 - Less Rust compile work on cache misses and partial invalidations.
 
 ### 4. Use non-release N-API build in PR CI
@@ -43,6 +46,7 @@ Expected impact:
 - Keep release build coverage in release/publish workflow.
 
 Expected impact:
+
 - Faster PR builds while preserving release correctness checks where they matter.
 
 ### 5. Evaluate `sccache` + sticky disk for Rust object reuse
@@ -51,6 +55,7 @@ Expected impact:
 - Compare against current `Swatinem/rust-cache` only setup.
 
 Expected impact:
+
 - Additional Rust rebuild speedup when cache keys partially invalidate.
 
 ## Execution Order
