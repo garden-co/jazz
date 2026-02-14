@@ -104,8 +104,8 @@ impl TestServer {
                 "--worker-threads",
                 "1",
             ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("spawn jazz-multi-server");
 

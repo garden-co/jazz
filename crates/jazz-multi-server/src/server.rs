@@ -52,26 +52,60 @@ pub struct ServerConfig {
     pub worker_threads: usize,
 }
 
-#[derive(Debug)]
 struct WorkerPool {
     workers: Vec<WorkerHandle>,
 }
 
-#[derive(Debug, Clone)]
 struct WorkerHandle {
-    ingress: tokio::sync::mpsc::Sender<QueuedSyncEntry>,
-}
-
-struct QueuedSyncEntry {
-    app_id: AppId,
-    app: Arc<AppRuntime>,
-    entry: InboxEntry,
+    ingress: Option<tokio::sync::mpsc::Sender<WorkerCommand>>,
+    join: Option<std::thread::JoinHandle<()>>,
 }
 
 #[derive(Debug)]
-enum WorkerEnqueueError {
+enum WorkerDispatchError {
     QueueFull { worker: usize },
     WorkerClosed { worker: usize },
+    WorkerUnavailable { worker: usize },
+    RuntimeError { worker: usize, message: String },
+}
+
+enum WorkerCommand {
+    CreateRuntime {
+        app_id: AppId,
+        data_dir: PathBuf,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    EnsureClientWithSession {
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SyncAsSession {
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+        payload: SyncPayload,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SyncAsAdmin {
+        app_id: AppId,
+        client_id: ClientId,
+        payload: SyncPayload,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
+impl WorkerCommand {
+    fn app_id(&self) -> AppId {
+        match self {
+            WorkerCommand::CreateRuntime { app_id, .. }
+            | WorkerCommand::EnsureClientWithSession { app_id, .. }
+            | WorkerCommand::SyncAsSession { app_id, .. }
+            | WorkerCommand::SyncAsAdmin { app_id, .. } => *app_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -146,34 +180,126 @@ impl WorkerPool {
 
         for worker_idx in 0..worker_count {
             let (ingress_tx, ingress_rx) =
-                tokio::sync::mpsc::channel::<QueuedSyncEntry>(WORKER_SYNC_QUEUE_CAPACITY);
-            tokio::spawn(run_worker_loop(worker_idx, ingress_rx));
+                tokio::sync::mpsc::channel::<WorkerCommand>(WORKER_SYNC_QUEUE_CAPACITY);
+            let thread_name = format!("jazz-multi-worker-{worker_idx}");
+            let join = std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build worker tokio runtime");
+                    runtime.block_on(run_worker_loop(worker_idx, ingress_rx));
+                })
+                .expect("failed to spawn worker thread");
+
             handles.push(WorkerHandle {
-                ingress: ingress_tx,
+                ingress: Some(ingress_tx),
+                join: Some(join),
             });
         }
 
         Self { workers: handles }
     }
 
-    fn enqueue_sync(
+    fn send_command(&self, command: WorkerCommand) -> Result<usize, WorkerDispatchError> {
+        let app_id = command.app_id();
+        let worker = self.worker_for_app(&app_id);
+        let Some(ingress) = self.workers[worker].ingress.as_ref() else {
+            return Err(WorkerDispatchError::WorkerClosed { worker });
+        };
+
+        ingress.try_send(command).map_err(|err| match err {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                WorkerDispatchError::QueueFull { worker }
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                WorkerDispatchError::WorkerClosed { worker }
+            }
+        })?;
+
+        Ok(worker)
+    }
+
+    async fn await_result(
+        worker: usize,
+        response: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), WorkerDispatchError> {
+        match response.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn create_runtime(
         &self,
         app_id: AppId,
-        app: Arc<AppRuntime>,
-        entry: InboxEntry,
-    ) -> Result<(), WorkerEnqueueError> {
-        let worker = self.worker_for_app(&app_id);
-        self.workers[worker]
-            .ingress
-            .try_send(QueuedSyncEntry { app_id, app, entry })
-            .map_err(|err| match err {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    WorkerEnqueueError::QueueFull { worker }
-                }
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                    WorkerEnqueueError::WorkerClosed { worker }
-                }
-            })
+        data_dir: PathBuf,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::CreateRuntime {
+            app_id,
+            data_dir,
+            sync_broadcast,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn ensure_client_with_session(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::EnsureClientWithSession {
+            app_id,
+            client_id,
+            session,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn sync_as_session(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        session: Session,
+        payload: SyncPayload,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::SyncAsSession {
+            app_id,
+            client_id,
+            session,
+            payload,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
+    }
+
+    async fn sync_as_admin(
+        &self,
+        app_id: AppId,
+        client_id: ClientId,
+        payload: SyncPayload,
+    ) -> Result<(), WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::SyncAsAdmin {
+            app_id,
+            client_id,
+            payload,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        Self::await_result(worker, response_rx).await
     }
 
     fn worker_count(&self) -> usize {
@@ -184,6 +310,20 @@ impl WorkerPool {
         let mut hasher = DefaultHasher::new();
         app_id.hash(&mut hasher);
         (hasher.finish() as usize) % self.workers.len()
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        for worker in &mut self.workers {
+            worker.ingress.take();
+        }
+
+        for worker in &mut self.workers {
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+        }
     }
 }
 
@@ -514,22 +654,15 @@ struct CachedJwks {
 }
 
 struct AppRuntime {
-    app_id: AppId,
-    meta_object_id: ObjectId,
     runtime: TokioRuntime<SurrealKvStorage>,
-    config: tokio::sync::RwLock<AppConfig>,
-    connections: tokio::sync::RwLock<HashMap<u64, ConnectionState>>,
-    next_connection_id: AtomicU64,
-    sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
 }
 
 impl AppRuntime {
     fn new(
         app_id: AppId,
-        meta_object_id: ObjectId,
-        config: AppConfig,
         data_dir: &Path,
-    ) -> Result<Arc<Self>, String> {
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| {
             format!(
                 "failed to create app data dir '{}': {e}",
@@ -544,37 +677,55 @@ impl AppRuntime {
         let storage = SurrealKvStorage::open(&db_path, 64 * 1024 * 1024)
             .map_err(|e| format!("failed to open storage '{}': {e:?}", db_path.display()))?;
 
-        let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
-        let sync_tx_clone = sync_tx.clone();
-
+        let sync_tx_clone = sync_broadcast.clone();
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
                 let _ = sync_tx_clone.send((client_id, entry.payload));
             }
         });
 
-        Ok(Arc::new(Self {
+        Ok(Self { runtime })
+    }
+}
+
+struct AppEntry {
+    app_id: AppId,
+    meta_object_id: ObjectId,
+    config: tokio::sync::RwLock<AppConfig>,
+    connections: tokio::sync::RwLock<HashMap<u64, ConnectionState>>,
+    next_connection_id: AtomicU64,
+    sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+}
+
+impl AppEntry {
+    fn new(
+        app_id: AppId,
+        meta_object_id: ObjectId,
+        config: AppConfig,
+        sync_broadcast: tokio::sync::broadcast::Sender<(ClientId, SyncPayload)>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
             app_id,
             meta_object_id,
-            runtime,
             config: tokio::sync::RwLock::new(config),
             connections: tokio::sync::RwLock::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
-            sync_broadcast: sync_tx,
-        }))
+            sync_broadcast,
+        })
     }
 }
 
 async fn run_worker_loop(
     worker: usize,
-    mut ingress_rx: tokio::sync::mpsc::Receiver<QueuedSyncEntry>,
+    mut ingress_rx: tokio::sync::mpsc::Receiver<WorkerCommand>,
 ) {
-    let mut fair_queue = FairAppQueue::<QueuedSyncEntry>::default();
+    let mut fair_queue = FairAppQueue::<WorkerCommand>::default();
+    let mut app_runtimes = HashMap::<AppId, AppRuntime>::new();
 
     loop {
         if fair_queue.is_empty() {
             match ingress_rx.recv().await {
-                Some(entry) => fair_queue.push(entry.app_id, entry),
+                Some(command) => fair_queue.push(command.app_id(), command),
                 None => {
                     info!(worker, "sync worker stopped");
                     return;
@@ -582,22 +733,125 @@ async fn run_worker_loop(
             }
         }
 
-        while let Ok(entry) = ingress_rx.try_recv() {
-            fair_queue.push(entry.app_id, entry);
+        while let Ok(command) = ingress_rx.try_recv() {
+            fair_queue.push(command.app_id(), command);
         }
 
         let Some(batch) = fair_queue.pop_batch(WORKER_APP_QUANTUM) else {
             continue;
         };
 
-        for queued in batch {
-            if let Err(err) = queued.app.runtime.push_sync_inbox(queued.entry) {
-                warn!(
-                    worker,
-                    app_id = %queued.app_id,
-                    error = %err,
-                    "failed to enqueue sync message in app runtime"
-                );
+        for command in batch {
+            match command {
+                WorkerCommand::CreateRuntime {
+                    app_id,
+                    data_dir,
+                    sync_broadcast,
+                    response,
+                } => {
+                    let result = if let std::collections::hash_map::Entry::Vacant(entry) =
+                        app_runtimes.entry(app_id)
+                    {
+                        AppRuntime::new(app_id, &data_dir, sync_broadcast).map(|runtime| {
+                            entry.insert(runtime);
+                        })
+                    } else {
+                        Err(format!("app runtime already exists for {app_id}"))
+                    };
+                    if response.send(result).is_err() {
+                        warn!(worker, app_id = %app_id, "create runtime response receiver dropped");
+                    }
+                }
+                WorkerCommand::EnsureClientWithSession {
+                    app_id,
+                    client_id,
+                    session,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .ensure_client_with_session(client_id, session)
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "ensure-client response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::SyncAsSession {
+                    app_id,
+                    client_id,
+                    session,
+                    payload,
+                    response,
+                } => {
+                    let result = match app_runtimes.get(&app_id) {
+                        Some(runtime) => {
+                            if let Err(err) = runtime
+                                .runtime
+                                .ensure_client_with_session(client_id, session)
+                            {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
+                                source: Source::Client(client_id),
+                                payload,
+                            }) {
+                                Err(err.to_string())
+                            } else {
+                                runtime.runtime.flush().await.map_err(|err| err.to_string())
+                            }
+                        }
+                        None => Err(format!("missing runtime for app {app_id}")),
+                    };
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "session-sync response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::SyncAsAdmin {
+                    app_id,
+                    client_id,
+                    payload,
+                    response,
+                } => {
+                    let result = match app_runtimes.get(&app_id) {
+                        Some(runtime) => {
+                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.set_client_admin(client_id) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
+                                source: Source::Client(client_id),
+                                payload,
+                            }) {
+                                Err(err.to_string())
+                            } else {
+                                runtime.runtime.flush().await.map_err(|err| err.to_string())
+                            }
+                        }
+                        None => Err(format!("missing runtime for app {app_id}")),
+                    };
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            client_id = %client_id,
+                            "admin-sync response receiver dropped"
+                        );
+                    }
+                }
             }
         }
 
@@ -606,7 +860,7 @@ async fn run_worker_loop(
 }
 
 struct ServerState {
-    apps: tokio::sync::RwLock<HashMap<AppId, Arc<AppRuntime>>>,
+    apps: tokio::sync::RwLock<HashMap<AppId, Arc<AppEntry>>>,
     data_root: PathBuf,
     internal_api_secret: String,
     workers: WorkerPool,
@@ -616,7 +870,7 @@ struct ServerState {
 }
 
 impl ServerState {
-    async fn get_app(&self, app_id: AppId) -> Option<Arc<AppRuntime>> {
+    async fn get_app(&self, app_id: AppId) -> Option<Arc<AppEntry>> {
         self.apps.read().await.get(&app_id).cloned()
     }
 
@@ -712,13 +966,24 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         let app_id = row.app_id;
         let app_config = app_config_from_row(&row);
         let app_dir = data_root.join("apps").join(app_id.to_string());
+        let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
 
-        match AppRuntime::new(app_id, row.object_id, app_config, &app_dir) {
-            Ok(runtime) => {
-                app_map.insert(app_id, runtime);
+        match workers
+            .create_runtime(app_id, app_dir, sync_tx.clone())
+            .await
+        {
+            Ok(()) => {
+                app_map.insert(
+                    app_id,
+                    AppEntry::new(app_id, row.object_id, app_config, sync_tx),
+                );
             }
             Err(err) => {
-                warn!(app_id = %app_id, error = %err, "failed to rehydrate app runtime from meta store");
+                warn!(
+                    app_id = %app_id,
+                    error = ?err,
+                    "failed to rehydrate app runtime from meta store"
+                );
             }
         }
     }
@@ -1127,7 +1392,28 @@ fn generate_secret() -> String {
     format!("{}{}", Uuid::now_v7().simple(), Uuid::new_v4().simple())
 }
 
-async fn app_summary(app: Arc<AppRuntime>, worker: usize) -> AppSummaryResponse {
+fn worker_dispatch_status_and_message(err: WorkerDispatchError) -> (StatusCode, String) {
+    match err {
+        WorkerDispatchError::QueueFull { worker } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("worker {worker} queue is full"),
+        ),
+        WorkerDispatchError::WorkerClosed { worker } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worker {worker} is closed"),
+        ),
+        WorkerDispatchError::WorkerUnavailable { worker } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worker {worker} is unavailable"),
+        ),
+        WorkerDispatchError::RuntimeError { worker, message } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("worker {worker} runtime error: {message}"),
+        ),
+    }
+}
+
+async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
     let cfg = app.config.read().await;
     AppSummaryResponse {
         app_id: app.app_id.to_string(),
@@ -1173,9 +1459,13 @@ async fn events_handler(
         None => ClientId::new(),
     };
 
-    app.runtime
-        .ensure_client_with_session(client_id, session)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Err(err) = state
+        .workers
+        .ensure_client_with_session(app_id, client_id, session)
+        .await
+    {
+        return Err(worker_dispatch_status_and_message(err));
+    }
 
     let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
     {
@@ -1288,21 +1578,11 @@ async fn sync_handler(
         }
     };
 
-    if is_admin {
-        if let Err(e) = app.runtime.add_client(request.client_id, None) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-        if let Err(e) = app.runtime.set_client_admin(request.client_id) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
+    let dispatch_result = if is_admin {
+        state
+            .workers
+            .sync_as_admin(app_id, request.client_id, request.payload)
+            .await
     } else {
         let session = match extract_session(&headers, app_id, &cfg, &state).await {
             Ok(Some(session)) => session,
@@ -1320,39 +1600,18 @@ async fn sync_handler(
             }
         };
 
-        if let Err(e) = app
-            .runtime
-            .ensure_client_with_session(request.client_id, session)
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-    }
-
-    let entry = InboxEntry {
-        source: Source::Client(request.client_id),
-        payload: request.payload,
+        state
+            .workers
+            .sync_as_session(app_id, request.client_id, session, request.payload)
+            .await
     };
 
-    match state.workers.enqueue_sync(app_id, app, entry) {
+    match dispatch_result {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(WorkerEnqueueError::QueueFull { worker }) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse::internal(format!(
-                "sync queue is full for worker {worker}",
-            ))),
-        )
-            .into_response(),
-        Err(WorkerEnqueueError::WorkerClosed { worker }) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(format!(
-                "sync worker {worker} is unavailable",
-            ))),
-        )
-            .into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
     }
 }
 
@@ -1413,20 +1672,30 @@ async fn create_app_handler(
 
     let app_config = app_config_from_row(&meta_row);
     let data_dir = state.app_data_dir(app_id);
+    let (sync_tx, _) = tokio::sync::broadcast::channel::<(ClientId, SyncPayload)>(256);
 
-    let app_runtime = match AppRuntime::new(app_id, meta_row.object_id, app_config, &data_dir) {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            let _ = state.meta_store.delete_app(meta_row.object_id).await;
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(err)),
-            )
-                .into_response();
-        }
-    };
+    if let Err(err) = state
+        .workers
+        .create_runtime(app_id, data_dir, sync_tx.clone())
+        .await
+    {
+        let _ = state.meta_store.delete_app(meta_row.object_id).await;
+        let (status, message) = worker_dispatch_status_and_message(err);
+        return (status, Json(ErrorResponse::internal(message))).into_response();
+    }
 
-    state.apps.write().await.insert(app_id, app_runtime);
+    let app_entry = AppEntry::new(app_id, meta_row.object_id, app_config, sync_tx);
+
+    if state.apps.write().await.insert(app_id, app_entry).is_some() {
+        let _ = state.meta_store.delete_app(meta_row.object_id).await;
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::bad_request(
+                "app runtime already exists for generated app id",
+            )),
+        )
+            .into_response();
+    }
 
     let worker = state.workers.worker_for_app(&app_id);
 
@@ -1450,7 +1719,7 @@ async fn list_apps_handler(
         return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
     }
 
-    let apps: Vec<Arc<AppRuntime>> = state.apps.read().await.values().cloned().collect();
+    let apps: Vec<Arc<AppEntry>> = state.apps.read().await.values().cloned().collect();
     let mut response = Vec::with_capacity(apps.len());
 
     for app in apps {
