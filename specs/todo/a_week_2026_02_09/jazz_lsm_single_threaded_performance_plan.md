@@ -12,18 +12,18 @@ Improve `jazz-lsm` mixed read/write performance in a single-threaded runtime, ta
 
 ## Roadmap status (updated 2026-02-14)
 
-| Phase | Item | Status | Complexity | Expected mixed R/W impact | Notes |
-|---|---|---|---|---|---|
-| 1 | Mixed workload benchmarks + counters | Done | S | Baseline quality | Implemented for native + WASM |
-| 2 | Internal write batching + in-memory WAL byte tracking | Done | S-M | High | Highest payoff-per-complexity so far |
-| 3 | Reuse encode/decode buffers in write path | Done | S | Medium | Positive native, mixed WASM |
-| 4 | SST v2 block format + point-read block index | Done | M-H | High but variable | Keep selective parts in Phase 8 stack |
-| 5 | Per-SST bloom filters | Done | M | Low/negative net | Kept for now; may revisit/trim later |
-| 6 | SST metadata/index cache + small block cache | Done | M | High | Highest payoff-per-complexity so far |
-| 7 | Range-scoped compaction + per-step budget | Dropped | M-H | Negative net in current runs | Dropped after strong native regressions |
-| 8 | `phase_2_6_some_4` consolidation | Done (mixed) | S-M | Mixed; not clearly better than Phase 6 | Finalized at `32 KiB` blocks + bloom enabled |
-| 9 | Append-only manifest edits + periodic checkpoint | Done (mixed) | M | High | Large gains vs Phase 8, especially native write-heavy rows |
-| 10 | Large-value separation (blob log threshold) | Planned | H | +5x to +20x for 1MB-heavy workloads | Still likely required for sustained 1MB performance |
+| Phase | Item                                                  | Status       | Complexity | Expected mixed R/W impact              | Notes                                                      |
+| ----- | ----------------------------------------------------- | ------------ | ---------- | -------------------------------------- | ---------------------------------------------------------- |
+| 1     | Mixed workload benchmarks + counters                  | Done         | S          | Baseline quality                       | Implemented for native + WASM                              |
+| 2     | Internal write batching + in-memory WAL byte tracking | Done         | S-M        | High                                   | Highest payoff-per-complexity so far                       |
+| 3     | Reuse encode/decode buffers in write path             | Done         | S          | Medium                                 | Positive native, mixed WASM                                |
+| 4     | SST v2 block format + point-read block index          | Done         | M-H        | High but variable                      | Keep selective parts in Phase 8 stack                      |
+| 5     | Per-SST bloom filters                                 | Done         | M          | Low/negative net                       | Kept for now; may revisit/trim later                       |
+| 6     | SST metadata/index cache + small block cache          | Done         | M          | High                                   | Highest payoff-per-complexity so far                       |
+| 7     | Range-scoped compaction + per-step budget             | Dropped      | M-H        | Negative net in current runs           | Dropped after strong native regressions                    |
+| 8     | `phase_2_6_some_4` consolidation                      | Done (mixed) | S-M        | Mixed; not clearly better than Phase 6 | Finalized at `32 KiB` blocks + bloom enabled               |
+| 9     | Append-only manifest edits + periodic checkpoint      | Done (mixed) | M          | High                                   | Large gains vs Phase 8, especially native write-heavy rows |
+| 10    | Large-value separation (blob log threshold)           | Planned      | H          | +5x to +20x for 1MB-heavy workloads    | Still likely required for sustained 1MB performance        |
 
 ## Measured ROI update (2026-02-14)
 

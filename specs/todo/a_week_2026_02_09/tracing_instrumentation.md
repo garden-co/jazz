@@ -24,6 +24,7 @@ More generally: as the system grows, we need a way to understand what's happenin
 Use `#[instrument]` and manual `span!`/`event!` macros. Every interesting boundary gets a span; key decision points get events.
 
 Levels:
+
 - **ERROR** — invariant violations, unrecoverable failures
 - **WARN** — recoverable issues (e.g. unknown client in sync message)
 - **INFO** — lifecycle events: runtime created, client added, server connected, schema registered
@@ -35,6 +36,7 @@ Levels:
 Priority areas (these trace a write + read end-to-end):
 
 **groove crate — core engine**
+
 ```
 SchemaManager::insert/update/delete_with_session
   ├─ span: object_id, table, branch
@@ -71,6 +73,7 @@ RuntimeCore::batched_tick
 ```
 
 **groove-wasm — WASM bindings**
+
 ```
 WasmRuntime::new        → span: app_id, schema summary
 WasmRuntime::addServer  → span: server URL
@@ -82,6 +85,7 @@ WasmRuntime::tick        → span (TRACE level, frequent)
 ```
 
 **jazz-cli — server**
+
 ```
 events_handler  → span: client_id, session info
 sync_handler    → span: client_id, payload size
@@ -89,6 +93,7 @@ sync_handler    → span: client_id, payload size
 ```
 
 **opfs-btree**
+
 ```
 Add focused storage spans/events for checkpoint, page allocation, and range scans.
 ```
@@ -96,6 +101,7 @@ Add focused storage spans/events for checkpoint, page allocation, and range scan
 ### WASM: `tracing-wasm`
 
 [`tracing-wasm`](https://crates.io/crates/tracing-wasm) bridges `tracing` to:
+
 - `console.log` / `console.debug` / etc. (with collapsible groups for spans)
 - `performance.mark()` / `performance.measure()` (shows up in browser Performance tab)
 
@@ -117,6 +123,7 @@ This is a one-liner at startup. All `#[instrument]` spans and `event!` macros th
 Keep TypeScript logging lightweight — the heavy lifting is in Rust/WASM. Add `[main]` and `[worker]` prefixes to existing console calls for clarity. The worker's WASM tracing output already appears in the worker's console; no bridging needed.
 
 Key TypeScript events to log (DEBUG level, behind a flag):
+
 - `db.ts`: bridge init, query subscribe/unsubscribe, message relay to worker
 - `groove-worker.ts`: init, stream connect/disconnect, sync POST, message relay to WASM
 - `client.ts`: SSE connect, schema context sent, sync POST
@@ -124,11 +131,13 @@ Key TypeScript events to log (DEBUG level, behind a flag):
 ### Filtering
 
 **Server (jazz-cli):** Already uses `RUST_LOG` env filter. Example:
+
 ```
 RUST_LOG=groove=trace,jazz_cli=debug cargo run -- server ...
 ```
 
 **WASM (browser):** `tracing-wasm` respects the max level set at init. We can make this configurable via a query param or init option:
+
 ```
 http://localhost:5173/?log=trace
 ```

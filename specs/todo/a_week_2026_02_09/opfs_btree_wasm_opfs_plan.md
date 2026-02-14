@@ -5,6 +5,7 @@
 Design and implement a browser-first B+tree engine for Dedicated Worker + OPFS sync handle usage.
 
 Key constraints:
+
 - WASM + OPFS only (Dedicated Worker)
 - Async open, then synchronous API
 - Single OPFS file (avoid multi-file coordination)
@@ -14,6 +15,7 @@ Key constraints:
 ## Why B+tree over current LSM path
 
 Given read-mostly, mostly-small-value workloads with acceptable write latency:
+
 - B+tree gives bounded read path (single root-to-leaf traversal) and straightforward range scans.
 - No compaction machinery and fewer moving parts than read-optimized LSM.
 - Single-file page layout maps naturally to OPFS sync access.
@@ -33,6 +35,7 @@ Given read-mostly, mostly-small-value workloads with acceptable write latency:
 - Remaining pages: B+tree pages + overflow pages + freelist pages.
 
 Page kinds:
+
 - `Internal`
 - `Leaf`
 - `Overflow` (optional for large values)
@@ -41,6 +44,7 @@ Page kinds:
 ## Checkpoint protocol: double superblock root-pointer swap
 
 Superblock fields:
+
 - magic/version
 - generation (monotonic)
 - root page id
@@ -49,12 +53,14 @@ Superblock fields:
 - checksum
 
 Commit steps:
+
 1. Write modified tree/freelist pages.
 2. Flush file handle.
 3. Write inactive superblock with new generation and root/freelist pointers.
 4. Flush file handle.
 
 Recovery/open:
+
 - Read both superblocks.
 - Validate checksums/version.
 - Pick highest valid generation.
@@ -92,6 +98,7 @@ impl<F: SyncFile> OpfsBTree<F> {
 ```
 
 Notes:
+
 - `SyncFile` is a swappable sync file interface (Memory/Std/OPFS adapters).
 - WASM wrapper provides async handle acquisition and then constructs `OpfsBTree`.
 
@@ -111,6 +118,7 @@ Notes:
 ## Rollout phases
 
 ### Phase 1 (this implementation start)
+
 - New crate scaffold.
 - Sync file abstraction.
 - Single-file page IO helpers.
@@ -119,16 +127,19 @@ Notes:
 - Tests for torn/corrupt superblock recovery behavior.
 
 ### Phase 2
+
 - Minimal functional B+tree (leaf/internal split, insert/get/delete/range).
 - Freelist page allocator.
 - Overflow pages for large values.
 
 ### Phase 3
+
 - Cache tuning, prefix compression, leaf prefetch for range.
 - Startup hot-leaf hints.
 - Benchmarks against current jazz-lsm wasm/opfs profiles.
 
 ### Phase 4
+
 - Optional lightweight intent log for faster crash-window recovery between checkpoints.
 - Background checkpoint policy integration in tab-leader runtime.
 

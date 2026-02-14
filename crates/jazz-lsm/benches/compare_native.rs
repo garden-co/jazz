@@ -6,6 +6,9 @@ use bf_tree::{BfTree, Config as BfConfig, LeafInsertResult, LeafReadResult};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fjall::{Config as FjallConfig, PartitionCreateOptions, PersistMode};
 use jazz_lsm::{LsmOptions, LsmTree, StdFs, WriteDurability};
+use opfs_btree::{
+    BTreeOptions as OpfsBTreeOptions, OpfsBTree as OpfsBTreeDb, StdFile as OpfsStdFile,
+};
 use rocksdb::{Options as RocksOptions, WriteOptions};
 use surrealkv::{
     Durability as SurrealDurability, Mode as SurrealMode, Transaction as SurrealTransaction,
@@ -73,14 +76,41 @@ impl Engine for LsmEngine {
     }
 
     fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        self.db
-            .get(key)
-            .expect("lsm get")
-            .expect("lsm key present")
+        self.db.get(key).expect("lsm get").expect("lsm key present")
     }
 
     fn finish_writes(&mut self) {
         self.db.flush().expect("lsm flush");
+    }
+}
+
+struct OpfsBTreeEngine {
+    db: OpfsBTreeDb<OpfsStdFile>,
+}
+
+impl OpfsBTreeEngine {
+    fn open(path: &Path) -> Self {
+        let file = OpfsStdFile::open(path.join("opfs-btree.data")).expect("open opfs-btree file");
+        let options = OpfsBTreeOptions::default();
+        let db = OpfsBTreeDb::open(file, options).expect("open opfs-btree");
+        Self { db }
+    }
+}
+
+impl Engine for OpfsBTreeEngine {
+    fn put(&mut self, key: &[u8], value: &[u8]) {
+        self.db.put(key, value).expect("opfs-btree put");
+    }
+
+    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+        self.db
+            .get(key)
+            .expect("opfs-btree get")
+            .expect("opfs-btree key present")
+    }
+
+    fn finish_writes(&mut self) {
+        self.db.checkpoint().expect("opfs-btree checkpoint");
     }
 }
 
@@ -131,7 +161,9 @@ impl Engine for BfTreeEngine {
         }
     }
 
-    fn finish_writes(&mut self) {}
+    fn finish_writes(&mut self) {
+        self.tree.snapshot();
+    }
 }
 
 struct RocksDbEngine {
@@ -327,19 +359,47 @@ fn shuffled_indices(n: usize) -> Vec<usize> {
     out
 }
 
-fn engine_factories(max_value_size: usize) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
+fn engine_factories(
+    max_value_size: usize,
+) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
     let mut out: Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> = Vec::new();
     out.push(("jazz_lsm", Box::new(|path| Box::new(LsmEngine::open(path)))));
+    out.push((
+        "opfs_btree",
+        Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
+    ));
     if max_value_size <= BF_TREE_MAX_VALUE_SIZE {
         out.push((
             "bf_tree",
             Box::new(move |path| Box::new(BfTreeEngine::open(path, max_value_size))),
         ));
     }
-    out.push(("rocksdb", Box::new(|path| Box::new(RocksDbEngine::open(path)))));
-    out.push(("surrealkv", Box::new(|path| Box::new(SurrealKvEngine::open(path)))));
+    out.push((
+        "rocksdb",
+        Box::new(|path| Box::new(RocksDbEngine::open(path))),
+    ));
+    out.push((
+        "surrealkv",
+        Box::new(|path| Box::new(SurrealKvEngine::open(path))),
+    ));
     out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
     out
+}
+
+fn cold_read_engine_factories() -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
+    vec![
+        ("jazz_lsm", Box::new(|path| Box::new(LsmEngine::open(path)))),
+        (
+            "opfs_btree",
+            Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
+        ),
+        ("rocksdb", Box::new(|path| Box::new(RocksDbEngine::open(path)))),
+        (
+            "surrealkv",
+            Box::new(|path| Box::new(SurrealKvEngine::open(path))),
+        ),
+        ("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))),
+    ]
 }
 
 fn bench_seq_write(c: &mut Criterion) {
@@ -506,11 +566,106 @@ fn bench_random_read(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cold_seq_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compare_native_cold_seq_read");
+    let key_count = key_count();
+    let value_sizes = value_sizes();
+
+    for value_size in value_sizes {
+        let factories = cold_read_engine_factories();
+        group.throughput(Throughput::Elements(key_count as u64));
+        for (engine_name, factory) in &factories {
+            group.bench_with_input(
+                BenchmarkId::new(*engine_name, format!("value_{value_size}")),
+                &value_size,
+                |b, &value_size| {
+                    b.iter_batched(
+                        || {
+                            let dir = tempfile::tempdir().expect("tempdir");
+                            let mut engine = factory(dir.path());
+                            for i in 0..key_count {
+                                let k = key(i);
+                                let v = value(value_size, (i % 251) as u8);
+                                engine.put(&k, &v);
+                            }
+                            engine.finish_writes();
+                            drop(engine);
+                            dir
+                        },
+                        |dir: TempDir| {
+                            let mut engine = factory(dir.path());
+                            let mut checksum: u64 = 0;
+                            for i in 0..key_count {
+                                let k = key(i);
+                                let v = engine.get(&k);
+                                checksum = checksum.wrapping_add(v[0] as u64);
+                            }
+                            black_box(checksum);
+                        },
+                        BatchSize::LargeInput,
+                    )
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_cold_random_read(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compare_native_cold_random_read");
+    let key_count = key_count();
+    let value_sizes = value_sizes();
+    let order = shuffled_indices(key_count);
+
+    for value_size in value_sizes {
+        let factories = cold_read_engine_factories();
+        group.throughput(Throughput::Elements(key_count as u64));
+        for (engine_name, factory) in &factories {
+            group.bench_with_input(
+                BenchmarkId::new(*engine_name, format!("value_{value_size}")),
+                &value_size,
+                |b, &value_size| {
+                    b.iter_batched(
+                        || {
+                            let dir = tempfile::tempdir().expect("tempdir");
+                            let mut engine = factory(dir.path());
+                            for i in 0..key_count {
+                                let k = key(i);
+                                let v = value(value_size, (i % 251) as u8);
+                                engine.put(&k, &v);
+                            }
+                            engine.finish_writes();
+                            drop(engine);
+                            dir
+                        },
+                        |dir: TempDir| {
+                            let mut engine = factory(dir.path());
+                            let mut checksum: u64 = 0;
+                            for &i in &order {
+                                let k = key(i);
+                                let v = engine.get(&k);
+                                checksum = checksum.wrapping_add(v[0] as u64);
+                            }
+                            black_box(checksum);
+                        },
+                        BatchSize::LargeInput,
+                    )
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     compare_native,
     bench_seq_write,
     bench_random_write,
     bench_seq_read,
-    bench_random_read
+    bench_random_read,
+    bench_cold_seq_read,
+    bench_cold_random_read
 );
 criterion_main!(compare_native);

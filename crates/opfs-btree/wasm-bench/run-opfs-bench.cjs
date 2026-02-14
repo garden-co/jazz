@@ -3,7 +3,17 @@
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const { chromium } = require("playwright");
+
+function loadPlaywright() {
+  try {
+    return require("playwright");
+  } catch {
+    const fallback = path.join(__dirname, "..", "..", "jazz-lsm", "node_modules", "playwright");
+    return require(fallback);
+  }
+}
+
+const { chromium } = loadPlaywright();
 
 const DEFAULT_COUNT = 5000;
 const DEFAULT_VALUE_SIZES = [32, 256, 4096];
@@ -113,11 +123,11 @@ function parseArgs(argv) {
 }
 
 function ensureBuiltPkg(pkgDir) {
-  const jsEntry = path.join(pkgDir, "jazz_lsm.js");
-  const wasmEntry = path.join(pkgDir, "jazz_lsm_bg.wasm");
+  const jsEntry = path.join(pkgDir, "opfs_btree.js");
+  const wasmEntry = path.join(pkgDir, "opfs_btree_bg.wasm");
   if (!fs.existsSync(jsEntry) || !fs.existsSync(wasmEntry)) {
     throw new Error(
-      "Missing wasm package output. Run `pnpm --dir crates/jazz-lsm run bench:wasm:build` first.",
+      "Missing wasm package output. Run `pnpm --dir crates/opfs-btree run bench:wasm:build` first.",
     );
   }
 }
@@ -180,7 +190,7 @@ import init, {
   bench_opfs_cold_sequential_read,
   bench_opfs_cold_random_read,
   bench_opfs_mixed_scenario
-} from "/pkg/jazz_lsm.js";
+} from "/pkg/opfs_btree.js";
 
 const pendingRequests = [];
 let wasmReady = false;
@@ -310,7 +320,7 @@ self.onmessage = (e) => {
 function createHtml(count, valueSizes, profile, seed, progress, includeColdRead) {
   return `<!doctype html>
 <meta charset="utf-8">
-<title>jazz-lsm wasm opfs bench</title>
+<title>opfs-btree wasm opfs bench</title>
 <script>
 window.__benchDone = false;
 window.__benchError = null;

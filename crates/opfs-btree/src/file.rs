@@ -3,8 +3,16 @@ use std::rc::Rc;
 
 use crate::BTreeError;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
+
 pub trait SyncFile {
     fn len(&self) -> Result<u64, BTreeError>;
+    fn is_empty(&self) -> Result<bool, BTreeError> {
+        self.len().map(|len| len == 0)
+    }
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError>;
     fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError>;
     fn truncate(&self, len: u64) -> Result<(), BTreeError>;
@@ -170,5 +178,170 @@ impl SyncFile for StdFile {
     fn flush(&self) -> Result<(), BTreeError> {
         let file = self.inner.borrow();
         file.sync_all().map_err(|e| BTreeError::Io(e.to_string()))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug)]
+pub struct OpfsFile {
+    inner: Rc<OpfsFileInner>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
+struct OpfsFileInner {
+    handle: web_sys::FileSystemSyncAccessHandle,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for OpfsFileInner {
+    fn drop(&mut self) {
+        self.handle.close();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OpfsFile {
+    pub async fn open(namespace: &str) -> Result<Self, BTreeError> {
+        let global: web_sys::WorkerGlobalScope = js_sys::global().dyn_into().map_err(|_| {
+            BTreeError::Io("OpfsFile::open must run in a dedicated worker".to_string())
+        })?;
+        let storage = global.navigator().storage();
+
+        let root: web_sys::FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
+            .await
+            .map_err(map_js_error)?
+            .dyn_into()
+            .map_err(|_| BTreeError::Io("failed to cast OPFS root".to_string()))?;
+
+        let opts = web_sys::FileSystemGetFileOptions::new();
+        opts.set_create(true);
+        let file: web_sys::FileSystemFileHandle =
+            JsFuture::from(root.get_file_handle_with_options(&Self::file_name(namespace), &opts))
+                .await
+                .map_err(map_js_error)?
+                .dyn_into()
+                .map_err(|_| BTreeError::Io("failed to cast OPFS file handle".to_string()))?;
+
+        let handle: web_sys::FileSystemSyncAccessHandle =
+            JsFuture::from(file.create_sync_access_handle())
+                .await
+                .map_err(map_js_error)?
+                .dyn_into()
+                .map_err(|_| {
+                    BTreeError::Io("failed to cast OPFS sync access handle".to_string())
+                })?;
+
+        Ok(Self {
+            inner: Rc::new(OpfsFileInner { handle }),
+        })
+    }
+
+    pub async fn destroy(namespace: &str) -> Result<(), BTreeError> {
+        let global: web_sys::WorkerGlobalScope = js_sys::global().dyn_into().map_err(|_| {
+            BTreeError::Io("OpfsFile::destroy must run in a dedicated worker".to_string())
+        })?;
+        let storage = global.navigator().storage();
+        let root: web_sys::FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
+            .await
+            .map_err(map_js_error)?
+            .dyn_into()
+            .map_err(|_| BTreeError::Io("failed to cast OPFS root".to_string()))?;
+
+        let name = Self::file_name(namespace);
+        let remove_fn = js_sys::Reflect::get(&root, &"removeEntry".into()).map_err(map_js_error)?;
+        let remove_fn: js_sys::Function = remove_fn
+            .dyn_into()
+            .map_err(|_| BTreeError::Io("OPFS removeEntry is unavailable".to_string()))?;
+        let opts = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&opts, &"recursive".into(), &false.into());
+        let promise = remove_fn.call2(&root, &name.into(), &opts.into());
+        if let Ok(promise) = promise {
+            let promise: js_sys::Promise = promise
+                .dyn_into()
+                .map_err(|_| BTreeError::Io("failed to cast removeEntry promise".to_string()))?;
+            let _ = JsFuture::from(promise).await;
+        }
+
+        Ok(())
+    }
+
+    fn file_name(namespace: &str) -> String {
+        format!("{}.opfsbtree", namespace)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl SyncFile for OpfsFile {
+    fn len(&self) -> Result<u64, BTreeError> {
+        Ok(self.inner.handle.get_size().map_err(map_js_error)? as u64)
+    }
+
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+        let opts = web_sys::FileSystemReadWriteOptions::new();
+        opts.set_at(offset as f64);
+        let read = self
+            .inner
+            .handle
+            .read_with_u8_array_and_options(buf, &opts)
+            .map_err(map_js_error)? as usize;
+        if read != buf.len() {
+            return Err(BTreeError::Io(format!(
+                "unexpected eof: read {} of {} bytes",
+                read,
+                buf.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+        let opts = web_sys::FileSystemReadWriteOptions::new();
+        opts.set_at(offset as f64);
+        let written = self
+            .inner
+            .handle
+            .write_with_u8_array_and_options(buf, &opts)
+            .map_err(map_js_error)? as usize;
+        if written != buf.len() {
+            return Err(BTreeError::Io(format!(
+                "short write: wrote {} of {} bytes",
+                written,
+                buf.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+        truncate_handle(&self.inner.handle, len)
+    }
+
+    fn flush(&self) -> Result<(), BTreeError> {
+        self.inner.handle.flush().map_err(map_js_error)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn truncate_handle(
+    handle: &web_sys::FileSystemSyncAccessHandle,
+    len: u64,
+) -> Result<(), BTreeError> {
+    let truncate = js_sys::Reflect::get(handle, &"truncate".into()).map_err(map_js_error)?;
+    let truncate: js_sys::Function = truncate
+        .dyn_into()
+        .map_err(|_| BTreeError::Io("OPFS truncate is unavailable".to_string()))?;
+    truncate
+        .call1(handle, &wasm_bindgen::JsValue::from_f64(len as f64))
+        .map_err(map_js_error)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn map_js_error(value: wasm_bindgen::JsValue) -> BTreeError {
+    if let Some(s) = value.as_string() {
+        BTreeError::Io(s)
+    } else {
+        BTreeError::Io(format!("{value:?}"))
     }
 }
