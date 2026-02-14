@@ -7,12 +7,19 @@ use serde::Serialize;
 use crate::error::LsmError;
 use crate::format::{OpKind, VersionedRecord, decode_records_into, encode_record_into};
 use crate::fs::{FsError, SyncFs};
-use crate::manifest::{Manifest, SstMeta};
+use crate::manifest::{
+    MANIFEST_CHECKPOINT_FORMAT_VERSION, Manifest, ManifestCheckpoint, ManifestEdit,
+    ManifestRemoval, SstMeta,
+};
 
-const MANIFEST_FILE: &str = "MANIFEST.json";
+const MANIFEST_CHECKPOINT_FILE: &str = "MANIFEST.checkpoint";
+const MANIFEST_EDITS_FILE: &str = "MANIFEST.edits";
 const WAL_FILE: &str = "active.wal";
 const SST_PREFIX: &str = "sst-";
 const WAL_APPEND_BATCH_BYTES: usize = 32 * 1024;
+const MANIFEST_EDIT_HEADER_SIZE: usize = 8; // len(u32) + crc32(u32)
+const MANIFEST_CHECKPOINT_EVERY_EDITS: u64 = 64;
+const MANIFEST_CHECKPOINT_TARGET_LOG_BYTES: u64 = 2 * 1024 * 1024;
 // phase_2_6_some_4: keep v2 indexed point-reads with a moderate block target to
 // balance index/block overhead against read amplification.
 const SST_V2_BLOCK_TARGET_BYTES: usize = 32 * 1024;
@@ -162,6 +169,8 @@ pub struct LsmTree<F: SyncFs> {
     fs: F,
     options: LsmOptions,
     manifest: Manifest,
+    manifest_last_edit_id: u64,
+    manifest_edits_since_checkpoint: u64,
     merge_ops: HashMap<u32, MergeFn>,
     required_merge_ops: BTreeSet<u32>,
     memtable: BTreeMap<Vec<u8>, Vec<VersionedRecord>>,
@@ -191,7 +200,8 @@ impl<F: SyncFs> LsmTree<F> {
             }
         }
 
-        let mut manifest = load_manifest(&fs, options.max_levels)?;
+        let load_state = load_manifest(&fs, options.max_levels)?;
+        let mut manifest = load_state.manifest;
         if manifest.levels.len() < options.max_levels {
             manifest.levels.resize_with(options.max_levels, Vec::new);
         }
@@ -211,6 +221,8 @@ impl<F: SyncFs> LsmTree<F> {
             fs,
             options,
             manifest,
+            manifest_last_edit_id: load_state.last_edit_id,
+            manifest_edits_since_checkpoint: load_state.edits_since_checkpoint,
             merge_ops: merge_map,
             required_merge_ops: std::mem::take(&mut required_merge_ops),
             memtable: BTreeMap::new(),
@@ -466,7 +478,6 @@ impl<F: SyncFs> LsmTree<F> {
         records.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.seq.cmp(&a.seq)));
 
         let file_id = self.manifest.next_file_id;
-        self.manifest.next_file_id += 1;
 
         let path = sst_path(file_id);
         let bytes = encode_sst_v2(&records)?;
@@ -487,7 +498,8 @@ impl<F: SyncFs> LsmTree<F> {
             records: records.len() as u64,
         };
 
-        self.manifest.levels[0].push(meta);
+        let edit = self.build_manifest_edit(vec![meta], Vec::new(), file_id + 1);
+        self.commit_manifest_edit(edit)?;
 
         {
             let mut stats = self.runtime_stats.borrow_mut();
@@ -500,27 +512,87 @@ impl<F: SyncFs> LsmTree<F> {
                 .saturating_add(bytes.len() as u64);
         }
 
-        self.memtable.clear();
-        self.memtable_bytes = 0;
-
-        self.persist_manifest()?;
-
         // WAL can be reset after manifest references the new SST.
         self.fs.truncate(WAL_FILE, 0)?;
         self.fs.sync_file(WAL_FILE)?;
         self.wal_bytes.set(0);
         self.wal_buffer.borrow_mut().clear();
+        self.memtable.clear();
+        self.memtable_bytes = 0;
 
         let _ = self.compact_step_internal()?;
         Ok(())
     }
 
-    fn persist_manifest(&mut self) -> Result<(), LsmError> {
-        self.manifest.required_merge_ops = self.required_merge_ops.iter().copied().collect();
-        let bytes = serde_json::to_vec(&self.manifest)
-            .map_err(|e| LsmError::ManifestParse(e.to_string()))?;
-        self.fs.write_atomic(MANIFEST_FILE, &bytes)?;
-        self.fs.sync_file(MANIFEST_FILE)?;
+    fn build_manifest_edit(
+        &self,
+        additions: Vec<SstMeta>,
+        removals: Vec<ManifestRemoval>,
+        next_file_id: u64,
+    ) -> ManifestEdit {
+        ManifestEdit {
+            id: self.manifest_last_edit_id + 1,
+            next_file_id,
+            next_seq: self.manifest.next_seq,
+            required_merge_ops: self.required_merge_ops.iter().copied().collect(),
+            additions,
+            removals,
+        }
+    }
+
+    fn commit_manifest_edit(&mut self, edit: ManifestEdit) -> Result<(), LsmError> {
+        self.append_manifest_edit_record(&edit)?;
+        self.manifest.apply_edit(&edit);
+        self.manifest_last_edit_id = edit.id;
+        self.manifest_edits_since_checkpoint =
+            self.manifest_edits_since_checkpoint.saturating_add(1);
+        self.maybe_checkpoint_manifest()?;
+        Ok(())
+    }
+
+    fn append_manifest_edit_record(&self, edit: &ManifestEdit) -> Result<(), LsmError> {
+        let payload =
+            serde_json::to_vec(edit).map_err(|e| LsmError::ManifestParse(e.to_string()))?;
+        let payload_len = u32::try_from(payload.len())
+            .map_err(|_| LsmError::ManifestParse("manifest edit payload too large".to_string()))?;
+        let payload_crc = crc32fast::hash(&payload);
+
+        let mut record = Vec::with_capacity(MANIFEST_EDIT_HEADER_SIZE + payload.len());
+        record.extend_from_slice(&payload_len.to_le_bytes());
+        record.extend_from_slice(&payload_crc.to_le_bytes());
+        record.extend_from_slice(&payload);
+
+        self.fs.append(MANIFEST_EDITS_FILE, &record)?;
+        self.fs.sync_file(MANIFEST_EDITS_FILE)?;
+        Ok(())
+    }
+
+    fn maybe_checkpoint_manifest(&mut self) -> Result<(), LsmError> {
+        let log_bytes = self.fs.file_len(MANIFEST_EDITS_FILE)?;
+        let should_checkpoint = self.manifest_edits_since_checkpoint
+            >= MANIFEST_CHECKPOINT_EVERY_EDITS
+            || log_bytes >= MANIFEST_CHECKPOINT_TARGET_LOG_BYTES;
+        if !should_checkpoint {
+            return Ok(());
+        }
+
+        self.write_manifest_checkpoint()?;
+        self.fs.truncate(MANIFEST_EDITS_FILE, 0)?;
+        self.fs.sync_file(MANIFEST_EDITS_FILE)?;
+        self.manifest_edits_since_checkpoint = 0;
+        Ok(())
+    }
+
+    fn write_manifest_checkpoint(&self) -> Result<(), LsmError> {
+        let checkpoint = ManifestCheckpoint {
+            format_version: MANIFEST_CHECKPOINT_FORMAT_VERSION,
+            last_edit_id: self.manifest_last_edit_id,
+            manifest: self.manifest.clone(),
+        };
+        let bytes =
+            serde_json::to_vec(&checkpoint).map_err(|e| LsmError::ManifestParse(e.to_string()))?;
+        self.fs.write_atomic(MANIFEST_CHECKPOINT_FILE, &bytes)?;
+        self.fs.sync_file(MANIFEST_CHECKPOINT_FILE)?;
         self.fs.sync_dir()?;
         Ok(())
     }
@@ -665,8 +737,7 @@ impl<F: SyncFs> LsmTree<F> {
             && bloom_offset < index_offset
             && bloom_offset.saturating_add(bloom_len) == index_offset;
 
-        if index_len == 0 || !bloom_ok || index_offset.saturating_add(index_len) != footer_offset
-        {
+        if index_len == 0 || !bloom_ok || index_offset.saturating_add(index_len) != footer_offset {
             return Err(corrupt_sst(&meta.path, footer_offset));
         }
 
@@ -765,9 +836,7 @@ impl<F: SyncFs> LsmTree<F> {
             return Err(corrupt_sst(&meta.path, block.offset));
         }
         let data = Rc::new(data);
-        self.sst_block_cache
-            .borrow_mut()
-            .insert(key, data.clone());
+        self.sst_block_cache.borrow_mut().insert(key, data.clone());
         Ok(data)
     }
 
@@ -876,7 +945,7 @@ impl<F: SyncFs> LsmTree<F> {
         let output_level = if level == deepest { deepest } else { level + 1 };
         let drop_tombstones = level == deepest;
 
-        let input_files = std::mem::take(&mut self.manifest.levels[level]);
+        let input_files = self.manifest.levels[level].clone();
         if input_files.is_empty() {
             return Ok(false);
         }
@@ -914,16 +983,13 @@ impl<F: SyncFs> LsmTree<F> {
 
         output_records.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.seq.cmp(&a.seq)));
 
-        for meta in input_files {
-            self.invalidate_sst_caches(meta.id);
-            self.fs.remove_file(&meta.path)?;
-        }
-
         let mut output_file_count = 0u64;
         let mut output_file_bytes = 0u64;
+        let mut output_meta = None;
+        let mut next_file_id = self.manifest.next_file_id;
         if !output_records.is_empty() {
-            let file_id = self.manifest.next_file_id;
-            self.manifest.next_file_id += 1;
+            let file_id = next_file_id;
+            next_file_id += 1;
 
             let path = sst_path(file_id);
             let bytes = encode_sst_v2(&output_records)?;
@@ -951,11 +1017,24 @@ impl<F: SyncFs> LsmTree<F> {
                 bytes: bytes.len() as u64,
                 records: output_records.len() as u64,
             };
-
-            self.manifest.levels[output_level].push(meta);
+            output_meta = Some(meta);
         }
 
-        self.persist_manifest()?;
+        let additions = output_meta.into_iter().collect();
+        let removals = input_files
+            .iter()
+            .map(|meta| ManifestRemoval {
+                level: meta.level,
+                id: meta.id,
+            })
+            .collect();
+        let edit = self.build_manifest_edit(additions, removals, next_file_id);
+        self.commit_manifest_edit(edit)?;
+
+        for meta in &input_files {
+            self.invalidate_sst_caches(meta.id);
+            self.fs.remove_file(&meta.path)?;
+        }
         {
             let mut stats = self.runtime_stats.borrow_mut();
             stats.compaction_steps = stats.compaction_steps.saturating_add(1);
@@ -1478,19 +1557,131 @@ fn corrupt_sst(path: &str, offset: u64) -> LsmError {
     }
 }
 
-fn load_manifest<F: SyncFs>(fs: &F, num_levels: usize) -> Result<Manifest, LsmError> {
-    match fs.read_all(MANIFEST_FILE) {
+struct ManifestLoadState {
+    manifest: Manifest,
+    last_edit_id: u64,
+    edits_since_checkpoint: u64,
+}
+
+fn load_manifest<F: SyncFs>(fs: &F, num_levels: usize) -> Result<ManifestLoadState, LsmError> {
+    let (mut manifest, checkpoint_edit_id) = match fs.read_all(MANIFEST_CHECKPOINT_FILE) {
         Ok(bytes) => {
-            let mut manifest: Manifest = serde_json::from_slice(&bytes)
+            let checkpoint: ManifestCheckpoint = serde_json::from_slice(&bytes)
                 .map_err(|e| LsmError::ManifestParse(e.to_string()))?;
-            if manifest.levels.len() < num_levels {
-                manifest.levels.resize_with(num_levels, Vec::new);
+            if checkpoint.format_version != MANIFEST_CHECKPOINT_FORMAT_VERSION {
+                return Err(LsmError::ManifestParse(format!(
+                    "unsupported manifest checkpoint version {}",
+                    checkpoint.format_version
+                )));
             }
-            Ok(manifest)
+            (checkpoint.manifest, checkpoint.last_edit_id)
         }
-        Err(FsError::NotFound(_)) => Ok(Manifest::new(num_levels)),
-        Err(e) => Err(LsmError::Fs(e)),
+        Err(FsError::NotFound(_)) => (Manifest::new(num_levels), 0),
+        Err(e) => return Err(LsmError::Fs(e)),
+    };
+
+    if manifest.levels.len() < num_levels {
+        manifest.levels.resize_with(num_levels, Vec::new);
     }
+
+    let mut last_edit_id = checkpoint_edit_id;
+    let mut edits_since_checkpoint = 0u64;
+
+    let edits_bytes = match fs.read_all(MANIFEST_EDITS_FILE) {
+        Ok(bytes) => bytes,
+        Err(FsError::NotFound(_)) => Vec::new(),
+        Err(e) => return Err(LsmError::Fs(e)),
+    };
+
+    let edits = decode_manifest_edits(&edits_bytes)?;
+    for edit in edits {
+        if edit.id <= checkpoint_edit_id {
+            continue;
+        }
+        manifest.apply_edit(&edit);
+        last_edit_id = edit.id;
+        edits_since_checkpoint = edits_since_checkpoint.saturating_add(1);
+    }
+
+    if manifest.levels.len() < num_levels {
+        manifest.levels.resize_with(num_levels, Vec::new);
+    }
+
+    Ok(ManifestLoadState {
+        manifest,
+        last_edit_id,
+        edits_since_checkpoint,
+    })
+}
+
+fn decode_manifest_edits(data: &[u8]) -> Result<Vec<ManifestEdit>, LsmError> {
+    let mut edits = Vec::new();
+    let mut cursor = 0usize;
+    let mut last_seen_id = 0u64;
+
+    while cursor + MANIFEST_EDIT_HEADER_SIZE <= data.len() {
+        let record_offset = cursor;
+        let payload_len = u32::from_le_bytes(
+            data[cursor..cursor + 4]
+                .try_into()
+                .expect("manifest payload len bytes"),
+        ) as usize;
+        cursor += 4;
+
+        let expected_crc = u32::from_le_bytes(
+            data[cursor..cursor + 4]
+                .try_into()
+                .expect("manifest payload crc bytes"),
+        );
+        cursor += 4;
+
+        if payload_len == 0 {
+            return Err(LsmError::ManifestParse(format!(
+                "zero-length manifest edit at byte offset {record_offset}"
+            )));
+        }
+
+        let payload_end = cursor.saturating_add(payload_len);
+        if payload_end > data.len() {
+            break;
+        }
+
+        let payload = &data[cursor..payload_end];
+        let record_is_tail = payload_end == data.len();
+
+        if crc32fast::hash(payload) != expected_crc {
+            if record_is_tail {
+                break;
+            }
+            return Err(LsmError::ManifestParse(format!(
+                "manifest edit CRC mismatch at byte offset {record_offset}"
+            )));
+        }
+
+        let edit: ManifestEdit = match serde_json::from_slice(payload) {
+            Ok(edit) => edit,
+            Err(err) => {
+                if record_is_tail {
+                    break;
+                }
+                return Err(LsmError::ManifestParse(format!(
+                    "failed to decode manifest edit at byte offset {record_offset}: {err}"
+                )));
+            }
+        };
+
+        if !edits.is_empty() && edit.id <= last_seen_id {
+            return Err(LsmError::ManifestParse(format!(
+                "manifest edit ids must be strictly increasing: {} after {}",
+                edit.id, last_seen_id
+            )));
+        }
+        last_seen_id = edit.id;
+        edits.push(edit);
+        cursor = payload_end;
+    }
+
+    Ok(edits)
 }
 
 fn validate_options(options: &LsmOptions) -> Result<(), LsmError> {
@@ -1740,5 +1931,69 @@ mod tests {
             (2..=3).contains(&min_read_range_calls),
             "at least one missing-key lookup should avoid block IO via bloom/range filtering; got {min_read_range_calls}"
         );
+    }
+
+    #[test]
+    fn manifest_tail_truncation_is_tolerated_on_open() {
+        let fs = MemoryFs::default();
+        {
+            let mut db = LsmTree::open(fs.clone(), LsmOptions::default(), vec![]).expect("open");
+            db.put(b"k1", b"v1").expect("put");
+            db.flush().expect("flush");
+        }
+
+        let payload_len = 128u32.to_le_bytes();
+        let payload_crc = 0u32.to_le_bytes();
+        let mut truncated_tail = Vec::new();
+        truncated_tail.extend_from_slice(&payload_len);
+        truncated_tail.extend_from_slice(&payload_crc);
+        fs.append(MANIFEST_EDITS_FILE, &truncated_tail)
+            .expect("append truncated edit");
+
+        let db = LsmTree::open(fs.clone(), LsmOptions::default(), vec![]).expect("reopen");
+        assert_eq!(db.get(b"k1").expect("get"), Some(b"v1".to_vec()));
+    }
+
+    #[test]
+    fn manifest_corruption_before_tail_is_rejected_on_open() {
+        let fs = MemoryFs::default();
+        {
+            let mut db = LsmTree::open(fs.clone(), LsmOptions::default(), vec![]).expect("open");
+            db.put(b"k1", b"v1").expect("put");
+            db.flush().expect("flush");
+        }
+
+        let original = fs.read_all(MANIFEST_EDITS_FILE).expect("read edits");
+        assert!(original.len() >= MANIFEST_EDIT_HEADER_SIZE + 1);
+        let payload_len = u32::from_le_bytes(
+            original[..4]
+                .try_into()
+                .expect("manifest payload length header"),
+        ) as usize;
+        let record_len = MANIFEST_EDIT_HEADER_SIZE + payload_len;
+        assert!(original.len() >= record_len);
+
+        let mut corrupted_record = original[..record_len].to_vec();
+        corrupted_record[MANIFEST_EDIT_HEADER_SIZE] ^= 0x01;
+
+        let mut combined = Vec::with_capacity(corrupted_record.len() + original.len());
+        combined.extend_from_slice(&corrupted_record);
+        combined.extend_from_slice(&original);
+        fs.write_all(MANIFEST_EDITS_FILE, &combined)
+            .expect("write corrupted edits");
+
+        let err = match LsmTree::open(fs, LsmOptions::default(), vec![]) {
+            Ok(_) => panic!("open should fail on corrupted manifest edits"),
+            Err(err) => err,
+        };
+        match err {
+            LsmError::ManifestParse(message) => {
+                assert!(
+                    message.contains("CRC mismatch"),
+                    "unexpected parse message: {message}"
+                );
+            }
+            other => panic!("expected manifest parse error, got {other:?}"),
+        }
     }
 }

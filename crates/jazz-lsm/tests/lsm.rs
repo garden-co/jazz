@@ -35,13 +35,23 @@ fn wal_replay_survives_second_restart_without_flush() -> TestResult {
     let dir = tempfile::tempdir()?;
     let fs = StdFs::new(dir.path())?;
 
-    block_on(scenarios::wal_replay_survives_second_restart_without_flush::<
-        StdFs,
-        _,
-        _,
-    >(move || {
-        std::future::ready(open_with_defaults(fs.clone()))
-    }))
+    block_on(
+        scenarios::wal_replay_survives_second_restart_without_flush::<StdFs, _, _>(move || {
+            std::future::ready(open_with_defaults(fs.clone()))
+        }),
+    )
+}
+
+#[test]
+fn checkpoint_survives_second_restart_after_wal_replay() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let fs = StdFs::new(dir.path())?;
+
+    block_on(
+        scenarios::checkpoint_survives_second_restart_after_wal_replay::<StdFs, _, _>(move || {
+            std::future::ready(open_with_defaults(fs.clone()))
+        }),
+    )
 }
 
 #[test]

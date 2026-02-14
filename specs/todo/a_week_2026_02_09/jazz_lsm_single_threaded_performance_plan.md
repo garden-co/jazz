@@ -10,7 +10,7 @@ Improve `jazz-lsm` mixed read/write performance in a single-threaded runtime, ta
 - Maintenance work must be cooperative (bounded foreground steps)
 - Durability contract unchanged: no lost acknowledged writes after `flush_wal()`
 
-## Roadmap status (updated 2026-02-13)
+## Roadmap status (updated 2026-02-14)
 
 | Phase | Item | Status | Complexity | Expected mixed R/W impact | Notes |
 |---|---|---|---|---|---|
@@ -22,21 +22,22 @@ Improve `jazz-lsm` mixed read/write performance in a single-threaded runtime, ta
 | 6 | SST metadata/index cache + small block cache | Done | M | High | Highest payoff-per-complexity so far |
 | 7 | Range-scoped compaction + per-step budget | Dropped | M-H | Negative net in current runs | Dropped after strong native regressions |
 | 8 | `phase_2_6_some_4` consolidation | Done (mixed) | S-M | Mixed; not clearly better than Phase 6 | Finalized at `32 KiB` blocks + bloom enabled |
-| 9 | Append-only manifest edits + periodic checkpoint | Planned (next) | M | +10% to +40% write-heavy mixed | Re-ordered ahead of large-value separation |
+| 9 | Append-only manifest edits + periodic checkpoint | Done (mixed) | M | High | Large gains vs Phase 8, especially native write-heavy rows |
 | 10 | Large-value separation (blob log threshold) | Planned | H | +5x to +20x for 1MB-heavy workloads | Still likely required for sustained 1MB performance |
 
-## Measured ROI update (2026-02-13)
+## Measured ROI update (2026-02-14)
 
 Observed payoff-per-complexity from completed phases:
 
 1. `Phase 2` (internal WAL batching + in-memory WAL bytes): highest ROI, low complexity.
-2. `Phase 6` (SST metadata/index cache + block cache): highest ROI, medium complexity.
-3. `Phase 3` (buffer reuse): good native ROI, mixed wasm impact.
-4. `Phase 4` (SST v2 block format + point index): high upside but more volatility/complexity.
-5. `Phase 5` (bloom filters): low/negative net in current runs.
-6. `Phase 7` (range-scoped compaction + per-step budget): negative net for native in current runs.
+2. `Phase 9` (append-only manifest edits + periodic checkpoint): highest ROI, medium complexity.
+3. `Phase 6` (SST metadata/index cache + block cache): highest ROI, medium complexity.
+4. `Phase 3` (buffer reuse): good native ROI, mixed wasm impact.
+5. `Phase 4` (SST v2 block format + point index): high upside but more volatility/complexity.
+6. `Phase 5` (bloom filters): low/negative net in current runs.
+7. `Phase 7` (range-scoped compaction + per-step budget): negative net for native in current runs.
 
-Decision for next iteration: build and benchmark **Phase 8** (`phase_2_6_some_4`).
+Decision for next iteration: build and benchmark **Phase 10** (large-value separation), using Phase 9 as baseline.
 
 ## Phase 8: `phase_2_6_some_4`
 
