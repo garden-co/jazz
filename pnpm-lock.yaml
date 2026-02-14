@@ -172,9 +172,6 @@ importers:
 
   packages/jazz-ts:
     dependencies:
-      blake3:
-        specifier: ^2.1.7
-        version: 2.1.7
       groove-wasm:
         specifier: workspace:*
         version: link:../../crates/groove-wasm
@@ -1051,9 +1048,6 @@ packages:
   baseline-browser-mapping@2.9.19:
     resolution: {integrity: sha512-ipDqC8FrAl/76p2SSWKSI+H9tFwm7vYqXQrItCuiVPt26Km0jS+NzSsBWAaBusvSbQcfJG+JitdMm+wZAgTYqg==}
     hasBin: true
-
-  blake3@2.1.7:
-    resolution: {integrity: sha512-5d+TdKJvju96IyEaGJ0eO6CHbckWi+NBrCezGYM/WsnI3R03aLL2TWfsuZSh1rs0fTv/L3ps/r0vykjYurcIwA==}
 
   body-parser@1.20.4:
     resolution: {integrity: sha512-ZTgYYLMOXY9qKU/57FAo8F+HA2dGX7bqGc71txDRC1rS4frdFI5R7NhluHxH6M0YItAP0sHB4uqAOcYKxO6uGA==}
@@ -2495,8 +2489,6 @@ snapshots:
   assertion-error@2.0.1: {}
 
   baseline-browser-mapping@2.9.19: {}
-
-  blake3@2.1.7: {}
 
   body-parser@1.20.4:
     dependencies:

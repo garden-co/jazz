@@ -20,10 +20,13 @@ Done. New `runtime/sync-transport.ts` with `isCataloguePayload()`, `sendSyncPayl
 
 These stubs break real functionality:
 
-- **Schema hash is hardcoded zeros** — `client.ts:468`: `schema_hash: "0".repeat(64)`. All schemas hash to the same value, which means branch composition (`{env}-{schemaHash}-{userBranch}`) collapses. `blake3` is declared as a dependency but never imported.
-- **Client ID is hardcoded zeros** — both `client.ts:560` and `groove-worker.ts:133` send `"00000000-0000-0000-0000-000000000000"` as `client_id` in sync POSTs.
+- ~~**Schema hash is hardcoded zeros**~~ ✅
+  - Exposed Rust `SchemaHash::compute` through runtime bindings as `getSchemaHash()` in WASM/NAPI.
+  - `client.ts:getSchemaContext()` now uses `runtime.getSchemaHash()` instead of `"0".repeat(64)`.
+- **Client ID is hardcoded zeros** — `runtime/sync-transport.ts` still falls back to `"00000000-0000-0000-0000-000000000000"` when no connected server client ID is known.
 - **Nested array relation mapping** — `row-transformer.ts:70–77`: TODO to map nested arrays from array subqueries to relation names. Currently returns unnamed extra values.
-- **Token refresh doesn't reconnect** — `groove-worker.ts:277–280`: `update-auth` message updates `jwtToken` in memory but doesn't reconnect the stream, so the server still sees the old token.
+- ~~**Token refresh doesn't reconnect**~~ ✅
+  - `update-auth` now aborts the stream and schedules reconnect so new auth is used.
 
 ## 4. ~~`#[allow(dead_code)]` Annotations~~ ✅
 
@@ -76,17 +79,15 @@ These files are getting unwieldy but don't need immediate action:
 | `object_manager.rs` | 2,294 | Clean after blob removal                                                         |
 | `types.rs`          | 2,419 | Type definitions; cohesive                                                       |
 
-## 9. Unused `blake3` Dependency (LOW)
+## 9. ~~Unused `blake3` Dependency~~ ✅
 
-`packages/jazz-ts/package.json` declares `blake3` (line 15) but it's never imported anywhere in the TypeScript code. Was presumably added for schema hash computation (see item 4) but never wired up.
-
-Action: either use it to implement the schema hash, or remove the dependency.
+Resolved by removing the TypeScript-side `blake3` dependency and using Rust hashing via runtime bindings.
 
 ## 10. Examples Lose Data on Reload (MEDIUM)
 
-The example apps (e.g., `todo-client-localfirst-ts`) lose all data when the page reloads, despite browser persistence tests passing. Likely related to the hardcoded-zeros issue in item 3 (schema hash and client ID are all zeros → branch mismatch between sessions, so the new session can't find data written by the old one).
+The example apps (e.g., `todo-client-localfirst-ts`) lose all data when the page reloads, despite browser persistence tests passing. Previously suspected root cause was the hardcoded schema hash/client ID placeholders in item 3.
 
-Investigate: does fixing the schema hash / client ID placeholders also fix persistence in the examples?
+Schema hash is now fixed. Investigate whether the remaining `client_id` fallback (all-zero UUID when not yet connected) is still contributing to reload persistence issues.
 
 ## 11. Worker Bridge Error Swallowing (LOW)
 
