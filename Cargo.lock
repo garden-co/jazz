@@ -2148,6 +2148,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "opfs-btree"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "owo-colors"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
