@@ -31,4 +31,5 @@ jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
+jazz-rs = { path = "../jazz-rs" }
 tempfile = "3"
