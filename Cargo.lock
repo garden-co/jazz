@@ -1413,6 +1413,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-multi-server"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "axum",
+ "base64",
+ "bytes",
+ "clap",
+ "groove",
+ "groove-tokio",
+ "jazz-transport",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-rs"
 version = "0.1.0"
 dependencies = [
