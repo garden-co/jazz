@@ -1442,6 +1442,7 @@ dependencies = [
  "groove-tokio",
  "hex",
  "hmac",
+ "jazz-rs",
  "jazz-transport",
  "jsonwebtoken",
  "reqwest",

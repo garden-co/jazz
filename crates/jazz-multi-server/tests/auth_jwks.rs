@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
 use base64::Engine;
+use groove::query_manager::session::Session;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -137,14 +138,32 @@ impl TestServer {
     }
 
     async fn create_app(&self, jwks_endpoint: &str) -> CreateAppResponse {
+        self.create_app_with_secrets(jwks_endpoint, None, None)
+            .await
+    }
+
+    async fn create_app_with_secrets(
+        &self,
+        jwks_endpoint: &str,
+        backend_secret: Option<&str>,
+        admin_secret: Option<&str>,
+    ) -> CreateAppResponse {
+        let mut payload = json!({
+            "app_name": "integration-app",
+            "jwks_endpoint": jwks_endpoint,
+        });
+        if let Some(secret) = backend_secret {
+            payload["backend_secret"] = Value::String(secret.to_string());
+        }
+        if let Some(secret) = admin_secret {
+            payload["admin_secret"] = Value::String(secret.to_string());
+        }
+
         let response = self
             .client
             .post(format!("{}/internal/apps", self.base_url()))
             .header("X-Jazz-Internal-Secret", INTERNAL_API_SECRET)
-            .json(&json!({
-                "app_name": "integration-app",
-                "jwks_endpoint": jwks_endpoint,
-            }))
+            .json(&payload)
             .send()
             .await
             .expect("create app request");
@@ -167,6 +186,25 @@ impl TestServer {
             .send()
             .await
             .expect("sync request")
+    }
+
+    async fn sync_with_backend_session(
+        &self,
+        app_id: &str,
+        backend_secret: Option<&str>,
+        session_user: &str,
+    ) -> reqwest::Response {
+        let mut request = self
+            .client
+            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
+            .header("X-Jazz-Session", encode_session(session_user))
+            .json(&sync_body());
+
+        if let Some(secret) = backend_secret {
+            request = request.header("X-Jazz-Backend-Secret", secret);
+        }
+
+        request.send().await.expect("sync request")
     }
 }
 
@@ -207,6 +245,12 @@ fn sync_body() -> Value {
             }
         }
     })
+}
+
+fn encode_session(user_id: &str) -> String {
+    let session = Session::new(user_id);
+    let json = serde_json::to_string(&session).expect("serialize session");
+    base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
 fn hs256_jwks(kid: &str, secret: &str) -> Value {
@@ -326,4 +370,27 @@ async fn bad_signature_stays_unauthorized_after_refresh_retry() {
         2,
         "signature failure should trigger one refresh retry"
     );
+}
+
+#[tokio::test]
+async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
+    let jwks_server = JwksServer::start(vec![hs256_jwks("kid-valid", "secret-valid")]).await;
+    let server = TestServer::start().await;
+    let app = server
+        .create_app_with_secrets(
+            &jwks_server.endpoint(),
+            Some("backend-secret-1"),
+            Some("admin-secret-1"),
+        )
+        .await;
+
+    let missing_secret = server
+        .sync_with_backend_session(&app.app_id, None, "backend-user")
+        .await;
+    assert_eq!(missing_secret.status(), StatusCode::UNAUTHORIZED);
+
+    let valid_secret = server
+        .sync_with_backend_session(&app.app_id, Some("backend-secret-1"), "backend-user")
+        .await;
+    assert_ne!(valid_secret.status(), StatusCode::UNAUTHORIZED);
 }
