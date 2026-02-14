@@ -187,3 +187,41 @@ Mixed scenarios:
 | mixed_random_60r_20w_20d          |        256 |               116.8 |                118.6 |  +1.5% |
 | mixed_random_60r_20w_20d          |       4096 |                25.8 |                 25.2 |  -2.3% |
 | mixed_random_60r_20w_20d          |    1048576 |                 0.9 |                  0.1 | -88.9% |
+
+## Phase: Internal Page Pinning + OPFS IO Counters
+
+Changes in this phase:
+
+- Added `BTreeOptions.pin_internal_pages` and enabled it for WASM OPFS runtime/bench options.
+- Added OPFS IO counters (`read/write calls + bytes, len/truncate/flush calls`) to wasm benchmark result payloads.
+- Reduced per-call JS object churn in `OpfsFile` by reusing `FileSystemReadWriteOptions` objects.
+
+### A/B: Mixed Profile (32MB cache, single run, fixed seed)
+
+Command shape (before/after): `--profile mixed --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages false|true --json`
+
+| scenario                          | value_size | before K/s | after K/s |  delta |
+| --------------------------------- | ---------: | ---------: | --------: | -----: |
+| mixed_random_70r_30w              |         32 |      122.0 |     131.6 |  +7.9% |
+| mixed_random_70r_30w              |        256 |      113.2 |     114.9 |  +1.5% |
+| mixed_random_70r_30w              |       4096 |       29.2 |      32.2 | +10.2% |
+| mixed_random_50r_50w_with_updates |         32 |       94.3 |      97.7 |  +3.6% |
+| mixed_random_50r_50w_with_updates |        256 |      104.2 |     105.3 |  +1.1% |
+| mixed_random_50r_50w_with_updates |       4096 |       20.0 |      20.3 |  +1.9% |
+| mixed_random_60r_20w_20d          |         32 |      154.6 |     147.1 |  -4.9% |
+| mixed_random_60r_20w_20d          |        256 |      117.2 |     117.6 |  +0.4% |
+| mixed_random_60r_20w_20d          |       4096 |       24.7 |      25.3 |  +2.4% |
+
+Aggregate (sum of rows): `+1.6%` throughput.
+OPFS call counts in this profile were unchanged because this workload remained mostly memory-resident during the measured operation window.
+
+### A/B: Cold-Read Stress (16KB cache, 4096-byte values)
+
+Command shape (before/after): `--profile basic --include-cold-read --count 3000 --value-sizes 4096 --seed 0xA5A5A5A501234567 --cache-mb 0.015625 --pin-internal-pages false|true --json`
+
+| scenario         | before K/s | after K/s |   delta | read calls before | read calls after | read call delta |
+| ---------------- | ---------: | --------: | ------: | ----------------: | ---------------: | --------------: |
+| cold_seq_read    |        4.6 |      16.9 | +265.5% |              6003 |             1506 |          -74.9% |
+| cold_random_read |        4.8 |       8.3 |  +74.3% |              6003 |             3004 |          -50.0% |
+
+This stress run confirms the intended mechanism: pinning internal pages can materially reduce OPFS read call volume under heavy eviction pressure.
