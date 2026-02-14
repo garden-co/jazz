@@ -4891,6 +4891,53 @@ fn subscribe_with_sync_sends_to_servers() {
 }
 
 #[test]
+fn add_server_replays_existing_local_query_subscriptions() {
+    use crate::sync_manager::{Destination, QueryId, ServerId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut client_qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let query = client_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+    let sub_id = client_qm.subscribe_with_sync(query, None, None).unwrap();
+
+    // No server connected yet, so no outbound subscription forwarding.
+    let outbox_before_add_server = client_qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox_before_add_server
+            .iter()
+            .all(|e| !matches!(e.payload, SyncPayload::QuerySubscription { .. })),
+        "Should not forward QuerySubscription before any server is connected"
+    );
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    client_qm.add_server(server_id);
+
+    let outbox = client_qm.sync_manager_mut().take_outbox();
+    let replayed: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+        .filter_map(|e| {
+            if let SyncPayload::QuerySubscription { query_id, .. } = &e.payload {
+                Some(*query_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        replayed,
+        vec![QueryId(sub_id.0)],
+        "add_server should replay active local subscriptions to the new server"
+    );
+}
+
+#[test]
 fn unsubscribe_with_sync_sends_to_servers() {
     use crate::sync_manager::{Destination, ServerId, SyncPayload};
     use uuid::Uuid;
