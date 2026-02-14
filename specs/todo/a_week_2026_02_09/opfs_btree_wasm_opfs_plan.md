@@ -151,6 +151,11 @@ Notes:
 ## Current implementation status
 
 - Done: crate scaffold, `SyncFile` abstraction (`MemoryFile`, `StdFile`), superblock A/B codec, generation-based recovery, checkpoint slot swap.
-- Done: minimal sync KV API (`get`/`put`/`delete`/`range`) with checkpointed snapshot persistence in the same single file.
+- Done: phase 2 baseline page engine:
+  - page-structured B+tree nodes (`Internal`/`Leaf`) with split-on-insert
+  - overflow page chains for large values
+  - freelist page persistence and reuse
+  - sync API (`get`/`put`/`delete`/`range`) over the in-memory page graph
+  - checkpoint writes page set + freelist metadata, then superblock root swap
 - Done: regression test for the two-crash pattern where only checkpointed state survives.
-- Next: replace snapshot-map persistence with true page-structured B+tree nodes + freelist allocator (phase 2 core).
+- Next: phase 3 performance work (cache tuning, prefix compression, scan prefetch, benchmarks).
