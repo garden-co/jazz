@@ -924,16 +924,16 @@ async fn extract_session(
         }
     }
 
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(token) = auth_value.strip_prefix("Bearer ") {
-            let token = token.trim();
-            if token.is_empty() {
-                return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
-            }
-
-            let session = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
-            return Ok(Some(session));
+    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())
+        && let Some(token) = auth_value.strip_prefix("Bearer ")
+    {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
         }
+
+        let session = validate_jwt_with_jwks(state, app_id, app_config, token).await?;
+        return Ok(Some(session));
     }
 
     Ok(None)
