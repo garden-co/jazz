@@ -314,3 +314,26 @@ Selected per-scenario deltas:
 | cold_random_read                  |         32 |      697.7 |     937.5 |  +34.4% |                21 |                8 |
 | cold_random_read                  |        256 |      236.2 |     379.7 |  +60.8% |               103 |               42 |
 | cold_random_read                  |       4096 |       18.9 |      33.7 |  +78.5% |              1506 |              603 |
+
+## Phase: On-Page Slot Directory (Regression Note)
+
+Changes in this phase:
+
+- Internal and leaf page formats moved to an on-page slot-directory layout (cell-pointer-array style).
+- Raw read helpers now consume slot directory offsets directly from page buffers.
+- Removed transient raw leaf index map from `db.rs`; lookup metadata now lives in the page itself.
+
+Benchmark method:
+
+- Compared against the read-coalescing baseline (`read_coalesce_pages=4`).
+- Command shape: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+- 3 runs due browser/worker variance.
+
+| run    | mixed delta | range delta | cold delta | overall delta |
+| ------ | ----------: | ----------: | ---------: | ------------: |
+| 1      |       -4.1% |      +18.5% |     -36.3% |        -22.1% |
+| 2      |       +3.6% |      +23.2% |      -9.1% |         -2.3% |
+| 3      |       -0.9% |      +27.0% |      -8.7% |         -2.8% |
+| median |       -0.9% |      +23.2% |      -9.1% |         -2.8% |
+
+Interpretation: the slot-directory format consistently improves range throughput, but cold point-read throughput regressed versus the prior read-coalescing baseline.

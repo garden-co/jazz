@@ -3,8 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
-    Page, PageId, ValueCell, decode_page, encode_page, freelist_ids_per_page,
-    overflow_chunk_capacity, page_fits,
+    Page, PageId, PageKind, ValueCell, ValueCellRef, decode_page, encode_page,
+    freelist_ids_per_page, overflow_chunk_capacity, page_fits, raw_freelist_page,
+    raw_internal_child_for_key, raw_leaf_find_value, raw_leaf_scan, raw_overflow_chunk,
+    raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -84,13 +86,19 @@ pub struct OpfsBTree<F: SyncFile> {
     active: Superblock,
     root_page_id: Option<PageId>,
     total_pages: u64,
-    pages: HashMap<PageId, Page>,
+    pages: HashMap<PageId, CachedPage>,
     page_access_epoch: HashMap<PageId, u64>,
     access_epoch: u64,
     dirty_pages: HashSet<PageId>,
     free_pages: Vec<PageId>,
     free_set: HashSet<PageId>,
     freelist_meta_pages: Vec<PageId>,
+}
+
+#[derive(Debug, Clone)]
+enum CachedPage {
+    Raw(Vec<u8>),
+    Decoded(Page),
 }
 
 #[derive(Debug)]
@@ -101,6 +109,14 @@ struct SplitResult {
 
 type KvPair = (Vec<u8>, Vec<u8>);
 type LeafEntry = (Vec<u8>, ValueCell);
+
+enum StagedValue {
+    Inline(Vec<u8>),
+    Overflow {
+        head_page_id: PageId,
+        total_len: usize,
+    },
+}
 
 impl<F: SyncFile> OpfsBTree<F> {
     pub fn open(file: F, options: BTreeOptions) -> Result<Self, BTreeError> {
@@ -152,15 +168,9 @@ impl<F: SyncFile> OpfsBTree<F> {
         if tree.active.root_page_id != 0 {
             tree.root_page_id = Some(tree.active.root_page_id);
             tree.ensure_page_loaded(tree.active.root_page_id)?;
-            let root_page = tree.pages.get(&tree.active.root_page_id).ok_or_else(|| {
-                BTreeError::Corrupt(format!(
-                    "root page {} missing after load",
-                    tree.active.root_page_id
-                ))
-            })?;
-            match root_page {
-                Page::Leaf { .. } | Page::Internal { .. } => {}
-                Page::Overflow { .. } | Page::Freelist { .. } => {
+            match tree.page_kind(tree.active.root_page_id)? {
+                PageKind::Leaf | PageKind::Internal => {}
+                PageKind::Overflow | PageKind::Freelist => {
                     return Err(BTreeError::Corrupt(format!(
                         "root page {} has invalid kind",
                         tree.active.root_page_id
@@ -183,18 +193,52 @@ impl<F: SyncFile> OpfsBTree<F> {
         };
 
         self.ensure_page_loaded(leaf_page_id)?;
-        let leaf = self.pages.get(&leaf_page_id).ok_or_else(|| {
-            BTreeError::Corrupt(format!("leaf page {} missing in memory", leaf_page_id))
-        })?;
-        let (entries, _) = expect_leaf(leaf)?;
+        enum FoundValue {
+            Inline(Vec<u8>),
+            Overflow(PageId, usize),
+            Decoded(ValueCell),
+            NotFound,
+        }
 
-        let value_cell = match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
-            Ok(idx) => Some(entries[idx].1.clone()),
-            Err(_) => None,
+        let is_raw = matches!(self.pages.get(&leaf_page_id), Some(CachedPage::Raw(_)));
+        let found = if is_raw {
+            let raw = self.raw_page_bytes(leaf_page_id)?;
+            let value_cell = raw_leaf_find_value(raw, self.options.page_size, key)?;
+            match value_cell {
+                None => FoundValue::NotFound,
+                Some(ValueCellRef::Inline(value)) => FoundValue::Inline(value.to_vec()),
+                Some(ValueCellRef::Overflow {
+                    head_page_id,
+                    total_len,
+                }) => FoundValue::Overflow(head_page_id, total_len as usize),
+            }
+        } else {
+            match self.pages.get(&leaf_page_id) {
+                Some(CachedPage::Decoded(leaf)) => {
+                    let (entries, _) = expect_leaf(leaf)?;
+                    match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
+                        Ok(idx) => FoundValue::Decoded(entries[idx].1.clone()),
+                        Err(_) => FoundValue::NotFound,
+                    }
+                }
+                Some(CachedPage::Raw(_)) => unreachable!("raw pages handled above"),
+                None => {
+                    return Err(BTreeError::Corrupt(format!(
+                        "leaf page {} missing in memory",
+                        leaf_page_id
+                    )));
+                }
+            }
         };
-        value_cell
-            .map(|cell| self.materialize_value(&cell))
-            .transpose()
+
+        match found {
+            FoundValue::Inline(value) => Ok(Some(value)),
+            FoundValue::Overflow(head_page_id, total_len) => {
+                self.read_overflow_value(head_page_id, total_len).map(Some)
+            }
+            FoundValue::Decoded(cell) => self.materialize_value(&cell).map(Some),
+            FoundValue::NotFound => Ok(None),
+        }
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), BTreeError> {
@@ -242,10 +286,19 @@ impl<F: SyncFile> OpfsBTree<F> {
             None => return Ok(()),
         };
 
-        self.ensure_page_loaded(root_page_id)?;
+        self.ensure_page_decoded(root_page_id)?;
         let root_page = self.pages.get(&root_page_id).ok_or_else(|| {
             BTreeError::Corrupt(format!("root page {} missing after delete", root_page_id))
         })?;
+        let root_page = match root_page {
+            CachedPage::Decoded(page) => page,
+            CachedPage::Raw(_) => {
+                return Err(BTreeError::Corrupt(format!(
+                    "root page {} not decoded after delete",
+                    root_page_id
+                )));
+            }
+        };
 
         if let Page::Leaf { entries, .. } = root_page
             && entries.is_empty()
@@ -280,31 +333,80 @@ impl<F: SyncFile> OpfsBTree<F> {
             }
 
             self.ensure_page_loaded(page_id)?;
-            let (next, staged_entries) = {
-                let page = self.pages.get(&page_id).ok_or_else(|| {
-                    BTreeError::Corrupt(format!("leaf page {} missing during range", page_id))
-                })?;
-                let (entries, next) = expect_leaf(page)?;
-
-                let remaining = limit.saturating_sub(out.len());
-                let mut staged = Vec::with_capacity(remaining.min(entries.len()));
-                for (key, value) in entries {
-                    if key.as_slice() >= end {
-                        break;
-                    }
-                    if key.as_slice() >= start {
-                        staged.push((key.clone(), value.clone()));
-                        if staged.len() == remaining {
-                            break;
+            let remaining = limit.saturating_sub(out.len());
+            let is_raw = matches!(self.pages.get(&page_id), Some(CachedPage::Raw(_)));
+            let (next, staged_entries): (Option<PageId>, Vec<(Vec<u8>, StagedValue)>) = if is_raw {
+                let raw = self.raw_page_bytes(page_id)?;
+                let mut staged = Vec::new();
+                let next = raw_leaf_scan(
+                    raw,
+                    self.options.page_size,
+                    start,
+                    end,
+                    remaining,
+                    |key, value| {
+                        let staged_value = match value {
+                            ValueCellRef::Inline(value) => StagedValue::Inline(value.to_vec()),
+                            ValueCellRef::Overflow {
+                                head_page_id,
+                                total_len,
+                            } => StagedValue::Overflow {
+                                head_page_id,
+                                total_len: total_len as usize,
+                            },
+                        };
+                        staged.push((key.to_vec(), staged_value));
+                        Ok(())
+                    },
+                )?;
+                (next, staged)
+            } else {
+                match self.pages.get(&page_id) {
+                    Some(CachedPage::Decoded(page)) => {
+                        let (entries, next) = expect_leaf(page)?;
+                        let mut staged = Vec::with_capacity(remaining.min(entries.len()));
+                        for (key, value) in entries {
+                            if key.as_slice() >= end {
+                                break;
+                            }
+                            if key.as_slice() >= start {
+                                let staged_value = match value {
+                                    ValueCell::Inline(value) => StagedValue::Inline(value.clone()),
+                                    ValueCell::Overflow {
+                                        head_page_id,
+                                        total_len,
+                                    } => StagedValue::Overflow {
+                                        head_page_id: *head_page_id,
+                                        total_len: *total_len as usize,
+                                    },
+                                };
+                                staged.push((key.clone(), staged_value));
+                                if staged.len() == remaining {
+                                    break;
+                                }
+                            }
                         }
+                        (*next, staged)
+                    }
+                    Some(CachedPage::Raw(_)) => unreachable!("raw pages handled above"),
+                    None => {
+                        return Err(BTreeError::Corrupt(format!(
+                            "leaf page {} missing during range",
+                            page_id
+                        )));
                     }
                 }
-
-                (*next, staged)
             };
 
             for (key, value) in staged_entries {
-                out.push((key, self.materialize_value(&value)?));
+                let value = match value {
+                    StagedValue::Inline(value) => value,
+                    StagedValue::Overflow {
+                        head_page_id,
+                        total_len,
+                    } => self.read_overflow_value(head_page_id, total_len)?,
+                };
+                out.push((key, value));
                 if out.len() == limit {
                     return Ok(out);
                 }
@@ -352,10 +454,19 @@ impl<F: SyncFile> OpfsBTree<F> {
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<SplitResult>, BTreeError> {
-        self.ensure_page_loaded(page_id)?;
+        self.ensure_page_decoded(page_id)?;
         let page = self.pages.get(&page_id).cloned().ok_or_else(|| {
             BTreeError::Corrupt(format!("page {} missing during insert", page_id))
         })?;
+        let page = match page {
+            CachedPage::Decoded(page) => page,
+            CachedPage::Raw(_) => {
+                return Err(BTreeError::Corrupt(format!(
+                    "page {} not decoded for insert",
+                    page_id
+                )));
+            }
+        };
 
         match page {
             Page::Leaf { mut entries, next } => {
@@ -482,10 +593,19 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
-        self.ensure_page_loaded(page_id)?;
+        self.ensure_page_decoded(page_id)?;
         let page = self.pages.get(&page_id).cloned().ok_or_else(|| {
             BTreeError::Corrupt(format!("page {} missing during delete", page_id))
         })?;
+        let page = match page {
+            CachedPage::Decoded(page) => page,
+            CachedPage::Raw(_) => {
+                return Err(BTreeError::Corrupt(format!(
+                    "page {} not decoded for delete",
+                    page_id
+                )));
+            }
+        };
 
         match page {
             Page::Leaf { mut entries, next } => {
@@ -549,9 +669,18 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page = self.pages.get(&current).ok_or_else(|| {
                 BTreeError::Corrupt(format!("overflow page {} missing in memory", current))
             })?;
-            let (chunk, next) = expect_overflow(page)?;
-            out.extend_from_slice(chunk);
-            current = next.unwrap_or(0);
+            match page {
+                CachedPage::Decoded(page) => {
+                    let (chunk, next) = expect_overflow(page)?;
+                    out.extend_from_slice(chunk);
+                    current = next.unwrap_or(0);
+                }
+                CachedPage::Raw(raw) => {
+                    let (chunk, next) = raw_overflow_chunk(raw, self.options.page_size)?;
+                    out.extend_from_slice(chunk);
+                    current = next.unwrap_or(0);
+                }
+            }
         }
 
         if out.len() < expected_len {
@@ -588,9 +717,18 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page = self.remove_page(current).ok_or_else(|| {
                 BTreeError::Corrupt(format!("overflow page {} missing while freeing", current))
             })?;
-            let (_, next) = expect_overflow(&page)?;
+            let next = match page {
+                CachedPage::Decoded(page) => {
+                    let (_, next) = expect_overflow(&page)?;
+                    next.unwrap_or(0)
+                }
+                CachedPage::Raw(raw) => {
+                    let (_, next) = raw_overflow_chunk(&raw, self.options.page_size)?;
+                    next.unwrap_or(0)
+                }
+            };
             self.add_free_page(current);
-            current = next.unwrap_or(0);
+            current = next;
         }
 
         Ok(())
@@ -647,27 +785,51 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         loop {
             self.ensure_page_loaded(current)?;
-            let page = self.pages.get(&current).ok_or_else(|| {
-                BTreeError::Corrupt(format!("page {} missing while descending", current))
-            })?;
-            match page {
-                Page::Leaf { .. } => return Ok(Some(current)),
-                Page::Internal { keys, children } => {
-                    let idx = child_index(keys, key);
-                    current = *children.get(idx).ok_or_else(|| {
-                        BTreeError::Corrupt(format!(
-                            "internal page {} missing child {}",
-                            current, idx
-                        ))
-                    })?;
+            if let Some(CachedPage::Decoded(page)) = self.pages.get(&current) {
+                match page {
+                    Page::Leaf { .. } => return Ok(Some(current)),
+                    Page::Internal { keys, children } => {
+                        let idx = child_index(keys, key);
+                        current = *children.get(idx).ok_or_else(|| {
+                            BTreeError::Corrupt(format!(
+                                "internal page {} missing child {}",
+                                current, idx
+                            ))
+                        })?;
+                        continue;
+                    }
+                    Page::Overflow { .. } => {
+                        return Err(BTreeError::Corrupt(format!(
+                            "unexpected overflow page {} in tree path",
+                            current
+                        )));
+                    }
+                    Page::Freelist { .. } => {
+                        return Err(BTreeError::Corrupt(format!(
+                            "unexpected freelist page {} in tree path",
+                            current
+                        )));
+                    }
                 }
-                Page::Overflow { .. } => {
+            }
+
+            let raw_kind = {
+                let raw = self.raw_page_bytes(current)?;
+                raw_page_kind(raw, self.options.page_size)?
+            };
+            match raw_kind {
+                PageKind::Leaf => return Ok(Some(current)),
+                PageKind::Internal => {
+                    let raw = self.raw_page_bytes(current)?;
+                    current = raw_internal_child_for_key(raw, self.options.page_size, key)?;
+                }
+                PageKind::Overflow => {
                     return Err(BTreeError::Corrupt(format!(
                         "unexpected overflow page {} in tree path",
                         current
                     )));
                 }
-                Page::Freelist { .. } => {
+                PageKind::Freelist => {
                     return Err(BTreeError::Corrupt(format!(
                         "unexpected freelist page {} in tree path",
                         current
@@ -692,6 +854,54 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    fn ensure_page_decoded(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        self.ensure_page_loaded(page_id)?;
+        let needs_decode = matches!(self.pages.get(&page_id), Some(CachedPage::Raw(_)));
+        if !needs_decode {
+            return Ok(());
+        }
+
+        let raw = match self.pages.remove(&page_id) {
+            Some(CachedPage::Raw(raw)) => raw,
+            Some(CachedPage::Decoded(page)) => {
+                self.pages.insert(page_id, CachedPage::Decoded(page));
+                return Ok(());
+            }
+            None => {
+                return Err(BTreeError::Corrupt(format!(
+                    "page {} missing before decode",
+                    page_id
+                )));
+            }
+        };
+        let decoded = decode_page(&raw, self.options.page_size)?;
+        self.pages.insert(page_id, CachedPage::Decoded(decoded));
+        self.touch_page(page_id);
+        Ok(())
+    }
+
+    fn page_kind(&self, page_id: PageId) -> Result<PageKind, BTreeError> {
+        let page = self
+            .pages
+            .get(&page_id)
+            .ok_or_else(|| BTreeError::Corrupt(format!("page {} missing", page_id)))?;
+        match page {
+            CachedPage::Decoded(page) => Ok(decoded_page_kind(page)),
+            CachedPage::Raw(raw) => raw_page_kind(raw, self.options.page_size),
+        }
+    }
+
+    fn raw_page_bytes(&self, page_id: PageId) -> Result<&[u8], BTreeError> {
+        match self.pages.get(&page_id) {
+            Some(CachedPage::Raw(raw)) => Ok(raw),
+            Some(CachedPage::Decoded(_)) => Err(BTreeError::Corrupt(format!(
+                "page {} expected raw cache entry",
+                page_id
+            ))),
+            None => Err(BTreeError::Corrupt(format!("page {} missing", page_id))),
+        }
+    }
+
     fn load_freelist_from_disk(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
         let mut current = head_page_id;
         let mut seen = HashSet::new();
@@ -703,11 +913,11 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ));
             }
 
-            let page = self.read_page_from_disk(current)?;
-            let (ids, next) = expect_freelist(&page)?;
+            let raw = self.read_page_raw_from_disk(current)?;
+            let (ids, next) = raw_freelist_page(&raw, self.options.page_size)?;
             self.freelist_meta_pages.push(current);
             for id in ids {
-                self.add_free_page(*id);
+                self.add_free_page(id);
             }
             current = next.unwrap_or(0);
         }
@@ -715,7 +925,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
-    fn read_page_from_disk(&self, page_id: PageId) -> Result<Page, BTreeError> {
+    fn read_page_raw_from_disk(&self, page_id: PageId) -> Result<Vec<u8>, BTreeError> {
         if page_id < 2 || page_id >= self.total_pages {
             return Err(BTreeError::Corrupt(format!(
                 "page id {} out of bounds for total_pages {}",
@@ -729,13 +939,14 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let mut raw = vec![0u8; self.options.page_size];
         self.file.read_exact_at(offset, &mut raw)?;
-        decode_page(&raw, self.options.page_size)
+        let _ = validate_page(&raw, self.options.page_size)?;
+        Ok(raw)
     }
 
     fn read_page_run_from_disk(&mut self, page_id: PageId) -> Result<(), BTreeError> {
         if self.options.read_coalesce_pages <= 1 {
-            let page = self.read_page_from_disk(page_id)?;
-            self.cache_loaded_page(page_id, page);
+            let raw = self.read_page_raw_from_disk(page_id)?;
+            self.cache_loaded_raw_page(page_id, raw);
             return Ok(());
         }
 
@@ -768,15 +979,14 @@ impl<F: SyncFile> OpfsBTree<F> {
             let end = start + self.options.page_size;
             let page_raw = &raw[start..end];
 
-            let page = if i == 0 {
-                decode_page(page_raw, self.options.page_size)?
-            } else {
-                match decode_page(page_raw, self.options.page_size) {
-                    Ok(page) => page,
-                    Err(_) => break,
-                }
+            let validate = validate_page(page_raw, self.options.page_size);
+            if i == 0 {
+                validate?;
+            } else if validate.is_err() {
+                break;
             };
-            self.pages.insert(current_page_id, page);
+            self.pages
+                .insert(current_page_id, CachedPage::Raw(page_raw.to_vec()));
             self.touch_page(current_page_id);
             self.evict_pages_if_needed(Some(page_id));
         }
@@ -815,6 +1025,15 @@ impl<F: SyncFile> OpfsBTree<F> {
         for page_id in dirty_page_ids {
             if let Some(page) = self.pages.get(page_id) {
                 self.validate_writable_page_id(*page_id)?;
+                let page = match page {
+                    CachedPage::Decoded(page) => page,
+                    CachedPage::Raw(_) => {
+                        return Err(BTreeError::Corrupt(format!(
+                            "dirty page {} is not decoded",
+                            page_id
+                        )));
+                    }
+                };
                 encoded_pages.push((*page_id, encode_page(page, self.options.page_size)?));
             }
         }
@@ -887,20 +1106,20 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn set_dirty_page(&mut self, page_id: PageId, page: Page) {
-        self.pages.insert(page_id, page);
+        self.pages.insert(page_id, CachedPage::Decoded(page));
         self.dirty_pages.insert(page_id);
         self.touch_page(page_id);
         self.evict_pages_if_needed(Some(page_id));
     }
 
-    fn remove_page(&mut self, page_id: PageId) -> Option<Page> {
+    fn remove_page(&mut self, page_id: PageId) -> Option<CachedPage> {
         self.dirty_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
         self.pages.remove(&page_id)
     }
 
-    fn cache_loaded_page(&mut self, page_id: PageId, page: Page) {
-        self.pages.insert(page_id, page);
+    fn cache_loaded_raw_page(&mut self, page_id: PageId, raw: Vec<u8>) {
+        self.pages.insert(page_id, CachedPage::Raw(raw));
         self.touch_page(page_id);
         self.evict_pages_if_needed(Some(page_id));
     }
@@ -1035,12 +1254,19 @@ impl<F: SyncFile> OpfsBTree<F> {
                 {
                     return None;
                 }
-                if self.options.pin_internal_pages && matches!(page, Page::Internal { .. }) {
+                let kind = match page {
+                    CachedPage::Decoded(page) => decoded_page_kind(page),
+                    CachedPage::Raw(raw) => match raw_page_kind(raw, self.options.page_size) {
+                        Ok(kind) => kind,
+                        Err(_) => return None,
+                    },
+                };
+                if self.options.pin_internal_pages && kind == PageKind::Internal {
                     return None;
                 }
 
                 Some((
-                    eviction_priority(page),
+                    eviction_priority(kind),
                     *self.page_access_epoch.get(page_id).unwrap_or(&0),
                     *page_id,
                 ))
@@ -1107,13 +1333,6 @@ fn expect_overflow(page: &Page) -> Result<(&Vec<u8>, &Option<PageId>), BTreeErro
     }
 }
 
-fn expect_freelist(page: &Page) -> Result<(&Vec<PageId>, &Option<PageId>), BTreeError> {
-    match page {
-        Page::Freelist { ids, next } => Ok((ids, next)),
-        _ => Err(BTreeError::Corrupt("expected freelist page".to_string())),
-    }
-}
-
 fn ensure_page_fits(page: &Page, page_size: usize, context: &str) -> Result<(), BTreeError> {
     if page_fits(page, page_size)? {
         Ok(())
@@ -1150,11 +1369,20 @@ fn slot_char(slot: SuperblockSlot) -> char {
     }
 }
 
-fn eviction_priority(page: &Page) -> u8 {
+fn eviction_priority(kind: PageKind) -> u8 {
+    match kind {
+        PageKind::Overflow | PageKind::Freelist => 0,
+        PageKind::Leaf => 1,
+        PageKind::Internal => 2,
+    }
+}
+
+fn decoded_page_kind(page: &Page) -> PageKind {
     match page {
-        Page::Overflow { .. } | Page::Freelist { .. } => 0,
-        Page::Leaf { .. } => 1,
-        Page::Internal { .. } => 2,
+        Page::Internal { .. } => PageKind::Internal,
+        Page::Leaf { .. } => PageKind::Leaf,
+        Page::Overflow { .. } => PageKind::Overflow,
+        Page::Freelist { .. } => PageKind::Freelist,
     }
 }
 
@@ -1711,7 +1939,7 @@ mod tests {
         let mut internal_ids = Vec::new();
         for page_id in 2..tree.total_pages {
             tree.ensure_page_loaded(page_id).expect("load page");
-            if matches!(tree.pages.get(&page_id), Some(Page::Internal { .. })) {
+            if tree.page_kind(page_id).expect("page kind") == PageKind::Internal {
                 internal_ids.push(page_id);
             }
         }
