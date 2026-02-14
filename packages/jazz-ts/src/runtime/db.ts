@@ -14,7 +14,7 @@ import type { WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import { JazzClient, loadWasmModule, type WasmModule, type PersistenceTier } from "./client.js";
 import { WorkerBridge } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
-import { transformRows } from "./row-transformer.js";
+import { transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 
@@ -53,6 +53,10 @@ export interface QueryBuilder<T> {
   _build(): string;
   /** @internal Phantom brand — enables TypeScript to infer T from usage */
   readonly _rowType: T;
+}
+
+interface BuiltQuery {
+  includes?: IncludeSpec;
 }
 
 /**
@@ -356,9 +360,11 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, settledTier?: PersistenceTier): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const wasmQuery = translateQuery(query._build(), query._schema);
+    const builderJson = query._build();
+    const builtQuery = JSON.parse(builderJson) as BuiltQuery;
+    const wasmQuery = translateQuery(builderJson, query._schema);
     const rows = await client.query(wasmQuery, settledTier);
-    return transformRows<T>(rows, query._schema, query._table);
+    return transformRows<T>(rows, query._schema, query._table, builtQuery.includes ?? {});
   }
 
   /**
@@ -406,10 +412,12 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
-    const wasmQuery = translateQuery(query._build(), query._schema);
+    const builderJson = query._build();
+    const builtQuery = JSON.parse(builderJson) as BuiltQuery;
+    const wasmQuery = translateQuery(builderJson, query._schema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>([row], query._schema, query._table)[0];
+      return transformRows<T>([row], query._schema, query._table, builtQuery.includes ?? {})[0];
     };
 
     const subId = client.subscribe(

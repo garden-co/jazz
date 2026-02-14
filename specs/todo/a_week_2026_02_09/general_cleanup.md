@@ -27,7 +27,10 @@ These stubs break real functionality:
   - Added generated UUID client IDs for both main-thread client and worker sync paths.
   - `sync-transport.ts` now uses a generated stable fallback ID instead of all-zero UUID.
   - `/events` stream now includes `client_id` from first connect attempt so `/sync` and `/events` stay identity-consistent before first `Connected` frame.
-- **Nested array relation mapping** — `row-transformer.ts:70–77`: TODO to map nested arrays from array subqueries to relation names. Currently returns unnamed extra values.
+- ~~**Nested array relation mapping**~~ ✅
+  - `transformRows()` now accepts include metadata and maps `array_subqueries` extras to relation names.
+  - Handles nested include trees recursively (e.g., `owner.manager`) using schema-derived relation metadata.
+  - Forward includes deserialize to a single nested object; reverse includes deserialize to arrays.
 - ~~**Token refresh doesn't reconnect**~~ ✅
   - `update-auth` now aborts the stream and schedules reconnect so new auth is used.
 

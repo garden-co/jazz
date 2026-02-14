@@ -104,6 +104,28 @@ describe("transformRows", () => {
     },
   };
 
+  const relationSchema: WasmSchema = {
+    tables: {
+      users: {
+        columns: [
+          { name: "name", column_type: { type: "Text" }, nullable: false },
+          {
+            name: "manager_id",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "users",
+          },
+        ],
+      },
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "owner_id", column_type: { type: "Uuid" }, nullable: false, references: "users" },
+        ],
+      },
+    },
+  };
+
   it("transforms rows to typed objects with id", () => {
     const rows: WasmRow[] = [
       {
@@ -225,5 +247,138 @@ describe("transformRows", () => {
       second: 2,
       third: true,
     });
+  });
+
+  it("maps forward include arrays to relation names", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Uuid", value: "user-1" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows(rows, relationSchema, "todos", { owner: true });
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner_id: "user-1",
+        owner: {
+          name: "Alice",
+          manager_id: undefined,
+        },
+      },
+    ]);
+  });
+
+  it("maps reverse include arrays to relation names", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "user-1",
+        values: [
+          { type: "Text", value: "Alice" },
+          { type: "Null" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: [
+                  { type: "Text", value: "Buy milk" },
+                  { type: "Uuid", value: "user-1" },
+                ],
+              },
+              {
+                type: "Row",
+                value: [
+                  { type: "Text", value: "Write tests" },
+                  { type: "Uuid", value: "user-1" },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows(rows, relationSchema, "users", { todosViaOwner: true });
+
+    expect(result).toEqual([
+      {
+        id: "user-1",
+        name: "Alice",
+        manager_id: undefined,
+        todosViaOwner: [
+          { title: "Buy milk", owner_id: "user-1" },
+          { title: "Write tests", owner_id: "user-1" },
+        ],
+      },
+    ]);
+  });
+
+  it("maps nested includes recursively", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Uuid", value: "user-1" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: [
+                  { type: "Text", value: "Alice" },
+                  { type: "Uuid", value: "user-2" },
+                  {
+                    type: "Array",
+                    value: [
+                      {
+                        type: "Row",
+                        value: [{ type: "Text", value: "Manager" }, { type: "Null" }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows(rows, relationSchema, "todos", {
+      owner: { manager: true },
+    });
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner_id: "user-1",
+        owner: {
+          name: "Alice",
+          manager_id: "user-2",
+          manager: {
+            name: "Manager",
+            manager_id: undefined,
+          },
+        },
+      },
+    ]);
   });
 });
