@@ -91,7 +91,13 @@ impl JazzClient {
         // Connect to server if URL provided (before creating runtime so we have the connection)
         let auth_config = AuthConfig::from_context(&context);
         let server_connection = if !context.server_url.is_empty() {
-            match ServerConnection::connect(&context.server_url, auth_config).await {
+            match ServerConnection::connect(
+                &context.server_url,
+                context.server_path_prefix.as_deref(),
+                auth_config,
+            )
+            .await
+            {
                 Ok(conn) => Some(Arc::new(conn)),
                 Err(e) => {
                     tracing::warn!("Failed to connect to server: {}", e);
@@ -190,7 +196,7 @@ impl JazzClient {
 
         // Spawn binary stream listener if connected to server
         let stream_listener_task = if let Some(ref conn) = server_connection {
-            let base_url = conn.base_url().to_string();
+            let conn_for_stream = conn.clone();
             let client_id_str = client_id.to_string();
             let runtime_for_stream = runtime.clone();
             let stream_headers = conn.build_stream_headers();
@@ -198,7 +204,7 @@ impl JazzClient {
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
                 loop {
-                    let url = format!("{}/events?client_id={}", base_url, client_id_str);
+                    let url = conn_for_stream.stream_url(&client_id_str);
 
                     tracing::info!("Connecting to server event stream: {}", url);
 

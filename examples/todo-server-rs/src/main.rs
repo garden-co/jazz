@@ -87,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: None,
         schema,
         server_url,
+        server_path_prefix: None,
         data_dir: PathBuf::from(data_dir),
         jwt_token: None,
         backend_secret: None,
