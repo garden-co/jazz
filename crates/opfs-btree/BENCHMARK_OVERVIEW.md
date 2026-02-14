@@ -27,13 +27,13 @@ Current `opfs-btree` default cache is `32MB`.
 | range_random_window_64            |                256 |             144.3 |                104.2 |          276.7 |           78.0 |            106.9 |          9.0 | [8][11]    |
 | range_random_window_64            |              4,096 |               2.0 |                  0.3 |           25.5 |           26.9 |             67.6 |         11.4 | [8][11]    |
 | range_random_window_64            |          1,048,576 |               1.1 |                  0.4 |            N/A |            0.5 |              0.5 |          0.0 | [8][12]    |
-| cold_seq_read                     |                 32 |            2491.9 |                 83.3 |            N/A |          716.1 |            268.0 |         18.5 | [3][5][10] |
-| cold_seq_read                     |                256 |            1658.4 |                 83.3 |            N/A |          626.8 |            220.1 |         18.4 | [3][5][10] |
-| cold_seq_read                     |              4,096 |             279.4 |                 14.9 |            N/A |          297.4 |            181.7 |         18.9 | [3][5][10] |
+| cold_seq_read                     |                 32 |            2491.9 |                 83.3 |          890.8 |          716.1 |            268.0 |         18.5 | [3][10]    |
+| cold_seq_read                     |                256 |            1658.4 |                 83.3 |          863.3 |          626.8 |            220.1 |         18.4 | [3][10]    |
+| cold_seq_read                     |              4,096 |             279.4 |                 14.9 |          297.6 |          297.4 |            181.7 |         18.9 | [3][10]    |
 | cold_seq_read                     |          1,048,576 |               2.4 |                  0.1 |            N/A |            4.4 |              0.9 |          0.2 | [4][5][10] |
-| cold_random_read                  |                 32 |            2154.1 |                111.1 |            N/A |          664.3 |            261.4 |         18.6 | [3][5][10] |
-| cold_random_read                  |                256 |            1560.0 |                 76.9 |            N/A |          641.7 |            262.7 |         18.5 | [3][5][10] |
-| cold_random_read                  |              4,096 |             265.4 |                 14.5 |            N/A |          294.6 |            166.4 |         18.8 | [3][5][10] |
+| cold_random_read                  |                 32 |            2154.1 |                111.1 |          694.2 |          664.3 |            261.4 |         18.6 | [3][10]    |
+| cold_random_read                  |                256 |            1560.0 |                 76.9 |          654.2 |          641.7 |            262.7 |         18.5 | [3][10]    |
+| cold_random_read                  |              4,096 |             265.4 |                 14.5 |          280.2 |          294.6 |            166.4 |         18.8 | [3][10]    |
 | cold_random_read                  |          1,048,576 |               2.4 |                  0.1 |            N/A |            4.6 |              1.1 |          0.2 | [4][5][10] |
 
 **Notes**
@@ -46,6 +46,7 @@ WASM mixed rows come from OPFS runners.
 
 [3] Cold native rows come from Criterion cross-engine groups (`--quick`) with `count=5000` for `32/256/4096`:
 `compare_native_cold_seq_read` and `compare_native_cold_random_read`.
+`bf-tree` is included for supported sizes (`<= 30KB` in this harness).
 WASM cold rows come from OPFS runners with `--include-cold-read`.
 
 [4] Cold `1,048,576` rows use reduced `count=64` for both native and wasm.
