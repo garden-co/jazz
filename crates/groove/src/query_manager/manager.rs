@@ -469,14 +469,6 @@ impl QueryManager {
 
     /// Test accessor for subscriptions (internal testing only).
     #[cfg(test)]
-    pub(crate) fn test_subscriptions_mut(
-        &mut self,
-    ) -> &mut HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
-        &mut self.subscriptions
-    }
-
-    /// Test accessor for subscriptions (internal testing only).
-    #[cfg(test)]
     pub(crate) fn test_subscriptions(
         &self,
     ) -> &HashMap<super::graph_nodes::output::QuerySubscriptionId, QuerySubscription> {
