@@ -20,6 +20,7 @@ pub struct BTreeOptions {
     pub cache_bytes: usize,
     pub overflow_threshold: usize,
     pub pin_internal_pages: bool,
+    pub read_coalesce_pages: usize,
 }
 
 impl Default for BTreeOptions {
@@ -29,6 +30,7 @@ impl Default for BTreeOptions {
             cache_bytes: DEFAULT_CACHE_BYTES,
             overflow_threshold: DEFAULT_OVERFLOW_THRESHOLD,
             pin_internal_pages: false,
+            read_coalesce_pages: 1,
         }
     }
 }
@@ -54,6 +56,11 @@ impl BTreeOptions {
         if self.overflow_threshold == 0 {
             return Err(BTreeError::InvalidOptions(
                 "overflow_threshold must be > 0".to_string(),
+            ));
+        }
+        if self.read_coalesce_pages == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "read_coalesce_pages must be > 0".to_string(),
             ));
         }
         Ok(())
@@ -675,8 +682,13 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.touch_page(page_id);
             return Ok(());
         }
-        let page = self.read_page_from_disk(page_id)?;
-        self.cache_loaded_page(page_id, page);
+        self.read_page_run_from_disk(page_id)?;
+        if !self.pages.contains_key(&page_id) {
+            return Err(BTreeError::Corrupt(format!(
+                "page {} missing after disk load",
+                page_id
+            )));
+        }
         Ok(())
     }
 
@@ -720,6 +732,58 @@ impl<F: SyncFile> OpfsBTree<F> {
         decode_page(&raw, self.options.page_size)
     }
 
+    fn read_page_run_from_disk(&mut self, page_id: PageId) -> Result<(), BTreeError> {
+        if self.options.read_coalesce_pages <= 1 {
+            let page = self.read_page_from_disk(page_id)?;
+            self.cache_loaded_page(page_id, page);
+            return Ok(());
+        }
+
+        if page_id < 2 || page_id >= self.total_pages {
+            return Err(BTreeError::Corrupt(format!(
+                "page id {} out of bounds for total_pages {}",
+                page_id, self.total_pages
+            )));
+        }
+
+        let run_pages =
+            (self.total_pages - page_id).min(self.options.read_coalesce_pages as u64) as usize;
+        let run_bytes = run_pages
+            .checked_mul(self.options.page_size)
+            .ok_or_else(|| BTreeError::Io("read run size overflow".to_string()))?;
+        let offset = page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
+
+        let mut raw = vec![0u8; run_bytes];
+        self.file.read_exact_at(offset, &mut raw)?;
+
+        for i in 0..run_pages {
+            let current_page_id = page_id + i as u64;
+            if self.pages.contains_key(&current_page_id) {
+                continue;
+            }
+
+            let start = i * self.options.page_size;
+            let end = start + self.options.page_size;
+            let page_raw = &raw[start..end];
+
+            let page = if i == 0 {
+                decode_page(page_raw, self.options.page_size)?
+            } else {
+                match decode_page(page_raw, self.options.page_size) {
+                    Ok(page) => page,
+                    Err(_) => break,
+                }
+            };
+            self.pages.insert(current_page_id, page);
+            self.touch_page(current_page_id);
+            self.evict_pages_if_needed(Some(page_id));
+        }
+
+        Ok(())
+    }
+
     fn write_pages_to_disk(
         &mut self,
         dirty_page_ids: &[PageId],
@@ -746,19 +810,67 @@ impl<F: SyncFile> OpfsBTree<F> {
             self.file.truncate(required_len)?;
         }
 
+        let mut encoded_pages: Vec<(PageId, Vec<u8>)> =
+            Vec::with_capacity(dirty_page_ids.len() + freelist_pages.len());
         for page_id in dirty_page_ids {
             if let Some(page) = self.pages.get(page_id) {
-                self.write_single_page(*page_id, page)?;
+                self.validate_writable_page_id(*page_id)?;
+                encoded_pages.push((*page_id, encode_page(page, self.options.page_size)?));
             }
         }
         for (page_id, page) in freelist_pages {
-            self.write_single_page(*page_id, page)?;
+            self.validate_writable_page_id(*page_id)?;
+            encoded_pages.push((*page_id, encode_page(page, self.options.page_size)?));
+        }
+
+        if encoded_pages.is_empty() {
+            return Ok(());
+        }
+
+        encoded_pages.sort_unstable_by_key(|(page_id, _)| *page_id);
+        for pair in encoded_pages.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                return Err(BTreeError::Corrupt(format!(
+                    "duplicate checkpoint page {}",
+                    pair[0].0
+                )));
+            }
+        }
+
+        let page_size = self.options.page_size;
+        let mut idx = 0usize;
+        while idx < encoded_pages.len() {
+            let start_page_id = encoded_pages[idx].0;
+            let mut end = idx + 1;
+            while end < encoded_pages.len() {
+                let prev_page_id = encoded_pages[end - 1].0;
+                if prev_page_id.checked_add(1) != Some(encoded_pages[end].0) {
+                    break;
+                }
+                end += 1;
+            }
+
+            let run_len = end - idx;
+            let run_capacity = run_len
+                .checked_mul(page_size)
+                .ok_or_else(|| BTreeError::Io("checkpoint run buffer size overflow".to_string()))?;
+            let mut run = Vec::with_capacity(run_capacity);
+            for (_, raw) in &encoded_pages[idx..end] {
+                run.extend_from_slice(raw);
+            }
+
+            let offset = start_page_id.checked_mul(page_size as u64).ok_or_else(|| {
+                BTreeError::Io("checkpoint run write offset overflow".to_string())
+            })?;
+            self.file.write_all_at(offset, &run)?;
+
+            idx = end;
         }
 
         Ok(())
     }
 
-    fn write_single_page(&self, page_id: PageId, page: &Page) -> Result<(), BTreeError> {
+    fn validate_writable_page_id(&self, page_id: PageId) -> Result<(), BTreeError> {
         if page_id < 2 {
             return Err(BTreeError::Corrupt(format!(
                 "attempt to write reserved page {}",
@@ -771,12 +883,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 page_id, self.total_pages
             )));
         }
-
-        let raw = encode_page(page, self.options.page_size)?;
-        let offset = page_id
-            .checked_mul(self.options.page_size as u64)
-            .ok_or_else(|| BTreeError::Io("page write offset overflow".to_string()))?;
-        self.file.write_all_at(offset, &raw)
+        Ok(())
     }
 
     fn set_dirty_page(&mut self, page_id: PageId, page: Page) {
@@ -1105,6 +1212,7 @@ mod tests {
             cache_bytes: 4 * 1024 * 8,
             overflow_threshold: 128,
             pin_internal_pages: false,
+            read_coalesce_pages: 1,
         }
     }
 
@@ -1114,6 +1222,7 @@ mod tests {
             cache_bytes: 4 * 1024 * 2,
             overflow_threshold: 128,
             pin_internal_pages: false,
+            read_coalesce_pages: 1,
         }
     }
 
@@ -1127,6 +1236,7 @@ mod tests {
     struct CountingFile {
         inner: MemoryFile,
         writes: Rc<RefCell<Vec<(u64, usize)>>>,
+        reads: Rc<RefCell<Vec<(u64, usize)>>>,
     }
 
     impl CountingFile {
@@ -1134,16 +1244,44 @@ mod tests {
             Self {
                 inner: MemoryFile::new(),
                 writes: Rc::new(RefCell::new(Vec::new())),
+                reads: Rc::new(RefCell::new(Vec::new())),
             }
         }
 
-        fn data_page_write_count(&self, page_size: usize) -> usize {
+        fn data_write_segments(&self, page_size: usize) -> Vec<(u64, usize)> {
             let min_data_offset = (2 * page_size) as u64;
             self.writes
                 .borrow()
                 .iter()
+                .copied()
+                .filter(|(offset, _)| *offset >= min_data_offset)
+                .collect()
+        }
+
+        fn data_page_write_count(&self, page_size: usize) -> usize {
+            self.data_write_segments(page_size).len()
+        }
+
+        fn max_data_write_len(&self, page_size: usize) -> usize {
+            self.data_write_segments(page_size)
+                .into_iter()
+                .map(|(_, len)| len)
+                .max()
+                .unwrap_or(0)
+        }
+
+        fn data_page_read_count(&self, page_size: usize) -> usize {
+            let min_data_offset = (2 * page_size) as u64;
+            self.reads
+                .borrow()
+                .iter()
                 .filter(|(offset, _)| *offset >= min_data_offset)
                 .count()
+        }
+
+        fn reset_io_stats(&self) {
+            self.reads.borrow_mut().clear();
+            self.writes.borrow_mut().clear();
         }
     }
 
@@ -1153,6 +1291,7 @@ mod tests {
         }
 
         fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+            self.reads.borrow_mut().push((offset, buf.len()));
             self.inner.read_exact_at(offset, buf)
         }
 
@@ -1377,6 +1516,76 @@ mod tests {
         tree.checkpoint().expect("checkpoint v2");
         let writes_after_v2 = file.data_page_write_count(options.page_size);
         assert_eq!(writes_after_v2, writes_after_noop + 1);
+    }
+
+    #[test]
+    fn checkpoint_coalesces_contiguous_data_page_writes() {
+        let options = small_options();
+        let file = CountingFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), options).expect("open tree");
+
+        for i in 0..2_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("value-{}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+        tree.checkpoint().expect("checkpoint");
+
+        let max_data_write_len = file.max_data_write_len(options.page_size);
+        assert!(
+            max_data_write_len > options.page_size,
+            "expected coalesced write larger than one page, got {} bytes",
+            max_data_write_len
+        );
+    }
+
+    #[test]
+    fn read_coalescing_reduces_data_page_read_calls() {
+        let file = CountingFile::new();
+        let mut build_options = small_options();
+        build_options.read_coalesce_pages = 1;
+        let mut tree = OpfsBTree::open(file.clone(), build_options).expect("open tree");
+
+        for i in 0..4_000u32 {
+            let key = format!("k{:05}", i);
+            let value = format!("value-{}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+        tree.checkpoint().expect("checkpoint");
+        drop(tree);
+
+        let mut baseline_options = small_options();
+        baseline_options.read_coalesce_pages = 1;
+        let mut baseline = OpfsBTree::open(file.clone(), baseline_options).expect("open baseline");
+        file.reset_io_stats();
+        for i in (0..4_000usize).step_by(17) {
+            let key = format!("k{:05}", i);
+            let _ = baseline.get(key.as_bytes()).expect("baseline get");
+        }
+        let baseline_reads = file.data_page_read_count(small_options().page_size);
+        drop(baseline);
+
+        let mut coalesced_options = small_options();
+        coalesced_options.read_coalesce_pages = 8;
+        let mut coalesced =
+            OpfsBTree::open(file.clone(), coalesced_options).expect("open coalesced");
+        file.reset_io_stats();
+        for i in (0..4_000usize).step_by(17) {
+            let key = format!("k{:05}", i);
+            let _ = coalesced.get(key.as_bytes()).expect("coalesced get");
+        }
+        let coalesced_reads = file.data_page_read_count(small_options().page_size);
+
+        assert!(
+            baseline_reads > 0,
+            "expected baseline data page reads to be non-zero"
+        );
+        assert!(
+            coalesced_reads < baseline_reads,
+            "expected coalesced reads ({}) to be < baseline ({})",
+            coalesced_reads,
+            baseline_reads
+        );
     }
 
     #[test]
