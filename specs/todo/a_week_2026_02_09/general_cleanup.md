@@ -23,7 +23,10 @@ These stubs break real functionality:
 - ~~**Schema hash is hardcoded zeros**~~ ✅
   - Exposed Rust `SchemaHash::compute` through runtime bindings as `getSchemaHash()` in WASM/NAPI.
   - `client.ts:getSchemaContext()` now uses `runtime.getSchemaHash()` instead of `"0".repeat(64)`.
-- **Client ID is hardcoded zeros** — `runtime/sync-transport.ts` still falls back to `"00000000-0000-0000-0000-000000000000"` when no connected server client ID is known.
+- ~~**Client ID is hardcoded zeros**~~ ✅
+  - Added generated UUID client IDs for both main-thread client and worker sync paths.
+  - `sync-transport.ts` now uses a generated stable fallback ID instead of all-zero UUID.
+  - `/events` stream now includes `client_id` from first connect attempt so `/sync` and `/events` stay identity-consistent before first `Connected` frame.
 - **Nested array relation mapping** — `row-transformer.ts:70–77`: TODO to map nested arrays from array subqueries to relation names. Currently returns unnamed extra values.
 - ~~**Token refresh doesn't reconnect**~~ ✅
   - `update-auth` now aborts the stream and schedules reconnect so new auth is used.
@@ -46,6 +49,13 @@ Done. `delete()` now delegates to `delete_with_session(…, None)`, matching `in
 Done. `new()` now delegates to `with_object_manager(ObjectManager::new())`.
 
 ## 7. Test Quality Issues (LOW)
+
+**WASM test build precondition**:
+
+- `subscription-manager.wasm-integration.test.ts` requires built `groove-wasm/pkg` artifacts.
+- Turbo now enforces this in the normal graph (`jazz-ts#build` depends on `groove-wasm#build`).
+- Direct targeted Vitest runs still hard-fail if artifacts are missing, with an explicit instruction to run `pnpm --filter @jazz/rust build:crates` first.
+- For local focused runs, do a one-time `pnpm build` (or the crate-only build above) before `pnpm --filter jazz-ts exec vitest ...`.
 
 **Weak assertions** — several tests assert only `is_ok()` / `is_some()` without checking the value:
 
@@ -87,7 +97,7 @@ Resolved by removing the TypeScript-side `blake3` dependency and using Rust hash
 
 The example apps (e.g., `todo-client-localfirst-ts`) lose all data when the page reloads, despite browser persistence tests passing. Previously suspected root cause was the hardcoded schema hash/client ID placeholders in item 3.
 
-Schema hash is now fixed. Investigate whether the remaining `client_id` fallback (all-zero UUID when not yet connected) is still contributing to reload persistence issues.
+Schema hash and client ID placeholders are now fixed. Re-verify reload persistence in examples and close this item if behavior is now stable.
 
 ## 11. Worker Bridge Error Swallowing (LOW)
 

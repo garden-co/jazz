@@ -20,6 +20,27 @@ export interface StreamCallbacks {
 }
 
 /**
+ * Generate a UUIDv4 client ID.
+ *
+ * Uses `crypto.randomUUID()` when available and falls back to a
+ * standards-compatible template in older environments.
+ */
+export function generateClientId(): string {
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return cryptoObj.randomUUID();
+  }
+
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+const fallbackClientId = generateClientId();
+
+/**
  * Check if a sync payload is for a catalogue object (schema or lens).
  * Catalogue payloads use admin-secret auth instead of JWT.
  */
@@ -58,7 +79,7 @@ export async function sendSyncPayload(
 
     const body = JSON.stringify({
       payload,
-      client_id: auth.clientId ?? "00000000-0000-0000-0000-000000000000",
+      client_id: auth.clientId ?? fallbackClientId,
     });
 
     const response = await fetch(`${serverUrl}/sync`, {
