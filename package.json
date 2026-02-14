@@ -3,7 +3,7 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check . && cargo fmt --check",
     "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
-    "build": "turbo run build:crates && turbo run build",
+    "build": "turbo run build:crates --filter=@jazz/rust && turbo run build",
     "test": "turbo run test",
     "postinstall": "lefthook install"
   },

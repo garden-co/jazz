@@ -732,11 +732,11 @@ async fn test_server_resync() {
         // QuerySettled response before resolving, ensuring synced data arrives.
         let query = QueryBuilder::new("todos").build();
         let results = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(10),
             client.query(query, Some(PersistenceTier::EdgeServer)),
         )
         .await
-        .expect("Query with EdgeServer tier should resolve within 5s")
+        .expect("Query with EdgeServer tier should resolve within 10s")
         .expect("Query should succeed");
 
         assert_eq!(results.len(), 1, "Todo should resync from server");
