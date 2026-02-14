@@ -39,9 +39,12 @@ export declare class NapiRuntime {
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
   onSyncMessageToSend(callback: (...args: any[]) => any): void;
   addServer(): void;
+  removeServer(): void;
   addClient(): string;
   /** Set a client's role ("user", "admin", or "peer"). */
   setClientRole(clientId: string, role: string): void;
   getSchema(): any;
   flush(): void;
+  /** Flush and close the underlying storage, releasing filesystem locks. */
+  close(): void;
 }

@@ -89,6 +89,7 @@ struct SstBlockCache {
 }
 
 pub type MergeFn = Box<dyn Fn(Option<&[u8]>, &[u8]) -> Vec<u8> + 'static>;
+type KvEntry = (Vec<u8>, Vec<u8>);
 
 pub struct MergeOperator {
     pub id: u32,
@@ -285,7 +286,7 @@ impl<F: SyncFs> LsmTree<F> {
         &self,
         start_inclusive: Option<&[u8]>,
         end_exclusive: Option<&[u8]>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, LsmError> {
+    ) -> Result<Vec<KvEntry>, LsmError> {
         let mut keys = BTreeSet::new();
         let mut sst_records = Vec::new();
 

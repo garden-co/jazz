@@ -393,7 +393,10 @@ fn cold_read_engine_factories() -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<d
             "opfs_btree",
             Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
         ),
-        ("rocksdb", Box::new(|path| Box::new(RocksDbEngine::open(path)))),
+        (
+            "rocksdb",
+            Box::new(|path| Box::new(RocksDbEngine::open(path))),
+        ),
         (
             "surrealkv",
             Box::new(|path| Box::new(SurrealKvEngine::open(path))),

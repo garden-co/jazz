@@ -614,9 +614,14 @@ fn lens_transform_to_ts(transform: &LensTransform) -> String {
                 } => {
                     let method = sql_type_to_col_method(column_type);
                     let default_ts = value_to_ts_literal(default);
+                    let optional = if matches!(default, Value::Null) {
+                        ".optional()"
+                    } else {
+                        ""
+                    };
                     lines.push(format!(
-                        "  {}: col.add().{}({{ default: {} }}),{}",
-                        column, method, default_ts, draft_comment
+                        "  {}: col.add(){}.{}({{ default: {} }}),{}",
+                        column, optional, method, default_ts, draft_comment
                     ));
                 }
                 LensOp::RemoveColumn {
@@ -946,5 +951,27 @@ mod tests {
             migration_sql_filename(1, 2, "455a1f10a158", "357c464c4c43", Direction::Backward),
             "migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"
         );
+    }
+
+    #[test]
+    fn lens_transform_to_ts_marks_nullable_adds_as_optional() {
+        let transform = LensTransform::with_ops(vec![
+            super::super::lens::LensOp::AddColumn {
+                table: "todos".to_string(),
+                column: "description".to_string(),
+                column_type: ColumnType::Text,
+                default: crate::query_manager::types::Value::Null,
+            },
+            super::super::lens::LensOp::AddColumn {
+                table: "todos".to_string(),
+                column: "title".to_string(),
+                column_type: ColumnType::Text,
+                default: crate::query_manager::types::Value::Text("".to_string()),
+            },
+        ]);
+
+        let ts = lens_transform_to_ts(&transform);
+        assert!(ts.contains("description: col.add().optional().string({ default: null }),"));
+        assert!(ts.contains("title: col.add().string({ default: \"\" }),"));
     }
 }

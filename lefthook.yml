@@ -2,13 +2,17 @@ pre-commit:
   commands:
     rustfmt:
       glob: "*.rs"
-      run: cargo fmt --manifest-path crates/groove/Cargo.toml -- --check
+      run: cargo fmt
+      stage_fixed: true
     clippy:
       glob: "*.rs"
-      run: cargo clippy --manifest-path crates/groove/Cargo.toml -- -D warnings
+      run: cargo clippy --workspace --fix --allow-dirty --allow-staged -- -D warnings
+      stage_fixed: true
     oxfmt:
-      glob: "*.{ts,tsx,js,jsx}"
-      run: pnpm format:check
+      glob: "*.{ts,tsx,js,jsx,md}"
+      run: pnpm oxfmt .
+      stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
-      run: pnpm lint
+      run: pnpm oxlint --fix .
+      stage_fixed: true

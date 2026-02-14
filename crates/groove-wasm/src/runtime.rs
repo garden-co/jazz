@@ -165,6 +165,7 @@ impl SyncSender for JsSyncSender {
 #[wasm_bindgen]
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
+    upstream_server_id: RefCell<Option<ServerId>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
     tier_label: &'static str,
 }
@@ -264,6 +265,7 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            upstream_server_id: RefCell::new(None),
             tier_label,
         })
     }
@@ -641,10 +643,31 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = addServer)]
     pub fn add_server(&self) {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
-        let server_id = ServerId::new();
+        let server_id = {
+            let mut slot = self.upstream_server_id.borrow_mut();
+            if let Some(server_id) = *slot {
+                server_id
+            } else {
+                let server_id = ServerId::new();
+                *slot = Some(server_id);
+                server_id
+            }
+        };
         let mut core = self.core.borrow_mut();
+        // Re-attach semantics: remove existing upstream edge then add again so
+        // replay/full-sync runs on every successful reconnect.
+        core.remove_server(server_id);
         core.add_server(server_id);
         core.batched_tick();
+    }
+
+    /// Remove the current upstream server connection.
+    #[wasm_bindgen(js_name = removeServer)]
+    pub fn remove_server(&self) {
+        let mut core = self.core.borrow_mut();
+        if let Some(server_id) = *self.upstream_server_id.borrow() {
+            core.remove_server(server_id);
+        }
     }
 
     /// Add a client connection (for server-side use in tests).
@@ -806,7 +829,172 @@ impl WasmRuntime {
 
         Ok(WasmRuntime {
             core: core_rc,
+            upstream_server_id: RefCell::new(None),
             tier_label,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use groove::commit::CommitId;
+    use groove::object::ObjectId;
+    use groove::query_manager::types::{Row, RowDelta, RowDescriptor};
+    use groove::runtime_core::{SubscriptionDelta, SubscriptionHandle};
+
+    fn row(id: ObjectId) -> Row {
+        Row {
+            id,
+            data: vec![],
+            commit_id: CommitId([0; 32]),
+        }
+    }
+
+    fn delta(added: Vec<Row>, removed: Vec<Row>, updated: Vec<(Row, Row)>) -> SubscriptionDelta {
+        SubscriptionDelta {
+            handle: SubscriptionHandle(0),
+            delta: RowDelta {
+                added,
+                removed,
+                updated,
+            },
+            descriptor: RowDescriptor::new(vec![]),
+        }
+    }
+
+    #[test]
+    fn wasm_delta_json_add_uses_post_index_and_updates_state() {
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+
+        let mut current_ids = vec![id_a, id_b];
+        let d = delta(vec![row(id_c)], vec![], vec![]);
+
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
+
+        assert_eq!(json["added"][0]["index"], serde_json::json!(2));
+        assert_eq!(json["pending"], serde_json::json!(false));
+        assert_eq!(current_ids, vec![id_a, id_b, id_c]);
+    }
+
+    #[test]
+    fn wasm_delta_json_remove_uses_pre_index() {
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+
+        let mut current_ids = vec![id_a, id_b, id_c];
+        let d = delta(vec![], vec![row(id_b)], vec![]);
+
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
+
+        assert_eq!(json["removed"][0]["index"], serde_json::json!(1));
+        assert_eq!(current_ids, vec![id_a, id_c]);
+    }
+
+    #[test]
+    fn wasm_delta_json_updated_identity_change_has_old_and_new_indices() {
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+
+        let mut current_ids = vec![id_a, id_b];
+        let d = delta(vec![], vec![], vec![(row(id_b), row(id_c))]);
+
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
+
+        assert_eq!(json["updated"][0]["old_index"], serde_json::json!(1));
+        assert_eq!(json["updated"][0]["new_index"], serde_json::json!(1));
+        assert_eq!(current_ids, vec![id_a, id_c]);
+    }
+
+    #[test]
+    fn wasm_delta_json_updated_identity_preserving_moves_row_to_end() {
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_c = ObjectId::new();
+
+        // Pre: [A, B, C]
+        let mut current_ids = vec![id_a, id_b, id_c];
+
+        // Identity-preserving update for B.
+        // Expected post with current wasm delta semantics: [A, C, B]
+        let d = delta(vec![], vec![], vec![(row(id_b), row(id_b))]);
+
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
+
+        assert_eq!(json["updated"][0]["old_index"], serde_json::json!(1));
+        assert_eq!(json["updated"][0]["new_index"], serde_json::json!(2));
+        assert_eq!(current_ids, vec![id_a, id_c, id_b]);
+    }
+
+    #[test]
+    fn wasm_delta_json_add_and_move_via_readd() {
+        let id_a = ObjectId::new();
+        let id_b = ObjectId::new();
+        let id_new = ObjectId::new();
+
+        // Initial: [A, B]
+        let mut current_ids = vec![id_a, id_b];
+
+        // Operation: Remove B, Add New, Add B.
+        // This simulates moving B to the end and inserting New before it.
+        // Result should be [A, New, B].
+        let d = delta(vec![row(id_new), row(id_b)], vec![row(id_b)], vec![]);
+
+        let json = build_wasm_delta_json(
+            &d,
+            &mut current_ids,
+            |r| serde_json::json!({ "id": r.id.uuid().to_string() }),
+        );
+
+        // Verify State
+        assert_eq!(current_ids, vec![id_a, id_new, id_b]);
+
+        // Verify JSON Output
+        // Removed B from index 1
+        let removed_b = json["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["row"]["id"] == id_b.uuid().to_string())
+            .unwrap();
+        assert_eq!(removed_b["index"], 1);
+
+        // Added New at index 1
+        let added_new = json["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["row"]["id"] == id_new.uuid().to_string())
+            .unwrap();
+        assert_eq!(added_new["index"], 1);
+
+        // Added B at index 2 (Moved)
+        let added_b = json["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["row"]["id"] == id_b.uuid().to_string())
+            .unwrap();
+        assert_eq!(added_b["index"], 2);
     }
 }

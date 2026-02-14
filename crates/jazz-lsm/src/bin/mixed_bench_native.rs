@@ -7,15 +7,15 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 
-    use jazz_lsm::{LsmOptions, LsmTree, RuntimeStats, StdFs, WriteDurability};
-    use opfs_btree::{BTreeOptions as OpfsBTreeOptions, OpfsBTree, StdFile as OpfsStdFile};
-    use serde::Serialize;
     #[cfg(feature = "compare-native")]
     use bf_tree::{BfTree, Config as BfConfig, LeafInsertResult, LeafReadResult};
     #[cfg(feature = "compare-native")]
     use fjall::{Config as FjallConfig, PartitionCreateOptions, PersistMode};
+    use jazz_lsm::{LsmOptions, LsmTree, RuntimeStats, StdFs, WriteDurability};
+    use opfs_btree::{BTreeOptions as OpfsBTreeOptions, OpfsBTree, StdFile as OpfsStdFile};
     #[cfg(feature = "compare-native")]
     use rocksdb::{Options as RocksOptions, WriteOptions};
+    use serde::Serialize;
     #[cfg(feature = "compare-native")]
     use surrealkv::{
         Durability as SurrealDurability, Mode as SurrealMode, Transaction as SurrealTransaction,
@@ -297,7 +297,9 @@ mod native {
     impl BenchEngine for SurrealKvBenchEngine {
         fn put(&mut self, key: &[u8], value: &[u8]) {
             self.read_txn = None;
-            self.ensure_write_txn().set(key, value).expect("surrealkv set");
+            self.ensure_write_txn()
+                .set(key, value)
+                .expect("surrealkv set");
         }
 
         fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
@@ -476,7 +478,7 @@ mod native {
         let mut out = Vec::new();
         for token in raw.split(',') {
             let name = token.trim();
-            if !supported.iter().any(|supported_name| *supported_name == name) {
+            if !supported.contains(&name) {
                 return Err(format!(
                     "`--engines` contains unknown engine `{}` (supported: {})",
                     name,

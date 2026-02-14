@@ -121,7 +121,6 @@ async fn events_handler(
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
-    let client_id_cleanup = client_id;
     let connection_id_cleanup = connection_id;
 
     // Capture client_id string for stream
@@ -174,8 +173,12 @@ async fn events_handler(
             let mut connections = state_cleanup.connections.write().await;
             connections.remove(&connection_id_cleanup);
         }
-        let _ = state_cleanup.runtime.remove_client(client_id_cleanup);
-        tracing::debug!("Stream connection {} closed, cleaned up", connection_id_cleanup);
+        // Keep logical client state across disconnects so reconnect with the same
+        // client_id can resume query forwarding state.
+        tracing::debug!(
+            "Stream connection {} closed (client state retained for resume)",
+            connection_id_cleanup
+        );
     };
 
     Ok(axum::response::Response::builder()
