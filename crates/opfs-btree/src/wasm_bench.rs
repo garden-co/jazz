@@ -518,7 +518,7 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
     // Cold-read window includes reopen + read loop.
     let op_start = high_res_now_ms();
     let reopen_start = high_res_now_ms();
-    let db = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "reopen_db_for_cold_read", reopen_start);
 
     let mut checksum = 0u64;
@@ -597,7 +597,7 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
     // Cold-read window includes reopen + read loop.
     let op_start = high_res_now_ms();
     let reopen_start = high_res_now_ms();
-    let db = open_db(&namespace).await?;
+    let mut db = open_db(&namespace).await?;
     push_phase(&mut phase_times_ms, "reopen_db_for_cold_read", reopen_start);
 
     let order = shuffled_indices(count as usize, seed);
