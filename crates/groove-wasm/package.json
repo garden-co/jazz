@@ -20,5 +20,8 @@
     "pkg/groove_wasm.d.ts"
   ],
   "main": "pkg/groove_wasm.js",
-  "types": "pkg/groove_wasm.d.ts"
+  "types": "pkg/groove_wasm.d.ts",
+  "scripts": {
+    "build": "wasm-pack build --target web"
+  }
 }

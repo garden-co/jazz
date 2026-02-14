@@ -23,7 +23,7 @@ use groove::object::ObjectId;
 use groove::query_manager::encoding::decode_row;
 use groove::query_manager::query::Query;
 use groove::query_manager::session::Session;
-use groove::query_manager::types::{Schema, Value};
+use groove::query_manager::types::{Schema, SchemaHash, Value};
 use groove::runtime_core::{
     RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle, SyncSender,
 };
@@ -976,6 +976,16 @@ impl NapiRuntime {
         let schema = core.current_schema();
         let js_schema = groove_schema_to_js(schema);
         env.to_js_value(&js_schema)
+    }
+
+    #[napi(js_name = "getSchemaHash")]
+    pub fn get_schema_hash(&self) -> napi::Result<String> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let schema = core.current_schema();
+        Ok(SchemaHash::compute(schema).to_string())
     }
 
     #[napi]

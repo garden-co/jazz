@@ -53,7 +53,14 @@ fn add_server_receives_existing_objects() {
             commits,
         } => {
             assert_eq!(*object_id, obj_id);
-            assert!(metadata.is_some()); // First sync includes metadata
+            let metadata = metadata
+                .as_ref()
+                .expect("First sync should include object metadata");
+            assert_eq!(metadata.id, obj_id);
+            assert!(
+                metadata.metadata.is_empty(),
+                "Object created without metadata should sync an empty metadata map"
+            );
             assert_eq!(branch_name.as_str(), "main");
             assert_eq!(commits.len(), 1);
         }
@@ -1173,7 +1180,15 @@ fn metadata_sent_only_once_per_destination() {
     assert_eq!(outbox.len(), 1);
     match &outbox[0].payload {
         SyncPayload::ObjectUpdated { metadata, .. } => {
-            assert!(metadata.is_some());
+            let metadata = metadata
+                .as_ref()
+                .expect("Existing object sync should include metadata on first send");
+            assert_eq!(metadata.id, obj_id);
+            assert_eq!(
+                metadata.metadata.get("key"),
+                Some(&"value".to_string()),
+                "Expected key=value metadata to be included in first sync"
+            );
         }
         _ => panic!("Expected ObjectUpdated"),
     }
@@ -1487,7 +1502,8 @@ fn regular_object_still_syncs_to_server() {
         ),
     );
     let author = ObjectId::new();
-    sm.object_manager
+    let commit_id = sm
+        .object_manager
         .add_commit(
             &mut io,
             obj_id,
@@ -1505,6 +1521,43 @@ fn regular_object_still_syncs_to_server() {
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1, "regular object should sync to server");
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id,
+                    metadata,
+                    branch_name,
+                    commits,
+                },
+        } => {
+            assert_eq!(
+                *id, server_id,
+                "message should target the newly added server"
+            );
+            assert_eq!(
+                *object_id, obj_id,
+                "synced object id should match created object"
+            );
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
+            assert_eq!(commits[0].id(), commit_id);
+
+            let metadata = metadata
+                .as_ref()
+                .expect("first sync for regular object should include metadata");
+            assert_eq!(metadata.id, obj_id);
+            assert_eq!(
+                metadata.metadata.get("key").map(String::as_str),
+                Some("value")
+            );
+        }
+        other => panic!(
+            "Expected ObjectUpdated payload to server after add_server, got {:?}",
+            other
+        ),
+    }
 }
 
 // ========================================================================
@@ -1528,8 +1581,11 @@ fn set_query_scope_stores_session() {
     let client = sm.get_client(client_id).expect("client should exist");
     let query = client.queries.get(&QueryId(1)).expect("query should exist");
     assert_eq!(query.scope, scope);
-    assert!(query.session.is_some());
-    assert_eq!(query.session.as_ref().unwrap().user_id, "alice");
+    let session = query
+        .session
+        .as_ref()
+        .expect("query scope should store provided session");
+    assert_eq!(session.user_id, "alice");
 }
 
 #[test]
@@ -1559,8 +1615,10 @@ fn send_query_subscription_includes_session() {
         } => {
             assert_eq!(*query_id, QueryId(1));
             assert_eq!(sent_query.table, query.table);
-            assert!(sent_session.is_some());
-            assert_eq!(sent_session.as_ref().unwrap().user_id, "alice");
+            let sent_session = sent_session
+                .as_ref()
+                .expect("QuerySubscription payload should include session");
+            assert_eq!(sent_session.user_id, "alice");
         }
         _ => panic!("Expected QuerySubscription"),
     }
@@ -1738,10 +1796,9 @@ fn persistence_ack_direct() {
     let a_commit =
         s.a.object_manager
             .get_commit_mut(obj_id, &"main".into(), commit_id);
-    assert!(a_commit.is_some(), "Commit should exist on A");
+    let a_commit = a_commit.expect("Commit should exist on A");
     assert!(
         a_commit
-            .unwrap()
             .ack_state
             .confirmed_tiers
             .contains(&PersistenceTier::Worker),

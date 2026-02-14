@@ -232,11 +232,10 @@ fn rebac_insert_denied_by_simple_policy() {
     let outbox = qm.sync_manager_mut().take_outbox();
     let error = outbox
         .iter()
-        .find(|e| matches!(e.destination, Destination::Client(id) if id == client_id));
+        .find(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .expect("Should receive error response");
 
-    assert!(error.is_some(), "Should receive error response");
-
-    match &error.unwrap().payload {
+    match &error.payload {
         SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
             assert!(
                 reason.contains("denied by policy"),
@@ -621,14 +620,18 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         other => panic!("Expected PermissionDenied error, got {:?}", other),
     }
 
-    // Commit should NOT be applied
+    // Commit should NOT be applied to the branch.
+    assert!(
+        qm.sync_manager_mut().object_manager.get(obj_id).is_some(),
+        "Object should still exist after denied insert"
+    );
     let tips = qm
         .sync_manager_mut()
         .object_manager
         .get_tip_ids(obj_id, "main");
     assert!(
-        tips.is_err() || !tips.unwrap().contains(&commit.id()),
-        "Non-admin insert should be denied by EXISTS policy"
+        tips.is_err(),
+        "Denied insert should not create tips on branch main"
     );
 }
 
