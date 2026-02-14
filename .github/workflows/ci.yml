@@ -37,9 +37,12 @@ jobs:
           cache-on-failure: true
 
       - run: pnpm install --frozen-lockfile
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
+      - name: Ensure wasm-pack is available
+        run: |
+          if ! command -v wasm-pack >/dev/null; then
+            cargo install wasm-pack
+          fi
+          wasm-pack --version
 
       - run: pnpm format:check
       - run: pnpm oxlint .
