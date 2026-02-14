@@ -21,6 +21,7 @@ const DEFAULT_PROFILE = "basic";
 const DEFAULT_SEED = "0xA5A5A5A501234567";
 const DEFAULT_CACHE_MB = 32;
 const DEFAULT_PIN_INTERNAL_PAGES = true;
+const DEFAULT_READ_COALESCE_PAGES = 4;
 
 function parseSeed(raw) {
   const text = String(raw || "").trim();
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     seed: DEFAULT_SEED,
     cacheMb: DEFAULT_CACHE_MB,
     pinInternalPages: DEFAULT_PIN_INTERNAL_PAGES,
+    readCoalescePages: DEFAULT_READ_COALESCE_PAGES,
     includeColdRead: false,
     json: false,
     progress: false,
@@ -136,6 +138,16 @@ function parseArgs(argv) {
 
     if (arg === "--pin-internal-pages") {
       out.pinInternalPages = parseBool(argv[i + 1], "--pin-internal-pages");
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--read-coalesce-pages") {
+      const next = Number(argv[i + 1]);
+      if (!Number.isFinite(next) || next <= 0) {
+        throw new Error("`--read-coalesce-pages` must be a positive integer");
+      }
+      out.readCoalescePages = Math.floor(next);
       i += 1;
       continue;
     }
@@ -222,7 +234,8 @@ import init, {
   bench_opfs_range_seq_window,
   bench_opfs_range_random_window,
   bench_set_cache_bytes,
-  bench_set_pin_internal_pages
+  bench_set_pin_internal_pages,
+  bench_set_read_coalesce_pages
 } from "/pkg/opfs_btree.js";
 
 const pendingRequests = [];
@@ -257,10 +270,12 @@ async function runRequest(payload) {
   const includeColdRead = Boolean(payload?.includeColdRead ?? false);
   const cacheMb = Number(payload?.cacheMb ?? ${DEFAULT_CACHE_MB});
   const pinInternalPages = Boolean(payload?.pinInternalPages ?? ${DEFAULT_PIN_INTERNAL_PAGES ? "true" : "false"});
+  const readCoalescePages = Number(payload?.readCoalescePages ?? ${DEFAULT_READ_COALESCE_PAGES});
   const seed = BigInt(seedRaw);
   const cacheBytes = Math.max(1, Math.round(cacheMb * 1024 * 1024));
   await bench_set_cache_bytes(cacheBytes);
   bench_set_pin_internal_pages(pinInternalPages);
+  await bench_set_read_coalesce_pages(readCoalescePages);
 
   try {
     const out = [];
@@ -385,6 +400,7 @@ function createHtml(
   seed,
   cacheMb,
   pinInternalPages,
+  readCoalescePages,
   progress,
   includeColdRead,
 ) {
@@ -444,6 +460,7 @@ worker.postMessage({
   seed: "${seed}",
   cacheMb: ${cacheMb},
   pinInternalPages: ${pinInternalPages ? "true" : "false"},
+  readCoalescePages: ${readCoalescePages},
   includeColdRead: ${includeColdRead ? "true" : "false"}
 });
 </script>`;
@@ -463,6 +480,7 @@ async function run() {
     args.seed,
     args.cacheMb,
     args.pinInternalPages,
+    args.readCoalescePages,
     args.progress,
     args.includeColdRead,
   );

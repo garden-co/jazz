@@ -66,12 +66,14 @@ const MIXED_SCENARIOS: [MixedScenario; 3] = [
 const DEFAULT_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
 const DEFAULT_BENCH_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_PIN_INTERNAL_PAGES: bool = true;
+const DEFAULT_READ_COALESCE_PAGES: usize = 4;
 const RANGE_WINDOW_KEYS: usize = 128;
 const RANGE_RESULT_LIMIT: usize = 64;
 
 thread_local! {
     static BENCH_CACHE_BYTES: Cell<usize> = const { Cell::new(DEFAULT_BENCH_CACHE_BYTES) };
     static BENCH_PIN_INTERNAL_PAGES: Cell<bool> = const { Cell::new(DEFAULT_PIN_INTERNAL_PAGES) };
+    static BENCH_READ_COALESCE_PAGES: Cell<usize> = const { Cell::new(DEFAULT_READ_COALESCE_PAGES) };
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +116,7 @@ fn benchmark_options() -> BTreeOptions {
         cache_bytes: BENCH_CACHE_BYTES.with(|bytes| bytes.get()),
         overflow_threshold: 8 * 1024,
         pin_internal_pages: BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.get()),
+        read_coalesce_pages: BENCH_READ_COALESCE_PAGES.with(|pages| pages.get()),
     }
 }
 
@@ -982,6 +985,26 @@ pub fn bench_get_pin_internal_pages() -> bool {
 #[wasm_bindgen]
 pub fn bench_reset_pin_internal_pages() {
     BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.set(DEFAULT_PIN_INTERNAL_PAGES));
+}
+
+#[wasm_bindgen]
+pub fn bench_set_read_coalesce_pages(read_coalesce_pages: u32) -> Result<(), JsValue> {
+    let read_coalesce_pages = read_coalesce_pages as usize;
+    if read_coalesce_pages == 0 {
+        return Err(JsValue::from_str("read_coalesce_pages must be > 0"));
+    }
+    BENCH_READ_COALESCE_PAGES.with(|pages| pages.set(read_coalesce_pages));
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub fn bench_get_read_coalesce_pages() -> u32 {
+    BENCH_READ_COALESCE_PAGES.with(|pages| pages.get() as u32)
+}
+
+#[wasm_bindgen]
+pub fn bench_reset_read_coalesce_pages() {
+    BENCH_READ_COALESCE_PAGES.with(|pages| pages.set(DEFAULT_READ_COALESCE_PAGES));
 }
 
 #[wasm_bindgen]
