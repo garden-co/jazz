@@ -3,6 +3,9 @@ name = "groove-tokio"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [dependencies]
 groove = { path = "../groove" }
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
