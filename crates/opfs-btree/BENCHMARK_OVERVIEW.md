@@ -19,14 +19,14 @@ Current `opfs-btree` default cache is `32MB`.
 | mixed_random_60r_20w_20d          |                256 |              48.1 |                118.6 |           90.3 |          256.3 |             85.5 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 25.2 |           71.7 |          176.4 |             63.3 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  0.1 |            N/A |            3.4 |              3.0 |          0.2 | [2][5][9]  |
-| range_seq_window_64               |                 32 |               N/A |                111.1 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
-| range_seq_window_64               |                256 |               N/A |                113.0 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
-| range_seq_window_64               |              4,096 |               N/A |                  1.5 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
-| range_seq_window_64               |          1,048,576 |               N/A |                  0.3 |            N/A |            N/A |              N/A |          N/A | [5][8][12] |
-| range_random_window_64            |                 32 |               N/A |                143.9 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
-| range_random_window_64            |                256 |               N/A |                104.2 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
-| range_random_window_64            |              4,096 |               N/A |                  0.3 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
-| range_random_window_64            |          1,048,576 |               N/A |                  0.4 |            N/A |            N/A |              N/A |          N/A | [5][8][12] |
+| range_seq_window_64               |                 32 |             151.9 |                111.1 |          302.4 |           89.6 |            110.3 |          9.0 | [8][11]    |
+| range_seq_window_64               |                256 |             148.9 |                113.0 |          268.2 |           75.7 |            109.2 |          9.0 | [8][11]    |
+| range_seq_window_64               |              4,096 |               3.0 |                  1.5 |           35.9 |           27.2 |             66.4 |         11.3 | [8][11]    |
+| range_seq_window_64               |          1,048,576 |               1.0 |                  0.3 |            N/A |            0.5 |              0.4 |          0.0 | [8][12]    |
+| range_random_window_64            |                 32 |             149.3 |                143.9 |          312.9 |           89.8 |            110.8 |          8.9 | [8][11]    |
+| range_random_window_64            |                256 |             144.3 |                104.2 |          276.7 |           78.0 |            106.9 |          9.0 | [8][11]    |
+| range_random_window_64            |              4,096 |               2.0 |                  0.3 |           25.5 |           26.9 |             67.6 |         11.4 | [8][11]    |
+| range_random_window_64            |          1,048,576 |               1.1 |                  0.4 |            N/A |            0.5 |              0.5 |          0.0 | [8][12]    |
 | cold_seq_read                     |                 32 |            2491.9 |                 83.3 |            N/A |          716.1 |            268.0 |         18.5 | [3][5][10] |
 | cold_seq_read                     |                256 |            1658.4 |                 83.3 |            N/A |          626.8 |            220.1 |         18.4 | [3][5][10] |
 | cold_seq_read                     |              4,096 |             279.4 |                 14.9 |            N/A |          297.4 |            181.7 |         18.9 | [3][5][10] |
@@ -67,9 +67,12 @@ and
 
 [10] Top-table wasm cold rows are currently carried forward from the prior baseline run (before cache-sizing phase re-measurement).
 
-[11] Range rows are now included in the top comparison table, but native cross-engine range runs are not populated in this phase.
+[11] Native range rows come from restored cross-engine Criterion groups
+`compare_native_range_seq_window` and `compare_native_range_random_window`
+in quick mode, with `key_count=5000` and `query_count=2000` for `32/256/4096`.
 
-[12] Top-table wasm range rows at `1,048,576` are carried forward from the prior baseline run.
+[12] Native `1,048,576` range rows use reduced counts (`key_count=16`, `query_count=4`).
+`bf-tree` remains `N/A` at `1,048,576` due value-size constraints in this harness.
 
 ## Range Query Benchmarks (opfs-btree wasm/opfs)
 
