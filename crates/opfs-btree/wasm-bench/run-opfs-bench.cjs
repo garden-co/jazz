@@ -40,7 +40,9 @@ function parseSeed(raw) {
 }
 
 function parseBool(raw, flagName) {
-  const value = String(raw ?? "").trim().toLowerCase();
+  const value = String(raw ?? "")
+    .trim()
+    .toLowerCase();
   if (["1", "true", "yes", "on"].includes(value)) return true;
   if (["0", "false", "no", "off"].includes(value)) return false;
   throw new Error(`\`${flagName}\` must be a boolean (true/false)`);
