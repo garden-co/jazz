@@ -1,6 +1,6 @@
 # jazz-lsm Benchmark Overview
 
-Generated on 2026-02-13.
+Generated on 2026-02-14.
 
 All values below are throughput shown as `K/s` (1 K = 1,000 ops/s) from the runs executed in this session. Native numbers come from Criterion `--quick` runs; WASM numbers come from the OPFS worker harness.
 
@@ -227,6 +227,34 @@ Rows with significant throughput noise (seeded):
 | native | mixed_random_50r_50w_with_updates | 4096 | `9308 / 7064 / 8488` | `13.7%` | `27.1%` | `wal_flushes=90`, `memtable_flushes=6`, `compaction_steps=1`, compaction bytes in/out `2070268/2070062` |
 | native | mixed_random_60r_20w_20d | 4096 | `12535 / 18158 / 16982` | `18.7%` | `35.4%` | `wal_flushes=72`, `memtable_flushes=5`, `compaction_steps=1`, compaction bytes in/out `2070268/2070062` |
 
+## Phase 9 Results (append-only manifest edits + periodic checkpoint)
+
+Phase 9 values below compare against Phase 8.
+
+Implementation summary:
+- Replace full manifest rewrite on flush/compaction with append-only `MANIFEST.edits` records (len + crc + json payload).
+- Add atomic `MANIFEST.checkpoint` snapshots and checkpoint-triggered edit-log truncation.
+- Recover by loading checkpoint first and replaying tail edits.
+
+| Scenario | Value Size (bytes) | Native ops/s (P8 -> P9) | Native p95 ms (P8 -> P9) | WASM ops/s (P8 -> P9) | WASM p95 ms (P8 -> P9) | Notes |
+|---|---:|---|---|---|---|---|
+| mixed_random_70r_30w | 32 | `12626.302 -> 19317.885` (`+53.0%`) | `0.068 -> 0.039` (`-42.2%`) | `12195.122 -> 12820.513` (`+5.1%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 32 | `11951.953 -> 20337.777` (`+70.2%`) | `0.075 -> 0.041` (`-45.9%`) | `13698.630 -> 21276.596` (`+55.3%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 32 | `12277.697 -> 20377.804` (`+66.0%`) | `0.065 -> 0.036` (`-45.1%`) | `22727.273 -> 24390.244` (`+7.3%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 256 | `16222.245 -> 28735.632` (`+77.1%`) | `0.019 -> 0.013` (`-33.3%`) | `19230.769 -> 21276.596` (`+10.6%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 256 | `16230.187 -> 30088.007` (`+85.4%`) | `0.021 -> 0.011` (`-47.6%`) | `22222.222 -> 21739.130` (`-2.2%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 256 | `15169.481 -> 28376.978` (`+87.1%`) | `0.023 -> 0.011` (`-52.9%`) | `23809.524 -> 23809.524` (`-0.0%`) | `0.100 -> 0.100` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 4096 | `8944.997 -> 26712.017` (`+198.6%`) | `0.061 -> 0.012` (`-80.1%`) | `14084.507 -> 15625.000` (`+10.9%`) | `0.200 -> 0.200` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 4096 | `4769.887 -> 15232.544` (`+219.3%`) | `0.129 -> 0.047` (`-63.4%`) | `14492.754 -> 18867.924` (`+30.2%`) | `0.200 -> 0.200` (`+0.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 4096 | `12189.052 -> 26337.449` (`+116.1%`) | `0.054 -> 0.013` (`-75.4%`) | `16393.443 -> 18867.924` (`+15.1%`) | `0.100 -> 0.200` (`+100.0%`) | Native `count=500`; WASM `count=100` |
+| mixed_random_70r_30w | 1,048,576 | `90.564 -> 93.989` (`+3.8%`) | `54.167 -> 35.548` (`-34.4%`) | `200.642 -> 272.257` (`+35.7%`) | `25.200 -> 18.900` (`-25.0%`) | Native `count=64`; WASM `count=100` |
+| mixed_random_50r_50w_with_updates | 1,048,576 | `72.647 -> 93.770` (`+29.1%`) | `51.147 -> 47.458` (`-7.2%`) | `133.049 -> 156.201` (`+17.4%`) | `24.100 -> 20.400` (`-15.4%`) | Native `count=64`; WASM `count=100` |
+| mixed_random_60r_20w_20d | 1,048,576 | `112.528 -> 214.123` (`+90.3%`) | `49.563 -> 18.012` (`-63.7%`) | `265.463 -> 434.783` (`+63.8%`) | `22.000 -> 7.800` (`-64.5%`) | Native `count=64`; WASM `count=100` |
+
+Phase 9 aggregate summary:
+- Native geometric-mean throughput delta vs Phase 8: `+101.5%` for `32/256/4096`, `+82.8%` including `1MB`.
+- WASM geometric-mean throughput delta vs Phase 8: `+13.6%` for `32/256/4096`, `+19.2%` including `1MB`.
+
 ## Progress Tracking
 
 - Use this mixed baseline table as the source of truth for Phase 1+ changes.
@@ -292,3 +320,7 @@ Rows with significant throughput noise (seeded):
 - WASM 1MB instrumented mixed (`count=4`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 4 --value-sizes 1048576 --json --progress`
 - WASM 1MB instrumented mixed (`count=32`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 32 --value-sizes 1048576 --json --progress`
 - WASM 1MB instrumented mixed (`count=100`): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json --progress`
+- Phase 9 mixed native rerun (32/256/4096): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 500 --value-sizes 32,256,4096 --json`
+- Phase 9 mixed native rerun (1MB): `cargo run -p jazz-lsm --release --bin mixed_bench_native -- --count 64 --value-sizes 1048576 --json`
+- Phase 9 mixed wasm/opfs rerun (32/256/4096): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 32,256,4096 --json`
+- Phase 9 mixed wasm/opfs rerun (1MB): `pnpm --dir /Users/anselm/jazz2-clean/crates/jazz-lsm run bench:wasm:opfs -- --profile mixed --count 100 --value-sizes 1048576 --json`

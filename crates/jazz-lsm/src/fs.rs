@@ -2,6 +2,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -156,18 +158,112 @@ impl SyncFs for MemoryFs {
 #[derive(Clone, Debug)]
 pub struct StdFs {
     root: std::path::PathBuf,
+    read_handle_cache: Rc<RefCell<StdReadHandleCache>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const STD_FS_READ_HANDLE_CACHE_CAPACITY: usize = 64;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct StdReadHandleCache {
+    capacity: usize,
+    entries: HashMap<String, std::fs::File>,
+    lru: VecDeque<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StdReadHandleCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn get_or_open(
+        &mut self,
+        path: &str,
+        full_path: &std::path::Path,
+    ) -> Result<&mut std::fs::File, FsError> {
+        if self.entries.contains_key(path) {
+            self.touch(path);
+            return self
+                .entries
+                .get_mut(path)
+                .ok_or_else(|| FsError::Io(format!("read handle cache miss after touch: {path}")));
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(full_path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    FsError::NotFound(path.to_string())
+                } else {
+                    FsError::Io(e.to_string())
+                }
+            })?;
+
+        self.entries.insert(path.to_string(), file);
+        self.touch(path);
+        self.evict_if_needed();
+
+        self.entries
+            .get_mut(path)
+            .ok_or_else(|| FsError::Io(format!("read handle cache insert failed: {path}")))
+    }
+
+    fn remove(&mut self, path: &str) {
+        self.entries.remove(path);
+        self.lru.retain(|cached| cached != path);
+    }
+
+    fn touch(&mut self, path: &str) {
+        self.lru.retain(|cached| cached != path);
+        self.lru.push_back(path.to_string());
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl StdFs {
     pub fn new(root: impl Into<std::path::PathBuf>) -> Result<Self, FsError> {
+        Self::with_read_handle_cache_capacity(root, STD_FS_READ_HANDLE_CACHE_CAPACITY)
+    }
+
+    pub fn with_read_handle_cache_capacity(
+        root: impl Into<std::path::PathBuf>,
+        capacity: usize,
+    ) -> Result<Self, FsError> {
+        if capacity == 0 {
+            return Err(FsError::Unsupported(
+                "StdFs read handle cache capacity must be >= 1".to_string(),
+            ));
+        }
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|e| FsError::Io(e.to_string()))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            read_handle_cache: Rc::new(RefCell::new(StdReadHandleCache::with_capacity(capacity))),
+        })
     }
 
     fn full_path(&self, relative: &str) -> std::path::PathBuf {
         self.root.join(relative)
+    }
+
+    fn invalidate_read_handle(&self, path: &str) {
+        self.read_handle_cache.borrow_mut().remove(path);
     }
 }
 
@@ -190,16 +286,9 @@ impl SyncFs for StdFs {
             return Ok(Vec::new());
         }
 
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .open(self.full_path(path))
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    FsError::NotFound(path.to_string())
-                } else {
-                    FsError::Io(e.to_string())
-                }
-            })?;
+        let full_path = self.full_path(path);
+        let mut cache = self.read_handle_cache.borrow_mut();
+        let file = cache.get_or_open(path, &full_path)?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| FsError::Io(e.to_string()))?;
 
@@ -212,6 +301,7 @@ impl SyncFs for StdFs {
     }
 
     fn write_all(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        self.invalidate_read_handle(path);
         std::fs::write(self.full_path(path), data).map_err(|e| FsError::Io(e.to_string()))
     }
 
@@ -220,6 +310,8 @@ impl SyncFs for StdFs {
         let tmp = self.full_path(&tmp_name);
         let dst = self.full_path(path);
 
+        self.invalidate_read_handle(path);
+        self.invalidate_read_handle(&tmp_name);
         std::fs::write(&tmp, data).map_err(|e| FsError::Io(e.to_string()))?;
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -257,6 +349,7 @@ impl SyncFs for StdFs {
     }
 
     fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
+        self.invalidate_read_handle(path);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -267,6 +360,7 @@ impl SyncFs for StdFs {
     }
 
     fn remove_file(&self, path: &str) -> Result<(), FsError> {
+        self.invalidate_read_handle(path);
         match std::fs::remove_file(self.full_path(path)) {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -1501,5 +1595,65 @@ mod tests {
             Err(FsError::NotFound(path)) => assert_eq!(path, "missing"),
             other => panic!("unexpected read result: {other:?}"),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn std_fs_read_handle_cache_invalidation_on_write_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = StdFs::with_read_handle_cache_capacity(dir.path(), 2).expect("open std fs");
+
+        fs.write_all("data", b"first").unwrap();
+        assert_eq!(fs.read_range("data", 0, 5).unwrap(), b"first".to_vec());
+
+        fs.write_all("data", b"second").unwrap();
+        assert_eq!(fs.read_range("data", 0, 6).unwrap(), b"second".to_vec());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn std_fs_read_handle_cache_invalidation_on_write_atomic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = StdFs::with_read_handle_cache_capacity(dir.path(), 2).expect("open std fs");
+
+        fs.write_all("manifest", b"old").unwrap();
+        assert_eq!(fs.read_range("manifest", 0, 3).unwrap(), b"old".to_vec());
+
+        fs.write_atomic("manifest", b"new-value").unwrap();
+        assert_eq!(
+            fs.read_range("manifest", 0, 9).unwrap(),
+            b"new-value".to_vec()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn std_fs_read_handle_cache_invalidation_on_remove_and_recreate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = StdFs::with_read_handle_cache_capacity(dir.path(), 2).expect("open std fs");
+
+        fs.write_all("sst", b"old").unwrap();
+        assert_eq!(fs.read_range("sst", 0, 3).unwrap(), b"old".to_vec());
+
+        fs.remove_file("sst").unwrap();
+        fs.write_all("sst", b"new").unwrap();
+        assert_eq!(fs.read_range("sst", 0, 3).unwrap(), b"new".to_vec());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn std_fs_read_handle_cache_eviction_is_lru() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fs = StdFs::with_read_handle_cache_capacity(dir.path(), 1).expect("open std fs");
+
+        fs.write_all("a", b"aaaa").unwrap();
+        fs.write_all("b", b"bbbb").unwrap();
+        assert_eq!(fs.read_range("a", 0, 4).unwrap(), b"aaaa".to_vec());
+        assert_eq!(fs.read_range("b", 0, 4).unwrap(), b"bbbb".to_vec());
+
+        let cache = fs.read_handle_cache.borrow();
+        assert_eq!(cache.entries.len(), 1);
+        assert!(cache.entries.contains_key("b"));
+        assert!(!cache.entries.contains_key("a"));
     }
 }

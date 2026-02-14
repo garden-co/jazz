@@ -98,6 +98,39 @@ where
     Ok(())
 }
 
+pub async fn checkpoint_survives_second_restart_after_wal_replay<FS, Open, OpenFut>(
+    mut open: Open,
+) -> TestResult
+where
+    FS: SyncFs + Clone + 'static,
+    Open: FnMut() -> OpenFut,
+    OpenFut: Future<Output = TestResult<LsmTree<FS>>>,
+{
+    // First run: write + durable WAL sync.
+    {
+        let mut db = open().await?;
+        db.put(b"k1", b"v1")?;
+        db.flush_wal()?;
+    }
+
+    // First restart: replay from WAL, then checkpoint to SST and clear WAL.
+    {
+        let mut db = open().await?;
+        assert_eq!(db.get(b"k1")?, Some(b"v1".to_vec()));
+        db.flush()?;
+        assert_eq!(db.debug_state()?.wal_bytes, 0);
+    }
+
+    // Second restart: WAL may be empty, so value must come from checkpointed SST+manifest.
+    {
+        let db = open().await?;
+        assert_eq!(db.get(b"k1")?, Some(b"v1".to_vec()));
+        assert_eq!(db.debug_state()?.wal_bytes, 0);
+    }
+
+    Ok(())
+}
+
 pub async fn unknown_merge_operator_rejected_on_open<
     FS,
     OpenWith,
