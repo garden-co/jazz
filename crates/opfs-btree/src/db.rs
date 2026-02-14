@@ -19,6 +19,7 @@ pub struct BTreeOptions {
     pub page_size: usize,
     pub cache_bytes: usize,
     pub overflow_threshold: usize,
+    pub pin_internal_pages: bool,
 }
 
 impl Default for BTreeOptions {
@@ -27,6 +28,7 @@ impl Default for BTreeOptions {
             page_size: DEFAULT_PAGE_SIZE,
             cache_bytes: DEFAULT_CACHE_BYTES,
             overflow_threshold: DEFAULT_OVERFLOW_THRESHOLD,
+            pin_internal_pages: false,
         }
     }
 }
@@ -926,6 +928,9 @@ impl<F: SyncFile> OpfsBTree<F> {
                 {
                     return None;
                 }
+                if self.options.pin_internal_pages && matches!(page, Page::Internal { .. }) {
+                    return None;
+                }
 
                 Some((
                     eviction_priority(page),
@@ -1099,6 +1104,7 @@ mod tests {
             page_size: 4 * 1024,
             cache_bytes: 4 * 1024 * 8,
             overflow_threshold: 128,
+            pin_internal_pages: false,
         }
     }
 
@@ -1107,7 +1113,14 @@ mod tests {
             page_size: 4 * 1024,
             cache_bytes: 4 * 1024 * 2,
             overflow_threshold: 128,
+            pin_internal_pages: false,
         }
+    }
+
+    fn tiny_cache_pinned_options() -> BTreeOptions {
+        let mut options = tiny_cache_options();
+        options.pin_internal_pages = true;
+        options
     }
 
     #[derive(Clone, Debug)]
@@ -1419,7 +1432,7 @@ mod tests {
         let file = MemoryFile::new();
         let mut tree = OpfsBTree::open(file, tiny_cache_options()).expect("open tree");
 
-        for i in 0..2_000u32 {
+        for i in 0..20_000u32 {
             let key = format!("k{:05}", i);
             let value = format!("value-{}", i);
             tree.put(key.as_bytes(), value.as_bytes()).expect("put");
@@ -1468,6 +1481,42 @@ mod tests {
             assert!(
                 tree.pages.contains_key(&page_id),
                 "dirty page {} was evicted",
+                page_id
+            );
+        }
+    }
+
+    #[test]
+    fn cache_eviction_preserves_loaded_internal_pages_when_pinned() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, tiny_cache_pinned_options()).expect("open tree");
+        let key_suffix = "x".repeat(256);
+
+        for i in 0..20_000u32 {
+            let key = format!("k{:05}-{}", i, key_suffix);
+            let value = format!("value-{}", i);
+            tree.put(key.as_bytes(), value.as_bytes()).expect("put");
+        }
+        tree.checkpoint().expect("checkpoint");
+
+        let mut internal_ids = Vec::new();
+        for page_id in 2..tree.total_pages {
+            tree.ensure_page_loaded(page_id).expect("load page");
+            if matches!(tree.pages.get(&page_id), Some(Page::Internal { .. })) {
+                internal_ids.push(page_id);
+            }
+        }
+        assert!(
+            internal_ids.len() >= 2,
+            "expected at least two internal pages"
+        );
+
+        tree.evict_pages_if_needed(None);
+
+        for page_id in internal_ids {
+            assert!(
+                tree.pages.contains_key(&page_id),
+                "internal page {} was evicted despite pinning",
                 page_id
             );
         }

@@ -5,6 +5,7 @@ use std::cell::Cell;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+use crate::file::{OpfsIoCounters, opfs_io_counters_reset, opfs_io_counters_snapshot};
 use crate::{BTreeOptions, OpfsBTree, OpfsFile};
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +31,7 @@ struct BenchmarkResult {
     deletes: u32,
     checksum: u64,
     phase_times_ms: Vec<PhaseTiming>,
+    opfs_io_counters: OpfsIoCounters,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,11 +65,13 @@ const MIXED_SCENARIOS: [MixedScenario; 3] = [
 
 const DEFAULT_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
 const DEFAULT_BENCH_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_PIN_INTERNAL_PAGES: bool = true;
 const RANGE_WINDOW_KEYS: usize = 128;
 const RANGE_RESULT_LIMIT: usize = 64;
 
 thread_local! {
     static BENCH_CACHE_BYTES: Cell<usize> = const { Cell::new(DEFAULT_BENCH_CACHE_BYTES) };
+    static BENCH_PIN_INTERNAL_PAGES: Cell<bool> = const { Cell::new(DEFAULT_PIN_INTERNAL_PAGES) };
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,6 +113,7 @@ fn benchmark_options() -> BTreeOptions {
         page_size: 16 * 1024,
         cache_bytes: BENCH_CACHE_BYTES.with(|bytes| bytes.get()),
         overflow_threshold: 8 * 1024,
+        pin_internal_pages: BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.get()),
     }
 }
 
@@ -222,6 +227,7 @@ fn to_js_value(result: &BenchmarkResult) -> Result<JsValue, JsValue> {
 }
 
 async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("seq-write");
@@ -237,6 +243,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
     let size = value_size as usize;
     let seed = derive_seed(DEFAULT_BASE_SEED, "seq_write", value_size);
 
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
@@ -253,6 +260,7 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "final_checkpoint", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -278,10 +286,12 @@ async fn run_seq_write(count: u32, value_size: u32) -> Result<BenchmarkResult, J
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
 async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("rand-write");
@@ -298,6 +308,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
     let seed = derive_seed(DEFAULT_BASE_SEED, "random_write", value_size);
     let order = shuffled_indices(count as usize, seed);
 
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for &i in &order {
@@ -314,6 +325,7 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     push_phase(&mut phase_times_ms, "final_checkpoint", flush_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -339,10 +351,12 @@ async fn run_random_write(count: u32, value_size: u32) -> Result<BenchmarkResult
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
 async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("seq-read");
@@ -375,6 +389,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
         prefill_checkpoint_start,
     );
 
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for i in 0..(count as usize) {
@@ -387,6 +402,7 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
     }
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -412,10 +428,12 @@ async fn run_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, Js
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
 async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("rand-read");
@@ -450,6 +468,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
 
     let order = shuffled_indices(count as usize, seed);
 
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     let mut checksum = 0u64;
     for &i in &order {
@@ -462,6 +481,7 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
     }
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -487,10 +507,12 @@ async fn run_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult,
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
 async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("cold-seq-read");
@@ -525,6 +547,7 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
     drop(db);
 
     // Cold-read window includes reopen + read loop.
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     let reopen_start = high_res_now_ms();
     let mut db = open_db(&namespace).await?;
@@ -541,6 +564,7 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
     }
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -566,10 +590,12 @@ async fn run_cold_seq_read(count: u32, value_size: u32) -> Result<BenchmarkResul
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
 async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace("cold-rand-read");
@@ -604,6 +630,7 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
     drop(db);
 
     // Cold-read window includes reopen + read loop.
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     let reopen_start = high_res_now_ms();
     let mut db = open_db(&namespace).await?;
@@ -621,6 +648,7 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
     }
     push_phase(&mut phase_times_ms, "op_read_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -646,6 +674,7 @@ async fn run_cold_random_read(count: u32, value_size: u32) -> Result<BenchmarkRe
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
@@ -655,6 +684,7 @@ async fn run_mixed_scenario(
     value_size: u32,
     base_seed: u64,
 ) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let namespace = unique_namespace(scenario.name);
@@ -699,6 +729,7 @@ async fn run_mixed_scenario(
     let mut checksum = 0u64;
     let mut op_latencies_ms = Vec::with_capacity(count as usize);
 
+    let io_start = opfs_io_counters_snapshot();
     let mixed_start = high_res_now_ms();
     for step in 0..(count as usize) {
         let op = choose_operation(scenario, rng.next_u8() % 100);
@@ -754,6 +785,7 @@ async fn run_mixed_scenario(
     push_phase(&mut phase_times_ms, "final_checkpoint", checkpoint_start);
 
     let elapsed_ms = high_res_now_ms() - mixed_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -779,6 +811,7 @@ async fn run_mixed_scenario(
         deletes,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
@@ -795,6 +828,7 @@ async fn run_range_scan(
     value_size: u32,
     random_start: bool,
 ) -> Result<BenchmarkResult, JsValue> {
+    opfs_io_counters_reset();
     let mut phase_times_ms = Vec::new();
     let wall_start = high_res_now_ms();
     let label = if random_start {
@@ -847,6 +881,7 @@ async fn run_range_scan(
     let mut read_hits = 0u32;
     let mut read_misses = 0u32;
 
+    let io_start = opfs_io_counters_snapshot();
     let op_start = high_res_now_ms();
     for i in 0..(count as usize) {
         let per_op_start = high_res_now_ms();
@@ -876,6 +911,7 @@ async fn run_range_scan(
     }
     push_phase(&mut phase_times_ms, "op_range_loop", op_start);
     let elapsed_ms = high_res_now_ms() - op_start;
+    let opfs_io_counters = opfs_io_counters_snapshot().delta_since(io_start);
 
     drop(db);
     let phase_start = high_res_now_ms();
@@ -901,6 +937,7 @@ async fn run_range_scan(
         deletes: 0,
         checksum,
         phase_times_ms,
+        opfs_io_counters,
     })
 }
 
@@ -930,6 +967,21 @@ pub fn bench_get_cache_bytes() -> u32 {
 #[wasm_bindgen]
 pub fn bench_reset_cache_bytes() {
     BENCH_CACHE_BYTES.with(|bytes| bytes.set(DEFAULT_BENCH_CACHE_BYTES));
+}
+
+#[wasm_bindgen]
+pub fn bench_set_pin_internal_pages(pin_internal_pages: bool) {
+    BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.set(pin_internal_pages));
+}
+
+#[wasm_bindgen]
+pub fn bench_get_pin_internal_pages() -> bool {
+    BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.get())
+}
+
+#[wasm_bindgen]
+pub fn bench_reset_pin_internal_pages() {
+    BENCH_PIN_INTERNAL_PAGES.with(|flag| flag.set(DEFAULT_PIN_INTERNAL_PAGES));
 }
 
 #[wasm_bindgen]

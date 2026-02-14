@@ -20,6 +20,7 @@ const DEFAULT_VALUE_SIZES = [32, 256, 4096];
 const DEFAULT_PROFILE = "basic";
 const DEFAULT_SEED = "0xA5A5A5A501234567";
 const DEFAULT_CACHE_MB = 32;
+const DEFAULT_PIN_INTERNAL_PAGES = true;
 
 function parseSeed(raw) {
   const text = String(raw || "").trim();
@@ -38,6 +39,13 @@ function parseSeed(raw) {
   }
 }
 
+function parseBool(raw, flagName) {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`\`${flagName}\` must be a boolean (true/false)`);
+}
+
 function parseArgs(argv) {
   const out = {
     count: DEFAULT_COUNT,
@@ -45,6 +53,7 @@ function parseArgs(argv) {
     profile: DEFAULT_PROFILE,
     seed: DEFAULT_SEED,
     cacheMb: DEFAULT_CACHE_MB,
+    pinInternalPages: DEFAULT_PIN_INTERNAL_PAGES,
     includeColdRead: false,
     json: false,
     progress: false,
@@ -119,6 +128,12 @@ function parseArgs(argv) {
         throw new Error("`--cache-mb` must be a positive number");
       }
       out.cacheMb = next;
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--pin-internal-pages") {
+      out.pinInternalPages = parseBool(argv[i + 1], "--pin-internal-pages");
       i += 1;
       continue;
     }
@@ -204,7 +219,8 @@ import init, {
   bench_opfs_mixed_scenario,
   bench_opfs_range_seq_window,
   bench_opfs_range_random_window,
-  bench_set_cache_bytes
+  bench_set_cache_bytes,
+  bench_set_pin_internal_pages
 } from "/pkg/opfs_btree.js";
 
 const pendingRequests = [];
@@ -238,9 +254,11 @@ async function runRequest(payload) {
   const seedRaw = String(payload?.seed ?? "${DEFAULT_SEED}");
   const includeColdRead = Boolean(payload?.includeColdRead ?? false);
   const cacheMb = Number(payload?.cacheMb ?? ${DEFAULT_CACHE_MB});
+  const pinInternalPages = Boolean(payload?.pinInternalPages ?? ${DEFAULT_PIN_INTERNAL_PAGES ? "true" : "false"});
   const seed = BigInt(seedRaw);
   const cacheBytes = Math.max(1, Math.round(cacheMb * 1024 * 1024));
   await bench_set_cache_bytes(cacheBytes);
+  bench_set_pin_internal_pages(pinInternalPages);
 
   try {
     const out = [];
@@ -358,7 +376,16 @@ self.onmessage = (e) => {
 `;
 }
 
-function createHtml(count, valueSizes, profile, seed, cacheMb, progress, includeColdRead) {
+function createHtml(
+  count,
+  valueSizes,
+  profile,
+  seed,
+  cacheMb,
+  pinInternalPages,
+  progress,
+  includeColdRead,
+) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>opfs-btree wasm opfs bench</title>
@@ -414,6 +441,7 @@ worker.postMessage({
   profile: "${profile}",
   seed: "${seed}",
   cacheMb: ${cacheMb},
+  pinInternalPages: ${pinInternalPages ? "true" : "false"},
   includeColdRead: ${includeColdRead ? "true" : "false"}
 });
 </script>`;
@@ -432,6 +460,7 @@ async function run() {
     args.profile,
     args.seed,
     args.cacheMb,
+    args.pinInternalPages,
     args.progress,
     args.includeColdRead,
   );
