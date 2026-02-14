@@ -19,6 +19,14 @@ Current `opfs-btree` default cache is `32MB`.
 | mixed_random_60r_20w_20d          |                256 |              48.1 |                118.6 |           90.3 |          256.3 |             85.5 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 25.2 |           71.7 |          176.4 |             63.3 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  0.1 |            N/A |            3.4 |              3.0 |          0.2 | [2][5][9]  |
+| range_seq_window_64               |                 32 |               N/A |                111.1 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
+| range_seq_window_64               |                256 |               N/A |                113.0 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
+| range_seq_window_64               |              4,096 |               N/A |                  1.5 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
+| range_seq_window_64               |          1,048,576 |               N/A |                  0.3 |            N/A |            N/A |              N/A |          N/A | [5][8][12] |
+| range_random_window_64            |                 32 |               N/A |                143.9 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
+| range_random_window_64            |                256 |               N/A |                104.2 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
+| range_random_window_64            |              4,096 |               N/A |                  0.3 |            N/A |            N/A |              N/A |          N/A | [5][8][11] |
+| range_random_window_64            |          1,048,576 |               N/A |                  0.4 |            N/A |            N/A |              N/A |          N/A | [5][8][12] |
 | cold_seq_read                     |                 32 |            2491.9 |                 83.3 |            N/A |          716.1 |            268.0 |         18.5 | [3][5][10] |
 | cold_seq_read                     |                256 |            1658.4 |                 83.3 |            N/A |          626.8 |            220.1 |         18.4 | [3][5][10] |
 | cold_seq_read                     |              4,096 |             279.4 |                 14.9 |            N/A |          297.4 |            181.7 |         18.9 | [3][5][10] |
@@ -58,6 +66,10 @@ and
 `count=3000` for `32/256/4096` and `count=64` for `1,048,576`.
 
 [10] Top-table wasm cold rows are currently carried forward from the prior baseline run (before cache-sizing phase re-measurement).
+
+[11] Range rows are now included in the top comparison table, but native cross-engine range runs are not populated in this phase.
+
+[12] Top-table wasm range rows at `1,048,576` are carried forward from the prior baseline run.
 
 ## Range Query Benchmarks (opfs-btree wasm/opfs)
 
@@ -142,44 +154,32 @@ Method:
 
 Decision: default cache is set to `32MB`.
 
-## Phase: Cache Default 8MB -> 32MB (Before/After)
+## Phase: Lazy Page Loading -> 32MB Default Cache (Before/After)
 
-Before = `8MB` cache.
-After = `32MB` cache.
-Values are 3-run medians in `K/s`, deterministic seed `0xA5A5A5A501234567`.
+Before = Lazy Page Loading phase medians (`after` column in the section above).
+After = current top-table medians with `32MB` cache default.
+Values are in `K/s`.
 
 Aggregate deltas:
 
-| metric                             | before (8MB) | after (32MB) | delta |
-| ---------------------------------- | -----------: | -----------: | ----: |
-| mixed aggregate (32/256/4096)      |         80.9 |         87.2 | +7.9% |
-| range aggregate (32/256/4096)      |         80.0 |         79.0 | -1.2% |
-| combined aggregate (mixed + range) |         80.5 |         83.9 | +4.3% |
+| metric                        | before (Lazy phase) | after (32MB default) | delta |
+| ----------------------------- | ------------------: | -------------------: | ----: |
+| mixed aggregate (all sizes)   |                66.2 |                 65.4 | -1.2% |
+| mixed aggregate (32/256/4096) |                88.1 |                 87.2 | -1.0% |
 
 Mixed scenarios:
 
-| scenario                          | value_size | before (8MB) | after (32MB) |   delta |
-| --------------------------------- | ---------: | -----------: | -----------: | ------: |
-| mixed_random_70r_30w              |         32 |        126.6 |        125.5 |   -0.8% |
-| mixed_random_70r_30w              |        256 |        120.0 |        117.6 |   -2.0% |
-| mixed_random_70r_30w              |       4096 |          8.9 |         31.8 | +258.3% |
-| mixed_random_70r_30w              |    1048576 |          0.1 |          0.1 |   +8.9% |
-| mixed_random_50r_50w_with_updates |         32 |         93.8 |         92.9 |   -0.9% |
-| mixed_random_50r_50w_with_updates |        256 |        104.5 |        106.4 |   +1.8% |
-| mixed_random_50r_50w_with_updates |       4096 |          7.1 |         21.4 | +201.2% |
-| mixed_random_50r_50w_with_updates |    1048576 |          0.1 |          0.1 |  +12.1% |
-| mixed_random_60r_20w_20d          |         32 |        142.9 |        145.6 |   +1.9% |
-| mixed_random_60r_20w_20d          |        256 |        116.7 |        118.6 |   +1.6% |
-| mixed_random_60r_20w_20d          |       4096 |          7.4 |         25.2 | +242.3% |
-| mixed_random_60r_20w_20d          |    1048576 |          0.1 |          0.1 |   +4.7% |
-
-Range scenarios:
-
-| operation              | value_size | before (8MB) | after (32MB) |  delta |
-| ---------------------- | ---------: | -----------: | -----------: | -----: |
-| range_seq_window_64    |         32 |        114.9 |        111.1 |  -3.3% |
-| range_seq_window_64    |        256 |        112.4 |        113.0 |  +0.6% |
-| range_seq_window_64    |       4096 |          2.2 |          1.5 | -32.7% |
-| range_random_window_64 |         32 |        140.8 |        143.9 |  +2.2% |
-| range_random_window_64 |        256 |        109.3 |        104.2 |  -4.7% |
-| range_random_window_64 |       4096 |          0.3 |          0.3 | +17.0% |
+| scenario                          | value_size | before (Lazy phase) | after (32MB default) |  delta |
+| --------------------------------- | ---------: | ------------------: | -------------------: | -----: |
+| mixed_random_70r_30w              |         32 |               138.1 |                125.5 |  -9.1% |
+| mixed_random_70r_30w              |        256 |               116.6 |                117.6 |  +0.9% |
+| mixed_random_70r_30w              |       4096 |                32.0 |                 31.8 |  -0.6% |
+| mixed_random_70r_30w              |    1048576 |                 0.3 |                  0.1 | -66.7% |
+| mixed_random_50r_50w_with_updates |         32 |                97.3 |                 92.9 |  -4.5% |
+| mixed_random_50r_50w_with_updates |        256 |               101.6 |                106.4 |  +4.7% |
+| mixed_random_50r_50w_with_updates |       4096 |                20.9 |                 21.4 |  +2.4% |
+| mixed_random_50r_50w_with_updates |    1048576 |                 0.3 |                  0.1 | -66.7% |
+| mixed_random_60r_20w_20d          |         32 |               144.1 |                145.6 |  +1.0% |
+| mixed_random_60r_20w_20d          |        256 |               116.8 |                118.6 |  +1.5% |
+| mixed_random_60r_20w_20d          |       4096 |                25.8 |                 25.2 |  -2.3% |
+| mixed_random_60r_20w_20d          |    1048576 |                 0.9 |                  0.1 | -88.9% |
