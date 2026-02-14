@@ -1112,8 +1112,8 @@ mod tests {
     // =========================================================================
 
     use crate::sync_manager::{
-        ClientId, ClientRole, Destination, InboxEntry, PersistenceTier, ServerId, Source,
-        SyncPayload,
+        ClientId, ClientRole, Destination, InboxEntry, OutboxEntry, PersistenceTier, ServerId,
+        Source, SyncPayload,
     };
 
     /// Three-tier RuntimeCore setup for durability tests.
@@ -1358,6 +1358,18 @@ mod tests {
         pump_b_to_a(s);
     }
 
+    fn count_query_subscriptions_to_server(entries: &[OutboxEntry], server_id: ServerId) -> usize {
+        entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.destination,
+                    Destination::Server(dest_server_id) if *dest_server_id == server_id
+                ) && matches!(&entry.payload, SyncPayload::QuerySubscription { .. })
+            })
+            .count()
+    }
+
     #[test]
     fn rc_replays_downstream_query_when_upstream_added_late() {
         // Build A <-> B first (no B <-> C yet), so B processes a downstream
@@ -1484,6 +1496,65 @@ mod tests {
         assert!(
             forwarded_query_subscriptions > 0,
             "Expected B to replay existing downstream QuerySubscription(s) when adding upstream"
+        );
+    }
+
+    #[test]
+    fn rc_replays_active_queries_on_upstream_reconnect() {
+        let mut s = create_3tier_rc();
+
+        let _handle =
+            s.a.subscribe(Query::new("users"), |_delta| {}, None)
+                .unwrap();
+        pump_a_to_b(&mut s);
+
+        let initial_forwarded = s.b.sync_sender().take();
+        assert!(
+            count_query_subscriptions_to_server(&initial_forwarded, s.c_server_for_b) > 0,
+            "Expected initial QuerySubscription forwarding from B to C"
+        );
+
+        // Simulate upstream disconnect/reconnect.
+        s.b.remove_server(s.c_server_for_b);
+        s.b.add_server(s.c_server_for_b);
+        s.b.batched_tick();
+
+        let replayed_forwarded = s.b.sync_sender().take();
+        assert!(
+            count_query_subscriptions_to_server(&replayed_forwarded, s.c_server_for_b) > 0,
+            "Expected active QuerySubscription replay after upstream reconnect"
+        );
+    }
+
+    #[test]
+    fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
+        let mut s = create_3tier_rc();
+
+        let handle =
+            s.a.subscribe(Query::new("users"), |_delta| {}, None)
+                .unwrap();
+        pump_a_to_b(&mut s);
+
+        let initial_forwarded = s.b.sync_sender().take();
+        assert!(
+            count_query_subscriptions_to_server(&initial_forwarded, s.c_server_for_b) > 0,
+            "Expected initial QuerySubscription forwarding from B to C"
+        );
+
+        s.a.unsubscribe(handle);
+        pump_a_to_b(&mut s);
+        s.b.sync_sender().take(); // Drain unsubscription forwarding and unrelated traffic.
+
+        // Reconnect upstream and ensure replay no longer includes this query.
+        s.b.remove_server(s.c_server_for_b);
+        s.b.add_server(s.c_server_for_b);
+        s.b.batched_tick();
+
+        let replayed_forwarded = s.b.sync_sender().take();
+        assert_eq!(
+            count_query_subscriptions_to_server(&replayed_forwarded, s.c_server_for_b),
+            0,
+            "Unsubscribed query must not be replayed after upstream reconnect"
         );
     }
 
