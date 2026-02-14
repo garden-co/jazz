@@ -20,6 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Rust build deps
         run: |
           apt-get update
