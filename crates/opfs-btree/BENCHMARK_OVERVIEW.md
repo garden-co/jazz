@@ -463,3 +463,46 @@ Aggregate medians:
 | overall aggregate |     4405.4 |    4293.0 | -2.6% |
 
 Interpretation: this first in-place implementation regressed overall throughput versus the raw-only baseline.
+
+## Phase: In-Place Leaf Mutation Follow-Up (Tail Allocator + Slot Hint)
+
+Changes in this phase:
+
+- Kept the raw in-place leaf fast path, but switched from full payload rewrite to:
+  - slot-only shifts for insert/delete,
+  - tail allocation for new key/value cells,
+  - in-place overwrite for same-key updates when the new value cell fits.
+- Added leaf `data_start` hint in the page header reserved bytes (u24 in bytes `5..7`) to avoid per-op slot scans on hot paths.
+- Added on-demand leaf compaction fallback when contiguous free space is insufficient.
+
+Benchmark method:
+
+- Before = previous in-place phase runs:
+  - `/tmp/opfs_inplace_run1.json`
+  - `/tmp/opfs_inplace_run2.json`
+  - `/tmp/opfs_inplace_run3.json`
+- After = this follow-up phase runs:
+  - `/tmp/opfs_inplace2_run1.json`
+  - `/tmp/opfs_inplace2_run2.json`
+  - `/tmp/opfs_inplace2_run3.json`
+- Command shape: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Run deltas (before -> after):
+
+| run    | mixed delta | range delta | cold delta | overall delta |
+| ------ | ----------: | ----------: | ---------: | ------------: |
+| 1      |       -1.5% |       -0.6% |     +11.3% |         +5.9% |
+| 2      |       -3.0% |       -0.1% |     -11.6% |         -7.7% |
+| 3      |       -0.6% |       -1.9% |      -2.9% |         -2.1% |
+| median |       -1.5% |       -0.6% |      -2.9% |         -2.1% |
+
+Aggregate medians:
+
+| metric            | before K/s | after K/s | delta |
+| ----------------- | ---------: | --------: | ----: |
+| mixed aggregate   |     1129.6 |    1115.9 | -1.2% |
+| range aggregate   |      607.3 |     601.2 | -1.0% |
+| cold aggregate    |     2401.2 |    2342.4 | -2.4% |
+| overall aggregate |     4130.7 |    4072.3 | -1.4% |
+
+Interpretation: this follow-up reduced the size of the regression versus the first in-place attempt, but it is still slower than the previous in-place baseline.
