@@ -951,7 +951,7 @@ fn leaf_search_position(
     let mut hi = entry_count;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let (current_key, _) = leaf_entry(payload, entry_count, mid)?;
+        let current_key = leaf_key(payload, entry_count, mid)?;
         match current_key.cmp(key) {
             std::cmp::Ordering::Less => lo = mid + 1,
             std::cmp::Ordering::Greater => hi = mid,
@@ -966,10 +966,24 @@ fn leaf_entry<'a>(
     entry_count: usize,
     idx: usize,
 ) -> Result<(&'a [u8], ValueCellRef<'a>), BTreeError> {
-    let (key_off, key_len, value_off) = leaf_slot(payload, entry_count, idx)?;
-    let key = slice_payload(payload, key_off, key_len, "leaf key")?;
+    let (key, value_off) = leaf_key_and_value_off(payload, entry_count, idx)?;
     let value = parse_leaf_value_cell_at(payload, value_off)?;
     Ok((key, value))
+}
+
+fn leaf_key(payload: &[u8], entry_count: usize, idx: usize) -> Result<&[u8], BTreeError> {
+    let (key, _) = leaf_key_and_value_off(payload, entry_count, idx)?;
+    Ok(key)
+}
+
+fn leaf_key_and_value_off(
+    payload: &[u8],
+    entry_count: usize,
+    idx: usize,
+) -> Result<(&[u8], usize), BTreeError> {
+    let (key_off, key_len, value_off) = leaf_slot(payload, entry_count, idx)?;
+    let key = slice_payload(payload, key_off, key_len, "leaf key")?;
+    Ok((key, value_off))
 }
 
 fn compact_leaf_in_place(raw: &mut [u8], expected_page_size: usize) -> Result<(), BTreeError> {
