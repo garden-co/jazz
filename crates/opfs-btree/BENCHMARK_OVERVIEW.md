@@ -552,3 +552,43 @@ Aggregate medians:
 | overall aggregate |     4072.3 |    4200.1 | +3.1% |
 
 Interpretation: locality-aware allocation recovers and improves cold-read throughput, with a net positive overall delta.
+
+## Phase: Key-Only Leaf Binary Search
+
+Changes in this phase:
+
+- Removed value-cell parsing from leaf binary-search comparisons in `page.rs`.
+- `leaf_search_position` now reads only key slices (`leaf_key`) while searching.
+- Value parsing is only performed once the target slot is found (or when explicitly needed).
+
+Benchmark method:
+
+- Before = locality-allocation runs:
+  - `/tmp/opfs_locality_run1.json`
+  - `/tmp/opfs_locality_run2.json`
+  - `/tmp/opfs_locality_run3.json`
+- After = key-only-search runs:
+  - `/tmp/opfs_keyonly_run1.json`
+  - `/tmp/opfs_keyonly_run2.json`
+  - `/tmp/opfs_keyonly_run3.json`
+- Command shape: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Run deltas (before -> after):
+
+| run    | mixed delta | range delta | cold delta | overall delta |
+| ------ | ----------: | ----------: | ---------: | ------------: |
+| 1      |       -3.6% |       -3.0% |      +5.7% |         +1.9% |
+| 2      |       +0.7% |       -2.8% |      -0.5% |         -0.5% |
+| 3      |       +1.5% |       -1.0% |      +2.3% |         +1.6% |
+| median |       +0.7% |       -2.8% |      +2.3% |         +1.6% |
+
+Aggregate medians:
+
+| metric            | before K/s | after K/s | delta |
+| ----------------- | ---------: | --------: | ----: |
+| mixed aggregate   |     1116.8 |    1128.9 | +1.1% |
+| range aggregate   |      601.7 |     591.5 | -1.7% |
+| cold aggregate    |     2472.2 |    2544.2 | +2.9% |
+| overall aggregate |     4200.1 |    4207.0 | +0.2% |
+
+Interpretation: key-only search reduces compare-path CPU and slightly improves mixed/cold throughput, but range regressed in this sample set.
