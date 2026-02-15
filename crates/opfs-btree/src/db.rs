@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
-    Page, PageId, PageKind, ValueCell, ValueCellRef, decode_page, encode_page,
-    freelist_ids_per_page, overflow_chunk_capacity, page_fits, raw_freelist_page,
-    raw_internal_child_for_key, raw_leaf_find_value, raw_leaf_scan, raw_overflow_chunk,
-    raw_page_kind, validate_page,
+    Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell, ValueCellRef,
+    decode_page, encode_page, freelist_ids_per_page, overflow_chunk_capacity, page_fits,
+    raw_freelist_page, raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value,
+    raw_leaf_scan, raw_leaf_upsert_in_place, raw_overflow_chunk, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -366,14 +366,47 @@ impl<F: SyncFile> OpfsBTree<F> {
         value: &[u8],
     ) -> Result<Option<SplitResult>, BTreeError> {
         self.ensure_page_loaded(page_id)?;
-        let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-            BTreeError::Corrupt(format!("page {} missing during insert", page_id))
-        })?;
-        let page = decode_page(&page_raw, self.options.page_size)?;
+        let kind = {
+            let raw = self.raw_page_bytes(page_id)?;
+            raw_page_kind(raw, self.options.page_size)?
+        };
 
-        match page {
-            Page::Leaf { mut entries, next } => {
+        match kind {
+            PageKind::Leaf => {
                 let new_value = self.build_value_cell(value)?;
+                let upsert = {
+                    let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
+                        BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+                    })?;
+                    raw_leaf_upsert_in_place(raw, self.options.page_size, key, &new_value)?
+                };
+
+                match upsert {
+                    RawLeafUpsertResult::Inserted => {
+                        self.mark_dirty_loaded_page(page_id);
+                        return Ok(None);
+                    }
+                    RawLeafUpsertResult::Updated { old_overflow } => {
+                        self.mark_dirty_loaded_page(page_id);
+                        if let Some(old_overflow) = old_overflow {
+                            self.free_overflow_chain(old_overflow.head_page_id)?;
+                        }
+                        return Ok(None);
+                    }
+                    RawLeafUpsertResult::NeedSplit => {}
+                }
+
+                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
+                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+                })?;
+                let page = decode_page(&page_raw, self.options.page_size)?;
+                let Page::Leaf { mut entries, next } = page else {
+                    return Err(BTreeError::Corrupt(format!(
+                        "expected leaf page {}, found non-leaf during split fallback",
+                        page_id
+                    )));
+                };
+
                 match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
                     Ok(idx) => {
                         let old_value = std::mem::replace(&mut entries[idx].1, new_value);
@@ -424,10 +457,21 @@ impl<F: SyncFile> OpfsBTree<F> {
                     right_page_id,
                 }))
             }
-            Page::Internal {
-                mut keys,
-                mut children,
-            } => {
+            PageKind::Internal => {
+                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
+                    BTreeError::Corrupt(format!("page {} missing during insert", page_id))
+                })?;
+                let page = decode_page(&page_raw, self.options.page_size)?;
+                let Page::Internal {
+                    mut keys,
+                    mut children,
+                } = page
+                else {
+                    return Err(BTreeError::Corrupt(format!(
+                        "expected internal page {}, found non-internal during insert",
+                        page_id
+                    )));
+                };
                 let child_idx = child_index(&keys, key);
                 let child_page_id = *children.get(child_idx).ok_or_else(|| {
                     BTreeError::Corrupt(format!(
@@ -484,11 +528,11 @@ impl<F: SyncFile> OpfsBTree<F> {
                     right_page_id,
                 }))
             }
-            Page::Overflow { .. } => Err(BTreeError::Corrupt(format!(
+            PageKind::Overflow => Err(BTreeError::Corrupt(format!(
                 "insert reached overflow page {}",
                 page_id
             ))),
-            Page::Freelist { .. } => Err(BTreeError::Corrupt(format!(
+            PageKind::Freelist => Err(BTreeError::Corrupt(format!(
                 "insert reached freelist page {}",
                 page_id
             ))),
@@ -497,23 +541,41 @@ impl<F: SyncFile> OpfsBTree<F> {
 
     fn delete_recursive(&mut self, page_id: PageId, key: &[u8]) -> Result<bool, BTreeError> {
         self.ensure_page_loaded(page_id)?;
-        let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
-            BTreeError::Corrupt(format!("page {} missing during delete", page_id))
-        })?;
-        let page = decode_page(&page_raw, self.options.page_size)?;
+        let kind = {
+            let raw = self.raw_page_bytes(page_id)?;
+            raw_page_kind(raw, self.options.page_size)?
+        };
 
-        match page {
-            Page::Leaf { mut entries, next } => {
-                let idx = match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
-                    Ok(idx) => idx,
-                    Err(_) => return Ok(false),
+        match kind {
+            PageKind::Leaf => {
+                let deleted = {
+                    let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
+                        BTreeError::Corrupt(format!("page {} missing during delete", page_id))
+                    })?;
+                    raw_leaf_delete_in_place(raw, self.options.page_size, key)?
                 };
-                let (_, value) = entries.remove(idx);
-                self.free_value_cell(value)?;
-                self.set_dirty_page(page_id, Page::Leaf { entries, next })?;
-                Ok(true)
+                match deleted {
+                    RawLeafDeleteResult::NotFound => Ok(false),
+                    RawLeafDeleteResult::Deleted { old_overflow, .. } => {
+                        self.mark_dirty_loaded_page(page_id);
+                        if let Some(old_overflow) = old_overflow {
+                            self.free_overflow_chain(old_overflow.head_page_id)?;
+                        }
+                        Ok(true)
+                    }
+                }
             }
-            Page::Internal { keys, children } => {
+            PageKind::Internal => {
+                let page_raw = self.pages.get(&page_id).cloned().ok_or_else(|| {
+                    BTreeError::Corrupt(format!("page {} missing during delete", page_id))
+                })?;
+                let page = decode_page(&page_raw, self.options.page_size)?;
+                let Page::Internal { keys, children } = page else {
+                    return Err(BTreeError::Corrupt(format!(
+                        "expected internal page {}, found non-internal during delete",
+                        page_id
+                    )));
+                };
                 let child_idx = child_index(&keys, key);
                 let child_page_id = *children.get(child_idx).ok_or_else(|| {
                     BTreeError::Corrupt(format!(
@@ -523,11 +585,11 @@ impl<F: SyncFile> OpfsBTree<F> {
                 })?;
                 self.delete_recursive(child_page_id, key)
             }
-            Page::Overflow { .. } => Err(BTreeError::Corrupt(format!(
+            PageKind::Overflow => Err(BTreeError::Corrupt(format!(
                 "delete reached overflow page {}",
                 page_id
             ))),
-            Page::Freelist { .. } => Err(BTreeError::Corrupt(format!(
+            PageKind::Freelist => Err(BTreeError::Corrupt(format!(
                 "delete reached freelist page {}",
                 page_id
             ))),
@@ -906,10 +968,14 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn set_dirty_page(&mut self, page_id: PageId, page: Page) -> Result<(), BTreeError> {
         let raw = encode_page(&page, self.options.page_size)?;
         self.pages.insert(page_id, raw);
+        self.mark_dirty_loaded_page(page_id);
+        Ok(())
+    }
+
+    fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
         self.dirty_pages.insert(page_id);
         self.touch_page(page_id);
         self.evict_pages_if_needed(Some(page_id));
-        Ok(())
     }
 
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {

@@ -40,6 +40,28 @@ pub(crate) enum ValueCellRef<'a> {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverflowRef {
+    pub head_page_id: PageId,
+    pub total_len: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RawLeafUpsertResult {
+    Inserted,
+    Updated { old_overflow: Option<OverflowRef> },
+    NeedSplit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RawLeafDeleteResult {
+    NotFound,
+    Deleted {
+        old_overflow: Option<OverflowRef>,
+        is_empty: bool,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
     Internal {
@@ -329,6 +351,170 @@ pub(crate) fn raw_leaf_scan<'a>(
     Ok(header.next_page_id)
 }
 
+pub(crate) fn raw_leaf_upsert_in_place(
+    raw: &mut [u8],
+    expected_page_size: usize,
+    key: &[u8],
+    value: &ValueCell,
+) -> Result<RawLeafUpsertResult, BTreeError> {
+    let (new_payload, new_count, result) = {
+        let header = parse_header(raw, expected_page_size, false)?;
+        if header.kind != PageKind::Leaf {
+            return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+        }
+
+        let entry_count = header.item_count as usize;
+        let slots_bytes = leaf_slots_bytes(entry_count)?;
+        if header.payload.len() < slots_bytes {
+            return Err(BTreeError::Corrupt(
+                "leaf page payload shorter than slot directory".to_string(),
+            ));
+        }
+
+        let pos = leaf_search_position(header.payload, entry_count, key)?;
+        let (replace_idx, insert_idx, old_overflow, new_count) = match pos {
+            Ok(idx) => (
+                Some(idx),
+                idx,
+                Some(leaf_entry(header.payload, entry_count, idx)?.1)
+                    .and_then(overflow_from_value_ref),
+                entry_count,
+            ),
+            Err(idx) => (None, idx, None, entry_count.saturating_add(1)),
+        };
+
+        let new_slots_bytes = leaf_slots_bytes(new_count)?;
+        let mut slots = Vec::with_capacity(new_slots_bytes);
+        let mut data = Vec::new();
+        let new_value_ref = value_cell_as_ref(value);
+
+        if let Some(replace_idx) = replace_idx {
+            for idx in 0..entry_count {
+                let (entry_key, entry_value) = leaf_entry(header.payload, entry_count, idx)?;
+                if idx == replace_idx {
+                    push_leaf_slot_entry(
+                        &mut slots,
+                        &mut data,
+                        new_slots_bytes,
+                        entry_key,
+                        new_value_ref,
+                    )?;
+                } else {
+                    push_leaf_slot_entry(
+                        &mut slots,
+                        &mut data,
+                        new_slots_bytes,
+                        entry_key,
+                        entry_value,
+                    )?;
+                }
+            }
+        } else {
+            for out_idx in 0..new_count {
+                if out_idx == insert_idx {
+                    push_leaf_slot_entry(
+                        &mut slots,
+                        &mut data,
+                        new_slots_bytes,
+                        key,
+                        new_value_ref,
+                    )?;
+                    continue;
+                }
+                let src_idx = if out_idx < insert_idx {
+                    out_idx
+                } else {
+                    out_idx.saturating_sub(1)
+                };
+                let (entry_key, entry_value) = leaf_entry(header.payload, entry_count, src_idx)?;
+                push_leaf_slot_entry(
+                    &mut slots,
+                    &mut data,
+                    new_slots_bytes,
+                    entry_key,
+                    entry_value,
+                )?;
+            }
+        }
+
+        let mut new_payload = Vec::with_capacity(slots.len().saturating_add(data.len()));
+        new_payload.extend_from_slice(&slots);
+        new_payload.extend_from_slice(&data);
+
+        let result = if replace_idx.is_some() {
+            RawLeafUpsertResult::Updated { old_overflow }
+        } else {
+            RawLeafUpsertResult::Inserted
+        };
+
+        (new_payload, new_count, result)
+    };
+
+    if new_payload.len() > page_payload_capacity(expected_page_size)? {
+        return Ok(RawLeafUpsertResult::NeedSplit);
+    }
+    write_leaf_payload(raw, expected_page_size, new_count as u32, &new_payload)?;
+    Ok(result)
+}
+
+pub(crate) fn raw_leaf_delete_in_place(
+    raw: &mut [u8],
+    expected_page_size: usize,
+    key: &[u8],
+) -> Result<RawLeafDeleteResult, BTreeError> {
+    let (new_payload, new_count, old_overflow) = {
+        let header = parse_header(raw, expected_page_size, false)?;
+        if header.kind != PageKind::Leaf {
+            return Err(BTreeError::Corrupt("expected leaf page".to_string()));
+        }
+
+        let entry_count = header.item_count as usize;
+        let slots_bytes = leaf_slots_bytes(entry_count)?;
+        if header.payload.len() < slots_bytes {
+            return Err(BTreeError::Corrupt(
+                "leaf page payload shorter than slot directory".to_string(),
+            ));
+        }
+
+        let delete_idx = match leaf_search_position(header.payload, entry_count, key)? {
+            Ok(idx) => idx,
+            Err(_) => return Ok(RawLeafDeleteResult::NotFound),
+        };
+        let (_, old_value) = leaf_entry(header.payload, entry_count, delete_idx)?;
+        let old_overflow = overflow_from_value_ref(old_value);
+
+        let new_count = entry_count.saturating_sub(1);
+        let new_slots_bytes = leaf_slots_bytes(new_count)?;
+        let mut slots = Vec::with_capacity(new_slots_bytes);
+        let mut data = Vec::new();
+
+        for idx in 0..entry_count {
+            if idx == delete_idx {
+                continue;
+            }
+            let (entry_key, entry_value) = leaf_entry(header.payload, entry_count, idx)?;
+            push_leaf_slot_entry(
+                &mut slots,
+                &mut data,
+                new_slots_bytes,
+                entry_key,
+                entry_value,
+            )?;
+        }
+
+        let mut new_payload = Vec::with_capacity(slots.len().saturating_add(data.len()));
+        new_payload.extend_from_slice(&slots);
+        new_payload.extend_from_slice(&data);
+        (new_payload, new_count, old_overflow)
+    };
+
+    write_leaf_payload(raw, expected_page_size, new_count as u32, &new_payload)?;
+    Ok(RawLeafDeleteResult::Deleted {
+        old_overflow,
+        is_empty: new_count == 0,
+    })
+}
+
 pub(crate) fn raw_overflow_chunk(
     raw: &[u8],
     expected_page_size: usize,
@@ -603,23 +789,144 @@ fn parse_leaf_value_cell_at<'a>(
 }
 
 fn encode_leaf_value_cell(value: &ValueCell, out: &mut Vec<u8>) -> Result<(), BTreeError> {
+    encode_leaf_value_cell_ref(value_cell_as_ref(value), out)
+}
+
+fn encode_leaf_value_cell_ref(
+    value: ValueCellRef<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), BTreeError> {
     match value {
-        ValueCell::Inline(v) => {
+        ValueCellRef::Inline(v) => {
             let value_len = u32::try_from(v.len())
                 .map_err(|_| BTreeError::InvalidOptions("inline value too large".to_string()))?;
             out.push(0);
             out.extend_from_slice(&value_len.to_le_bytes());
             out.extend_from_slice(v);
+            Ok(())
         }
-        ValueCell::Overflow {
+        ValueCellRef::Overflow {
             head_page_id,
             total_len,
         } => {
             out.push(1);
             out.extend_from_slice(&head_page_id.to_le_bytes());
             out.extend_from_slice(&total_len.to_le_bytes());
+            Ok(())
         }
     }
+}
+
+fn value_cell_as_ref(value: &ValueCell) -> ValueCellRef<'_> {
+    match value {
+        ValueCell::Inline(v) => ValueCellRef::Inline(v.as_slice()),
+        ValueCell::Overflow {
+            head_page_id,
+            total_len,
+        } => ValueCellRef::Overflow {
+            head_page_id: *head_page_id,
+            total_len: *total_len,
+        },
+    }
+}
+
+fn overflow_from_value_ref(value: ValueCellRef<'_>) -> Option<OverflowRef> {
+    match value {
+        ValueCellRef::Inline(_) => None,
+        ValueCellRef::Overflow {
+            head_page_id,
+            total_len,
+        } => Some(OverflowRef {
+            head_page_id,
+            total_len,
+        }),
+    }
+}
+
+fn leaf_search_position(
+    payload: &[u8],
+    entry_count: usize,
+    key: &[u8],
+) -> Result<Result<usize, usize>, BTreeError> {
+    let mut lo = 0usize;
+    let mut hi = entry_count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let (current_key, _) = leaf_entry(payload, entry_count, mid)?;
+        match current_key.cmp(key) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Ok(Ok(mid)),
+        }
+    }
+    Ok(Err(lo))
+}
+
+fn leaf_entry<'a>(
+    payload: &'a [u8],
+    entry_count: usize,
+    idx: usize,
+) -> Result<(&'a [u8], ValueCellRef<'a>), BTreeError> {
+    let (key_off, key_len, value_off) = leaf_slot(payload, entry_count, idx)?;
+    let key = slice_payload(payload, key_off, key_len, "leaf key")?;
+    let value = parse_leaf_value_cell_at(payload, value_off)?;
+    Ok((key, value))
+}
+
+fn push_leaf_slot_entry(
+    slots: &mut Vec<u8>,
+    data: &mut Vec<u8>,
+    slots_bytes: usize,
+    key: &[u8],
+    value: ValueCellRef<'_>,
+) -> Result<(), BTreeError> {
+    let key_len = u32::try_from(key.len())
+        .map_err(|_| BTreeError::InvalidOptions("leaf key too large".to_string()))?;
+    let key_off = slots_bytes
+        .checked_add(data.len())
+        .ok_or_else(|| BTreeError::InvalidOptions("leaf key offset overflow".to_string()))?;
+    let key_off = u32::try_from(key_off)
+        .map_err(|_| BTreeError::InvalidOptions("leaf key offset too large".to_string()))?;
+    data.extend_from_slice(key);
+
+    let value_off = slots_bytes
+        .checked_add(data.len())
+        .ok_or_else(|| BTreeError::InvalidOptions("leaf value offset overflow".to_string()))?;
+    let value_off = u32::try_from(value_off)
+        .map_err(|_| BTreeError::InvalidOptions("leaf value offset too large".to_string()))?;
+    encode_leaf_value_cell_ref(value, data)?;
+
+    slots.extend_from_slice(&key_off.to_le_bytes());
+    slots.extend_from_slice(&key_len.to_le_bytes());
+    slots.extend_from_slice(&value_off.to_le_bytes());
+    Ok(())
+}
+
+fn write_leaf_payload(
+    raw: &mut [u8],
+    expected_page_size: usize,
+    item_count: u32,
+    payload: &[u8],
+) -> Result<(), BTreeError> {
+    if raw.len() != expected_page_size {
+        return Err(BTreeError::Corrupt(format!(
+            "page length mismatch: found {}, expected {}",
+            raw.len(),
+            expected_page_size
+        )));
+    }
+    if payload.len() > page_payload_capacity(expected_page_size)? {
+        return Err(BTreeError::InvalidOptions(
+            "leaf payload exceeds page size".to_string(),
+        ));
+    }
+
+    raw[16..20].copy_from_slice(&item_count.to_le_bytes());
+    raw[20..24].copy_from_slice(&0u32.to_le_bytes());
+    raw[PAGE_HEADER_BYTES..].fill(0);
+    raw[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + payload.len()].copy_from_slice(payload);
+    let checksum = page_checksum(raw);
+    raw[20..24].copy_from_slice(&checksum.to_le_bytes());
     Ok(())
 }
 
@@ -818,5 +1125,98 @@ mod tests {
 
         let err = decode_page(&encoded, 4096).expect_err("must fail checksum");
         assert!(matches!(err, BTreeError::Corrupt(_)));
+    }
+
+    #[test]
+    fn leaf_upsert_in_place_insert_update_and_delete() {
+        let mut raw = encode_page(
+            &Page::Leaf {
+                entries: vec![
+                    (b"a".to_vec(), ValueCell::Inline(b"1".to_vec())),
+                    (b"c".to_vec(), ValueCell::Inline(b"3".to_vec())),
+                ],
+                next: Some(9),
+            },
+            4096,
+        )
+        .expect("encode");
+
+        let inserted =
+            raw_leaf_upsert_in_place(&mut raw, 4096, b"b", &ValueCell::Inline(b"2".to_vec()))
+                .expect("insert in place");
+        assert_eq!(inserted, RawLeafUpsertResult::Inserted);
+
+        let updated =
+            raw_leaf_upsert_in_place(&mut raw, 4096, b"c", &ValueCell::Inline(b"30".to_vec()))
+                .expect("update in place");
+        assert_eq!(updated, RawLeafUpsertResult::Updated { old_overflow: None });
+
+        let deleted = raw_leaf_delete_in_place(&mut raw, 4096, b"a").expect("delete in place");
+        assert_eq!(
+            deleted,
+            RawLeafDeleteResult::Deleted {
+                old_overflow: None,
+                is_empty: false,
+            }
+        );
+
+        let decoded = decode_page(&raw, 4096).expect("decode");
+        assert_eq!(
+            decoded,
+            Page::Leaf {
+                entries: vec![
+                    (b"b".to_vec(), ValueCell::Inline(b"2".to_vec())),
+                    (b"c".to_vec(), ValueCell::Inline(b"30".to_vec())),
+                ],
+                next: Some(9),
+            }
+        );
+    }
+
+    #[test]
+    fn leaf_upsert_in_place_returns_need_split_when_payload_overflows() {
+        let mut raw = encode_page(
+            &Page::Leaf {
+                entries: vec![(b"a".to_vec(), ValueCell::Inline(vec![1u8; 80]))],
+                next: None,
+            },
+            128,
+        )
+        .expect("encode");
+
+        let result =
+            raw_leaf_upsert_in_place(&mut raw, 128, b"b", &ValueCell::Inline(vec![2u8; 80]))
+                .expect("upsert");
+        assert_eq!(result, RawLeafUpsertResult::NeedSplit);
+    }
+
+    #[test]
+    fn leaf_delete_in_place_reports_deleted_overflow() {
+        let mut raw = encode_page(
+            &Page::Leaf {
+                entries: vec![(
+                    b"k".to_vec(),
+                    ValueCell::Overflow {
+                        head_page_id: 77,
+                        total_len: 1024,
+                    },
+                )],
+                next: None,
+            },
+            4096,
+        )
+        .expect("encode");
+
+        let result = raw_leaf_delete_in_place(&mut raw, 4096, b"k").expect("delete");
+        assert_eq!(
+            result,
+            RawLeafDeleteResult::Deleted {
+                old_overflow: Some(OverflowRef {
+                    head_page_id: 77,
+                    total_len: 1024,
+                }),
+                is_empty: true,
+            }
+        );
     }
 }
