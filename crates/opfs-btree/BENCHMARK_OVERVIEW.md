@@ -337,3 +337,41 @@ Benchmark method:
 | median |       -0.9% |      +23.2% |      -9.1% |         -2.8% |
 
 Interpretation: the slot-directory format consistently improves range throughput, but cold point-read throughput regressed versus the prior read-coalescing baseline.
+
+## Phase: Raw-Only Page Cache (Decode-On-Demand)
+
+Changes in this phase:
+
+- Removed the mixed raw/decoded cache model in `db.rs`; cache entries are now always raw page bytes.
+- Mutation paths (`put`/`delete`) decode page bytes only for the active edit and re-encode immediately on dirty-set.
+- Read paths (`get`/`range`/tree descent/overflow) stay fully on the raw slot-directory helpers.
+
+Benchmark method:
+
+- Before = slot-directory baseline runs:
+  - `/tmp/opfs_slotdir_current.json`
+  - `/tmp/opfs_slotdir_current2.json`
+  - `/tmp/opfs_slotdir_current3.json`
+- After = raw-only cache runs:
+  - `/tmp/opfs_raw_only_run1.json`
+  - `/tmp/opfs_raw_only_run2.json`
+  - `/tmp/opfs_raw_only_run3.json`
+- Command shape: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Run deltas (before -> after):
+
+| run    | mixed delta | range delta | cold delta | overall delta |
+| ------ | ----------: | ----------: | ---------: | ------------: |
+| 1      |       +9.7% |      +10.1% |     +45.6% |        +28.4% |
+| 2      |       +3.1% |       +9.2% |      +5.4% |         +5.3% |
+| 3      |       -1.0% |       +0.5% |      +0.5% |         +0.1% |
+| median |       +3.1% |       +9.2% |      +5.4% |         +5.3% |
+
+Aggregate medians:
+
+| metric            | before K/s | after K/s | delta |
+| ----------------- | ---------: | --------: | ----: |
+| mixed aggregate   |     1116.3 |    1185.5 | +6.2% |
+| range aggregate   |      586.8 |     621.9 | +6.0% |
+| cold aggregate    |     2529.4 |    2582.9 | +2.1% |
+| overall aggregate |     4263.3 |    4390.3 | +3.0% |
