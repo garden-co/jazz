@@ -16,6 +16,7 @@ const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 8 * 1024;
 const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
+const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 
@@ -636,7 +637,6 @@ impl<F: SyncFile> OpfsBTree<F> {
         head_page_id: PageId,
         expected_len: usize,
     ) -> Result<Vec<u8>, BTreeError> {
-        let mut out = Vec::with_capacity(expected_len);
         let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
         if max_chunk == 0 {
             return Err(BTreeError::InvalidOptions(
@@ -644,6 +644,14 @@ impl<F: SyncFile> OpfsBTree<F> {
             ));
         }
         let page_count = overflow_pages_for_len(expected_len, max_chunk);
+
+        if expected_len >= OVERFLOW_DIRECT_READ_MIN_BYTES
+            && !self.overflow_extent_has_dirty_pages(head_page_id, page_count)?
+        {
+            return self.read_overflow_extent_direct(head_page_id, expected_len, page_count);
+        }
+
+        let mut out = Vec::with_capacity(expected_len);
         self.ensure_overflow_extent_loaded(head_page_id, page_count)?;
 
         for idx in 0..page_count {
@@ -667,6 +675,77 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         out.truncate(expected_len);
         Ok(out)
+    }
+
+    fn read_overflow_extent_direct(
+        &self,
+        head_page_id: PageId,
+        expected_len: usize,
+        page_count: usize,
+    ) -> Result<Vec<u8>, BTreeError> {
+        if page_count == 0 {
+            return Ok(Vec::new());
+        }
+        if head_page_id < 2 {
+            return Err(BTreeError::Corrupt(format!(
+                "overflow page id {} out of bounds",
+                head_page_id
+            )));
+        }
+        let last_page_id = head_page_id
+            .checked_add((page_count - 1) as u64)
+            .ok_or_else(|| BTreeError::Corrupt("overflow extent page id overflow".to_string()))?;
+        if last_page_id >= self.total_pages {
+            return Err(BTreeError::Corrupt(format!(
+                "overflow extent [{}..={}] exceeds total_pages {}",
+                head_page_id, last_page_id, self.total_pages
+            )));
+        }
+
+        let run_bytes = page_count
+            .checked_mul(self.options.page_size)
+            .ok_or_else(|| BTreeError::Io("overflow extent read size overflow".to_string()))?;
+        let offset = head_page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
+
+        let mut raw = vec![0u8; run_bytes];
+        self.file.read_exact_at(offset, &mut raw)?;
+
+        let mut out = Vec::with_capacity(expected_len);
+        for i in 0..page_count {
+            let start = i * self.options.page_size;
+            let end = start + self.options.page_size;
+            let page_raw = &raw[start..end];
+            let (chunk, _) = raw_overflow_chunk(page_raw, self.options.page_size)?;
+            out.extend_from_slice(chunk);
+        }
+
+        if out.len() < expected_len {
+            return Err(BTreeError::Corrupt(format!(
+                "overflow payload truncated: expected {}, found {}",
+                expected_len,
+                out.len()
+            )));
+        }
+        out.truncate(expected_len);
+        Ok(out)
+    }
+
+    fn overflow_extent_has_dirty_pages(
+        &self,
+        head_page_id: PageId,
+        page_count: usize,
+    ) -> Result<bool, BTreeError> {
+        for idx in 0..page_count {
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            if self.dirty_pages.contains(&page_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn free_value_cell(&mut self, value: ValueCell) -> Result<(), BTreeError> {
