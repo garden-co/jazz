@@ -421,3 +421,45 @@ Per-scenario and size:
 | range_seq_window_64               |         32 |               123.5 |       149.3 | +20.9% |
 | range_seq_window_64               |        256 |               114.5 |       153.1 | +33.7% |
 | range_seq_window_64               |       4096 |                 2.1 |         2.0 |  -4.2% |
+
+## Phase: In-Place Leaf Mutation (Raw Slotted Pages)
+
+Changes in this phase:
+
+- Added raw in-place leaf helpers in `page.rs`:
+  - `raw_leaf_upsert_in_place`
+  - `raw_leaf_delete_in_place`
+- Wired leaf fast paths in `db.rs` for `insert_recursive` and `delete_recursive`.
+- Kept decode/split fallback for cases where in-page upsert does not fit (`NeedSplit`).
+
+Benchmark method:
+
+- Before = raw-only cache phase medians from:
+  - `/tmp/opfs_raw_only_run1.json`
+  - `/tmp/opfs_raw_only_run2.json`
+  - `/tmp/opfs_raw_only_run3.json`
+- After = this phase medians from:
+  - `/tmp/opfs_inplace_run1.json`
+  - `/tmp/opfs_inplace_run2.json`
+  - `/tmp/opfs_inplace_run3.json`
+- Command shape: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Run deltas (before -> after):
+
+| run    | mixed delta | range delta | cold delta | overall delta |
+| ------ | ----------: | ----------: | ---------: | ------------: |
+| 1      |       -4.7% |       -0.6% |     -13.4% |         -9.2% |
+| 2      |       -3.3% |       -6.1% |      -0.6% |         -2.1% |
+| 3      |       +1.5% |       -0.2% |      -6.0% |         -3.2% |
+| median |       -3.3% |       -0.6% |      -6.0% |         -3.2% |
+
+Aggregate medians:
+
+| metric            | before K/s | after K/s | delta |
+| ----------------- | ---------: | --------: | ----: |
+| mixed aggregate   |     1182.8 |    1142.2 | -3.4% |
+| range aggregate   |      622.6 |     607.3 | -2.5% |
+| cold aggregate    |     2600.0 |    2543.5 | -2.2% |
+| overall aggregate |     4405.4 |    4293.0 | -2.6% |
+
+Interpretation: this first in-place implementation regressed overall throughput versus the raw-only baseline.
