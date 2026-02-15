@@ -3,3 +3,4 @@ bin/
 .pulumi/
 Pulumi.*.yaml
 !Pulumi.yaml
+.deploy-secrets-*.env

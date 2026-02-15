@@ -64,6 +64,53 @@ pulumi preview
 pulumi up
 ```
 
+## Local quick deploy script
+
+You can use:
+
+```bash
+cd crates/jazz-multi-server/deploy/pulumi
+./deploy-local.sh --aws-profile <profile> --yes
+```
+
+The script will:
+
+- Build and push `jazz-multi-server` to ECR (linux/amd64)
+- Initialize/select Pulumi stack `cloud2`
+- Set Pulumi config values
+- Generate missing secrets and persist them locally for reuse
+- Run `pulumi up`
+
+Important local file:
+
+- `.deploy-secrets-<stack>.env`
+  - Stores generated `internalApiSecret` and `secretHashKey`
+  - Reused on subsequent deploys so secret hashing remains stable
+
+### Inputs and secrets
+
+Required inputs:
+
+- AWS credentials (`AWS_PROFILE` or default credentials chain)
+- Pulumi login/session (`pulumi login` done)
+
+Required deploy secrets:
+
+- `internalApiSecret` (for `/internal/apps/*` auth)
+- `secretHashKey` (used to hash backend/admin secrets; must stay stable across redeploys)
+
+How secrets are handled:
+
+- If you pass `--internal-api-secret` / `--secret-hash-key`, those are used.
+- If omitted, the script auto-generates both and writes them to `.deploy-secrets-<stack>.env`.
+
+Useful optional inputs:
+
+- `--account-id` / `--allowed-account-id`
+- `--domain` (defaults to `cloud2.aws.cloud.jazz.tools`)
+- `--route53-delegation-role-arn` (for cross-account DNS writes)
+- `--image` with `--skip-build` (if image already exists)
+
 ## Notes
 
 - This is intentionally single-instance and minimal.
