@@ -375,3 +375,49 @@ Aggregate medians:
 | range aggregate   |      586.8 |     621.9 | +6.0% |
 | cold aggregate    |     2529.4 |    2582.9 | +2.1% |
 | overall aggregate |     4263.3 |    4390.3 | +3.0% |
+
+## Full Phase Comparison: Read Coalescing -> Current
+
+Method:
+
+- Baseline = read-coalescing phase result (`/tmp/opfs_read_coalesce_after.json`).
+- Current = median of:
+  - `/tmp/opfs_raw_only_run1.json`
+  - `/tmp/opfs_raw_only_run2.json`
+  - `/tmp/opfs_raw_only_run3.json`
+- Profile/settings matched: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Aggregate:
+
+| metric            | read-coalescing K/s | current K/s |  delta |
+| ----------------- | ------------------: | ----------: | -----: |
+| mixed aggregate   |              1126.9 |      1182.8 |  +5.0% |
+| range aggregate   |               476.5 |       622.6 | +30.7% |
+| cold aggregate    |              2783.0 |      2600.0 |  -6.6% |
+| overall aggregate |              4386.4 |      4405.4 |  +0.4% |
+
+Per-scenario and size:
+
+| scenario                          | value_size | read-coalescing K/s | current K/s |  delta |
+| --------------------------------- | ---------: | ------------------: | ----------: | -----: |
+| cold_random_read                  |         32 |               937.5 |       857.1 |  -8.6% |
+| cold_random_read                  |        256 |               379.7 |       405.4 |  +6.8% |
+| cold_random_read                  |       4096 |                33.7 |        35.6 |  +5.7% |
+| cold_seq_read                     |         32 |               882.4 |       731.7 | -17.1% |
+| cold_seq_read                     |        256 |               500.0 |       517.2 |  +3.4% |
+| cold_seq_read                     |       4096 |                49.8 |        52.9 |  +6.3% |
+| mixed_random_50r_50w_with_updates |         32 |                99.7 |       104.9 |  +5.2% |
+| mixed_random_50r_50w_with_updates |        256 |               176.5 |       184.0 |  +4.3% |
+| mixed_random_50r_50w_with_updates |       4096 |                35.2 |        37.6 |  +6.8% |
+| mixed_random_60r_20w_20d          |         32 |               154.6 |       170.5 | +10.2% |
+| mixed_random_60r_20w_20d          |        256 |               217.4 |       234.4 |  +7.8% |
+| mixed_random_60r_20w_20d          |       4096 |                35.8 |        40.7 | +13.7% |
+| mixed_random_70r_30w              |         32 |               142.9 |       137.6 |  -3.7% |
+| mixed_random_70r_30w              |        256 |               222.2 |       227.3 |  +2.3% |
+| mixed_random_70r_30w              |       4096 |                42.7 |        45.9 |  +7.5% |
+| range_random_window_64            |         32 |               135.7 |       176.5 | +30.0% |
+| range_random_window_64            |        256 |               100.3 |       141.5 | +41.0% |
+| range_random_window_64            |       4096 |                 0.3 |         0.3 |  -6.0% |
+| range_seq_window_64               |         32 |               123.5 |       149.3 | +20.9% |
+| range_seq_window_64               |        256 |               114.5 |       153.1 | +33.7% |
+| range_seq_window_64               |       4096 |                 2.1 |         2.0 |  -4.2% |
