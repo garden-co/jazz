@@ -313,19 +313,34 @@ pub(crate) fn raw_leaf_scan<'a>(
     }
 
     let entry_count = header.item_count as usize;
+    let payload = header.payload;
     let slots_bytes = leaf_slots_bytes(entry_count)?;
-    if header.payload.len() < slots_bytes {
+    if payload.len() < slots_bytes {
         return Err(BTreeError::Corrupt(
             "leaf page payload shorter than slot directory".to_string(),
         ));
     }
+    let slots = &payload[..slots_bytes];
 
     let mut lo = 0usize;
     let mut hi = entry_count;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let (key_off, key_len, _) = leaf_slot(header.payload, entry_count, mid)?;
-        let current_key = slice_payload(header.payload, key_off, key_len, "leaf key")?;
+        let slot_base = leaf_slot_base(mid)?;
+        let slot = &slots[slot_base..slot_base + LEAF_SLOT_BYTES];
+        let key_off =
+            u32::from_le_bytes(slot[0..4].try_into().expect("leaf key offset slot bytes")) as usize;
+        let key_len =
+            u32::from_le_bytes(slot[4..8].try_into().expect("leaf key length slot bytes")) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "leaf key exceeds payload bounds".to_string(),
+            ));
+        }
+        let current_key = &payload[key_off..key_end];
         if current_key < start {
             lo = mid + 1;
         } else {
@@ -334,17 +349,34 @@ pub(crate) fn raw_leaf_scan<'a>(
     }
 
     let mut emitted = 0usize;
-    let mut idx = lo;
-    while idx < entry_count && emitted < limit {
-        let (key_off, key_len, value_off) = leaf_slot(header.payload, entry_count, idx)?;
-        let key = slice_payload(header.payload, key_off, key_len, "leaf key")?;
+    let mut slot_base = leaf_slot_base(lo)?;
+    while slot_base < slots_bytes && emitted < limit {
+        let slot = &slots[slot_base..slot_base + LEAF_SLOT_BYTES];
+        let key_off =
+            u32::from_le_bytes(slot[0..4].try_into().expect("leaf key offset slot bytes")) as usize;
+        let key_len =
+            u32::from_le_bytes(slot[4..8].try_into().expect("leaf key length slot bytes")) as usize;
+        let value_off = u32::from_le_bytes(
+            slot[8..12]
+                .try_into()
+                .expect("leaf value offset slot bytes"),
+        ) as usize;
+        let key_end = key_off
+            .checked_add(key_len)
+            .ok_or_else(|| BTreeError::Corrupt("leaf key offset overflow".to_string()))?;
+        if key_end > payload.len() {
+            return Err(BTreeError::Corrupt(
+                "leaf key exceeds payload bounds".to_string(),
+            ));
+        }
+        let key = &payload[key_off..key_end];
         if key >= end {
             break;
         }
-        let value = parse_leaf_value_cell_at(header.payload, value_off)?;
+        let value = parse_leaf_value_cell_at(payload, value_off)?;
         visit(key, value)?;
         emitted += 1;
-        idx += 1;
+        slot_base += LEAF_SLOT_BYTES;
     }
 
     Ok(header.next_page_id)
