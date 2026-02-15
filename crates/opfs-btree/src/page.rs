@@ -648,6 +648,42 @@ pub(crate) fn raw_overflow_chunk(
     Ok((data, header.next_page_id))
 }
 
+pub(crate) fn encode_overflow_page_chunk(
+    chunk: &[u8],
+    next: Option<PageId>,
+    page_size: usize,
+) -> Result<Vec<u8>, BTreeError> {
+    if page_size < PAGE_HEADER_BYTES {
+        return Err(BTreeError::InvalidOptions(format!(
+            "page_size {} is too small",
+            page_size
+        )));
+    }
+    let payload_capacity = page_payload_capacity(page_size)?;
+    if chunk.len() > payload_capacity {
+        return Err(BTreeError::InvalidOptions(format!(
+            "overflow chunk {} exceeds page payload capacity {}",
+            chunk.len(),
+            payload_capacity
+        )));
+    }
+
+    let item_count = u32::try_from(chunk.len())
+        .map_err(|_| BTreeError::InvalidOptions("overflow chunk too large".to_string()))?;
+
+    let mut raw = vec![0u8; page_size];
+    raw[..4].copy_from_slice(&PAGE_MAGIC);
+    raw[4] = KIND_OVERFLOW;
+    set_leaf_data_start_hint(&mut raw, 0)?;
+    raw[8..16].copy_from_slice(&next.unwrap_or(0).to_le_bytes());
+    raw[16..20].copy_from_slice(&item_count.to_le_bytes());
+    raw[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + chunk.len()].copy_from_slice(chunk);
+
+    let checksum = page_checksum(&raw);
+    raw[20..24].copy_from_slice(&checksum.to_le_bytes());
+    Ok(raw)
+}
+
 pub(crate) fn raw_freelist_page(
     raw: &[u8],
     expected_page_size: usize,
@@ -1384,6 +1420,23 @@ mod tests {
 
         let err = decode_page(&encoded, 4096).expect_err("must fail checksum");
         assert!(matches!(err, BTreeError::Corrupt(_)));
+    }
+
+    #[test]
+    fn overflow_chunk_fast_encode_round_trip() {
+        let chunk = vec![7u8; 1234];
+        let raw = encode_overflow_page_chunk(&chunk, Some(42), 4096).expect("fast encode");
+        let (decoded_chunk, next) = raw_overflow_chunk(&raw, 4096).expect("raw overflow");
+        assert_eq!(decoded_chunk, chunk.as_slice());
+        assert_eq!(next, Some(42));
+        let decoded_page = decode_page(&raw, 4096).expect("decode");
+        assert_eq!(
+            decoded_page,
+            Page::Overflow {
+                data: chunk,
+                next: Some(42),
+            }
+        );
     }
 
     #[test]

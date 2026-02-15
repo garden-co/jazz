@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
-    Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell, ValueCellRef,
-    decode_page, encode_page, freelist_ids_per_page, overflow_chunk_capacity, page_fits,
-    raw_freelist_page, raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value,
-    raw_leaf_scan, raw_leaf_upsert_in_place, raw_overflow_chunk, raw_page_kind, validate_page,
+    OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
+    ValueCellRef, decode_page, encode_overflow_page_chunk, encode_page, freelist_ids_per_page,
+    overflow_chunk_capacity, page_fits, raw_freelist_page, raw_internal_child_for_key,
+    raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place,
+    raw_overflow_chunk, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
@@ -14,6 +15,7 @@ const MIN_PAGE_SIZE: usize = 4 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 8 * 1024;
+const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
 const ALLOC_NEAR_WINDOW: u64 = 32;
 
@@ -374,7 +376,27 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         match kind {
             PageKind::Leaf => {
-                let new_value = self.build_value_cell(value)?;
+                let (new_value, reused_overflow_head) =
+                    if value.len() <= self.options.overflow_threshold {
+                        (ValueCell::Inline(value.to_vec()), None)
+                    } else if value.len() < OVERFLOW_REUSE_MIN_BYTES {
+                        (self.build_value_cell(value)?, None)
+                    } else {
+                        let existing_overflow = {
+                            let raw = self.raw_page_bytes(page_id)?;
+                            match raw_leaf_find_value(raw, self.options.page_size, key)? {
+                                Some(ValueCellRef::Overflow {
+                                    head_page_id,
+                                    total_len,
+                                }) => Some(OverflowRef {
+                                    head_page_id,
+                                    total_len,
+                                }),
+                                _ => None,
+                            }
+                        };
+                        self.build_value_cell_for_existing(existing_overflow, value)?
+                    };
                 let upsert = {
                     let raw = self.pages.get_mut(&page_id).ok_or_else(|| {
                         BTreeError::Corrupt(format!("page {} missing during insert", page_id))
@@ -389,8 +411,13 @@ impl<F: SyncFile> OpfsBTree<F> {
                     }
                     RawLeafUpsertResult::Updated { old_overflow } => {
                         self.mark_dirty_loaded_page(page_id);
-                        if let Some(old_overflow) = old_overflow {
-                            self.free_overflow_chain(old_overflow.head_page_id)?;
+                        if let Some(old_overflow) = old_overflow
+                            && Some(old_overflow.head_page_id) != reused_overflow_head
+                        {
+                            self.free_overflow_extent(
+                                old_overflow.head_page_id,
+                                old_overflow.total_len as usize,
+                            )?;
                         }
                         return Ok(None);
                     }
@@ -411,7 +438,11 @@ impl<F: SyncFile> OpfsBTree<F> {
                 match entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)) {
                     Ok(idx) => {
                         let old_value = std::mem::replace(&mut entries[idx].1, new_value);
-                        self.free_value_cell(old_value)?;
+                        match old_value {
+                            ValueCell::Overflow { head_page_id, .. }
+                                if Some(head_page_id) == reused_overflow_head => {}
+                            other => self.free_value_cell(other)?,
+                        }
                     }
                     Err(idx) => entries.insert(idx, (key.to_vec(), new_value)),
                 }
@@ -560,7 +591,10 @@ impl<F: SyncFile> OpfsBTree<F> {
                     RawLeafDeleteResult::Deleted { old_overflow, .. } => {
                         self.mark_dirty_loaded_page(page_id);
                         if let Some(old_overflow) = old_overflow {
-                            self.free_overflow_chain(old_overflow.head_page_id)?;
+                            self.free_overflow_extent(
+                                old_overflow.head_page_id,
+                                old_overflow.total_len as usize,
+                            )?;
                         }
                         Ok(true)
                     }
@@ -603,23 +637,24 @@ impl<F: SyncFile> OpfsBTree<F> {
         expected_len: usize,
     ) -> Result<Vec<u8>, BTreeError> {
         let mut out = Vec::with_capacity(expected_len);
-        let mut current = head_page_id;
-        let mut seen = HashSet::new();
+        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
+        if max_chunk == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "page size too small for overflow pages".to_string(),
+            ));
+        }
+        let page_count = overflow_pages_for_len(expected_len, max_chunk);
+        self.ensure_overflow_extent_loaded(head_page_id, page_count)?;
 
-        while current != 0 && out.len() < expected_len {
-            if !seen.insert(current) {
-                return Err(BTreeError::Corrupt(
-                    "overflow chain contains a cycle".to_string(),
-                ));
-            }
-
-            self.ensure_page_loaded(current)?;
-            let page_raw = self.pages.get(&current).ok_or_else(|| {
-                BTreeError::Corrupt(format!("overflow page {} missing in memory", current))
+        for idx in 0..page_count {
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
             })?;
-            let (chunk, next) = raw_overflow_chunk(page_raw, self.options.page_size)?;
+            let page_raw = self.pages.get(&page_id).ok_or_else(|| {
+                BTreeError::Corrupt(format!("overflow page {} missing in memory", page_id))
+            })?;
+            let (chunk, _) = raw_overflow_chunk(page_raw, self.options.page_size)?;
             out.extend_from_slice(chunk);
-            current = next.unwrap_or(0);
         }
 
         if out.len() < expected_len {
@@ -635,33 +670,96 @@ impl<F: SyncFile> OpfsBTree<F> {
     }
 
     fn free_value_cell(&mut self, value: ValueCell) -> Result<(), BTreeError> {
-        if let ValueCell::Overflow { head_page_id, .. } = value {
-            self.free_overflow_chain(head_page_id)?;
+        if let ValueCell::Overflow {
+            head_page_id,
+            total_len,
+        } = value
+        {
+            self.free_overflow_extent(head_page_id, total_len as usize)?;
         }
         Ok(())
     }
 
-    fn free_overflow_chain(&mut self, head_page_id: PageId) -> Result<(), BTreeError> {
-        let mut current = head_page_id;
-        let mut seen = HashSet::new();
+    fn free_overflow_extent(
+        &mut self,
+        head_page_id: PageId,
+        total_len: usize,
+    ) -> Result<(), BTreeError> {
+        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
+        if max_chunk == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "page size too small for overflow pages".to_string(),
+            ));
+        }
+        let page_count = overflow_pages_for_len(total_len, max_chunk);
 
-        while current != 0 {
-            if !seen.insert(current) {
-                return Err(BTreeError::Corrupt(
-                    "overflow free encountered a cycle".to_string(),
-                ));
-            }
-
-            self.ensure_page_loaded(current)?;
-            let page = self.remove_page(current).ok_or_else(|| {
-                BTreeError::Corrupt(format!("overflow page {} missing while freeing", current))
+        for idx in 0..page_count {
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
             })?;
-            let (_, next) = raw_overflow_chunk(&page, self.options.page_size)?;
-            let next = next.unwrap_or(0);
-            self.add_free_page(current);
-            current = next;
+            self.remove_page(page_id);
+            self.add_free_page(page_id);
         }
 
+        Ok(())
+    }
+
+    fn ensure_overflow_extent_loaded(
+        &mut self,
+        head_page_id: PageId,
+        page_count: usize,
+    ) -> Result<(), BTreeError> {
+        if page_count == 0 {
+            return Ok(());
+        }
+
+        let mut first_missing_idx = None;
+        for idx in 0..page_count {
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            if self.pages.contains_key(&page_id) {
+                self.touch_page(page_id);
+            } else {
+                first_missing_idx = Some(idx);
+                break;
+            }
+        }
+
+        let Some(start_idx) = first_missing_idx else {
+            return Ok(());
+        };
+        let start_page_id = head_page_id
+            .checked_add(start_idx as u64)
+            .ok_or_else(|| BTreeError::Corrupt("overflow extent page id overflow".to_string()))?;
+        let load_pages = page_count.saturating_sub(start_idx);
+        let run_bytes = load_pages
+            .checked_mul(self.options.page_size)
+            .ok_or_else(|| BTreeError::Io("overflow extent read size overflow".to_string()))?;
+        let offset = start_page_id
+            .checked_mul(self.options.page_size as u64)
+            .ok_or_else(|| BTreeError::Corrupt("page offset overflow".to_string()))?;
+
+        let mut raw = vec![0u8; run_bytes];
+        self.file.read_exact_at(offset, &mut raw)?;
+
+        for i in 0..load_pages {
+            let page_id = start_page_id.checked_add(i as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            if self.pages.contains_key(&page_id) {
+                self.touch_page(page_id);
+                continue;
+            }
+
+            let start = i * self.options.page_size;
+            let end = start + self.options.page_size;
+            let page_raw = &raw[start..end];
+            let _ = validate_page(page_raw, self.options.page_size)?;
+            self.pages.insert(page_id, page_raw.to_vec());
+            self.touch_page(page_id);
+        }
+        self.evict_pages_if_needed(Some(head_page_id));
         Ok(())
     }
 
@@ -679,32 +777,95 @@ impl<F: SyncFile> OpfsBTree<F> {
 
         let total_len = u32::try_from(value.len())
             .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
+        let page_count = overflow_pages_for_len(value.len(), max_chunk);
+        let head_page_id = self.alloc_extent_pages(page_count)?;
 
         let mut remaining = value;
-        let mut page_ids = Vec::new();
-        while !remaining.is_empty() {
-            let page_id = match page_ids.last().copied() {
-                Some(prev) => self.alloc_page_near(prev),
-                None => self.alloc_page(),
-            };
-            page_ids.push(page_id);
+        for idx in 0..page_count {
             let consume = remaining.len().min(max_chunk);
-            remaining = &remaining[consume..];
-        }
-
-        remaining = value;
-        for (idx, page_id) in page_ids.iter().enumerate() {
-            let consume = remaining.len().min(max_chunk);
-            let chunk = remaining[..consume].to_vec();
+            let chunk = &remaining[..consume];
             remaining = &remaining[consume..];
 
-            let next = page_ids.get(idx + 1).copied();
-            self.set_dirty_page(*page_id, Page::Overflow { data: chunk, next })?;
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            let raw = encode_overflow_page_chunk(chunk, None, self.options.page_size)?;
+            self.set_dirty_raw_page(page_id, raw);
         }
 
-        let head_page_id = *page_ids
-            .first()
-            .ok_or_else(|| BTreeError::Corrupt("overflow page id allocation failed".to_string()))?;
+        Ok(ValueCell::Overflow {
+            head_page_id,
+            total_len,
+        })
+    }
+
+    fn build_value_cell_for_existing(
+        &mut self,
+        existing_overflow: Option<OverflowRef>,
+        value: &[u8],
+    ) -> Result<(ValueCell, Option<PageId>), BTreeError> {
+        if value.len() <= self.options.overflow_threshold {
+            return Ok((ValueCell::Inline(value.to_vec()), None));
+        }
+        if let Some(existing) = existing_overflow {
+            let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
+            if max_chunk == 0 {
+                return Err(BTreeError::InvalidOptions(
+                    "page size too small for overflow pages".to_string(),
+                ));
+            }
+            let existing_pages = overflow_pages_for_len(existing.total_len as usize, max_chunk);
+            let needed_pages = overflow_pages_for_len(value.len(), max_chunk);
+            if needed_pages <= existing_pages {
+                let cell =
+                    self.rewrite_overflow_extent(existing.head_page_id, existing_pages, value)?;
+                return Ok((cell, Some(existing.head_page_id)));
+            }
+        }
+        Ok((self.build_value_cell(value)?, None))
+    }
+
+    fn rewrite_overflow_extent(
+        &mut self,
+        head_page_id: PageId,
+        existing_pages: usize,
+        value: &[u8],
+    ) -> Result<ValueCell, BTreeError> {
+        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
+        if max_chunk == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "page size too small for overflow pages".to_string(),
+            ));
+        }
+
+        let total_len = u32::try_from(value.len())
+            .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
+        let needed_pages = value.len().div_ceil(max_chunk).max(1);
+        if needed_pages > existing_pages {
+            return Err(BTreeError::Corrupt(
+                "overflow extent rewrite requires additional pages".to_string(),
+            ));
+        }
+
+        let mut remaining = value;
+        for idx in 0..needed_pages {
+            let consume = remaining.len().min(max_chunk);
+            let chunk = &remaining[..consume];
+            remaining = &remaining[consume..];
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            let raw = encode_overflow_page_chunk(chunk, None, self.options.page_size)?;
+            self.set_dirty_raw_page(page_id, raw);
+        }
+
+        for idx in needed_pages..existing_pages {
+            let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
+                BTreeError::Corrupt("overflow extent page id overflow".to_string())
+            })?;
+            self.remove_page(page_id);
+            self.add_free_page(page_id);
+        }
 
         Ok(ValueCell::Overflow {
             head_page_id,
@@ -977,6 +1138,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
+    fn set_dirty_raw_page(&mut self, page_id: PageId, raw: Vec<u8>) {
+        self.pages.insert(page_id, raw);
+        self.mark_dirty_loaded_page(page_id);
+    }
+
     fn mark_dirty_loaded_page(&mut self, page_id: PageId) {
         self.dirty_pages.insert(page_id);
         self.touch_page(page_id);
@@ -1084,6 +1250,54 @@ impl<F: SyncFile> OpfsBTree<F> {
         let page_id = self.total_pages;
         self.total_pages = self.total_pages.saturating_add(1);
         page_id
+    }
+
+    fn alloc_extent_pages(&mut self, page_count: usize) -> Result<PageId, BTreeError> {
+        if page_count == 0 {
+            return Err(BTreeError::InvalidOptions(
+                "extent page_count must be > 0".to_string(),
+            ));
+        }
+        if page_count == 1 {
+            return Ok(self.alloc_page());
+        }
+
+        let mut free_ids: Vec<PageId> = self.free_set.iter().copied().collect();
+        free_ids.sort_unstable();
+        let mut run_start = 0u64;
+        let mut run_len = 0usize;
+        let mut prev = 0u64;
+        for id in free_ids {
+            if run_len == 0 {
+                run_start = id;
+                run_len = 1;
+            } else if id == prev.saturating_add(1) {
+                run_len = run_len.saturating_add(1);
+            } else {
+                run_start = id;
+                run_len = 1;
+            }
+            prev = id;
+
+            if run_len >= page_count {
+                for i in 0..page_count {
+                    let page_id = run_start.checked_add(i as u64).ok_or_else(|| {
+                        BTreeError::Corrupt("extent free-run page id overflow".to_string())
+                    })?;
+                    self.free_set.remove(&page_id);
+                }
+                return Ok(run_start);
+            }
+        }
+
+        let start = self.total_pages;
+        self.total_pages = self
+            .total_pages
+            .checked_add(page_count as u64)
+            .ok_or_else(|| {
+                BTreeError::Io("total_pages overflow while allocating extent".to_string())
+            })?;
+        Ok(start)
     }
 
     fn alloc_page_near(&mut self, preferred: PageId) -> PageId {
@@ -1209,6 +1423,10 @@ impl<F: SyncFile> OpfsBTree<F> {
 
 fn child_index(keys: &[Vec<u8>], key: &[u8]) -> usize {
     keys.partition_point(|separator| separator.as_slice() <= key)
+}
+
+fn overflow_pages_for_len(total_len: usize, max_chunk: usize) -> usize {
+    total_len.div_ceil(max_chunk).max(1)
 }
 
 fn ensure_page_fits(page: &Page, page_size: usize, context: &str) -> Result<(), BTreeError> {
@@ -1530,6 +1748,49 @@ mod tests {
         reopened.delete(b"big").expect("delete big");
         reopened.checkpoint().expect("checkpoint delete");
         assert_eq!(reopened.get(b"big").expect("get big after delete"), None);
+    }
+
+    #[test]
+    fn overflow_update_reuses_existing_extent_when_page_count_matches() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        let value_v1 = vec![1u8; 180_000];
+        let value_v2 = vec![2u8; 182_000];
+
+        tree.put(b"k", &value_v1).expect("put v1");
+        let total_pages_before = tree.total_pages;
+
+        tree.put(b"k", &value_v2).expect("put v2");
+        assert_eq!(tree.get(b"k").expect("get k"), Some(value_v2));
+        assert_eq!(
+            tree.total_pages, total_pages_before,
+            "same-page-count overflow update should reuse existing extent pages"
+        );
+        assert!(
+            tree.free_set.is_empty(),
+            "reuse path should not free overflow pages when page count is unchanged"
+        );
+    }
+
+    #[test]
+    fn overflow_update_shrink_frees_tail_pages() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        let value_large = vec![3u8; 180_000];
+        let value_small = vec![4u8; 170_000];
+
+        tree.put(b"k", &value_large).expect("put large");
+        let total_pages_before = tree.total_pages;
+
+        tree.put(b"k", &value_small).expect("put small");
+        assert_eq!(tree.get(b"k").expect("get k"), Some(value_small));
+        assert_eq!(tree.total_pages, total_pages_before);
+        assert!(
+            !tree.free_set.is_empty(),
+            "shrinking overflow value should return tail pages to free list"
+        );
     }
 
     #[test]

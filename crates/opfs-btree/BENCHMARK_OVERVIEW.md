@@ -643,3 +643,66 @@ Range medians by scenario:
 | range_random_window_64 |       4096 |        0.3 |       0.3 | +5.2% |
 
 Interpretation: direct slot walking improves overall throughput in this setup, with strongest gains on mixed/cold and moderate positive effect on range aggregate.
+
+## Phase: Large-Value Extent Storage (WIP)
+
+Changes in this phase:
+
+- Switched overflow values from pointer-chained pages to contiguous extents (start page + length).
+- Added fast raw overflow-page encoding path for large-value writes.
+- Added in-place extent rewrite + tail-page reclaim for large updates when page count does not grow.
+- Added large-value reuse guard (`>= 128KB`) to avoid extra update-lookup overhead on smaller overflow values.
+
+Benchmark method:
+
+- Baseline mixed-size sweep:
+  - `/tmp/opfs_largefocus_before_4096.json`
+  - `/tmp/opfs_largefocus_before_8192.json`
+  - `/tmp/opfs_largefocus_before_16384.json`
+  - `/tmp/opfs_largefocus_before_32768.json`
+  - `/tmp/opfs_largefocus_before_65536.json`
+  - `/tmp/opfs_largefocus_before_1048576.json`
+- After (extent WIP):
+  - `/tmp/opfs_largefocus_after7_4096.json`
+  - `/tmp/opfs_largefocus_after7_8192.json`
+  - `/tmp/opfs_largefocus_after7_16384.json`
+  - `/tmp/opfs_largefocus_after7_32768.json`
+  - `/tmp/opfs_largefocus_after7_65536.json`
+  - `/tmp/opfs_largefocus_after7_1048576.json`
+- Command shape (mixed sweep):
+  - `--profile mixed --count 400 --value-sizes 4096|8192|16384|32768|65536`
+  - `--profile mixed --count 64 --value-sizes 1048576`
+  - `--seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Mixed aggregate deltas by value size (sum of 3 mixed scenarios):
+
+| value_size | before K/s | after K/s | delta |
+| ---------: | ---------: | --------: | ----: |
+|      4,096 |    110.913 |   117.245 | +5.7% |
+|      8,192 |     79.072 |    75.866 | -4.1% |
+|     16,384 |     71.094 |    71.920 | +1.2% |
+|     32,768 |     58.904 |    56.402 | -4.2% |
+|     65,536 |     46.848 |    45.444 | -3.0% |
+|  1,048,576 |      0.612 |     0.596 | -2.6% |
+
+Overall mixed aggregate across these sizes: `367.443 -> 367.474 K/s` (`+0.0%`).
+
+Focused 1MB all-profile delta:
+
+- Before: `/tmp/opfs_large_baseline_run1.json`
+- After: `/tmp/opfs_large_after7_all_1m.json`
+- Command shape: `--profile all --include-cold-read --count 64 --value-sizes 1048576 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+| operation                         | before K/s | after K/s | delta |
+| --------------------------------- | ---------: | --------: | ----: |
+| seq_write                         |      0.201 |     0.212 | +5.5% |
+| random_write                      |      0.271 |     0.277 | +2.2% |
+| seq_read                          |      0.113 |     0.113 | -0.2% |
+| random_read                       |      0.120 |     0.122 | +1.8% |
+| mixed_random_70r_30w              |      0.184 |     0.184 | +0.0% |
+| mixed_random_50r_50w_with_updates |      0.189 |     0.206 | +8.8% |
+| mixed_random_60r_20w_20d          |      0.207 |     0.212 | +2.5% |
+| cold_seq_read                     |      0.182 |     0.179 | -1.3% |
+| cold_random_read                  |      0.177 |     0.170 | -3.5% |
+
+Interpretation: this WIP extent model improves large write-heavy/update-heavy paths, but does not yet improve large cold reads and is near-flat in mixed aggregate across 4KB..1MB. It should be treated as an exploratory phase, not promoted to top-table baseline yet.
