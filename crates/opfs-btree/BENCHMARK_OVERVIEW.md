@@ -706,3 +706,46 @@ Focused 1MB all-profile delta:
 | cold_random_read                  |      0.177 |     0.170 | -3.5% |
 
 Interpretation: this WIP extent model improves large write-heavy/update-heavy paths, but does not yet improve large cold reads and is near-flat in mixed aggregate across 4KB..1MB. It should be treated as an exploratory phase, not promoted to top-table baseline yet.
+
+## Phase: Large-Value Direct Extent Read (WIP)
+
+Changes in this phase:
+
+- Added direct contiguous extent-read path for large values (`>= 128KB`) that bypasses page-cache materialization when extent pages are not dirty.
+- Kept read-your-writes correctness by falling back to in-memory path when any extent page is dirty.
+- Kept extent-update reuse path gated to large values (`>= 128KB`) to avoid extra lookup overhead on smaller overflow values.
+
+Benchmark method:
+
+- Before (extent baseline): `/tmp/opfs_largefocus_after7_*.json`, `/tmp/opfs_large_after7_all_1m.json`
+- After (direct extent-read): `/tmp/opfs_largefocus_after8_*.json`, `/tmp/opfs_large_after8_all_1m.json`
+- Command shape remains the same as the previous large-value phase.
+
+Mixed aggregate deltas by value size (extent baseline -> direct-read):
+
+| value_size | before K/s | after K/s | delta |
+| ---------: | ---------: | --------: | ----: |
+|      4,096 |    117.245 |   111.078 | -5.3% |
+|      8,192 |     75.866 |    77.880 | +2.7% |
+|     16,384 |     71.920 |    76.496 | +6.4% |
+|     32,768 |     56.402 |    57.071 | +1.2% |
+|     65,536 |     45.444 |    46.202 | +1.7% |
+|  1,048,576 |      0.596 |     0.595 | -0.2% |
+
+Overall mixed aggregate across these sizes: `367.474 -> 369.322 K/s` (`+0.5%`).
+
+Focused 1MB all-profile delta (extent baseline -> direct-read):
+
+| operation                         | before K/s | after K/s | delta |
+| --------------------------------- | ---------: | --------: | ----: |
+| seq_write                         |      0.212 |     0.214 | +1.0% |
+| random_write                      |      0.277 |     0.277 | +0.3% |
+| seq_read                          |      0.113 |     0.113 | -0.0% |
+| random_read                       |      0.122 |     0.122 | +0.3% |
+| mixed_random_70r_30w              |      0.184 |     0.178 | -3.4% |
+| mixed_random_50r_50w_with_updates |      0.206 |     0.208 | +1.1% |
+| mixed_random_60r_20w_20d          |      0.212 |     0.207 | -2.6% |
+| cold_seq_read                     |      0.179 |     0.180 | +0.6% |
+| cold_random_read                  |      0.170 |     0.177 | +3.9% |
+
+Interpretation: direct extent-read yields a modest net uplift over the previous extent baseline and improves cold random reads at 1MB, but mixed 1MB scenarios remain near-flat to slightly negative.
