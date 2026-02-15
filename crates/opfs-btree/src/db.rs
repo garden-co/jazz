@@ -15,6 +15,7 @@ const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_OVERFLOW_THRESHOLD: usize = 8 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
+const ALLOC_NEAR_WINDOW: u64 = 32;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BTreeOptions {
@@ -437,7 +438,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                     .map(|(k, _)| k.clone())
                     .ok_or_else(|| BTreeError::Corrupt("right leaf split empty".to_string()))?;
 
-                let right_page_id = self.alloc_page();
+                let right_page_id = self.alloc_page_near(page_id);
                 let left_page = Page::Leaf {
                     entries,
                     next: Some(right_page_id),
@@ -519,7 +520,7 @@ impl<F: SyncFile> OpfsBTree<F> {
                 ensure_page_fits(&left_page, self.options.page_size, "left internal split")?;
                 ensure_page_fits(&right_page, self.options.page_size, "right internal split")?;
 
-                let right_page_id = self.alloc_page();
+                let right_page_id = self.alloc_page_near(page_id);
                 self.set_dirty_page(page_id, left_page)?;
                 self.set_dirty_page(right_page_id, right_page)?;
 
@@ -682,7 +683,11 @@ impl<F: SyncFile> OpfsBTree<F> {
         let mut remaining = value;
         let mut page_ids = Vec::new();
         while !remaining.is_empty() {
-            page_ids.push(self.alloc_page());
+            let page_id = match page_ids.last().copied() {
+                Some(prev) => self.alloc_page_near(prev),
+                None => self.alloc_page(),
+            };
+            page_ids.push(page_id);
             let consume = remaining.len().min(max_chunk);
             remaining = &remaining[consume..];
         }
@@ -1079,6 +1084,30 @@ impl<F: SyncFile> OpfsBTree<F> {
         let page_id = self.total_pages;
         self.total_pages = self.total_pages.saturating_add(1);
         page_id
+    }
+
+    fn alloc_page_near(&mut self, preferred: PageId) -> PageId {
+        for delta in 1..=ALLOC_NEAR_WINDOW {
+            if let Some(hi) = preferred.checked_add(delta)
+                && self.free_set.remove(&hi)
+            {
+                return hi;
+            }
+            if let Some(lo) = preferred.checked_sub(delta)
+                && lo >= 2
+                && self.free_set.remove(&lo)
+            {
+                return lo;
+            }
+        }
+
+        if preferred.saturating_add(1) == self.total_pages {
+            let page_id = self.total_pages;
+            self.total_pages = self.total_pages.saturating_add(1);
+            return page_id;
+        }
+
+        self.alloc_page()
     }
 
     fn add_free_page(&mut self, page_id: PageId) {
@@ -1797,5 +1826,32 @@ mod tests {
                 page_id
             );
         }
+    }
+
+    #[test]
+    fn alloc_page_near_prefers_adjacent_free_page() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        tree.total_pages = 32;
+        tree.add_free_page(7);
+        tree.add_free_page(10);
+        tree.add_free_page(11);
+        tree.add_free_page(14);
+
+        let allocated = tree.alloc_page_near(10);
+        assert_eq!(allocated, 11, "expected +1 neighbor to be selected first");
+        assert!(!tree.free_set.contains(&11));
+    }
+
+    #[test]
+    fn alloc_page_near_appends_when_preferred_at_tail() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
+
+        tree.total_pages = 18;
+        let allocated = tree.alloc_page_near(17);
+        assert_eq!(allocated, 18);
+        assert_eq!(tree.total_pages, 19);
     }
 }

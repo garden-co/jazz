@@ -506,3 +506,49 @@ Aggregate medians:
 | overall aggregate |     4130.7 |    4072.3 | -1.4% |
 
 Interpretation: this follow-up reduced the size of the regression versus the first in-place attempt, but it is still slower than the previous in-place baseline.
+
+## Phase: Locality-Aware Page Allocation
+
+Changes in this phase:
+
+- Added `alloc_page_near(preferred)` allocator in `db.rs`:
+  - prefers nearby free pages within a bounded window,
+  - otherwise appends contiguously when splitting at the file tail,
+  - falls back to normal allocation when no nearby option exists.
+- Wired near-allocation into:
+  - leaf splits,
+  - internal splits,
+  - overflow chain page allocation.
+- Added allocator tests for adjacent-page preference and tail-append behavior.
+
+Benchmark method:
+
+- Before = in-place follow-up runs:
+  - `/tmp/opfs_inplace2_run1.json`
+  - `/tmp/opfs_inplace2_run2.json`
+  - `/tmp/opfs_inplace2_run3.json`
+- After = locality-allocation runs:
+  - `/tmp/opfs_locality_run1.json`
+  - `/tmp/opfs_locality_run2.json`
+  - `/tmp/opfs_locality_run3.json`
+- Command shape: `--profile all --include-cold-read --count 3000 --value-sizes 32,256,4096 --seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4 --json`
+
+Run deltas (before -> after):
+
+| run    | mixed delta | range delta | cold delta | overall delta |
+| ------ | ----------: | ----------: | ---------: | ------------: |
+| 1      |       +0.4% |       -2.1% |      -3.3% |         -2.1% |
+| 2      |       -0.3% |       +1.3% |      +5.5% |         +3.3% |
+| 3      |       -0.3% |       +0.8% |      +6.7% |         +3.9% |
+| median |       -0.3% |       +0.8% |      +5.5% |         +3.3% |
+
+Aggregate medians:
+
+| metric            | before K/s | after K/s | delta |
+| ----------------- | ---------: | --------: | ----: |
+| mixed aggregate   |     1115.9 |    1116.8 | +0.1% |
+| range aggregate   |      601.2 |     601.7 | +0.1% |
+| cold aggregate    |     2342.4 |    2472.2 | +5.5% |
+| overall aggregate |     4072.3 |    4200.1 | +3.1% |
+
+Interpretation: locality-aware allocation recovers and improves cold-read throughput, with a net positive overall delta.
