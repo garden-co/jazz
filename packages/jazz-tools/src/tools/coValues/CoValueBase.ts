@@ -25,7 +25,7 @@ export abstract class CoValueBase implements CoValue {
 
   constructor() {
     Object.defineProperties(this, {
-      $isLoaded: { value: true, enumerable: false },
+      $isLoaded: { value: true, enumerable: false, configurable: true },
     });
   }
 
@@ -56,6 +56,7 @@ export abstract class CoValueJazzApi<V extends CoValue> {
   constructor(private coValue: V) {
     Object.defineProperty(this, "_instanceID", {
       value: `instance-${Math.random().toString(36).slice(2)}`,
+      configurable: true,
       enumerable: false,
     });
   }
