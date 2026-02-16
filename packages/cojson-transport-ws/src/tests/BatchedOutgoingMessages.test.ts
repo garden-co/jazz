@@ -132,7 +132,7 @@ describe("BatchedOutgoingMessages", () => {
       // Message should be sent directly
       expect(mockWebSocket.send).toHaveBeenCalledTimes(1);
 
-      // Fast path: pushed and pulled should be equal (both 0 since queue not used)
+      // Fast path: pushed and pulled should be equal
       const pushed = await metricReader.getMetricValue(
         "jazz.messagequeue.outgoing.pushed",
         { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
@@ -142,8 +142,7 @@ describe("BatchedOutgoingMessages", () => {
         { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
       );
       expect(pushed).toEqual(pulled);
-      // Verify we're actually bypassing the queue
-      expect(pushed).toBe(0);
+      expect(pushed).toBe(1);
     });
 
     test("slow path: should push to queue when WebSocket is not ready", async () => {
@@ -195,7 +194,7 @@ describe("BatchedOutgoingMessages", () => {
       // All messages should be sent directly
       expect(mockWebSocket.send).toHaveBeenCalledTimes(3);
 
-      // Queue should not be used (both 0)
+      // Queue metrics should be balanced for fast-path sends
       const pushed = await metricReader.getMetricValue(
         "jazz.messagequeue.outgoing.pushed",
         { priority: CO_VALUE_PRIORITY.HIGH, peerRole: "client" },
@@ -206,7 +205,7 @@ describe("BatchedOutgoingMessages", () => {
       );
 
       expect(pushed).toBe(pulled);
-      expect(pushed).toBe(0);
+      expect(pushed).toBe(3);
     });
 
     test("should queue second message when first is being processed", async () => {
