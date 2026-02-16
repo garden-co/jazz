@@ -5,36 +5,36 @@ Generated on 2026-02-16.
 Single baseline table for further `opfs-btree` work. All values are throughput in `K/s` (1 K = 1,000 ops/s), rounded to one decimal.
 Current `opfs-btree` default cache is `32MB`.
 
-| Scenario                          | Value Size (bytes) | opfs-btree native | opfs-btree wasm/opfs | bf-tree native | rocksdb native | surrealkv native | fjall native | Notes      |
-| --------------------------------- | -----------------: | ----------------: | -------------------: | -------------: | -------------: | ---------------: | -----------: | ---------- |
-| mixed_random_70r_30w              |                 32 |              40.7 |                152.3 |           81.9 |          214.0 |             75.5 |          2.2 | [1][5][9]  |
-| mixed_random_70r_30w              |                256 |              48.0 |                225.6 |           89.8 |          256.5 |             81.8 |          2.2 | [1][5][9]  |
-| mixed_random_70r_30w              |              4,096 |              32.6 |                 46.2 |           66.2 |          153.1 |             57.6 |          2.2 | [1][5][9]  |
-| mixed_random_70r_30w              |          1,048,576 |               0.9 |                  0.5 |            N/A |            1.8 |              1.4 |          0.2 | [2][5][9]  |
-| mixed_random_50r_50w_with_updates |                 32 |              40.3 |                107.5 |           98.1 |          265.2 |             77.3 |          2.2 | [1][5][9]  |
-| mixed_random_50r_50w_with_updates |                256 |              47.6 |                184.0 |           77.4 |          263.0 |             84.1 |          2.2 | [1][5][9]  |
-| mixed_random_50r_50w_with_updates |              4,096 |              32.3 |                 37.5 |           56.4 |          143.2 |             49.3 |          2.3 | [1][5][9]  |
-| mixed_random_50r_50w_with_updates |          1,048,576 |               0.8 |                  0.5 |            N/A |            1.8 |              1.3 |          0.2 | [2][5][9]  |
-| mixed_random_60r_20w_20d          |                 32 |              40.4 |                166.7 |           95.2 |          298.1 |             78.7 |          2.2 | [1][5][9]  |
-| mixed_random_60r_20w_20d          |                256 |              48.1 |                232.6 |           90.3 |          256.3 |             85.5 |          2.2 | [1][5][9]  |
-| mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 40.7 |           71.7 |          176.4 |             63.3 |          2.2 | [1][5][9]  |
-| mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  1.3 |            N/A |            3.4 |              3.0 |          0.2 | [2][5][9]  |
-| range_seq_window_64               |                 32 |             151.9 |                151.5 |          302.4 |           89.6 |            110.3 |          9.0 | [8][11]    |
-| range_seq_window_64               |                256 |             148.9 |                154.6 |          268.2 |           75.7 |            109.2 |          9.0 | [8][11]    |
-| range_seq_window_64               |              4,096 |               3.0 |                  2.0 |           35.9 |           27.2 |             66.4 |         11.3 | [8][11]    |
-| range_seq_window_64               |          1,048,576 |               1.0 |                  0.1 |            N/A |            0.5 |              0.4 |          0.0 | [8][12]    |
-| range_random_window_64            |                 32 |             149.3 |                172.4 |          312.9 |           89.8 |            110.8 |          8.9 | [8][11]    |
-| range_random_window_64            |                256 |             144.3 |                141.5 |          276.7 |           78.0 |            106.9 |          9.0 | [8][11]    |
-| range_random_window_64            |              4,096 |               2.0 |                  0.3 |           25.5 |           26.9 |             67.6 |         11.4 | [8][11]    |
-| range_random_window_64            |          1,048,576 |               1.1 |                  0.1 |            N/A |            0.5 |              0.5 |          0.0 | [8][12]    |
-| cold_seq_read                     |                 32 |            2491.9 |                750.0 |          890.8 |          716.1 |            268.0 |         18.5 | [3][10]    |
-| cold_seq_read                     |                256 |            1658.4 |                483.9 |          863.3 |          626.8 |            220.1 |         18.4 | [3][10]    |
-| cold_seq_read                     |              4,096 |             279.4 |                 52.4 |          297.6 |          297.4 |            181.7 |         18.9 | [3][10]    |
-| cold_seq_read                     |          1,048,576 |               2.4 |                  2.9 |            N/A |            4.4 |              0.9 |          0.2 | [4][5][10] |
-| cold_random_read                  |                 32 |            2154.1 |                882.4 |          694.2 |          664.3 |            261.4 |         18.6 | [3][10]    |
-| cold_random_read                  |                256 |            1560.0 |                400.0 |          654.2 |          641.7 |            262.7 |         18.5 | [3][10]    |
-| cold_random_read                  |              4,096 |             265.4 |                 35.3 |          280.2 |          294.6 |            166.4 |         18.8 | [3][10]    |
-| cold_random_read                  |          1,048,576 |               2.4 |                  3.1 |            N/A |            4.6 |              1.1 |          0.2 | [4][5][10] |
+| Scenario                          | Value Size (bytes) | opfs-btree native | opfs-btree wasm/opfs | bf-tree native | rocksdb native | surrealkv native | fjall native | Notes          |
+| --------------------------------- | -----------------: | ----------------: | -------------------: | -------------: | -------------: | ---------------: | -----------: | -------------- |
+| mixed_random_70r_30w              |                 32 |              40.7 |                152.3 |           81.9 |          214.0 |            407.1 |        364.5 | [1][5][9][13]  |
+| mixed_random_70r_30w              |                256 |              48.0 |                225.6 |           89.8 |          256.5 |            368.9 |        339.9 | [1][5][9][13]  |
+| mixed_random_70r_30w              |              4,096 |              32.6 |                 46.2 |           66.2 |          153.1 |            202.9 |        277.0 | [1][5][9][13]  |
+| mixed_random_70r_30w              |          1,048,576 |               0.9 |                  0.5 |            N/A |            1.8 |              2.6 |          0.9 | [2][5][9][13]  |
+| mixed_random_50r_50w_with_updates |                 32 |              40.3 |                107.5 |           98.1 |          265.2 |            363.4 |        330.9 | [1][5][9][13]  |
+| mixed_random_50r_50w_with_updates |                256 |              47.6 |                184.0 |           77.4 |          263.0 |            328.5 |        346.6 | [1][5][9][13]  |
+| mixed_random_50r_50w_with_updates |              4,096 |              32.3 |                 37.5 |           56.4 |          143.2 |            165.3 |        223.5 | [1][5][9][13]  |
+| mixed_random_50r_50w_with_updates |          1,048,576 |               0.8 |                  0.5 |            N/A |            1.8 |              1.5 |          0.8 | [2][5][9][13]  |
+| mixed_random_60r_20w_20d          |                 32 |              40.4 |                166.7 |           95.2 |          298.1 |            374.6 |        349.2 | [1][5][9][13]  |
+| mixed_random_60r_20w_20d          |                256 |              48.1 |                232.6 |           90.3 |          256.3 |            378.3 |        354.4 | [1][5][9][13]  |
+| mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 40.7 |           71.7 |          176.4 |            227.1 |        302.1 | [1][5][9][13]  |
+| mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  1.3 |            N/A |            3.4 |              2.3 |          1.0 | [2][5][9][13]  |
+| range_seq_window_64               |                 32 |             151.9 |                151.5 |          302.4 |           89.6 |            116.0 |         83.8 | [8][11][13]    |
+| range_seq_window_64               |                256 |             148.9 |                154.6 |          268.2 |           75.7 |            109.3 |         90.9 | [8][11][13]    |
+| range_seq_window_64               |              4,096 |               3.0 |                  2.0 |           35.9 |           27.2 |             72.3 |        104.6 | [8][11][13]    |
+| range_seq_window_64               |          1,048,576 |               1.0 |                  0.1 |            N/A |            0.5 |              0.4 |          1.6 | [8][12][13]    |
+| range_random_window_64            |                 32 |             149.3 |                172.4 |          312.9 |           89.8 |            108.5 |         89.3 | [8][11][13]    |
+| range_random_window_64            |                256 |             144.3 |                141.5 |          276.7 |           78.0 |            107.3 |         87.2 | [8][11][13]    |
+| range_random_window_64            |              4,096 |               2.0 |                  0.3 |           25.5 |           26.9 |             71.6 |         81.9 | [8][11][13]    |
+| range_random_window_64            |          1,048,576 |               1.1 |                  0.1 |            N/A |            0.5 |              0.4 |          1.6 | [8][12][13]    |
+| cold_seq_read                     |                 32 |            2491.9 |                750.0 |          890.8 |          716.1 |            260.9 |        218.4 | [3][10][13]    |
+| cold_seq_read                     |                256 |            1658.4 |                483.9 |          863.3 |          626.8 |            243.6 |        215.8 | [3][10][13]    |
+| cold_seq_read                     |              4,096 |             279.4 |                 52.4 |          297.6 |          297.4 |            148.5 |        187.3 | [3][10][13]    |
+| cold_seq_read                     |          1,048,576 |               2.4 |                  2.9 |            N/A |            4.4 |              1.2 |          3.7 | [4][5][10][13] |
+| cold_random_read                  |                 32 |            2154.1 |                882.4 |          694.2 |          664.3 |            242.7 |        222.0 | [3][10][13]    |
+| cold_random_read                  |                256 |            1560.0 |                400.0 |          654.2 |          641.7 |            257.9 |        188.5 | [3][10][13]    |
+| cold_random_read                  |              4,096 |             265.4 |                 35.3 |          280.2 |          294.6 |            172.9 |        188.0 | [3][10][13]    |
+| cold_random_read                  |          1,048,576 |               2.4 |                  3.1 |            N/A |            4.6 |              1.0 |          3.8 | [4][5][10][13] |
 
 **Notes**
 
@@ -79,6 +79,11 @@ in quick mode, with `key_count=5000` and `query_count=2000` for `32/256/4096`.
 
 [12] Native `1,048,576` range rows use reduced counts (`key_count=16`, `query_count=4`).
 `bf-tree` remains `N/A` at `1,048,576` due value-size constraints in this harness.
+
+[13] `surrealkv`/`fjall` native columns were refreshed on 2026-02-16 after dependency updates
+to `surrealkv=0.20.1` and `fjall=3.0.2` by rerunning native Criterion harnesses with
+`cargo +1.91.0 bench` and `JAZZ_COMPARE_ENGINES=surrealkv,fjall`.
+Other native columns (`opfs-btree`, `bf-tree`, `rocksdb`) are carried forward from prior runs.
 
 ## Range Query Benchmarks (opfs-btree wasm/opfs)
 

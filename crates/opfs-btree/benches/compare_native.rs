@@ -8,7 +8,9 @@ use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
     measurement::WallTime,
 };
-use fjall::{Config as FjallConfig, PartitionCreateOptions, PersistMode};
+use fjall::{
+    Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions, PersistMode,
+};
 use opfs_btree::{
     BTreeOptions as OpfsBTreeOptions, OpfsBTree as OpfsBTreeDb, StdFile as OpfsStdFile,
 };
@@ -27,6 +29,70 @@ const RANGE_WINDOW_KEYS: usize = 128;
 const RANGE_RESULT_LIMIT: usize = 64;
 const BF_TREE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const BF_TREE_MAX_VALUE_SIZE: usize = 30 * 1024;
+const DEFAULT_MIXED_BASE_SEED: u64 = 0xA5A5_A5A5_0123_4567;
+
+#[derive(Clone, Copy)]
+struct MixedScenario {
+    name: &'static str,
+    read_pct: u8,
+    write_pct: u8,
+    update_pct: u8,
+}
+
+const MIXED_SCENARIOS: [MixedScenario; 3] = [
+    MixedScenario {
+        name: "mixed_random_70r_30w",
+        read_pct: 70,
+        write_pct: 30,
+        update_pct: 80,
+    },
+    MixedScenario {
+        name: "mixed_random_50r_50w_with_updates",
+        read_pct: 50,
+        write_pct: 50,
+        update_pct: 90,
+    },
+    MixedScenario {
+        name: "mixed_random_60r_20w_20d",
+        read_pct: 60,
+        write_pct: 20,
+        update_pct: 80,
+    },
+];
+
+#[derive(Clone, Copy)]
+enum OpChoice {
+    Read,
+    Write,
+    Delete,
+}
+
+#[derive(Clone, Copy)]
+struct DeterministicRng {
+    state: u64,
+}
+
+impl DeterministicRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.state
+    }
+
+    fn next_u8(&mut self) -> u8 {
+        (self.next_u64() >> 56) as u8
+    }
+
+    fn next_usize(&mut self, upper: usize) -> usize {
+        if upper == 0 {
+            return 0;
+        }
+        (self.next_u64() as usize) % upper
+    }
+}
 
 fn quick_mode() -> bool {
     std::env::var("JAZZ_COMPARE_BENCH_QUICK")
@@ -74,8 +140,36 @@ fn value_sizes() -> Vec<usize> {
         .unwrap_or_else(|| DEFAULT_VALUE_SIZES.to_vec())
 }
 
+fn derive_seed(label: &str, value_size: usize) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ DEFAULT_MIXED_BASE_SEED ^ (value_size as u64);
+    for &b in label.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^ ((value_size as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+fn choose_operation(scenario: MixedScenario, roll: u8) -> OpChoice {
+    if roll < scenario.read_pct {
+        return OpChoice::Read;
+    }
+    if roll < scenario.read_pct.saturating_add(scenario.write_pct) {
+        return OpChoice::Write;
+    }
+    OpChoice::Delete
+}
+
+fn engine_enabled(name: &str) -> bool {
+    let Ok(raw) = std::env::var("JAZZ_COMPARE_ENGINES") else {
+        return true;
+    };
+    raw.split(',').any(|entry| entry.trim() == name)
+}
+
 trait Engine {
     fn put(&mut self, key: &[u8], value: &[u8]);
+    fn delete(&mut self, key: &[u8]);
+    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>>;
     fn get(&mut self, key: &[u8]) -> Vec<u8>;
     fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64;
     fn finish_writes(&mut self);
@@ -100,11 +194,16 @@ impl Engine for OpfsBTreeEngine {
         self.db.put(key, value).expect("opfs-btree put");
     }
 
+    fn delete(&mut self, key: &[u8]) {
+        self.db.delete(key).expect("opfs-btree delete");
+    }
+
+    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.db.get(key).expect("opfs-btree get")
+    }
+
     fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        self.db
-            .get(key)
-            .expect("opfs-btree get")
-            .expect("opfs-btree key present")
+        self.get_opt(key).expect("opfs-btree key present")
     }
 
     fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
@@ -164,13 +263,20 @@ impl Engine for BfTreeEngine {
         );
     }
 
-    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+    fn delete(&mut self, key: &[u8]) {
+        self.tree.delete(key);
+    }
+
+    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         match self.tree.read(key, &mut self.read_buffer) {
-            LeafReadResult::Found(len) => self.read_buffer[..(len as usize)].to_vec(),
-            LeafReadResult::Deleted => panic!("bf-tree key unexpectedly deleted"),
-            LeafReadResult::NotFound => panic!("bf-tree key missing"),
+            LeafReadResult::Found(len) => Some(self.read_buffer[..(len as usize)].to_vec()),
+            LeafReadResult::Deleted | LeafReadResult::NotFound => None,
             LeafReadResult::InvalidKey => panic!("bf-tree invalid key"),
         }
+    }
+
+    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+        self.get_opt(key).expect("bf-tree key present")
     }
 
     fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
@@ -230,13 +336,21 @@ impl Engine for RocksDbEngine {
             .expect("rocksdb put");
     }
 
-    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+    fn delete(&mut self, key: &[u8]) {
+        self.db
+            .delete_opt(key, &self.write_options)
+            .expect("rocksdb delete");
+    }
+
+    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         self.db
             .get_pinned(key)
             .expect("rocksdb get")
-            .expect("rocksdb key present")
-            .as_ref()
-            .to_vec()
+            .map(|v| v.as_ref().to_vec())
+    }
+
+    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+        self.get_opt(key).expect("rocksdb key present")
     }
 
     fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
@@ -265,44 +379,48 @@ impl Engine for RocksDbEngine {
 }
 
 struct FjallEngine {
-    keyspace: fjall::Keyspace,
-    partition: fjall::PartitionHandle,
+    database: FjallDatabase,
+    keyspace: FjallKeyspace,
 }
 
 impl FjallEngine {
     fn open(path: &Path) -> Self {
-        let keyspace = FjallConfig::new(path.join("fjall"))
+        let database = FjallDatabase::builder(path.join("fjall"))
             .open()
+            .expect("open fjall database");
+        let keyspace = database
+            .keyspace("bench", KeyspaceCreateOptions::default)
             .expect("open fjall keyspace");
-        let partition = keyspace
-            .open_partition("bench", PartitionCreateOptions::default())
-            .expect("open fjall partition");
-        Self {
-            keyspace,
-            partition,
-        }
+        Self { database, keyspace }
     }
 }
 
 impl Engine for FjallEngine {
     fn put(&mut self, key: &[u8], value: &[u8]) {
-        self.partition.insert(key, value).expect("fjall insert");
+        self.keyspace.insert(key, value).expect("fjall insert");
+    }
+
+    fn delete(&mut self, key: &[u8]) {
+        self.keyspace.remove(key).expect("fjall remove");
+    }
+
+    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.keyspace
+            .get(key)
+            .expect("fjall get")
+            .map(|v| v.to_vec())
     }
 
     fn get(&mut self, key: &[u8]) -> Vec<u8> {
-        self.partition
-            .get(key)
-            .expect("fjall get")
-            .expect("fjall key present")
-            .to_vec()
+        self.get_opt(key).expect("fjall key present")
     }
 
     fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
         let mut seen = 0usize;
         let mut checksum = 0u64;
 
-        for item in self.partition.range(start.to_vec()..end.to_vec()) {
-            let (_key, value) = item.expect("fjall range item");
+        for item in self.keyspace.range(start.to_vec()..end.to_vec()) {
+            let value = item.value().expect("fjall range value");
             checksum = checksum.wrapping_add(value.first().copied().unwrap_or(0) as u64);
             seen += 1;
             if seen == limit {
@@ -314,7 +432,7 @@ impl Engine for FjallEngine {
     }
 
     fn finish_writes(&mut self) {
-        self.keyspace
+        self.database
             .persist(PersistMode::SyncData)
             .expect("fjall persist");
     }
@@ -388,14 +506,22 @@ impl Engine for SurrealKvEngine {
             .expect("surrealkv set");
     }
 
-    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+    fn delete(&mut self, key: &[u8]) {
+        self.read_txn = None;
+        self.ensure_write_txn()
+            .delete(key)
+            .expect("surrealkv delete");
+    }
+
+    fn get_opt(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         if self.write_txn.is_some() {
             self.finish_writes();
         }
-        self.ensure_read_txn()
-            .get(key)
-            .expect("surrealkv get")
-            .expect("surrealkv key present")
+        self.ensure_read_txn().get(key).expect("surrealkv get")
+    }
+
+    fn get(&mut self, key: &[u8]) -> Vec<u8> {
+        self.get_opt(key).expect("surrealkv key present")
     }
 
     fn range_checksum(&mut self, start: &[u8], end: &[u8], limit: usize) -> u64 {
@@ -466,25 +592,33 @@ fn engine_factories(
     max_value_size: usize,
 ) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
     let mut out: Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> = Vec::new();
-    out.push((
-        "opfs_btree",
-        Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
-    ));
-    if max_value_size <= BF_TREE_MAX_VALUE_SIZE {
+    if engine_enabled("opfs_btree") {
+        out.push((
+            "opfs_btree",
+            Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
+        ));
+    }
+    if engine_enabled("bf_tree") && max_value_size <= BF_TREE_MAX_VALUE_SIZE {
         out.push((
             "bf_tree",
             Box::new(move |path| Box::new(BfTreeEngine::open(path, max_value_size))),
         ));
     }
-    out.push((
-        "rocksdb",
-        Box::new(|path| Box::new(RocksDbEngine::open(path))),
-    ));
-    out.push((
-        "surrealkv",
-        Box::new(|path| Box::new(SurrealKvEngine::open(path))),
-    ));
-    out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
+    if engine_enabled("rocksdb") {
+        out.push((
+            "rocksdb",
+            Box::new(|path| Box::new(RocksDbEngine::open(path))),
+        ));
+    }
+    if engine_enabled("surrealkv") {
+        out.push((
+            "surrealkv",
+            Box::new(|path| Box::new(SurrealKvEngine::open(path))),
+        ));
+    }
+    if engine_enabled("fjall") {
+        out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
+    }
     out
 }
 
@@ -492,25 +626,33 @@ fn cold_read_engine_factories(
     max_value_size: usize,
 ) -> Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> {
     let mut out: Vec<(&'static str, Box<dyn Fn(&Path) -> Box<dyn Engine>>)> = Vec::new();
-    out.push((
-        "opfs_btree",
-        Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
-    ));
-    if max_value_size <= BF_TREE_MAX_VALUE_SIZE {
+    if engine_enabled("opfs_btree") {
+        out.push((
+            "opfs_btree",
+            Box::new(|path| Box::new(OpfsBTreeEngine::open(path))),
+        ));
+    }
+    if engine_enabled("bf_tree") && max_value_size <= BF_TREE_MAX_VALUE_SIZE {
         out.push((
             "bf_tree",
             Box::new(move |path| Box::new(BfTreeEngine::open(path, max_value_size))),
         ));
     }
-    out.push((
-        "rocksdb",
-        Box::new(|path| Box::new(RocksDbEngine::open(path))),
-    ));
-    out.push((
-        "surrealkv",
-        Box::new(|path| Box::new(SurrealKvEngine::open(path))),
-    ));
-    out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
+    if engine_enabled("rocksdb") {
+        out.push((
+            "rocksdb",
+            Box::new(|path| Box::new(RocksDbEngine::open(path))),
+        ));
+    }
+    if engine_enabled("surrealkv") {
+        out.push((
+            "surrealkv",
+            Box::new(|path| Box::new(SurrealKvEngine::open(path))),
+        ));
+    }
+    if engine_enabled("fjall") {
+        out.push(("fjall", Box::new(|path| Box::new(FjallEngine::open(path)))));
+    }
     out
 }
 
@@ -680,6 +822,99 @@ fn bench_random_read(c: &mut Criterion) {
     }
 
     group.finish();
+}
+
+fn bench_mixed_scenario(c: &mut Criterion, scenario: MixedScenario) {
+    let mut group = c.benchmark_group(format!("compare_native_{}", scenario.name));
+    configure_group(&mut group);
+    let op_count = key_count();
+    let value_sizes = value_sizes();
+
+    for value_size in value_sizes {
+        let factories = engine_factories(value_size);
+        group.throughput(Throughput::Elements(op_count as u64));
+        for (engine_name, factory) in &factories {
+            group.bench_with_input(
+                BenchmarkId::new(*engine_name, format!("value_{value_size}")),
+                &value_size,
+                |b, &value_size| {
+                    b.iter_batched(
+                        || {
+                            let dir = tempfile::tempdir().expect("tempdir");
+                            let mut engine = factory(dir.path());
+                            let initial_key_space = op_count.max(1);
+                            for i in 0..initial_key_space {
+                                let k = key(i);
+                                let v = value(value_size, (i % 251) as u8);
+                                engine.put(&k, &v);
+                            }
+                            engine.finish_writes();
+                            (dir, engine)
+                        },
+                        |(_dir, mut engine): (TempDir, Box<dyn Engine>)| {
+                            let mut rng =
+                                DeterministicRng::new(derive_seed(scenario.name, value_size));
+                            let mut key_space = op_count.max(1);
+                            let mut checksum = 0u64;
+
+                            for step in 0..op_count {
+                                let op = choose_operation(scenario, rng.next_u8() % 100);
+                                match op {
+                                    OpChoice::Read => {
+                                        let idx = rng.next_usize(key_space.max(1));
+                                        let k = key(idx);
+                                        if let Some(v) = engine.get_opt(&k) {
+                                            checksum = checksum.wrapping_add(v[0] as u64);
+                                        } else {
+                                            checksum = checksum.wrapping_add(1);
+                                        }
+                                    }
+                                    OpChoice::Write => {
+                                        let update = (rng.next_u8() % 100) < scenario.update_pct;
+                                        let idx = if update || key_space == 0 {
+                                            rng.next_usize(key_space.max(1))
+                                        } else {
+                                            let i = key_space;
+                                            key_space += 1;
+                                            i
+                                        };
+                                        let k = key(idx);
+                                        let v = value(value_size, ((step + idx) % 251) as u8);
+                                        checksum = checksum.wrapping_add(v[0] as u64);
+                                        engine.put(&k, &v);
+                                    }
+                                    OpChoice::Delete => {
+                                        let idx = rng.next_usize(key_space.max(1));
+                                        let k = key(idx);
+                                        engine.delete(&k);
+                                        checksum = checksum.wrapping_add(idx as u64);
+                                    }
+                                }
+                            }
+
+                            engine.finish_writes();
+                            black_box(checksum);
+                        },
+                        BatchSize::LargeInput,
+                    )
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_mixed_random_70r_30w(c: &mut Criterion) {
+    bench_mixed_scenario(c, MIXED_SCENARIOS[0]);
+}
+
+fn bench_mixed_random_50r_50w_with_updates(c: &mut Criterion) {
+    bench_mixed_scenario(c, MIXED_SCENARIOS[1]);
+}
+
+fn bench_mixed_random_60r_20w_20d(c: &mut Criterion) {
+    bench_mixed_scenario(c, MIXED_SCENARIOS[2]);
 }
 
 fn bench_cold_seq_read(c: &mut Criterion) {
@@ -885,6 +1120,9 @@ criterion_group!(
     bench_random_write,
     bench_seq_read,
     bench_random_read,
+    bench_mixed_random_70r_30w,
+    bench_mixed_random_50r_50w_with_updates,
+    bench_mixed_random_60r_20w_20d,
     bench_cold_seq_read,
     bench_cold_random_read,
     bench_range_seq_window,
