@@ -9,14 +9,27 @@ description: Schema evolution workflow and generated migration stubs.
 
 ## Traditional Migrations vs Jazz Lenses
 
-This section will explain how Jazz read/write-time migration lenses differ from traditional linear migration execution.
+- Traditional migration systems run a linear sequence and require all peers to converge before old versions stop writing.
+- Jazz migration lenses are evaluated at read/write time, so mixed-version clients can continue operating while data is translated across schema versions.
+- This enables incremental rollouts where older and newer app versions overlap safely during migration windows.
 
 ## CLI Workflow
 
-1. Update current schema.
-2. Run Jazz CLI to generate migration stubs.
-3. Edit generated stubs where needed.
-4. Rebuild and test.
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="bash" meta='title="examples/todo-server-ts/docs/migrations-workflow.sh"'>
+      ../examples/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="bash" meta='title="examples/todo-server-rs/docs/migrations-workflow.sh"'>
+      ../examples/todo-server-rs/docs/migrations-workflow.sh#migrations-workflow-sql
+    </include>
+  </Tab>
+</Tabs>
+
+For TypeScript DSL migrations, one generated file can define both forward and backward behavior in the same stub.
+For SQL migrations, keep explicit forward/backward files and edit each direction intentionally.
 
 ## Generated Stubs
 

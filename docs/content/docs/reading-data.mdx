@@ -35,8 +35,36 @@ description: Query APIs across one-shot reads, subscriptions, and reactive hooks
 
 ## Common Concepts
 
-- Filters, sorting, and pagination
-- Resolving references via includes
+- Filters, sorting, and pagination:
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-query-shaping-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-query-shaping-rust
+    </include>
+  </Tab>
+</Tabs>
+
+- Resolving references via includes:
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+  </Tab>
+</Tabs>
+
 - Settled tier semantics and local-first behavior:
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>

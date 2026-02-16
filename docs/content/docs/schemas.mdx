@@ -20,10 +20,19 @@ description: Define tables and relationships in TS DSL or SQL, then use the CLI 
 
 ## Datatypes and References
 
-- Use TS DSL (`col.string`, `col.boolean`, `col.ref`) as the default docs path.
-- Use SQL as the alternate path, especially for Rust-first projects.
+- TypeScript DSL defaults to `col.string`, `col.boolean`, and `col.ref` for relationships.
+- SQL keeps the same model via `TEXT`, `BOOLEAN`, and `UUID REFERENCES ...`.
+- Use SQL as the alternate path when your project is Rust-first.
 
 ## Jazz CLI and Generated Files
+
+### TS Client Codegen
+
+<include cwd lang="bash" meta='title="examples/todo-client-localfirst-ts/docs/schema-codegen.sh"'>
+  ../examples/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
+</include>
+
+This regenerates `schema/current.sql` and typed client bindings (for example `schema/app.ts`) from `schema/current.ts`.
 
 ### Generated migration stubs
 
