@@ -46,11 +46,6 @@ describe("TransactionContext", () => {
     ]);
   });
 
-  test("isActive returns true for active context", () => {
-    const context = new TransactionContext();
-    expect(context.isActive()).toBe(true);
-  });
-
   test("clear empties the buffer", () => {
     const context = new TransactionContext();
     context.bufferMessage(

@@ -38,14 +38,6 @@ export class TransactionContext {
   }
 
   /**
-   * Check if this transaction context is active.
-   * A TransactionContext is always considered active when it exists.
-   */
-  isActive(): boolean {
-    return true;
-  }
-
-  /**
    * Clear all buffered messages and CoValue IDs.
    * Called when the transaction is discarded (e.g., on error).
    */

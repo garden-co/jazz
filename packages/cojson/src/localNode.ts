@@ -558,7 +558,7 @@ export class LocalNode {
     // Check if we're inside a transaction context
     const transactionContext = this.getTransactionContext();
 
-    if (transactionContext?.isActive()) {
+    if (transactionContext) {
       // Buffer the message instead of syncing immediately
       transactionContext.bufferMessage(coValue.verified, emptyKnownState(id));
       // Don't sync now - will be done when transaction completes

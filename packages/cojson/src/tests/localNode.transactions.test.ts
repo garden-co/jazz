@@ -223,15 +223,12 @@ describe("LocalNode.unstable_withTransaction", () => {
         expect(map.get("key1")).toBe("value1");
 
         throw new Error("Test error");
-
-        // This line won't be reached
-        // map.set("key2", "value2", "trusting");
       });
     } catch {
       // Expected error
     }
 
-    // First mutation should be in memory
+    // Mutation should be in memory
     expect(map.get("key1")).toBe("value1");
   });
 });

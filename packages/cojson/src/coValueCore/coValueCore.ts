@@ -1252,7 +1252,7 @@ export class CoValueCore {
     // Check if we're inside a transaction context
     const transactionContext = this.node.getTransactionContext();
 
-    if (transactionContext?.isActive()) {
+    if (transactionContext) {
       // Don't sync now - will be done when transaction completes
       // Buffer the message instead of syncing immediately
       transactionContext.bufferMessage(this.verified, knownStateBefore);
