@@ -18,7 +18,7 @@ export function JazzExpoProvider<
     | AnyAccountSchema,
 >(props: JazzProviderProps<S>) {
   const storage = useMemo(() => {
-    return props.storage ?? new ExpoSQLiteAdapter();
+    return props.storage ?? ExpoSQLiteAdapter.getInstance();
   }, [props.storage]);
 
   const kvStore = useMemo(() => {
