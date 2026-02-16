@@ -1131,6 +1131,8 @@ export class SyncManager {
     }
 
     // Send to all server peers for each CoValue
+    // `sentToPeers` is used to avoid sending the same message to the same peer multiple times
+    // e.g. this.getServerPeers(A) and this.getServerPeers(B) both contain the same peer P
     const sentToPeers = new Set<PeerID>();
     for (const coValueId of coValueIds) {
       for (const peer of this.getServerPeers(coValueId)) {
