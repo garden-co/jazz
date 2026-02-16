@@ -18,6 +18,7 @@ import {
   MOON_SURFACE_WIDTH,
   FUEL_TYPES,
   ASTRONAUT_WIDTH,
+  SHARE_PROXIMITY_RADIUS,
   type PlayerMode,
   type FuelType,
 } from "./constants.js";
@@ -114,6 +115,8 @@ export interface RemotePlayerView {
   velocityY: number;
   color: string;
   landerX?: number;
+  requiredFuelType?: string;
+  playerId?: string;
 }
 
 export interface EngineState {
@@ -144,6 +147,7 @@ export function useGameEngine(
     inventory?: FuelType[];
     onCollectDeposit?: (id: string) => void;
     onRefuel?: (fuelType: FuelType) => void;
+    onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
   },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
@@ -179,6 +183,8 @@ export function useGameEngine(
   onCollectDepositRef.current = options?.onCollectDeposit;
   const onRefuelRef = useRef(options?.onRefuel);
   onRefuelRef.current = options?.onRefuel;
+  const onShareFuelRef = useRef(options?.onShareFuel);
+  onShareFuelRef.current = options?.onShareFuel;
 
   // Keep external deposits ref in sync with latest props
   if (isConnected) {
@@ -199,12 +205,30 @@ export function useGameEngine(
   // when the next React render overwrites depositsRef from Jazz props.
   const collectedIdsRef = useRef<Set<string>>(new Set());
 
+  // Fuel types shared out to other players (pending Jazz confirmation).
+  // Excluded from the merged inventory to prevent re-sharing on re-render.
+  const sharedOutRef = useRef<Set<FuelType>>(new Set());
+
   // Merge Jazz inventory into the working set each render (connected mode)
   if (options?.inventory !== undefined) {
-    inventoryRef.current = new Set([
+    const merged = new Set([
       ...options.inventory,
       ...optimisticInventoryRef.current,
     ]);
+    // Exclude fuel types shared out to other players (pending Jazz confirmation)
+    for (const ft of sharedOutRef.current) {
+      merged.delete(ft);
+    }
+    inventoryRef.current = merged;
+
+    // Clean up sharedOut entries Jazz has confirmed (type gone from props)
+    const propsSet = new Set(options.inventory);
+    const sharedClean: FuelType[] = [];
+    for (const ft of sharedOutRef.current) {
+      if (!propsSet.has(ft)) sharedClean.push(ft);
+    }
+    for (const ft of sharedClean) sharedOutRef.current.delete(ft);
+
     // Clean up collected IDs that Jazz has confirmed (no longer in deposit list).
     // Build a removal list first to avoid mutating the Set during iteration.
     const toRemove: string[] = [];
@@ -365,6 +389,21 @@ export function useGameEngine(
             collectedIdsRef.current.add(d.id);
             onCollectDepositRef.current?.(d.id);
           }
+        }
+
+        // Proximity fuel sharing: give fuel to nearby walking remote players
+        for (const rp of remotePlayersRef.current) {
+          if (rp.mode !== "walking") continue;
+          if (!rp.requiredFuelType || !rp.playerId) continue;
+          if (wrapDistance(posXRef.current, rp.positionX) > SHARE_PROXIMITY_RADIUS) continue;
+          const ft = rp.requiredFuelType as FuelType;
+          if (ft === requiredFuelType) continue; // never give away what we need
+          if (!inventoryRef.current.has(ft)) continue;
+          // Share it
+          inventoryRef.current.delete(ft);
+          optimisticInventoryRef.current.delete(ft);
+          sharedOutRef.current.add(ft);
+          onShareFuelRef.current?.(rp.requiredFuelType, rp.playerId);
         }
 
         if (wantsInteract) {

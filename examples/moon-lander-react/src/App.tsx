@@ -173,6 +173,7 @@ function GameWithSync({
         requiredFuelType: p.requiredFuelType,
         lastSeen: p.lastSeen,
         landerFuelLevel: p.landerFuelLevel,
+        playerId: p.playerId,
         landerX: p.landerSpawnX || undefined,
       }));
   }, [allPlayers, playerId]);

@@ -462,15 +462,37 @@ Local inventory must move to Jazz before sharing can work. Currently `inventoryR
 
 ### Phase 4: Automatic Fuel Sharing
 
-- [ ] Proximity detection: compare local player position with raw DB positions of remote walking players (use generous radius ~1.5x interact radius to account for sync latency)
-- [ ] Proximity hint: at 2x radius, show "move closer to share fuel" if sharing is possible
-- [ ] Auto-share: at 1x radius, rewrite `collectedBy` from giver's playerId to receiver's playerId
-  - Both players must be walking
-  - Only give fuel types the giver does NOT need (`fuelType !== giver.requiredFuelType`)
-  - One-way giving: each client only gives its own fuel away
-- [ ] Visual: shape icon floats from giver to receiver
-- [ ] Inventory burst: on lander entry, animate unneeded fuel to new X positions, then reset `collected = false, collectedBy = "", positionX = newX`
-- [ ] Test: "Walk past another player, fuel transfers correctly"
+#### Phase 4a: Data threading + proximity sharing logic
+
+Thread remote player identity through to the engine so sharing decisions can be made:
+- [ ] Add `requiredFuelType` and `playerId` to `RemotePlayerView` (engine needs to know what each remote player needs and who they are for the DB write)
+- [ ] Pass local `playerId` into the engine (needed for the `onShareFuel` callback)
+- [ ] Proximity detection in engine game loop: compare local walking player position with raw DB positions (`remotePlayersRef`) of remote walking players
+- [ ] Auto-share: fires continuously while conditions are met (both walking, within 1x interact radius, giver has fuel the receiver needs and giver doesn't need it). Continuous firing ensures transfers happen despite sync delays.
+  - Giver's client rewrites `collectedBy` from own playerId to receiver's playerId
+  - Guard: `fuelType !== giver.requiredFuelType` (never give away what you need)
+  - One-way: each client only gives, never takes
+- [ ] Add `onShareFuel(depositId: string, receiverPlayerId: string)` callback chain: engine → Game → App → `db.update(fuel_deposits, id, { collectedBy: receiverPlayerId })`
+- [ ] Proximity hint: at 2x radius, show "move closer to share fuel" if sharing would be possible (giver has giveable fuel, receiver needs it)
+- [ ] Tests: "Walk past another player, fuel transfers correctly"
+
+#### Phase 4b: Inventory burst on lander entry
+
+When a player enters the lander (presses E), ALL collected deposits that are NOT the required fuel type are scattered back onto the moon surface. This always happens on lander entry, regardless of whether the player has the correct fuel.
+
+- [ ] On lander entry: identify all deposits in inventory where `fuelType !== requiredFuelType`
+- [ ] Arc animation: each ejected fuel shape animates in an arc from the player to a new random X position nearby (runs in parallel with gameplay, non-blocking)
+- [ ] DB write fires after animation lands (not before): `collected = false, collectedBy = "", positionX = newX`
+- [ ] Deposits are NOT collectible by anyone during the arc animation (they don't exist on the surface until the write fires)
+- [ ] Add `onBurstDeposit(depositId: string, newX: number)` callback chain: engine → Game → App
+- [ ] The required fuel type deposit stays → consumed for refuelling (existing behaviour)
+- [ ] Tests: "Entering lander scatters non-required fuel back to surface"
+
+#### Phase 4c: Share visual
+
+- [ ] When a fuel transfer occurs, animate the shape icon in an arc from giver to receiver (canvas, non-blocking)
+- [ ] Animation plays on both screens: giver sees shape leave, receiver sees shape arrive
+- [ ] Giver triggers animation locally on share. Receiver detects the transfer via Jazz subscription (new deposit in their inventory with a nearby giver) and triggers a matching arrival animation.
 
 ### Phase 5: Chat & Polish
 

@@ -38,6 +38,7 @@ export interface RemotePlayer {
   requiredFuelType: string;
   lastSeen: number;
   landerFuelLevel: number;
+  playerId?: string;
   landerX?: number;
 }
 
@@ -52,12 +53,13 @@ interface GameProps {
   inventory?: FuelType[];
   onCollectDeposit?: (id: string) => void;
   onRefuel?: (fuelType: FuelType) => void;
+  onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
   onStateChange?: (state: GameState) => void;
 }
 
 const STALE_THRESHOLD_S = 180; // 3 minutes
 
-export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onCollectDeposit, onRefuel, onStateChange }: GameProps) {
+export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onCollectDeposit, onRefuel, onShareFuel, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -77,6 +79,8 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
         velocityY: rp.velocityY,
         color: rp.color,
         landerX: rp.landerX,
+        requiredFuelType: rp.requiredFuelType,
+        playerId: rp.playerId,
       }));
   }, [remotePlayers]);
 
@@ -88,6 +92,7 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
     inventory,
     onCollectDeposit,
     onRefuel,
+    onShareFuel,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)

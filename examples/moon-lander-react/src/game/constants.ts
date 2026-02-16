@@ -26,6 +26,7 @@ export const REFUEL_AMOUNT = 100; // Per correct fuel unit collected
 
 // Lander interaction
 export const LANDER_INTERACT_RADIUS = 40; // Pixels — how close to walk to enter lander
+export const SHARE_PROXIMITY_RADIUS = 80; // Pixels — how close for automatic fuel sharing
 
 // Spawn
 export const INITIAL_ALTITUDE = -400; // Y position at spawn (high above the moon surface)
