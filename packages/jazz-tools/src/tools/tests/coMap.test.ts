@@ -589,9 +589,9 @@ describe("CoMap", async () => {
       });
       // `in` returns true for schema-defined keys even when value is undefined,
       // to satisfy proxy invariant consistency with ownKeys/getOwnPropertyDescriptor.
-      // Use $jazz.has() to check if a key has a set value.
       expect("age" in john).toEqual(true);
-      expect(john.$jazz.has("age")).toEqual(false);
+      // $jazz.has() returns true because age was explicitly set (even to undefined)
+      expect(john.$jazz.has("age")).toEqual(true);
       // The key still exists, since age === undefined
       expect(Object.keys(john)).toEqual(["name", "age"]);
     });
