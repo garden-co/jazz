@@ -132,6 +132,31 @@ describe("createWebSocketPeer", () => {
     vi.useRealTimers();
   });
 
+  test("should extend ping timeout when receiving new messages", async () => {
+    vi.useFakeTimers();
+    const { triggerEvent, peer } = setup({ pingTimeout: 1_000 });
+
+    const onMessageSpy = vi.fn();
+
+    peer.incoming.onMessage(onMessageSpy);
+
+    triggerEvent("message", new MessageEvent("message", { data: "{}" }));
+
+    await vi.advanceTimersByTimeAsync(900);
+
+    triggerEvent("message", new MessageEvent("message", { data: "{}" }));
+
+    await vi.advanceTimersByTimeAsync(900);
+
+    expect(onMessageSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(onMessageSpy).toHaveBeenCalledWith("Disconnected");
+
+    vi.useRealTimers();
+  });
+
   test("should send outgoing messages", async () => {
     const { peer, mockWebSocket } = setup();
 

@@ -36,16 +36,50 @@ function createPingTimeoutListener(
   }
 
   let pingTimeout: ReturnType<typeof setTimeout> | null = null;
+  let pingDeadline = 0;
+  let cleared = false;
+
+  function scheduleTimeout() {
+    if (cleared || pingTimeout !== null || pingDeadline === 0) {
+      return;
+    }
+
+    pingTimeout = setTimeout(
+      () => {
+        pingTimeout = null;
+
+        if (cleared) {
+          return;
+        }
+
+        if (Date.now() >= pingDeadline) {
+          cleared = true;
+          callback();
+          return;
+        }
+
+        scheduleTimeout();
+      },
+      Math.max(0, pingDeadline - Date.now()),
+    );
+  }
 
   return {
     reset() {
-      pingTimeout && clearTimeout(pingTimeout);
-      pingTimeout = setTimeout(() => {
-        callback();
-      }, timeout);
+      if (cleared) {
+        return;
+      }
+
+      pingDeadline = Date.now() + timeout;
+      scheduleTimeout();
     },
     clear() {
-      pingTimeout && clearTimeout(pingTimeout);
+      cleared = true;
+
+      if (pingTimeout !== null) {
+        clearTimeout(pingTimeout);
+        pingTimeout = null;
+      }
     },
   };
 }
