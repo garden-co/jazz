@@ -1,5 +1,5 @@
 import type { CojsonInternalTypes, SyncMessage } from "cojson";
-import { cojsonInternals } from "cojson";
+import { cojsonInternals, logger } from "cojson";
 import { type Mocked, afterEach, describe, expect, test, vi } from "vitest";
 import {
   type CreateWebSocketPeerOpts,
@@ -130,6 +130,58 @@ describe("createWebSocketPeer", () => {
     expect(onMessageSpy).toHaveBeenCalledWith("Disconnected");
 
     vi.useRealTimers();
+  });
+
+  test("should log ping timeout with peer metadata", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    const { triggerEvent } = setup({
+      id: "peer-123",
+      role: "server",
+    });
+
+    triggerEvent("message", new MessageEvent("message", { data: "{}" }));
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(warnSpy).toHaveBeenCalledWith("Ping timeout from peer", {
+      peerId: "peer-123",
+      peerRole: "server",
+    });
+
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  test("should log ping delay when enabled", () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const infoSpy = vi.spyOn(logger, "info").mockImplementation(() => {});
+    const { triggerEvent } = setup({
+      enablePingDelayLogs: true,
+      pingDelayLogsData: {
+        source: "test-suite",
+      },
+    });
+
+    triggerEvent(
+      "message",
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ping",
+          time: 750,
+          dc: "unknown",
+        }),
+      }),
+    );
+
+    expect(infoSpy).toHaveBeenCalledWith("Ping delay", {
+      delay: 250,
+      server: "unknown",
+      source: "test-suite",
+    });
+
+    infoSpy.mockRestore();
+    nowSpy.mockRestore();
   });
 
   test("should extend ping timeout when receiving new messages", async () => {
