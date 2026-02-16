@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { Account, co, Group, Loaded, Ref } from "../internal";
+import { z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 
 beforeEach(async () => {
@@ -86,6 +87,82 @@ describe("Group", () => {
       const groupId = group.$jazz.id;
       const invite = await co.group().createInvite(groupId, { role: "writer" });
       expect(invite.startsWith("inviteSecret_")).toBeTruthy();
+    });
+  });
+
+  describe("reader cannot create content", () => {
+    it("should throw when a reader tries to create a CoMap", () => {
+      const me = Account.getMe();
+      const group = Group.create();
+      group.addMember(me, "reader");
+      expect(group.myRole()).toBe("reader");
+
+      const TestMap = co.map({ val: z.string() });
+      expect(() => {
+        TestMap.create({ val: "test" }, { owner: group });
+      }).toThrow("does not have write permissions");
+    });
+
+    it("should throw when a reader tries to create a CoList", () => {
+      const me = Account.getMe();
+      const group = Group.create();
+      group.addMember(me, "reader");
+
+      const TestList = co.list(z.string());
+      expect(() => {
+        TestList.create(["test"], { owner: group });
+      }).toThrow("does not have write permissions");
+    });
+
+    it("should throw when a reader tries to create a CoFeed", () => {
+      const me = Account.getMe();
+      const group = Group.create();
+      group.addMember(me, "reader");
+
+      const TestFeed = co.feed(z.string());
+      expect(() => {
+        TestFeed.create(["test"], { owner: group });
+      }).toThrow("does not have write permissions");
+    });
+
+    it("should throw when a reader tries to create nested inline CoMaps", () => {
+      const me = Account.getMe();
+      const group = Group.create();
+      group.addMember(me, "reader");
+
+      const Inner = co.map({ val: z.string() });
+      const Outer = co.map({ inner: Inner });
+
+      expect(() => {
+        Outer.create({ inner: { val: "test" } }, { owner: group });
+      }).toThrow("does not have write permissions");
+    });
+
+    it("should throw when a reader creates a CoMap referencing a pre-created value", () => {
+      const me = Account.getMe();
+      const readerGroup = Group.create();
+      readerGroup.addMember(me, "reader");
+
+      const writerGroup = Group.create();
+      const Inner = co.map({ val: z.string() });
+      const Outer = co.map({ inner: Inner });
+
+      const inner = Inner.create({ val: "test" }, { owner: writerGroup });
+      expect(() => {
+        Outer.create({ inner }, { owner: readerGroup });
+      }).toThrow("does not have write permissions");
+    });
+
+    it("should allow a writer to create content", async () => {
+      const admin = await createJazzTestAccount();
+      const me = Account.getMe();
+
+      const group = Group.create({ owner: admin });
+      group.addMember(me, "writer");
+
+      const TestMap = co.map({ val: z.string() });
+      const map = TestMap.create({ val: "test" }, { owner: group });
+      expect(map.val).toBe("test");
     });
   });
 
