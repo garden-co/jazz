@@ -5,13 +5,28 @@ description: Insert, update, and delete APIs with write acknowledgement semantic
 
 ## Core Operations
 
-- Insert
-- Update
-- Delete
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+  </Tab>
+</Tabs>
 
 ## Write Ack Tier
 
-This section will document write acknowledgement tier behavior and how it impacts local sync vs remote confirmation timing.
+TypeScript exposes persisted write helpers that wait for selected tiers.
+
+<include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+  ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#writing-ack-tier-ts
+</include>
+
+Rust API parity for explicit write ack tier selection is still evolving; current Rust examples use synchronous local writes with async sync propagation.
 
 ## Backend Request Context Reminder
 

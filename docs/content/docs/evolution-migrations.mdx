@@ -18,4 +18,48 @@ This section will explain how Jazz read/write-time migration lenses differ from 
 3. Edit generated stubs where needed.
 4. Rebuild and test.
 
-See [Schemas](/docs/schemas) for generated and edited stub examples.
+## Generated Stubs
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
+    >
+      ../examples/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
+    </include>
+  </Tab>
+</Tabs>
+
+## Edited Stubs
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
+    >
+      ../examples/todo-server-ts/schema/migration_v1_v2_customized_example.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
+    >
+      ../examples/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
+    </include>
+  </Tab>
+</Tabs>
