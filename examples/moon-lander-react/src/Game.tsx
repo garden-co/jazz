@@ -1,5 +1,6 @@
-import { useRef, useEffect } from "react";
+import { useMemo, useRef, useEffect } from "react";
 import { useGameEngine } from "./game/engine.js";
+import type { RemotePlayerView } from "./game/engine.js";
 import { getOrCreatePlayerId, derivePlayerProps } from "./game/player.js";
 import { Hud } from "./game/Hud.js";
 import type { PlayerMode, FuelType } from "./game/constants.js";
@@ -50,14 +51,35 @@ interface GameProps {
   onStateChange?: (state: GameState) => void;
 }
 
+const STALE_THRESHOLD_S = 180; // 3 minutes
+
 export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Filter stale remote players (Jazz concern, not engine's job)
+  const activeRemotes: RemotePlayerView[] = useMemo(() => {
+    if (!remotePlayers) return [];
+    const nowS = Math.floor(Date.now() / 1000);
+    return remotePlayers
+      .filter((rp) => nowS - rp.lastSeen < STALE_THRESHOLD_S)
+      .map((rp) => ({
+        id: rp.id,
+        name: rp.name,
+        mode: rp.mode,
+        positionX: rp.positionX,
+        positionY: rp.positionY,
+        velocityY: rp.velocityY,
+        color: rp.color,
+        landerX: rp.landerX,
+      }));
+  }, [remotePlayers]);
+
   const engine = useGameEngine(canvasRef, {
     physicsSpeed,
     requiredFuelType: playerProps.requiredFuelType,
+    remotePlayers: activeRemotes,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)
@@ -94,6 +116,7 @@ export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) 
       data-lander-y={engine.landerY}
       data-deposit-count={engine.depositCount}
       data-inventory={engine.inventory.join(",")}
+      data-remote-player-count={engine.remotePlayerCount}
       style={{ position: "relative", width: "100vw", height: "100vh" }}
     >
       <canvas

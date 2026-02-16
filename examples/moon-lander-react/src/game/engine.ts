@@ -38,6 +38,14 @@ function wrapDistance(a: number, b: number): number {
   return Math.min(direct, MOON_SURFACE_WIDTH - direct);
 }
 
+/** Lerp an X position toward a target, taking the shortest wrapping path. */
+function wrapLerp(current: number, target: number, t: number): number {
+  let diff = target - current;
+  if (diff > MOON_SURFACE_WIDTH / 2) diff -= MOON_SURFACE_WIDTH;
+  if (diff < -MOON_SURFACE_WIDTH / 2) diff += MOON_SURFACE_WIDTH;
+  return wrapX(current + diff * t);
+}
+
 /** Convert a world X to a screen X relative to the camera, with wrapping. */
 function wrapScreenX(worldX: number, cameraX: number): number {
   let dx = worldX - cameraX;
@@ -95,6 +103,18 @@ function generateDeposits(requiredFuelType: FuelType, spawnX: number): Deposit[]
 // Engine state — the snapshot exposed to React each tick
 // ---------------------------------------------------------------------------
 
+/** A remote player to render (already filtered for staleness). */
+export interface RemotePlayerView {
+  id: string;
+  name: string;
+  mode: string;
+  positionX: number;
+  positionY: number;
+  velocityY: number;
+  color: string;
+  landerX?: number;
+}
+
 export interface EngineState {
   mode: PlayerMode;
   positionX: number;
@@ -106,6 +126,7 @@ export interface EngineState {
   fuel: number;
   depositCount: number;
   inventory: string[];
+  remotePlayerCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +135,11 @@ export interface EngineState {
 
 export function useGameEngine(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  options?: { physicsSpeed?: number; requiredFuelType?: FuelType },
+  options?: {
+    physicsSpeed?: number;
+    requiredFuelType?: FuelType;
+    remotePlayers?: RemotePlayerView[];
+  },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
   const requiredFuelType = options?.requiredFuelType ?? "circle";
@@ -135,6 +160,10 @@ export function useGameEngine(
   const smoothCamYRef = useRef(NaN); // NaN = snap on first frame
   const launchElapsedRef = useRef(0);
 
+  // Remote players (updated from props via ref so the game loop sees latest)
+  const remotePlayersRef = useRef<RemotePlayerView[]>([]);
+  const smoothedRemotesRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+
   // Fuel deposits and inventory
   const depositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
   const inventoryRef = useRef<Set<FuelType>>(new Set());
@@ -151,7 +180,11 @@ export function useGameEngine(
     fuel: INITIAL_FUEL,
     depositCount: depositsRef.current.length,
     inventory: [],
+    remotePlayerCount: 0,
   });
+
+  // Keep remote players ref in sync with latest props
+  remotePlayersRef.current = options?.remotePlayers ?? [];
 
   // Track which keys are currently held + one-shot action queue
   const keysRef = useRef(new Set<string>());
@@ -353,6 +386,45 @@ export function useGameEngine(
         }
       }
 
+      // Smooth and draw remote players
+      const smoothed = smoothedRemotesRef.current;
+      const lerpT = Math.min(1, 8 * rawDt);
+      const activeIds = new Set<string>();
+      for (const rp of remotePlayersRef.current) {
+        activeIds.add(rp.id);
+        let s = smoothed.get(rp.id);
+        if (!s) {
+          s = { x: rp.positionX, y: rp.positionY };
+          smoothed.set(rp.id, s);
+        }
+        s.x = wrapLerp(s.x, rp.positionX, lerpT);
+        s.y += (rp.positionY - s.y) * lerpT;
+
+        const rpSX = wrapScreenX(s.x, cameraX);
+        if (rpSX < -60 || rpSX > w + 60) continue;
+
+        if (rp.mode === "walking") {
+          drawAstronaut(ctx, rpSX, groundScreenY, rp.color, rp.name);
+          if (rp.landerX != null) {
+            const rpLanderSX = wrapScreenX(rp.landerX, cameraX);
+            if (rpLanderSX > -40 && rpLanderSX < w + 40) {
+              drawLander(ctx, rpLanderSX, groundScreenY, false, rp.color);
+            }
+          }
+        } else if (rp.mode === "descending") {
+          const rpSY = s.y - cameraY;
+          if (rpSY > -60 && rpSY < h + 60) {
+            drawLander(ctx, rpSX, rpSY, rp.velocityY < 0, rp.color, rp.name);
+          }
+        } else {
+          drawLander(ctx, rpSX, groundScreenY, false, rp.color, rp.name);
+        }
+      }
+      // Clean up smoothed entries for players who left
+      for (const id of smoothed.keys()) {
+        if (!activeIds.has(id)) smoothed.delete(id);
+      }
+
       // Draw player
       const screenX = posXRef.current - cameraX;
       if (modeRef.current === "descending") {
@@ -415,6 +487,7 @@ export function useGameEngine(
         fuel: fuelRef.current,
         depositCount: depositsRef.current.length,
         inventory: [...inventoryRef.current],
+        remotePlayerCount: remotePlayersRef.current.length,
       });
     }, 50);
 

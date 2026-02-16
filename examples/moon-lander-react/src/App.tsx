@@ -1,4 +1,4 @@
-import { useRef, useCallback, useMemo } from "react";
+import { useRef, useCallback, useEffect, useMemo } from "react";
 import { JazzProvider, useDb, useAll } from "jazz-react";
 import type { DbConfig } from "jazz-ts";
 import { app } from "../schema/app.js";
@@ -21,15 +21,21 @@ function GameWithSync({
 
   // Track the Jazz row ID for the local player so we can update (not re-insert)
   const dbRowIdRef = useRef<string | null>(null);
-  const lastWriteRef = useRef(0);
+  const allPlayersRef = useRef(allPlayers);
+  allPlayersRef.current = allPlayers;
 
-  // On first write (or after sync delivers an existing row), claim or create our row
-  const handleStateChange = useCallback(
-    (state: GameState) => {
-      // Throttle DB writes to DB_SYNC_INTERVAL_MS
-      const now = Date.now();
-      if (now - lastWriteRef.current < DB_SYNC_INTERVAL_MS) return;
-      lastWriteRef.current = now;
+  // Buffer latest game state in a ref — written to DB on a separate interval
+  // to avoid re-entrant WASM borrows when sync messages trigger React renders
+  const latestStateRef = useRef<GameState | null>(null);
+
+  const handleStateChange = useCallback((state: GameState) => {
+    latestStateRef.current = state;
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const state = latestStateRef.current;
+      if (!state) return;
 
       const playerData = {
         playerId,
@@ -47,9 +53,8 @@ function GameWithSync({
         landerSpawnX: state.landerSpawnX,
       };
 
-      // If we haven't found our row yet, check if server sync delivered one
-      if (!dbRowIdRef.current && allPlayers) {
-        const existing = allPlayers.find((p) => p.playerId === playerId);
+      if (!dbRowIdRef.current && allPlayersRef.current) {
+        const existing = allPlayersRef.current.find((p) => p.playerId === playerId);
         if (existing) {
           dbRowIdRef.current = existing.id;
         }
@@ -60,9 +65,10 @@ function GameWithSync({
       } else {
         db.update(app.players, dbRowIdRef.current, playerData);
       }
-    },
-    [db, playerId, allPlayers],
-  );
+    }, DB_SYNC_INTERVAL_MS);
+
+    return () => clearInterval(id);
+  }, [db, playerId]);
 
   // Map Jazz subscription data → RemotePlayer[] for Game
   // Filter by playerId so we exclude all our own rows (current + any stale)
