@@ -22,17 +22,18 @@ This page will expand with concrete production/dev presets.
 
 Use `JAZZ_APP_ID` as the app ID configuration key across environments.
 
-### React Client (TypeScript)
-
-<include cwd lang="tsx" meta='title="examples/todo-client-localfirst-react/src/App.tsx"'>
-  ../examples/todo-client-localfirst-react/src/App.tsx#context-setup-react
-</include>
-
-### TS Client
-
-<include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/main.ts"'>
-  ../examples/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
-</include>
+<Tabs groupId="jazz-client-framework" items={["React Client", "TS Client"]} persist>
+  <Tab value="React Client">
+    <include cwd lang="tsx" meta='title="examples/todo-client-localfirst-react/src/App.tsx"'>
+      ../examples/todo-client-localfirst-react/src/App.tsx#context-setup-react
+    </include>
+  </Tab>
+  <Tab value="TS Client">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/main.ts"'>
+      ../examples/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
+    </include>
+  </Tab>
+</Tabs>
 
 ### Backend Context Setup
 
@@ -51,6 +52,35 @@ Use `JAZZ_APP_ID` as the app ID configuration key across environments.
 
 ### Backend Identity Pattern
 
-- Client-side usage enforces permissions for the local user context.
-- Backend usage must extract requester JWT and create a user-scoped client/session.
-- Read/write and permissions sections reference this model.
+Client-side usage enforces permissions for the local user context.
+Backend usage should extract requester JWT and create a user-scoped client/session.
+
+#### 1. Extract requester session from JWT
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#backend-request-session-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#backend-request-session-rust
+    </include>
+  </Tab>
+</Tabs>
+
+#### 2. Create a user-scoped client
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#backend-request-scoped-client-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#backend-request-scoped-client-rust
+    </include>
+  </Tab>
+</Tabs>
