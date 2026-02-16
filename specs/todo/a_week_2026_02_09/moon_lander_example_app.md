@@ -445,7 +445,7 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
   - Both players must be walking
   - No cooldown — transfer is immediate on proximity
 - [ ] Visual: shape icon floats from giver to receiver
-- [ ] Launch scatter: when a player launches, unneeded inventory fuel explodes back onto the moonscape as new deposits
+- [ ] Inventory burst: when entering the lander, all inventory items that are NOT the required fuel type scatter back onto the moon surface (Sonic-dropping-rings style). Scattered items become collectable deposits again. This prevents unneeded fuel being launched into space.
 - [ ] Test: "Walk past another player, fuel transfers correctly"
 
 ### Phase 5: Chat & Polish
@@ -453,6 +453,10 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
 - [ ] Chat input UI
 - [ ] Speech bubbles above players
 - [ ] Test: "Send message, appears above head for 5 seconds"
+
+### Phase 5b: Walking Polish
+
+- [ ] Astronaut jumping: Space/W while walking triggers a lunar-gravity jump (low gravity = high, floaty arcs). Adds verticality and makes traversal more fun.
 
 ### Phase 6: Synthwave Aesthetic
 

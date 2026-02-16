@@ -21,7 +21,7 @@ import {
   type PlayerMode,
   type FuelType,
 } from "./constants.js";
-import { drawBackground, drawLander, drawAstronaut } from "./render.js";
+import { drawBackground, drawLander, drawAstronaut, drawDeposit, drawArrow, drawSplash, DEPOSIT_COLOURS } from "./render.js";
 
 // ---------------------------------------------------------------------------
 // World wrapping — the moon is round
@@ -36,6 +36,14 @@ function wrapX(x: number): number {
 function wrapDistance(a: number, b: number): number {
   const direct = Math.abs(a - b);
   return Math.min(direct, MOON_SURFACE_WIDTH - direct);
+}
+
+/** Convert a world X to a screen X relative to the camera, with wrapping. */
+function wrapScreenX(worldX: number, cameraX: number): number {
+  let dx = worldX - cameraX;
+  if (dx < -MOON_SURFACE_WIDTH / 2) dx += MOON_SURFACE_WIDTH;
+  if (dx > MOON_SURFACE_WIDTH / 2) dx -= MOON_SURFACE_WIDTH;
+  return dx;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +130,10 @@ export function useGameEngine(
   const landerXRef = useRef(0);
   const landerYRef = useRef(0);
   const fuelRef = useRef(INITIAL_FUEL);
+
+  // Camera smoothing
+  const smoothCamYRef = useRef(NaN); // NaN = snap on first frame
+  const launchElapsedRef = useRef(0);
 
   // Fuel deposits and inventory
   const depositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
@@ -260,13 +272,11 @@ export function useGameEngine(
         // Wrap horizontally
         posXRef.current = wrapX(posXRef.current);
 
-        // Collect deposits the player walks over (1 per type max)
+        // Collect deposits the player walks over (skip types already owned)
         const pickupRange = ASTRONAUT_WIDTH;
         depositsRef.current = depositsRef.current.filter((d) => {
-          if (wrapDistance(d.x, posXRef.current) < pickupRange) {
-            if (!inventoryRef.current.has(d.type)) {
-              inventoryRef.current.add(d.type);
-            }
+          if (wrapDistance(d.x, posXRef.current) < pickupRange && !inventoryRef.current.has(d.type)) {
+            inventoryRef.current.add(d.type);
             return false; // remove from surface
           }
           return true;
@@ -284,32 +294,63 @@ export function useGameEngine(
             }
           }
         }
+      } else if (modeRef.current === "launched") {
+        launchElapsedRef.current += dt;
+        // Keep accelerating until well off-screen, then clamp position
+        velYRef.current -= THRUST_POWER * 1.5 * dt;
+        posYRef.current += velYRef.current * dt;
+        fuelRef.current = Math.max(0, fuelRef.current - FUEL_BURN_Y * dt);
+        // Clamp to prevent overflow (well above any camera position)
+        if (posYRef.current < -100000) {
+          posYRef.current = -100000;
+          velYRef.current = 0;
+        }
       }
 
-      // --- Camera ---
+      // --- Camera (smoothed) ---
       const cameraX = Math.floor(posXRef.current - w / 2);
-      // Vertical: follow player during descent, lock ground near bottom after landing
-      const GROUND_MARGIN = 80; // pixels of ground visible below surface line
-      let cameraY: number;
+      const GROUND_MARGIN = 80;
+
+      let targetCamY: number;
       if (modeRef.current === "descending") {
-        // Centre on player vertically
-        cameraY = Math.floor(posYRef.current - h / 2);
+        targetCamY = posYRef.current - h / 2;
+      } else if (modeRef.current === "launched") {
+        // Slow pan up to deep space — lander flies out of frame naturally
+        targetCamY = INITIAL_ALTITUDE - h / 2;
       } else {
-        // Lock so ground is near the bottom
-        cameraY = Math.floor(GROUND_LEVEL - h + GROUND_MARGIN);
+        // Ground modes — lock ground near bottom
+        targetCamY = GROUND_LEVEL - h + GROUND_MARGIN;
       }
+
+      // Lerp toward target (snap on first frame)
+      if (isNaN(smoothCamYRef.current)) {
+        smoothCamYRef.current = targetCamY;
+      }
+      const camLerp = modeRef.current === "launched" ? 1.5 : 5;
+      smoothCamYRef.current += (targetCamY - smoothCamYRef.current) * Math.min(1, camLerp * dt);
+      const cameraY = Math.floor(smoothCamYRef.current);
 
       // --- Render ---
       drawBackground(ctx, cameraX, cameraY, w, h);
+
+      // Draw fuel deposits on the ground (with world wrapping)
+      const groundScreenY = GROUND_LEVEL - cameraY;
+      for (const dep of depositsRef.current) {
+        const dx = wrapScreenX(dep.x, cameraX);
+        if (dx > -20 && dx < w + 20) {
+          drawDeposit(ctx, dx, groundScreenY, dep.type);
+        }
+      }
 
       // Draw parked lander (if we've landed and are walking)
       if (
         modeRef.current === "walking" &&
         landerXRef.current !== 0
       ) {
-        const landerScreenX = landerXRef.current - cameraX;
-        const landerScreenY = GROUND_LEVEL - cameraY;
-        drawLander(ctx, landerScreenX, landerScreenY, false);
+        const landerSX = wrapScreenX(landerXRef.current, cameraX);
+        if (landerSX > -40 && landerSX < w + 40) {
+          drawLander(ctx, landerSX, groundScreenY, false);
+        }
       }
 
       // Draw player
@@ -318,11 +359,43 @@ export function useGameEngine(
         const screenY = posYRef.current - cameraY;
         drawLander(ctx, screenX, screenY, thrusting);
       } else if (modeRef.current === "landed" || modeRef.current === "in_lander") {
-        const screenY = GROUND_LEVEL - cameraY;
-        drawLander(ctx, screenX, screenY, false);
+        drawLander(ctx, screenX, groundScreenY, false);
       } else if (modeRef.current === "walking") {
-        const screenY = GROUND_LEVEL - cameraY;
-        drawAstronaut(ctx, screenX, screenY);
+        drawAstronaut(ctx, screenX, groundScreenY);
+      } else if (modeRef.current === "launched") {
+        const screenY = posYRef.current - cameraY;
+        // Only draw lander while it's on-screen
+        if (screenY > -60 && screenY < h + 60) {
+          drawLander(ctx, screenX, screenY, launchElapsedRef.current < 3);
+        }
+      }
+
+      // Success splash (fade in after 4s of launch)
+      if (modeRef.current === "launched" && launchElapsedRef.current > 4) {
+        const splashAlpha = Math.min(1, (launchElapsedRef.current - 4) * 0.8);
+        drawSplash(ctx, w, h, splashAlpha);
+      }
+
+      // Arrows (only while walking)
+      if (modeRef.current === "walking") {
+        // Arrow to lander
+        const landerSX = wrapScreenX(landerXRef.current, cameraX);
+        const landerDist = Math.floor(wrapDistance(posXRef.current, landerXRef.current));
+        drawArrow(ctx, landerSX, w, h, "#00ffff", `lander ${landerDist}`);
+
+        // Arrow to nearest deposit of the required type
+        let nearestDep: { sx: number; dist: number } | null = null;
+        for (const dep of depositsRef.current) {
+          if (dep.type !== requiredFuelType) continue;
+          if (inventoryRef.current.has(dep.type)) continue;
+          const dist = wrapDistance(posXRef.current, dep.x);
+          if (!nearestDep || dist < nearestDep.dist) {
+            nearestDep = { sx: wrapScreenX(dep.x, cameraX), dist };
+          }
+        }
+        if (nearestDep) {
+          drawArrow(ctx, nearestDep.sx, w, h, DEPOSIT_COLOURS[requiredFuelType], `fuel ${Math.floor(nearestDep.dist)}`);
+        }
       }
 
       rafId = requestAnimationFrame(gameLoop);
