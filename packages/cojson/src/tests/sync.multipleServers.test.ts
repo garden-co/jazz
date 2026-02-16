@@ -398,6 +398,7 @@ describe("multiple servers peers", () => {
         "client -> server2 | KNOWN Group sessions: header/6",
         "client -> server2 | CONTENT Group header: false new: After: 0 New: 6",
         "client -> server2 | KNOWN Map sessions: header/0",
+        "server2 -> client | KNOWN Group sessions: header/6",
         "server2 -> client | KNOWN Map sessions: header/0",
         "server1 -> client | KNOWN Map sessions: header/73",
         "server1 -> client | CONTENT Map header: false new: After: 0 New: 73",
