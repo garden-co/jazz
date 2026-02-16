@@ -54,12 +54,13 @@ interface GameProps {
   onCollectDeposit?: (id: string) => void;
   onRefuel?: (fuelType: FuelType) => void;
   onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
+  onBurstDeposit?: (fuelType: string, newX: number) => void;
   onStateChange?: (state: GameState) => void;
 }
 
 const STALE_THRESHOLD_S = 180; // 3 minutes
 
-export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onCollectDeposit, onRefuel, onShareFuel, onStateChange }: GameProps) {
+export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -93,6 +94,7 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
     onCollectDeposit,
     onRefuel,
     onShareFuel,
+    onBurstDeposit,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)

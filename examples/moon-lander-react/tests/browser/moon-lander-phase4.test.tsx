@@ -360,3 +360,176 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     expect(shares).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 4b: Inventory burst on lander entry
+// ---------------------------------------------------------------------------
+
+describe("Moon Lander — Phase 4b: Inventory Burst", () => {
+  // =========================================================================
+  // 1. Entering lander ejects non-required fuel types
+  //
+  //   Player (walking, has ⬡ ● ▲ ■)   requiredFuel = ???
+  //        ▼  presses E near lander
+  //   ════╤════════════════════════════
+  //        keeps required type → refuels
+  //        ejects others → onBurstDeposit fires for each
+  // =========================================================================
+
+  it("ejects non-required fuel types on lander entry", async () => {
+    const bursts: Array<{ fuelType: string; newX: number }> = [];
+    const refuels: string[] = [];
+
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: [...FUEL_TYPES],
+      onBurstDeposit: (fuelType: string, newX: number) => {
+        bursts.push({ fuelType, newX });
+      },
+      onRefuel: (fuelType: string) => {
+        refuels.push(fuelType);
+      },
+    });
+
+    // Land and walk out
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    const localRequired = readStr(el, "required-fuel");
+
+    // Walk back to lander and enter
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "in_lander", 3000);
+    releaseKey("e", "KeyE");
+
+    // Wait for bursts to fire
+    await waitFor(
+      () => bursts.length >= FUEL_TYPES.length - 1,
+      2000,
+      `should eject ${FUEL_TYPES.length - 1} non-required types (got ${bursts.length})`,
+    );
+
+    const ejectedTypes = new Set(bursts.map((b) => b.fuelType));
+
+    // Required type NOT ejected
+    expect(ejectedTypes.has(localRequired)).toBe(false);
+
+    // All other types ejected
+    expect(ejectedTypes.size).toBe(FUEL_TYPES.length - 1);
+
+    // Required type was consumed for refuelling
+    expect(refuels).toContain(localRequired);
+
+    // Each burst has a valid newX position
+    for (const b of bursts) {
+      expect(b.newX).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  // =========================================================================
+  // 2. Inventory is empty after entering lander
+  //
+  //   All fuel consumed or ejected — nothing lingers
+  // =========================================================================
+
+  it("inventory is empty after entering lander", async () => {
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: [...FUEL_TYPES],
+      onBurstDeposit: () => {},
+    });
+
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    // Re-enter lander
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "in_lander", 3000);
+    releaseKey("e", "KeyE");
+
+    // Inventory should be empty (all consumed or ejected)
+    await waitForAttr(el, "inventory", "", 2000);
+  });
+
+  // =========================================================================
+  // 3. Re-entering lander after burst produces no additional bursts
+  //
+  //   First entry: 6 types ejected, required consumed
+  //   Walk out, re-enter: inventory empty → 0 new bursts
+  // =========================================================================
+
+  it("re-entering lander produces no additional bursts", async () => {
+    const bursts: Array<{ fuelType: string; newX: number }> = [];
+
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: [...FUEL_TYPES],
+      onBurstDeposit: (fuelType: string, newX: number) => {
+        bursts.push({ fuelType, newX });
+      },
+    });
+
+    // Land, walk out, re-enter → first burst
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "in_lander", 3000);
+    releaseKey("e", "KeyE");
+
+    await waitFor(
+      () => bursts.length >= FUEL_TYPES.length - 1,
+      2000,
+      "first burst should eject non-required types",
+    );
+    const firstBurstCount = bursts.length;
+
+    // Walk out again
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    // Re-enter lander
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "in_lander", 3000);
+    releaseKey("e", "KeyE");
+
+    // No additional bursts
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bursts.length).toBe(firstBurstCount);
+  });
+
+  // =========================================================================
+  // 4. No burst when inventory is empty
+  // =========================================================================
+
+  it("does not burst when inventory is empty", async () => {
+    const bursts: Array<{ fuelType: string; newX: number }> = [];
+
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: [],
+      onBurstDeposit: (fuelType: string, newX: number) => {
+        bursts.push({ fuelType, newX });
+      },
+    });
+
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "in_lander", 3000);
+    releaseKey("e", "KeyE");
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bursts).toHaveLength(0);
+  });
+});

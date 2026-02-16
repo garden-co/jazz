@@ -148,6 +148,7 @@ export function useGameEngine(
     onCollectDeposit?: (id: string) => void;
     onRefuel?: (fuelType: FuelType) => void;
     onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
+    onBurstDeposit?: (fuelType: string, newX: number) => void;
   },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
@@ -185,6 +186,8 @@ export function useGameEngine(
   onRefuelRef.current = options?.onRefuel;
   const onShareFuelRef = useRef(options?.onShareFuel);
   onShareFuelRef.current = options?.onShareFuel;
+  const onBurstDepositRef = useRef(options?.onBurstDeposit);
+  onBurstDepositRef.current = options?.onBurstDeposit;
 
   // Keep external deposits ref in sync with latest props
   if (isConnected) {
@@ -417,6 +420,19 @@ export function useGameEngine(
               inventoryRef.current.delete(requiredFuelType);
               optimisticInventoryRef.current.delete(requiredFuelType);
               onRefuelRef.current?.(requiredFuelType);
+            }
+
+            // Burst: eject all non-required fuel types back to the surface
+            const toBurst: FuelType[] = [];
+            for (const ft of inventoryRef.current) {
+              if (ft !== requiredFuelType) toBurst.push(ft);
+            }
+            for (const ft of toBurst) {
+              inventoryRef.current.delete(ft);
+              optimisticInventoryRef.current.delete(ft);
+              sharedOutRef.current.add(ft);
+              const newX = wrapX(posXRef.current + (Math.random() - 0.5) * 600);
+              onBurstDepositRef.current?.(ft, newX);
             }
           }
         }
