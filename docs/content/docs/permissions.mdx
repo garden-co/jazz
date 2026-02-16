@@ -24,8 +24,9 @@ Jazz permissions use relationship-based policy evaluation with requester session
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
-    Current TypeScript examples demonstrate session-scoped access patterns.
-    Policy authoring examples are currently shown via Rust schema builder APIs.
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#permissions-simple-ts
+    </include>
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
@@ -38,7 +39,9 @@ Jazz permissions use relationship-based policy evaluation with requester session
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
-    INHERITS behavior follows the same requester-session model used for TS backend reads and writes.
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#permissions-inherits-ts
+    </include>
   </Tab>
   <Tab value="Rust">
     <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
