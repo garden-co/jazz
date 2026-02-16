@@ -533,8 +533,8 @@ export function useGameEngine(
       if (modeRef.current === "descending") {
         targetCamY = posYRef.current - h / 2;
       } else if (modeRef.current === "launched") {
-        // Slow pan up to deep space — lander flies out of frame naturally
-        targetCamY = INITIAL_ALTITUDE - h / 2;
+        // Track the lander during launch — centre camera on it
+        targetCamY = posYRef.current - h / 2;
       } else {
         // Ground modes — lock ground near bottom
         targetCamY = GROUND_LEVEL - h + GROUND_MARGIN;
@@ -546,6 +546,10 @@ export function useGameEngine(
       }
       const camLerp = modeRef.current === "launched" ? 1.5 : 5;
       smoothCamYRef.current += (targetCamY - smoothCamYRef.current) * Math.min(1, camLerp * dt);
+      // Never dip downward during launch — camera may only move up
+      if (modeRef.current === "launched") {
+        smoothCamYRef.current = Math.min(smoothCamYRef.current, targetCamY);
+      }
       const cameraY = Math.floor(smoothCamYRef.current);
 
       // --- Render ---
@@ -620,6 +624,12 @@ export function useGameEngine(
           const rpSY = s.y - cameraY;
           if (rpSY > -60 && rpSY < h + 60) {
             drawLander(ctx, rpSX, rpSY, rp.velocityY < 0, rp.color, rp.name);
+          }
+        } else if (rp.mode === "launched") {
+          // Remote player launching — draw at their synced Y (flying upward)
+          const rpSY = s.y - cameraY;
+          if (rpSY > -60 && rpSY < h + 60) {
+            drawLander(ctx, rpSX, rpSY, true, rp.color, rp.name);
           }
         } else {
           drawLander(ctx, rpSX, groundScreenY, false, rp.color, rp.name);

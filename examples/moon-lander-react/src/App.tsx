@@ -19,14 +19,17 @@ function GameWithSync({
   playerId: string;
 }) {
   const db = useDb();
-  const allPlayers = useAll(app.players);
+  // Jazz-native filtering: only subscribe to remote players (ne = local)
+  const remotePlayerRows = useAll(app.players.where({ playerId: { ne: playerId } }));
+  // Separate subscription for the local player's row (for finding existing row on reload)
+  const localPlayerRows = useAll(app.players.where({ playerId }));
   const allDepositsRaw = useAll(app.fuel_deposits);
   const allChatMessages = useAll(app.chat_messages);
 
   // Track the Jazz row ID for the local player so we can update (not re-insert)
   const dbRowIdRef = useRef<string | null>(null);
-  const allPlayersRef = useRef(allPlayers);
-  allPlayersRef.current = allPlayers;
+  const localPlayerRowsRef = useRef(localPlayerRows);
+  localPlayerRowsRef.current = localPlayerRows;
 
   // Keep latest deposit subscription accessible from setInterval
   const allDepositsRef = useRef(allDepositsRaw);
@@ -70,30 +73,40 @@ function GameWithSync({
     pendingMessagesRef.current.push(text);
   }, []);
 
-  // Seed flag — prevents re-seeding after initial population
+  // Seed flag — prevents re-seeding after initial population.
+  // Grace period lets the subscription deliver existing data from OPFS/server
+  // before we decide the table is empty.
   const seededRef = useRef(false);
+  const mountedAtRef = useRef(Date.now());
 
   // Flush all DB writes in a single setInterval (player sync + deposit collection + seeding)
   useEffect(() => {
     const id = setInterval(() => {
-      // --- Seed deposits if DB is empty ---
-      if (!seededRef.current && allDepositsRef.current && allDepositsRef.current.length === 0) {
-        seededRef.current = true;
-        const nowS = Math.floor(Date.now() / 1000);
-        for (const fuelType of FUEL_TYPES) {
-          for (let i = 0; i < 3; i++) {
-            db.insert(app.fuel_deposits, {
-              fuelType,
-              positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
-              createdAt: nowS,
-              collected: false,
-              collectedBy: "",
-            });
+      const GRACE_MS = 2000;
+      const elapsed = Date.now() - mountedAtRef.current;
+
+      // --- Seed deposits if DB is empty (after grace period) ---
+      if (!seededRef.current && allDepositsRef.current) {
+        if (allDepositsRef.current.length > 0) {
+          seededRef.current = true;
+        } else if (elapsed > GRACE_MS) {
+          seededRef.current = true;
+          const nowS = Math.floor(Date.now() / 1000);
+          for (const fuelType of FUEL_TYPES) {
+            for (let i = 0; i < 3; i++) {
+              db.insert(app.fuel_deposits, {
+                fuelType,
+                positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
+                createdAt: nowS,
+                collected: false,
+                collectedBy: "",
+              });
+            }
           }
         }
       }
 
-      // --- Player state sync ---
+      // --- Player state sync (after grace period to find existing row) ---
       const state = latestStateRef.current;
       if (state) {
         const playerData = {
@@ -112,17 +125,16 @@ function GameWithSync({
           landerSpawnX: state.landerSpawnX,
         };
 
-        if (!dbRowIdRef.current && allPlayersRef.current) {
-          const existing = allPlayersRef.current.find((p) => p.playerId === playerId);
-          if (existing) {
-            dbRowIdRef.current = existing.id;
-          }
+        if (!dbRowIdRef.current && localPlayerRowsRef.current.length > 0) {
+          dbRowIdRef.current = localPlayerRowsRef.current[0].id;
         }
 
-        if (!dbRowIdRef.current) {
-          dbRowIdRef.current = db.insert(app.players, playerData);
-        } else {
+        // Wait for grace period before inserting a new row — gives the
+        // subscription time to deliver the existing row from OPFS/server.
+        if (dbRowIdRef.current) {
           db.update(app.players, dbRowIdRef.current, playerData);
+        } else if (elapsed > GRACE_MS) {
+          dbRowIdRef.current = db.insert(app.players, playerData);
         }
       }
 
@@ -228,28 +240,25 @@ function GameWithSync({
       }));
   }, [allChatMessages]);
 
-  // Map Jazz subscription data → RemotePlayer[] for Game
-  // Filter by playerId so we exclude all our own rows (current + any stale)
+  // Map Jazz subscription → RemotePlayer[] for Game.
+  // Jazz query already excludes the local player (ne filter).
   const remotePlayers: RemotePlayer[] = useMemo(() => {
-    if (!allPlayers) return [];
-    return allPlayers
-      .filter((p) => p.playerId !== playerId)
-      .map((p) => ({
-        id: p.id,
-        name: p.name,
-        mode: p.mode as RemotePlayer["mode"],
-        positionX: p.positionX,
-        positionY: p.positionY,
-        velocityX: p.velocityX,
-        velocityY: p.velocityY,
-        color: p.color,
-        requiredFuelType: p.requiredFuelType,
-        lastSeen: p.lastSeen,
-        landerFuelLevel: p.landerFuelLevel,
-        playerId: p.playerId,
-        landerX: p.landerSpawnX || undefined,
-      }));
-  }, [allPlayers, playerId]);
+    return remotePlayerRows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      mode: p.mode as RemotePlayer["mode"],
+      positionX: p.positionX,
+      positionY: p.positionY,
+      velocityX: p.velocityX,
+      velocityY: p.velocityY,
+      color: p.color,
+      requiredFuelType: p.requiredFuelType,
+      lastSeen: p.lastSeen,
+      landerFuelLevel: p.landerFuelLevel,
+      playerId: p.playerId,
+      landerX: p.landerSpawnX,
+    }));
+  }, [remotePlayerRows]);
 
   return (
     <Game

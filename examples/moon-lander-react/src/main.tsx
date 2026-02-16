@@ -59,7 +59,9 @@ async function main() {
     sessionStorage.setItem(KEY, playerId);
   }
 
-  const dbName = `moon-lander-${playerId.slice(0, 8)}-${Date.now()}`;
+  // Stable dbName per tab — reusing the same OPFS database across refreshes
+  // means the local player row and deposits persist, avoiding ghost duplicates.
+  const dbName = `moon-lander-${playerId.slice(0, 8)}`;
   const jwtToken = await signJwt(playerId, DEV_JWT_SECRET);
 
   createRoot(document.getElementById("root")!).render(
