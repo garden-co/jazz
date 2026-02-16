@@ -114,14 +114,18 @@ function buildQuery(table: string) {
 export async function createServer(dataPath?: string): Promise<TodoServer> {
   // Create SurrealKV-backed runtime via NAPI
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const runtime = new NapiRuntime(JSON.stringify(schema), "todo-server-ts", "dev", "main", dbPath);
+  const appId = process.env.JAZZ_APP_ID ?? "todo-server-ts";
+
+  // #region context-setup-ts-backend
+  const runtime = new NapiRuntime(JSON.stringify(schema), appId, "dev", "main", dbPath);
 
   const client = JazzClient.connectWithRuntime(runtime, {
-    appId: "todo-server-ts",
+    appId,
     schema,
     env: "dev",
     userBranch: "main",
   });
+  // #endregion context-setup-ts-backend
 
   // Create Express app
   const app = express();

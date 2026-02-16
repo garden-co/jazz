@@ -1,0 +1,56 @@
+---
+title: Setup
+description: Hosted and self-hosted setup, plus runtime context setup across client and backend environments.
+---
+
+## 1. Hosted Database Server (From Us)
+
+Current onboarding is manual.
+
+- App IDs are provisioned manually.
+- Request provisioning in the `jazz2-adopters` Discord channel.
+- Include:
+  - app name
+  - JWKS endpoint
+
+## 2. Run a Database Server Yourself (CLI)
+
+Self-hosting flow is documented from the runnable examples and CLI workflows.
+This page will expand with concrete production/dev presets.
+
+## 3. Context Setup
+
+Use `JAZZ_APP_ID` as the app ID configuration key across environments.
+
+### React Client (TypeScript)
+
+<include cwd lang="tsx" meta='title="examples/todo-client-localfirst-react/src/App.tsx"'>
+  ../examples/todo-client-localfirst-react/src/App.tsx#context-setup-react
+</include>
+
+### TS Client
+
+<include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/main.ts"'>
+  ../examples/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
+</include>
+
+### Backend Context Setup
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/main.ts"'>
+      ../examples/todo-server-ts/src/main.ts#context-setup-ts-backend
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/main.rs"'>
+      ../examples/todo-server-rs/src/main.rs#context-setup-rust-backend
+    </include>
+  </Tab>
+</Tabs>
+
+### Backend Identity Pattern
+
+- Client-side usage enforces permissions for the local user context.
+- Backend usage must extract requester JWT and create a user-scoped client/session.
+- Read/write and permissions sections reference this model.
