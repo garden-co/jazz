@@ -8,7 +8,18 @@ const environment = cfg.get("environment") ?? pulumi.getStack();
 const namePrefix = cfg.get("namePrefix") ?? `jazz-${environment}-cloud2`;
 const domainName = cfg.get("domainName") ?? "cloud2.aws.cloud.jazz.tools";
 
-const containerImage = cfg.require("containerImage");
+const containerImage = cfg.get("containerImage");
+const containerImageRepository = cfg.get("containerImageRepository");
+const containerImageTag = cfg.get("containerImageTag");
+
+if (!containerImage && !(containerImageRepository && containerImageTag)) {
+  throw new Error(
+    "configure either `containerImage` or (`containerImageRepository` + `containerImageTag`)",
+  );
+}
+
+const resolvedContainerImage = containerImage ?? `${containerImageRepository}:${containerImageTag}`;
+
 const appPort = cfg.getNumber("appPort") ?? 1625;
 const workerThreads = cfg.getNumber("workerThreads");
 const dataRoot = cfg.get("dataRoot") ?? "/mnt/data";
@@ -538,7 +549,7 @@ const taskDefinition = new aws.ecs.TaskDefinition(
         JSON.stringify([
           {
             name: "app",
-            image: containerImage,
+            image: resolvedContainerImage,
             essential: true,
             command: commandArgs,
             portMappings: [

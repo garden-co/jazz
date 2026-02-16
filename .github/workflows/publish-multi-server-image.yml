@@ -1,0 +1,109 @@
+name: Publish Multi Server Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to publish (default: sha-<short commit>)"
+        required: false
+        type: string
+      stack:
+        description: "Target stack for auto-dispatch"
+        required: true
+        default: cloud2
+        type: string
+      dispatch_deploy:
+        description: "Dispatch deploy workflow after push"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      ECR_REPOSITORY: ${{ vars.JAZZ_MULTI_SERVER_ECR_REPOSITORY || 'jazz-multi-server' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required configuration
+        run: |
+          set -euo pipefail
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "Missing repo variable AWS_ACCOUNT_ID" >&2
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}" ]; then
+            echo "Missing repo secret AWS_GITHUB_ACTIONS_ROLE_ARN" >&2
+            exit 1
+          fi
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          role-session-name: github-multi-server-image-publish
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "${TAG}" ]; then
+            TAG="sha-${GITHUB_SHA::7}"
+          fi
+
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${TAG}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure ECR repository exists
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --file crates/jazz-multi-server/deploy/pulumi/Dockerfile \
+            --tag "${{ steps.meta.outputs.image_uri }}" \
+            --push \
+            .
+
+      - name: Dispatch deployment update
+        if: ${{ github.event.inputs.dispatch_deploy == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/${{ github.repository }}/dispatches \
+            -f event_type=multi-server-image-updated \
+            -f client_payload="{\"stack\":\"${{ github.event.inputs.stack }}\",\"image_tag\":\"${{ steps.meta.outputs.tag }}\"}"
+
+      - name: Summary
+        run: |
+          echo "Published image: ${{ steps.meta.outputs.image_uri }}"
+          if [ "${{ github.event.inputs.dispatch_deploy }}" = "true" ]; then
+            echo "Triggered deployment dispatch for stack: ${{ github.event.inputs.stack }}"
+          fi

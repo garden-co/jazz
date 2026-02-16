@@ -25,7 +25,9 @@ This is an MVP deployment sketch for a single hosted `jazz-multi-server` instanc
 Set these on your stack before `pulumi up`:
 
 - Required:
-  - `containerImage` (image for `jazz-multi-server`)
+  - Either:
+    - `containerImage` (full image URI), or
+    - `containerImageRepository` + `containerImageTag`
   - `internalApiSecret` (secret)
   - `secretHashKey` (secret)
 - Usually required in CI/guardrails:
@@ -47,6 +49,11 @@ Optional:
 - `workerThreads` (server worker thread override)
 - `dataRoot=/mnt/data`
 - `publicSubnetCidrs=["10.42.0.0/24","10.42.1.0/24"]`
+
+Tracked stack config:
+
+- `Pulumi.cloud2.yaml` is checked in and intended for non-secret config (including image tag rollouts).
+- Keep secrets in Pulumi Cloud stack secrets, not in the repo.
 
 ## Example bootstrap
 
@@ -110,6 +117,48 @@ Useful optional inputs:
 - `--domain` (defaults to `cloud2.aws.cloud.jazz.tools`)
 - `--route53-delegation-role-arn` (for cross-account DNS writes)
 - `--image` with `--skip-build` (if image already exists)
+
+## Pulumi Cloud + GitHub Deploy Model (No Local AWS Creds For Infra Apply)
+
+This repo now includes two workflows:
+
+- `.github/workflows/publish-multi-server-image.yml`
+  - Builds and pushes a linux/amd64 image to ECR via GitHub OIDC role assumption.
+  - Optionally dispatches a deploy update event.
+- `.github/workflows/deploy-multi-server-image.yml`
+  - Updates `Pulumi.<stack>.yaml` image tag, opens/updates a deployment PR, and enables auto-merge.
+  - Pulumi Cloud should run `pulumi up` on merge to `main`.
+
+### Required GitHub repo configuration
+
+Repository secrets:
+
+- `AWS_GITHUB_ACTIONS_ROLE_ARN`
+  - IAM role assumable by GitHub OIDC for ECR push.
+
+Repository variables:
+
+- `AWS_ACCOUNT_ID`
+  - Account where ECR repository lives.
+- `AWS_REGION` (optional, default `us-east-2`)
+- `JAZZ_MULTI_SERVER_ECR_REPOSITORY` (optional, default `jazz-multi-server`)
+
+### Required Pulumi Cloud setup
+
+For stack `garden-computing/jazz-multi-server-cloud2/cloud2` (or your equivalent):
+
+- Configure deployment runner/source control to this repo and stack `cloud2`.
+- Configure AWS deployment credentials/role in Pulumi Cloud (not in GitHub workflow).
+- Set required stack secrets in Pulumi Cloud:
+  - `jazz-multi-server-cloud2:internalApiSecret`
+  - `jazz-multi-server-cloud2:secretHashKey`
+
+Once configured:
+
+1. Run **Publish Multi Server Image** workflow (manual dispatch).
+2. It pushes image and triggers deploy dispatch.
+3. Deploy workflow updates `Pulumi.cloud2.yaml` tag in a PR and auto-merges.
+4. Pulumi Cloud applies infra changes from `main`.
 
 ## Notes
 
