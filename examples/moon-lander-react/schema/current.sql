@@ -13,3 +13,11 @@ CREATE TABLE players (
     landerFuelLevel INTEGER NOT NULL,
     landerSpawnX INTEGER NOT NULL
 );
+
+CREATE TABLE fuel_deposits (
+    fuelType TEXT NOT NULL,
+    positionX INTEGER NOT NULL,
+    createdAt INTEGER NOT NULL,
+    collected BOOLEAN NOT NULL,
+    collectedBy TEXT NOT NULL
+);

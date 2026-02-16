@@ -64,18 +64,27 @@ The game demonstrates Jazz's core strengths:
 - Fuel deposits on the moon are random shapes
 - Players collect all fuel they walk over, regardless of type
 - **Inventory cap:** Players hold at most 1 unit of each fuel type. Walking over a deposit you already have does nothing.
-- When two players walk past each other, fuel transfers automatically:
-  - Player A needs triangle fuel
-  - Player B has triangle fuel in inventory
-  - Player A automatically "collects" the triangle fuel from Player B
-  - **BUT**: If Player B ALSO needs triangle fuel, NO transfer happens (no stealing!)
-- **Proximity sharing (two radii):** At 2x interact radius, show "move closer to share fuel" hint. At 1x interact radius, transfer happens automatically — no key press, no cooldown. Only fuel you don't need is given.
+- **Inventory IS the DB.** A player's inventory = `fuel_deposits WHERE collectedBy = myPlayerId AND collected = true`. No local inventory state — everything is derived from Jazz.
+
+**Fuel Sharing (proximity transfer):**
+- When two walking players are within 1x interact radius, fuel transfers automatically
+- At 2x interact radius, show "move closer to share fuel" hint (if sharing is possible)
+- **Mechanism:** The giver's client rewrites `collectedBy` on the deposit row from their own playerId to the receiver's playerId. The receiver's subscription updates and they see the fuel in their inventory. One DB write, one source of truth.
+- **Guard:** Only give fuel types the giver does NOT need (i.e. `fuelType !== giver.requiredFuelType`)
+- **No stealing:** If the giver also needs that fuel type, no transfer happens
 - **One-way giving:** Each client only gives its own fuel away, never takes. This avoids dual-write races.
+- **Proximity detection:** Use raw DB positions (not interpolated) with a generous radius to account for sync latency
 
 **Refuelling:**
 - Each correct fuel unit refuels the lander by +100 (capped at max capacity 100)
 - Since landing consumes most of the initial 40 units, a single deposit of the correct type is sufficient to fully refuel and launch
-- **Launch scatter:** When a player launches, unneeded inventory fuel is ejected as new `fuel_deposit` rows scattered on the moon surface. This recycles fuel back into the world.
+
+**Inventory burst (lander entry):**
+- When a player enters the lander (presses E near it), all collected deposits that are NOT the required fuel type are scattered back onto the moon surface
+- **Visual:** Each ejected fuel shape animates in an arc from the player to a new random X position nearby
+- **DB write:** After animation, update each ejected deposit: `collected = false, collectedBy = "", positionX = newX`
+- The required fuel type deposit stays collected → consumed for refuelling
+- This recycles unneeded fuel back into the world, prevents it being launched into space
 
 **Inventory Display:**
 - Icon above player's head shows collected fuel types
@@ -112,6 +121,7 @@ All players can win independently — it's cooperative, not competitive.
 
 ```typescript
 table("players", {
+  playerId: col.string(),  // Stable localStorage UUID
   name: col.string(),
   color: col.string(), // Hex colour for their astronaut/lander
 
@@ -120,47 +130,36 @@ table("players", {
   online: col.boolean(),
   lastSeen: col.integer(), // Unix timestamp in SECONDS (i32 limit)
 
-  // Position — fixed-point integers (pixel * 100)
-  positionX: col.integer(), // e.g. 50000 = 500.00 pixels
+  // Position
+  positionX: col.integer(),
   positionY: col.integer(),
-  velocityX: col.integer(), // fixed-point velocity
+  velocityX: col.integer(),
   velocityY: col.integer(),
 
   // Lander requirements
   requiredFuelType: col.string(), // "circle" | "triangle" | "square" | "pentagon" | "hexagon" | "heptagon" | "octagon"
   landerFuelLevel: col.integer(), // 0-100, starts at ~40 (enough to land, not launch)
-  landerSpawnX: col.integer(), // Where this player's lander landed (fixed-point)
-
-  // Auth
-  userId: col.string(),
-});
-
-table("player_inventory", {
-  playerId: col.ref("players"),
-  fuelType: col.string(), // "circle" | "triangle" | "square" | etc.
-  quantity: col.integer(),
+  landerSpawnX: col.integer(), // Where this player's lander landed
 });
 
 table("fuel_deposits", {
   fuelType: col.string(), // "circle" | "triangle" | etc.
-  positionX: col.integer(), // Fixed-point — only X coord, deposits are always on the ground (Y = GROUND_LEVEL)
+  positionX: col.integer(), // Only X coord — deposits are always on the ground (Y = GROUND_LEVEL)
   createdAt: col.integer(), // Unix timestamp (seconds) — used for deposit decay ordering
   collected: col.boolean(),
-  collectedBy: col.ref("players").optional(),
-  collectedAt: col.integer().optional(), // Unix timestamp (seconds)
+  collectedBy: col.string(), // playerId of collector ("" if uncollected)
 });
 
 table("messages", {
-  senderId: col.ref("players"),
+  senderId: col.string(), // playerId
   text: col.string(),
   timestamp: col.integer(), // Unix timestamp (seconds)
-  // No position — messages are attached to the player, rendered above their current position
 });
 ```
 
 **Schema Notes:**
-- **Separate `player_inventory` table** — Enables querying "who nearby has fuel I need?" for fuel-sharing logic. Also supports future features like directional arrows pointing to fuel sources.
-- **Uses `col.ref()`** — Demonstrates relational patterns (ref to players), which existing examples don't showcase well (see `codegen_relations_demo.md`). Ref columns support `where({ playerId: { eq: someId } })` filtering.
+- **No `player_inventory` table** — Inventory is derived from `fuel_deposits WHERE collectedBy = playerId AND collected = true`. The `fuel_deposits` table is the single source of truth for both world state and player inventory.
+- **`collectedBy` is a string, not a ref** — Uses playerId strings for simplicity. Sharing = rewriting `collectedBy`. Burst = resetting `collected` and `collectedBy`.
 - **No `game_config` table** — Game constants (gravity, escape velocity, ground level) hardcoded in `constants.ts`
 - **Fuel deposits have no Y coord** — Always on surface (Y = GROUND_LEVEL constant)
 - **Messages have no position** — Follow the player who sent them
@@ -221,6 +220,16 @@ table("messages", {
 ## Technical Architecture
 
 This is a demonstration of **Jazz**, a database which allows building rich, realtime collaborative applications. Separate concerns: physics and rendering are secondary to the main goal. Abstract game engine concerns into modules users don't need to inspect. Wherever we interact with Jazz, avoid large monolithic components — import non-Jazz-specific code instead. Users will primarily want to read the Jazz-specific source.
+
+### Design Principle: Jazz-Managed State
+
+**Nothing should be local-only state.** All game state is either:
+- **Deterministic** — derived from constants or player identity (e.g. player colour from hash, fuel type from session)
+- **Jazz-managed** — synced through the database (position, mode, fuel level, inventory, deposits)
+
+The engine receives all mutable state as props (from Jazz subscriptions) and emits changes via callbacks (queued and flushed to DB on a timer). The engine itself is a pure rendering/physics layer with no authoritative local state beyond what's needed for the current animation frame.
+
+This ensures that every player sees the same world, and any browser refresh restores the full game state from Jazz.
 
 ### Frontend Stack
 
@@ -435,17 +444,30 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
 - [x] Launch mechanic (Space key when in lander with fuel >= 100)
 - [x] World wrapping (walking/flying off one edge loops to the other)
 - [x] Test: "Can I collect fuel, return, and launch?" (17/17 green)
-- [ ] Render fuel deposits on canvas (currently data-only)
-- [ ] Launch animation (lander flies upward)
+- [x] Render fuel deposits on canvas
+- [x] Launch animation (lander flies upward, cinematic camera, success splash)
+- [x] Shared fuel deposits via Jazz `fuel_deposits` table (deposits sync across clients, collection propagates)
+
+### Phase 3b: Inventory via Jazz (prerequisite for Phase 4)
+
+Local inventory must move to Jazz before sharing can work. Currently `inventoryRef` is a local `Set<FuelType>` in the engine — this must become a derived view of `fuel_deposits WHERE collectedBy = myPlayerId AND collected = true`.
+
+- [ ] Remove local `inventoryRef` from engine — inventory comes from Jazz subscription via props
+- [ ] Collection writes `collectedBy = playerId` on the deposit row (already partly done via `onCollectDeposit`)
+- [ ] Engine receives `inventory: FuelType[]` as a prop (derived from DB in App.tsx)
+- [ ] Refuelling consumes the deposit (keeps `collected = true`, used for fuel level calc)
+- [ ] Audit: ensure NO game state is local-only — everything is either deterministic or Jazz-managed
 
 ### Phase 4: Automatic Fuel Sharing
 
-- [ ] Proximity hint: at 2x interact radius, show "move closer to share fuel" if sharing is possible
-- [ ] Auto-share: at 1x interact radius, transfer fuel the other player needs (and you don't)
+- [ ] Proximity detection: compare local player position with raw DB positions of remote walking players (use generous radius ~1.5x interact radius to account for sync latency)
+- [ ] Proximity hint: at 2x radius, show "move closer to share fuel" if sharing is possible
+- [ ] Auto-share: at 1x radius, rewrite `collectedBy` from giver's playerId to receiver's playerId
   - Both players must be walking
-  - No cooldown — transfer is immediate on proximity
+  - Only give fuel types the giver does NOT need (`fuelType !== giver.requiredFuelType`)
+  - One-way giving: each client only gives its own fuel away
 - [ ] Visual: shape icon floats from giver to receiver
-- [ ] Inventory burst: when entering the lander, all inventory items that are NOT the required fuel type scatter back onto the moon surface (Sonic-dropping-rings style). Scattered items become collectable deposits again. This prevents unneeded fuel being launched into space.
+- [ ] Inventory burst: on lander entry, animate unneeded fuel to new X positions, then reset `collected = false, collectedBy = "", positionX = newX`
 - [ ] Test: "Walk past another player, fuel transfers correctly"
 
 ### Phase 5: Chat & Polish

@@ -58,7 +58,8 @@ function wrapScreenX(worldX: number, cameraX: number): number {
 // Fuel deposits — scattered across the moon surface
 // ---------------------------------------------------------------------------
 
-interface Deposit {
+export interface Deposit {
+  id: string;
   x: number;
   type: FuelType;
 }
@@ -88,13 +89,13 @@ function generateDeposits(requiredFuelType: FuelType, spawnX: number): Deposit[]
       if (wrapDistance(x, spawnX) < noSpawnRadius) {
         x = wrapX(spawnX + noSpawnRadius + seededRand(seed + 0.7) * 1000);
       }
-      deposits.push({ x, type: FUEL_TYPES[ti] });
+      deposits.push({ id: String(deposits.length), x, type: FUEL_TYPES[ti] });
     }
   }
 
   // 1 extra of the required type, placed 1/4–1/2 world away
   const offset = MOON_SURFACE_WIDTH / 4 + seededRand(9999) * (MOON_SURFACE_WIDTH / 4);
-  deposits.push({ x: wrapX(spawnX + offset), type: requiredFuelType });
+  deposits.push({ id: String(deposits.length), x: wrapX(spawnX + offset), type: requiredFuelType });
 
   return deposits;
 }
@@ -139,6 +140,8 @@ export function useGameEngine(
     physicsSpeed?: number;
     requiredFuelType?: FuelType;
     remotePlayers?: RemotePlayerView[];
+    deposits?: Deposit[];
+    onCollectDeposit?: (id: string) => void;
   },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
@@ -165,7 +168,22 @@ export function useGameEngine(
   const smoothedRemotesRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
   // Fuel deposits and inventory
-  const depositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
+  // Connected mode: external deposits via ref (updated from props)
+  // Standalone mode: locally generated deposits
+  const isConnected = options?.deposits !== undefined;
+  const externalDepositsRef = useRef<Deposit[]>([]);
+  const localDepositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
+  const onCollectDepositRef = useRef(options?.onCollectDeposit);
+  onCollectDepositRef.current = options?.onCollectDeposit;
+
+  // Keep external deposits ref in sync with latest props
+  if (isConnected) {
+    externalDepositsRef.current = options.deposits!;
+  }
+
+  // The active deposits list (connected uses external, standalone uses local)
+  const depositsRef = isConnected ? externalDepositsRef : localDepositsRef;
+
   const inventoryRef = useRef<Set<FuelType>>(new Set());
 
   // Mirrored into state for external consumption (HUD, data attributes, Jazz)
@@ -307,13 +325,21 @@ export function useGameEngine(
 
         // Collect deposits the player walks over (skip types already owned)
         const pickupRange = ASTRONAUT_WIDTH;
+        const collected: string[] = [];
         depositsRef.current = depositsRef.current.filter((d) => {
           if (wrapDistance(d.x, posXRef.current) < pickupRange && !inventoryRef.current.has(d.type)) {
             inventoryRef.current.add(d.type);
+            collected.push(d.id);
             return false; // remove from surface
           }
           return true;
         });
+        // Notify Jazz layer of collections (queued, not immediate)
+        if (collected.length > 0 && onCollectDepositRef.current) {
+          for (const id of collected) {
+            onCollectDepositRef.current(id);
+          }
+        }
 
         if (wantsInteract) {
           if (wrapDistance(posXRef.current, landerXRef.current) <= LANDER_INTERACT_RADIUS) {

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useEffect } from "react";
 import { useGameEngine } from "./game/engine.js";
-import type { RemotePlayerView } from "./game/engine.js";
+import type { RemotePlayerView, Deposit } from "./game/engine.js";
 import { getOrCreatePlayerId, derivePlayerProps } from "./game/player.js";
 import { Hud } from "./game/Hud.js";
 import type { PlayerMode, FuelType } from "./game/constants.js";
@@ -48,12 +48,14 @@ export interface RemotePlayer {
 interface GameProps {
   physicsSpeed?: number;
   remotePlayers?: RemotePlayer[];
+  deposits?: Deposit[];
+  onCollectDeposit?: (id: string) => void;
   onStateChange?: (state: GameState) => void;
 }
 
 const STALE_THRESHOLD_S = 180; // 3 minutes
 
-export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) {
+export function Game({ physicsSpeed, remotePlayers, deposits, onCollectDeposit, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -80,6 +82,8 @@ export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) 
     physicsSpeed,
     requiredFuelType: playerProps.requiredFuelType,
     remotePlayers: activeRemotes,
+    deposits,
+    onCollectDeposit,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)

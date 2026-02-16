@@ -15,3 +15,11 @@ table("players", {
   landerFuelLevel: col.int(),
   landerSpawnX: col.int(),
 });
+
+table("fuel_deposits", {
+  fuelType: col.string(),
+  positionX: col.int(),
+  createdAt: col.int(),
+  collected: col.boolean(),
+  collectedBy: col.string(),
+});
