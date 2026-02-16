@@ -696,23 +696,28 @@ export async function loadWasmModule(): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
 
-  // In Node.js, we need to read the .wasm file and use initSync
-  // In browsers, the default fetch-based init works
+  // In Node.js, we need to read the .wasm file and use initSync.
+  // In browsers/React Native, the default fetch-based init works (or default()).
+  // Use try/catch so we skip the Node path when node:* modules are unavailable (e.g. RN).
+  let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
-    const { readFileSync } = await import("node:fs");
-    const { fileURLToPath } = await import("node:url");
-    const { dirname, join } = await import("node:path");
+    try {
+      const { readFileSync } = await import("node:fs");
+      const { fileURLToPath } = await import("node:url");
+      const { dirname, join } = await import("node:path");
 
-    // Find the .wasm file relative to the jazz-wasm package
-    const wasmPath = join(
-      dirname(fileURLToPath(import.meta.url)),
-      "../../node_modules/jazz-wasm/pkg/jazz_wasm_bg.wasm",
-    );
-    const wasmBytes = readFileSync(wasmPath);
-    wasmModule.initSync(wasmBytes);
-  } else if (typeof wasmModule.default === "function") {
-    // In browsers without a bundler WASM plugin, call the init function.
-    // With vite-plugin-wasm, init happens at import time and default is not a function.
+      const wasmPath = join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../node_modules/jazz-wasm/jazz_wasm_bg.wasm",
+      );
+      const wasmBytes = readFileSync(wasmPath);
+      wasmModule.initSync(wasmBytes);
+      nodeInitDone = true;
+    } catch {
+      // Node modules unavailable (e.g. React Native with process polyfill)
+    }
+  }
+  if (!nodeInitDone && typeof wasmModule.default === "function") {
     await wasmModule.default();
   }
 

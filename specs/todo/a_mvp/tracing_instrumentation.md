@@ -1,6 +1,6 @@
 # Tracing Instrumentation
 
-Add structured tracing throughout the Rust codebase using the `tracing` crate, with `tracing-wasm` for browser console/Performance timeline output and `tracing-subscriber` for server-side terminal output. Goal: see the entire request flow from browser main thread → worker → WASM runtime (and separately, jazz-cli server) at TRACE level.
+Add structured tracing throughout the Rust codebase using the `tracing` crate, with `tracing-wasm` for browser console/Performance timeline output and `tracing-subscriber` for server-side terminal output. Goal: see the entire request flow from browser main thread → worker → WASM runtime (and separately, jazz-tools server) at TRACE level.
 
 ## Motivation
 
@@ -12,7 +12,7 @@ More generally: as the system grows, we need a way to understand what's happenin
 
 - **groove crate**: zero tracing
 - **jazz-wasm**: zero tracing/logging
-- **jazz-cli**: `tracing` + `tracing-subscriber` with `env-filter`; ~5 ad-hoc `info!`/`warn!`/`error!` calls in routes
+- **jazz-tools**: `tracing` + `tracing-subscriber` with `env-filter`; ~5 ad-hoc `info!`/`warn!`/`error!` calls in routes
 - **jazz-tools client module**: `tracing` available but instrumentation coverage is uneven
 - **opfs-btree**: trace points available in the storage crate, not fully wired into end-to-end spans yet
 - **TypeScript**: scattered `console.error` for failures, no structured logging
@@ -84,7 +84,7 @@ WasmRuntime::handleSyncMessages   → span: message count
 WasmRuntime::tick        → span (TRACE level, frequent)
 ```
 
-**jazz-cli — server**
+**jazz-tools — server**
 
 ```
 events_handler  → span: client_id, session info
@@ -130,7 +130,7 @@ Key TypeScript events to log (DEBUG level, behind a flag):
 
 ### Filtering
 
-**Server (jazz-cli):** Already uses `RUST_LOG` env filter. Example:
+**Server (jazz-tools):** Already uses `RUST_LOG` env filter. Example:
 
 ```
 RUST_LOG=groove=trace,jazz_cli=debug cargo run -- server ...
@@ -155,7 +155,7 @@ Or just hardcode TRACE during development — the browser console has its own le
 7. Instrument groove core: RuntimeCore::batched_tick
 8. Instrument jazz-wasm: all public `WasmRuntime` methods
 9. Add/expand `opfs-btree` tracing hooks used by groove storage adapters
-10. Instrument jazz-cli routes (expand existing sparse tracing)
+10. Instrument jazz-tools routes (expand existing sparse tracing)
 11. Add `[main]`/`[worker]` prefixes to TypeScript console calls
 12. Test: run todo example with tracing, verify full write→read flow visible in console
 
