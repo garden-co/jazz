@@ -427,13 +427,16 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
 
 ### Phase 3: Fuel Collection
 
-- [ ] Spawn random fuel shapes on moon surface (3 per type + 1 of player's required type 1/4–1/2 world away)
-- [ ] Thrust burns fuel (FUEL_BURN_Y=8/sec vertical, FUEL_BURN_X=4/sec horizontal; disabled at 0)
-- [ ] Collection mechanic (walk over deposit within COLLECT_RADIUS to collect)
-- [ ] Inventory display above player head (small fuel shape icons)
-- [ ] Return to lander and refuel (auto-transfer matching fuel on re-enter, +100 per unit, capped at 100)
-- [ ] Launch mechanic (Space key when landed with fuel >= 100)
-- [ ] Test: "Can I collect fuel, return, and launch?"
+- [x] Spawn random fuel shapes on moon surface (3 per type + 1 of player's required type 1/4–1/2 world away)
+- [x] Thrust burns fuel (FUEL_BURN_Y=8/sec vertical, FUEL_BURN_X=4/sec horizontal; disabled at 0)
+- [x] Collection mechanic (walk over deposit to collect, 1 per type max)
+- [x] Inventory display in HUD (need/bag)
+- [x] Return to lander and refuel (auto-transfer matching fuel on re-enter, +100 per unit, capped at 100)
+- [x] Launch mechanic (Space key when in lander with fuel >= 100)
+- [x] World wrapping (walking/flying off one edge loops to the other)
+- [x] Test: "Can I collect fuel, return, and launch?" (17/17 green)
+- [ ] Render fuel deposits on canvas (currently data-only)
+- [ ] Launch animation (lander flies upward)
 
 ### Phase 4: Automatic Fuel Sharing
 

@@ -13,9 +13,75 @@ import {
   INITIAL_FUEL,
   FUEL_BURN_Y,
   FUEL_BURN_X,
+  MAX_FUEL,
+  REFUEL_AMOUNT,
+  MOON_SURFACE_WIDTH,
+  FUEL_TYPES,
+  ASTRONAUT_WIDTH,
   type PlayerMode,
+  type FuelType,
 } from "./constants.js";
 import { drawBackground, drawLander, drawAstronaut } from "./render.js";
+
+// ---------------------------------------------------------------------------
+// World wrapping — the moon is round
+// ---------------------------------------------------------------------------
+
+/** Wrap an x coordinate into [0, MOON_SURFACE_WIDTH). */
+function wrapX(x: number): number {
+  return ((x % MOON_SURFACE_WIDTH) + MOON_SURFACE_WIDTH) % MOON_SURFACE_WIDTH;
+}
+
+/** Shortest distance between two x positions on the wrapping surface. */
+function wrapDistance(a: number, b: number): number {
+  const direct = Math.abs(a - b);
+  return Math.min(direct, MOON_SURFACE_WIDTH - direct);
+}
+
+// ---------------------------------------------------------------------------
+// Fuel deposits — scattered across the moon surface
+// ---------------------------------------------------------------------------
+
+interface Deposit {
+  x: number;
+  type: FuelType;
+}
+
+/** Deterministic pseudo-random (simple sine hash). */
+function seededRand(seed: number): number {
+  const x = Math.sin(seed * 127.1 + seed * 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+/**
+ * Generate fuel deposits across the surface.
+ * 3 of each fuel type spread evenly, plus 1 extra of the player's
+ * required type placed 1/4–1/2 of the world away from the spawn point.
+ * A no-spawn zone keeps deposits away from where the player lands.
+ */
+function generateDeposits(requiredFuelType: FuelType, spawnX: number): Deposit[] {
+  const deposits: Deposit[] = [];
+  const noSpawnRadius = 300;
+
+  // 3 of each type, spread across the full surface
+  for (let ti = 0; ti < FUEL_TYPES.length; ti++) {
+    for (let i = 0; i < 3; i++) {
+      const seed = ti * 100 + i;
+      let x = seededRand(seed) * MOON_SURFACE_WIDTH;
+      // Push deposits out of the landing zone
+      if (wrapDistance(x, spawnX) < noSpawnRadius) {
+        x = wrapX(spawnX + noSpawnRadius + seededRand(seed + 0.7) * 1000);
+      }
+      deposits.push({ x, type: FUEL_TYPES[ti] });
+    }
+  }
+
+  // 1 extra of the required type, placed 1/4–1/2 world away
+  const offset = MOON_SURFACE_WIDTH / 4 + seededRand(9999) * (MOON_SURFACE_WIDTH / 4);
+  deposits.push({ x: wrapX(spawnX + offset), type: requiredFuelType });
+
+  return deposits;
+}
 
 // ---------------------------------------------------------------------------
 // Engine state — the snapshot exposed to React each tick
@@ -30,6 +96,8 @@ export interface EngineState {
   landerX: number;
   landerY: number;
   fuel: number;
+  depositCount: number;
+  inventory: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -38,9 +106,10 @@ export interface EngineState {
 
 export function useGameEngine(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  options?: { physicsSpeed?: number },
+  options?: { physicsSpeed?: number; requiredFuelType?: FuelType },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
+  const requiredFuelType = options?.requiredFuelType ?? "circle";
 
   const sizeRef = useRef({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
 
@@ -54,6 +123,10 @@ export function useGameEngine(
   const landerYRef = useRef(0);
   const fuelRef = useRef(INITIAL_FUEL);
 
+  // Fuel deposits and inventory
+  const depositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
+  const inventoryRef = useRef<Set<FuelType>>(new Set());
+
   // Mirrored into state for external consumption (HUD, data attributes, Jazz)
   const [state, setState] = useState<EngineState>({
     mode: "descending",
@@ -64,6 +137,8 @@ export function useGameEngine(
     landerX: 0,
     landerY: 0,
     fuel: INITIAL_FUEL,
+    depositCount: depositsRef.current.length,
+    inventory: [],
   });
 
   // Track which keys are currently held + one-shot action queue
@@ -74,13 +149,17 @@ export function useGameEngine(
     const onKeyDown = (e: KeyboardEvent) => {
       keysRef.current.add(e.code);
       if (e.code === "KeyE") actionsRef.current.push("interact");
+      if (e.code === "Space") actionsRef.current.push("launch");
     };
     const onKeyUp = (e: KeyboardEvent) => keysRef.current.delete(e.code);
+    const onBlur = () => keysRef.current.clear();
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
     };
   }, []);
 
@@ -123,9 +202,11 @@ export function useGameEngine(
       // --- Process one-shot actions ---
       const actions = actionsRef.current.splice(0);
       const wantsInteract = actions.includes("interact");
+      const wantsLaunch = actions.includes("launch");
 
       const thrusting =
         modeRef.current === "descending" &&
+        fuelRef.current > 0 &&
         (keys.has("ArrowUp") || keys.has("KeyW"));
 
       // --- Physics ---
@@ -148,6 +229,9 @@ export function useGameEngine(
         posXRef.current += velXRef.current * dt;
         posYRef.current += velYRef.current * dt;
 
+        // Wrap horizontally
+        posXRef.current = wrapX(posXRef.current);
+
         // Landing detection
         if (posYRef.current >= GROUND_LEVEL) {
           posYRef.current = GROUND_LEVEL;
@@ -160,7 +244,9 @@ export function useGameEngine(
           landerYRef.current = GROUND_LEVEL;
         }
       } else if (modeRef.current === "landed" || modeRef.current === "in_lander") {
-        if (wantsInteract) {
+        if (wantsLaunch && modeRef.current === "in_lander" && fuelRef.current >= MAX_FUEL) {
+          modeRef.current = "launched";
+        } else if (wantsInteract) {
           modeRef.current = "walking";
         }
       } else if (modeRef.current === "walking") {
@@ -171,11 +257,31 @@ export function useGameEngine(
           posXRef.current += WALK_SPEED * dt;
         }
 
+        // Wrap horizontally
+        posXRef.current = wrapX(posXRef.current);
+
+        // Collect deposits the player walks over (1 per type max)
+        const pickupRange = ASTRONAUT_WIDTH;
+        depositsRef.current = depositsRef.current.filter((d) => {
+          if (wrapDistance(d.x, posXRef.current) < pickupRange) {
+            if (!inventoryRef.current.has(d.type)) {
+              inventoryRef.current.add(d.type);
+            }
+            return false; // remove from surface
+          }
+          return true;
+        });
+
         if (wantsInteract) {
-          const dist = Math.abs(posXRef.current - landerXRef.current);
-          if (dist <= LANDER_INTERACT_RADIUS) {
+          if (wrapDistance(posXRef.current, landerXRef.current) <= LANDER_INTERACT_RADIUS) {
             modeRef.current = "in_lander";
             posXRef.current = landerXRef.current;
+
+            // Refuel if carrying the correct fuel type
+            if (inventoryRef.current.has(requiredFuelType)) {
+              fuelRef.current = Math.min(MAX_FUEL, fuelRef.current + REFUEL_AMOUNT);
+              inventoryRef.current.delete(requiredFuelType);
+            }
           }
         }
       }
@@ -234,6 +340,8 @@ export function useGameEngine(
         landerX: landerXRef.current,
         landerY: landerYRef.current,
         fuel: fuelRef.current,
+        depositCount: depositsRef.current.length,
+        inventory: [...inventoryRef.current],
       });
     }, 50);
 

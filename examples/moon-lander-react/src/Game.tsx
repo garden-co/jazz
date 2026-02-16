@@ -55,7 +55,10 @@ export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) 
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const engine = useGameEngine(canvasRef, { physicsSpeed });
+  const engine = useGameEngine(canvasRef, {
+    physicsSpeed,
+    requiredFuelType: playerProps.requiredFuelType,
+  });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)
   useEffect(() => {
@@ -89,6 +92,8 @@ export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) 
       data-velocity-y={engine.velocityY}
       data-lander-x={engine.landerX}
       data-lander-y={engine.landerY}
+      data-deposit-count={engine.depositCount}
+      data-inventory={engine.inventory.join(",")}
       style={{ position: "relative", width: "100vw", height: "100vh" }}
     >
       <canvas
@@ -104,6 +109,8 @@ export function Game({ physicsSpeed, remotePlayers, onStateChange }: GameProps) 
         velocityY={engine.velocityY}
         fuel={engine.fuel}
         landerX={engine.landerX}
+        requiredFuelType={playerProps.requiredFuelType}
+        inventory={engine.inventory}
       />
     </div>
   );

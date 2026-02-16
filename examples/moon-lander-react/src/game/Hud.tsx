@@ -8,6 +8,8 @@ interface HudProps {
   velocityY: number;
   fuel: number;
   landerX: number;
+  requiredFuelType: string;
+  inventory: string[];
 }
 
 export function Hud({
@@ -18,6 +20,8 @@ export function Hud({
   velocityY,
   fuel,
   landerX,
+  requiredFuelType,
+  inventory,
 }: HudProps) {
   return (
     <>
@@ -51,9 +55,21 @@ export function Hud({
           <span
             style={{ color: fuel > 10 ? COLOURS.green : COLOURS.orange }}
           >
-            {fuel}
+            {Math.round(fuel)}
           </span>
         </div>
+        <div>
+          need:{" "}
+          <span style={{ color: inventory.includes(requiredFuelType) ? COLOURS.green : COLOURS.orange }}>
+            {requiredFuelType}
+          </span>
+          {inventory.includes(requiredFuelType) ? " ✓" : ""}
+        </div>
+        {inventory.length > 0 && (
+          <div>
+            bag: {inventory.join(", ")}
+          </div>
+        )}
         {mode === "walking" && (
           <div>
             lander: {Math.floor(landerX)} (dist:{" "}
@@ -77,7 +93,7 @@ export function Hud({
       >
         {mode === "descending" && "Arrow keys / WASD — thrust"}
         {mode === "landed" && "Press E to exit lander"}
-        {mode === "in_lander" && "Press E to exit lander"}
+        {mode === "in_lander" && (fuel >= 100 ? "Space — launch | E — exit" : "Press E to exit lander")}
         {mode === "walking" && "A/D — walk | E — enter lander (when near)"}
       </div>
     </>

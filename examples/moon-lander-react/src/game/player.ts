@@ -41,12 +41,13 @@ export function getOrCreatePlayerId(): string {
   return id;
 }
 
-/** Derive deterministic player properties from a player ID. */
+/** Derive player properties from a player ID.
+ *  Name and colour are stable (identity). Fuel type varies each session. */
 export function derivePlayerProps(id: string): PlayerProps {
   const h = hashCode(id);
   return {
     name: PLAYER_NAMES[h % PLAYER_NAMES.length],
     color: PLAYER_COLOURS[h % PLAYER_COLOURS.length],
-    requiredFuelType: FUEL_TYPES[h % FUEL_TYPES.length] as FuelType,
+    requiredFuelType: FUEL_TYPES[Math.floor(Math.random() * FUEL_TYPES.length)],
   };
 }
