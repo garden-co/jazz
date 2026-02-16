@@ -19,7 +19,7 @@ export function JazzReactNativeProvider<
 >(props: JazzProviderProps<S>) {
   // Destructure kvStore and pass everything else via rest
   const storage = useMemo(() => {
-    return props.storage ?? new OPSQLiteAdapter();
+    return props.storage ?? OPSQLiteAdapter.getInstance();
   }, [props.storage]);
 
   const kvStore = useMemo(() => {
