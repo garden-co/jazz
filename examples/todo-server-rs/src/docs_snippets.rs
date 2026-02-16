@@ -1,9 +1,9 @@
 //! Documentation snippet sources compiled with the example crate.
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz_rs::{JazzClient, ObjectId, PersistenceTier, QueryBuilder, Session, SessionClient, Value};
 use groove::query_manager::policy::{Operation, PolicyExpr};
 use groove::query_manager::types::TablePolicies;
+use jazz_rs::{JazzClient, ObjectId, PersistenceTier, QueryBuilder, Session, SessionClient, Value};
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
@@ -30,7 +30,10 @@ pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, St
 
 // #region backend-request-scoped-client-rust
 #[allow(dead_code)]
-pub fn scoped_client_for_session<'a>(client: &'a JazzClient, session: Session) -> SessionClient<'a> {
+pub fn scoped_client_for_session<'a>(
+    client: &'a JazzClient,
+    session: Session,
+) -> SessionClient<'a> {
     client.for_session(session)
 }
 // #endregion backend-request-scoped-client-rust
@@ -102,6 +105,33 @@ pub async fn read_todos_settled_edge(client: &JazzClient) -> jazz_rs::Result<usi
 }
 // #endregion reading-settled-tier-rust
 
+// #region reading-query-shaping-rust
+#[allow(dead_code)]
+pub async fn read_todos_with_query_shaping(client: &JazzClient) -> jazz_rs::Result<usize> {
+    let query = QueryBuilder::new("todos")
+        .filter_eq("completed", Value::Boolean(false))
+        .order_by("title")
+        .limit(20)
+        .offset(0)
+        .build();
+
+    let rows = client.query(query, None).await?;
+    Ok(rows.len())
+}
+// #endregion reading-query-shaping-rust
+
+// #region reading-includes-rust
+#[allow(dead_code)]
+pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_rs::Result<usize> {
+    // Rust currently composes related data using additional queries.
+    // If rows carry foreign keys, query related tables and join in application code.
+    let rows = client
+        .query(QueryBuilder::new("todos").build(), None)
+        .await?;
+    Ok(rows.len())
+}
+// #endregion reading-includes-rust
+
 // #region writing-crud-rust
 #[allow(dead_code)]
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_rs::Result<()> {
@@ -122,3 +152,23 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
     Ok(())
 }
 // #endregion writing-crud-rust
+
+// #region writing-ack-tier-rust
+#[allow(dead_code)]
+pub async fn write_todo_with_default_ack(client: &JazzClient) -> jazz_rs::Result<ObjectId> {
+    let id = client
+        .create(
+            "todos",
+            vec![
+                Value::Text("Write docs with default ack behavior".to_string()),
+                Value::Boolean(false),
+                Value::Text(String::new()),
+            ],
+        )
+        .await?;
+
+    // Rust currently does not expose per-write ack tier arguments.
+    // Writes apply locally first, then sync asynchronously to higher tiers.
+    Ok(id)
+}
+// #endregion writing-ack-tier-rust

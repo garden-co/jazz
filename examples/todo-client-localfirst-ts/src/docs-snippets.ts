@@ -21,6 +21,25 @@ export async function readTodosSettledAtEdge(db: Db) {
 }
 // #endregion reading-settled-tier-ts
 
+// #region reading-query-shaping-ts
+export async function readTodosWithQueryShaping(db: Db) {
+  return db.all(
+    app.todos
+      .where({ done: false, title: { contains: "docs" } })
+      .orderBy("title", "asc")
+      .limit(20)
+      .offset(0)
+      .include({ project: true, parent: true }),
+  );
+}
+// #endregion reading-query-shaping-ts
+
+// #region reading-includes-ts
+export async function readTodosWithIncludes(db: Db) {
+  return db.all(app.todos.where({ done: false }).include({ project: true, parent: true }));
+}
+// #endregion reading-includes-ts
+
 // #region writing-crud-ts
 export function writeTodoCrud(db: Db, todoId: string) {
   db.insert(app.todos, {
