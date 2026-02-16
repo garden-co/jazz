@@ -813,6 +813,8 @@ impl QueryGraph {
         // Track all table names and descriptors for TupleDescriptor
         let mut table_names = vec![query.table.as_str().to_string()];
         let mut table_descriptors = vec![base_descriptor.clone()];
+        let mut seen_tables: HashSet<String> = HashSet::new();
+        seen_tables.insert(query.table.as_str().to_string());
 
         // Build pipeline for base table: IndexScan → Materialize
         let id_column = ColumnName::new("_id");
@@ -840,6 +842,13 @@ impl QueryGraph {
 
         // Process each join
         for join_spec in &query.joins {
+            let join_table_name = join_spec.table.as_str().to_string();
+            if seen_tables.contains(&join_table_name) {
+                // Self/circular join chains are not yet supported in the execution graph.
+                return None;
+            }
+            let (left_col, right_col) = join_spec.on.as_ref()?;
+
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.descriptor.clone();
 
@@ -861,39 +870,37 @@ impl QueryGraph {
             let right_mat_id = graph.add_node(GraphNode::Materialize(right_mat));
             graph.add_edge(right_mat_id, right_scan_id);
 
-            // Create JoinNode
-            if let Some((left_col, right_col)) = &join_spec.on {
-                // Parse column names - may be qualified (table.col) or unqualified
-                let left_col_name = left_col.split('.').next_back().unwrap_or(left_col);
-                let right_col_name = right_col.split('.').next_back().unwrap_or(right_col);
+            // Parse column names - may be qualified (table.col) or unqualified
+            let left_col_name = left_col.split('.').next_back().unwrap_or(left_col);
+            let right_col_name = right_col.split('.').next_back().unwrap_or(right_col);
 
-                let join_node = JoinNode::from_row_descriptors(
-                    &left_table_name,
-                    left_descriptor.clone(),
-                    join_spec.table.as_str(),
-                    right_descriptor.clone(),
-                    left_col_name,
-                    right_col_name,
-                )?;
-                let join_id = graph.add_node(GraphNode::Join(join_node));
+            let join_node = JoinNode::from_row_descriptors(
+                &left_table_name,
+                left_descriptor.clone(),
+                join_spec.table.as_str(),
+                right_descriptor.clone(),
+                left_col_name,
+                right_col_name,
+            )?;
+            let join_id = graph.add_node(GraphNode::Join(join_node));
 
-                // JoinNode takes left and right as inputs
-                // Using convention: first edge is left, second is right
-                graph.add_edge(join_id, left_id);
-                graph.add_edge(join_id, right_mat_id);
+            // JoinNode takes left and right as inputs
+            // Using convention: first edge is left, second is right
+            graph.add_edge(join_id, left_id);
+            graph.add_edge(join_id, right_mat_id);
 
-                // Update for next join in chain
-                left_id = join_id;
+            // Update for next join in chain
+            left_id = join_id;
 
-                // Track table name and descriptor for TupleDescriptor
-                table_names.push(join_spec.table.as_str().to_string());
-                table_descriptors.push(right_descriptor.clone());
+            // Track table name and descriptor for TupleDescriptor
+            table_names.push(join_table_name.clone());
+            table_descriptors.push(right_descriptor.clone());
+            seen_tables.insert(join_table_name);
 
-                // Combine descriptors for downstream nodes
-                left_descriptor = RowDescriptor::combine(&[left_descriptor, right_descriptor]);
-                // Use combined table name for multi-way joins
-                left_table_name = format!("{}_{}", left_table_name, join_spec.table.as_str());
-            }
+            // Combine descriptors for downstream nodes
+            left_descriptor = RowDescriptor::combine(&[left_descriptor, right_descriptor]);
+            // Use combined table name for multi-way joins
+            left_table_name = format!("{}_{}", left_table_name, join_spec.table.as_str());
         }
 
         // Build combined descriptor and TupleDescriptor from all tables
@@ -1860,6 +1867,35 @@ mod tests {
 
         let graph = QueryGraph::compile(&query, &schema);
         assert!(graph.is_none(), "Should return None for invalid column");
+    }
+
+    #[test]
+    fn compile_join_returns_none_without_on_clause() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users").join("posts").build();
+
+        let graph = QueryGraph::compile(&query, &schema);
+        assert!(
+            graph.is_none(),
+            "Join queries without an explicit ON clause should fail compilation"
+        );
+    }
+
+    #[test]
+    fn compile_join_returns_none_for_circular_join_chain() {
+        let schema = join_schema();
+        let query = QueryBuilder::new("users")
+            .join("posts")
+            .on("id", "author_id")
+            .join("users")
+            .on("author_id", "id")
+            .build();
+
+        let graph = QueryGraph::compile(&query, &schema);
+        assert!(
+            graph.is_none(),
+            "Circular/self join chains are not yet supported by the execution graph"
+        );
     }
 
     // ========================================================================

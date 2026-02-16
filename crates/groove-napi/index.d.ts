@@ -44,6 +44,7 @@ export declare class NapiRuntime {
   /** Set a client's role ("user", "admin", or "peer"). */
   setClientRole(clientId: string, role: string): void;
   getSchema(): any;
+  getSchemaHash(): string;
   flush(): void;
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void;

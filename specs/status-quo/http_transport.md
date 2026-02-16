@@ -74,9 +74,16 @@ Server calls `ensure_client_with_session(client_id, session)` on connect.
 
 ### Reconnection
 
-Fixed 5s retry delay. Same client_id preserves server state. Server resumes from `sent_tips`.
+Reconnection behavior currently differs by client implementation:
 
-> `crates/jazz-rs/src/client.rs:167-257`
+- `jazz-rs` client: fixed 5s retry loop for `/events`.
+- `jazz-ts` runtime + worker bridge: exponential backoff with jitter (`base=300ms`, cap `10s`, random `0-199ms` jitter).
+- Both reconnect to `/events` with a `client_id` query parameter and preserve logical client identity across reconnects.
+- In `jazz-ts`, stream disconnect detaches upstream from runtime, and `Connected` re-attaches it; this intentionally replays active query subscriptions as anti-entropy.
+
+> `crates/jazz-rs/src/client.rs:157-257`
+> `packages/jazz-ts/src/runtime/client.ts:572-663`
+> `packages/jazz-ts/src/worker/groove-worker.ts:152-241`
 
 ## Authentication
 
