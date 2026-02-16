@@ -9,13 +9,6 @@
     },
   });
   const me = $derived(account.current);
-  const navigate = async (route: string) => {
-    // Flush the name to avoid SSR picking up the previous name
-    if (me.$isLoaded) {
-      await me.profile.$jazz.waitForSync();
-    }
-    await goto(route);
-  };
 </script>
 
 <div>
@@ -38,7 +31,9 @@
       }}
     />
   </label>
-  <button onclick={() => navigate(`/profile/${me.$isLoaded ? me.profile.$jazz.id : ""}`)}>
+  <button
+    onclick={() => me.$isLoaded && goto(`/profile/${me.profile.$jazz.id}`)}
+  >
     Your profile name in a Server Component &rarr;
   </button>
 </div>

@@ -32,14 +32,6 @@
     value={me.profile.name ?? ""}
     oninput={(e) => me.profile.$jazz.set("name", e.currentTarget.value)}
   />
-  <button data-testid="wait-for-sync" onclick={waitForSync}>
-    Wait for Sync
-  </button>
-  {#if synced}
-    <p data-testid="sync-status">synced</p>
-  {/if}
-  <button data-testid="navigate" onclick={navigate}>
-    View Profile SSR
-  </button>
+  <button data-testid="navigate" onclick={navigate}> View Profile SSR </button>
   <p data-testid="profile-id">{me.profile.$jazz.id}</p>
 {/if}

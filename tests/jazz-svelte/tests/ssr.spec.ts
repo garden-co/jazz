@@ -6,10 +6,6 @@ test("SSR should show the updated profile name after navigation", async ({
   await page.goto("/ssr");
   const input = page.getByTestId("name-input");
   await expect(input).toBeVisible({ timeout: 15000 });
-
-  await page.getByTestId("wait-for-sync").click();
-  await expect(page.getByTestId("sync-status")).toBeVisible();
-
   // Throttle the network to ensure sync message is slow
   const cdpSession = await page.context().newCDPSession(page);
   await cdpSession.send("Network.emulateNetworkConditions", {
@@ -21,6 +17,10 @@ test("SSR should show the updated profile name after navigation", async ({
 
   await input.fill("TestUpdatedName");
   await page.getByTestId("navigate").click();
+
+  await expect(page.getByTestId("ssr-profile-name")).not.toHaveText(
+    "Anonymous user",
+  );
 
   await expect(page.getByTestId("ssr-profile-name")).toHaveText(
     "TestUpdatedName",

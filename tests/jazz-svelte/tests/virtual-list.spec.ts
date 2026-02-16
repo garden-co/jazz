@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("should show the and update properties", async ({ page }) => {
+test("should show the list and update properties", async ({ page }) => {
   await page.goto("/virtual-list");
 
   await page.getByRole("combobox", { name: "List" }).selectOption("alice");
