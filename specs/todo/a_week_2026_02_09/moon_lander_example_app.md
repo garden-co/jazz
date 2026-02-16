@@ -511,6 +511,9 @@ When a player enters the lander (presses E), ALL collected deposits that are NOT
 - [ ] Add glow effects (fuel, thrust, outlines)
 - [ ] Particle effects (thrust, collection sparkles)
 - [ ] Background (Earth, stars, gradient)
+- [ ] Share/burst arc animation: add glow, pulsing, and spinning to the fuel shape as it flies
+- [ ] Share arc should reactively track the receiver's current position (chase a moving player, not fly to where they were)
+- [ ] Launch success camera pan: slow down the upward pan so the lander stays visible longer during ascent
 
 ### Phase 7: Demo Assets
 

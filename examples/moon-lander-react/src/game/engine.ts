@@ -56,6 +56,20 @@ function wrapScreenX(worldX: number, cameraX: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// Arc animations — fuel shapes flying through the air
+// ---------------------------------------------------------------------------
+
+interface ArcAnimation {
+  fuelType: FuelType;
+  startX: number;   // world X
+  endX: number;     // world X
+  peakHeight: number; // pixels above ground level
+  duration: number; // seconds (game time)
+  elapsed: number;
+  onComplete?: () => void;
+}
+
+// ---------------------------------------------------------------------------
 // Fuel deposits — scattered across the moon surface
 // ---------------------------------------------------------------------------
 
@@ -208,6 +222,12 @@ export function useGameEngine(
   // when the next React render overwrites depositsRef from Jazz props.
   const collectedIdsRef = useRef<Set<string>>(new Set());
 
+  // Arc animations (burst, share visuals)
+  const arcsRef = useRef<ArcAnimation[]>([]);
+
+  // Track previous Jazz inventory to detect received shares (receiver-side animation)
+  const prevExternalInventoryRef = useRef<Set<FuelType>>(new Set());
+
   // Fuel types shared out to other players (pending Jazz confirmation).
   // Excluded from the merged inventory to prevent re-sharing on re-render.
   const sharedOutRef = useRef<Set<FuelType>>(new Set());
@@ -231,6 +251,33 @@ export function useGameEngine(
       if (!propsSet.has(ft)) sharedClean.push(ft);
     }
     for (const ft of sharedClean) sharedOutRef.current.delete(ft);
+
+    // Detect received shares: new items in Jazz inventory that weren't
+    // optimistically collected locally → animate fuel arriving from nearest
+    // walking remote player
+    for (const ft of propsSet) {
+      if (!prevExternalInventoryRef.current.has(ft) && !optimisticInventoryRef.current.has(ft)) {
+        let nearestX = posXRef.current;
+        let nearestDist = Infinity;
+        for (const rp of remotePlayersRef.current) {
+          if (rp.mode !== "walking") continue;
+          const dist = wrapDistance(posXRef.current, rp.positionX);
+          if (dist < nearestDist) {
+            nearestDist = dist;
+            nearestX = rp.positionX;
+          }
+        }
+        arcsRef.current.push({
+          fuelType: ft,
+          startX: nearestX,
+          endX: posXRef.current,
+          peakHeight: 60 + Math.random() * 30,
+          duration: 0.5,
+          elapsed: 0,
+        });
+      }
+    }
+    prevExternalInventoryRef.current = propsSet;
 
     // Clean up collected IDs that Jazz has confirmed (no longer in deposit list).
     // Build a removal list first to avoid mutating the Set during iteration.
@@ -402,11 +449,19 @@ export function useGameEngine(
           const ft = rp.requiredFuelType as FuelType;
           if (ft === requiredFuelType) continue; // never give away what we need
           if (!inventoryRef.current.has(ft)) continue;
-          // Share it
+          // Share it — fire callback immediately, animate visually
           inventoryRef.current.delete(ft);
           optimisticInventoryRef.current.delete(ft);
           sharedOutRef.current.add(ft);
           onShareFuelRef.current?.(rp.requiredFuelType, rp.playerId);
+          arcsRef.current.push({
+            fuelType: ft,
+            startX: posXRef.current,
+            endX: rp.positionX,
+            peakHeight: 60 + Math.random() * 30,
+            duration: 0.5,
+            elapsed: 0,
+          });
         }
 
         if (wantsInteract) {
@@ -422,7 +477,8 @@ export function useGameEngine(
               onRefuelRef.current?.(requiredFuelType);
             }
 
-            // Burst: eject all non-required fuel types back to the surface
+            // Burst: eject all non-required fuel types back to the surface.
+            // Arc animation plays first; DB write fires when animation lands.
             const toBurst: FuelType[] = [];
             for (const ft of inventoryRef.current) {
               if (ft !== requiredFuelType) toBurst.push(ft);
@@ -432,7 +488,15 @@ export function useGameEngine(
               optimisticInventoryRef.current.delete(ft);
               sharedOutRef.current.add(ft);
               const newX = wrapX(posXRef.current + (Math.random() - 0.5) * 600);
-              onBurstDepositRef.current?.(ft, newX);
+              arcsRef.current.push({
+                fuelType: ft,
+                startX: posXRef.current,
+                endX: newX,
+                peakHeight: 80 + Math.random() * 40,
+                duration: 0.6 + Math.random() * 0.3,
+                elapsed: 0,
+                onComplete: () => onBurstDepositRef.current?.(ft, newX),
+              });
             }
           }
         }
@@ -482,6 +546,25 @@ export function useGameEngine(
         const dx = wrapScreenX(dep.x, cameraX);
         if (dx > -20 && dx < w + 20) {
           drawDeposit(ctx, dx, groundScreenY, dep.type);
+        }
+      }
+
+      // Update and draw arc animations (burst, share visuals)
+      for (let i = arcsRef.current.length - 1; i >= 0; i--) {
+        const arc = arcsRef.current[i];
+        arc.elapsed += dt;
+        if (arc.elapsed >= arc.duration) {
+          arc.onComplete?.();
+          arcsRef.current.splice(i, 1);
+          continue;
+        }
+        const t = arc.elapsed / arc.duration;
+        const arcX = wrapLerp(arc.startX, arc.endX, t);
+        const arcY = GROUND_LEVEL - arc.peakHeight * 4 * t * (1 - t);
+        const sx = wrapScreenX(arcX, cameraX);
+        const sy = arcY - cameraY;
+        if (sx > -20 && sx < w + 20 && sy > -20 && sy < h + 60) {
+          drawDeposit(ctx, sx, sy, arc.fuelType);
         }
       }
 

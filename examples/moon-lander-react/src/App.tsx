@@ -51,6 +51,18 @@ function GameWithSync({
     pendingRefuelsRef.current.push(fuelType);
   }, []);
 
+  // Pending fuel shares (rewrite collectedBy from local → receiver)
+  const pendingSharesRef = useRef<Array<{ fuelType: string; receiverPlayerId: string }>>([]);
+  const handleShareFuel = useCallback((fuelType: string, receiverPlayerId: string) => {
+    pendingSharesRef.current.push({ fuelType, receiverPlayerId });
+  }, []);
+
+  // Pending burst deposits (eject back to surface at new position)
+  const pendingBurstsRef = useRef<Array<{ fuelType: string; newX: number }>>([]);
+  const handleBurstDeposit = useCallback((fuelType: string, newX: number) => {
+    pendingBurstsRef.current.push({ fuelType, newX });
+  }, []);
+
   // Seed flag — prevents re-seeding after initial population
   const seededRef = useRef(false);
 
@@ -130,6 +142,38 @@ function GameWithSync({
           });
         }
       }
+
+      // --- Share writes ---
+      // Transfer fuel: rewrite collectedBy from local player to receiver
+      for (const share of pendingSharesRef.current.splice(0)) {
+        const deposits = allDepositsRef.current;
+        if (!deposits) continue;
+        const dep = deposits.find(
+          (d) => d.collected && d.collectedBy === playerId && d.fuelType === share.fuelType,
+        );
+        if (dep) {
+          db.update(app.fuel_deposits, dep.id, {
+            collectedBy: share.receiverPlayerId,
+          });
+        }
+      }
+
+      // --- Burst writes ---
+      // Eject deposits back to surface: mark uncollected at new position
+      for (const burst of pendingBurstsRef.current.splice(0)) {
+        const deposits = allDepositsRef.current;
+        if (!deposits) continue;
+        const dep = deposits.find(
+          (d) => d.collected && d.collectedBy === playerId && d.fuelType === burst.fuelType,
+        );
+        if (dep) {
+          db.update(app.fuel_deposits, dep.id, {
+            collected: false,
+            collectedBy: "",
+            positionX: Math.floor(burst.newX),
+          });
+        }
+      }
     }, DB_SYNC_INTERVAL_MS);
 
     return () => clearInterval(id);
@@ -186,6 +230,8 @@ function GameWithSync({
       inventory={inventory}
       onCollectDeposit={handleCollectDeposit}
       onRefuel={handleRefuel}
+      onShareFuel={handleShareFuel}
+      onBurstDeposit={handleBurstDeposit}
       onStateChange={handleStateChange}
     />
   );
