@@ -3,11 +3,12 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", "target/**"]
+      "outputs": ["dist/**", "target/**", "pkg/**"],
+      "env": ["JAZZ_NAPI_RELEASE"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
-      "outputs": ["target/**", "pkg/**"]
+      "outputs": ["../target/debug/jazz*"]
     },
     "test": {
       "dependsOn": ["build"],

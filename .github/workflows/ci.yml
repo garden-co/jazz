@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [main]
 
@@ -14,6 +15,12 @@ jobs:
   validate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
+    env:
+      # PR validation favors debug N-API builds for speed (release remains in publish paths).
+      JAZZ_NAPI_RELEASE: "0"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
 
     steps:
       - uses: actions/checkout@v6
@@ -29,21 +36,40 @@ jobs:
 
       - run: corepack enable
 
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          cache-on-failure: true
 
       - run: pnpm install --frozen-lockfile
-      - run: cargo install wasm-pack
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+      - name: Show sccache stats (before build)
+        run: sccache --show-stats || true
 
       - run: pnpm format:check
       - run: pnpm oxlint .
       - run: pnpm build
+      - name: Show sccache stats (after pnpm build)
+        run: sccache --show-stats || true
       - run: cargo clippy --workspace -- -D warnings
-      - run: pnpm exec playwright install --with-deps
+      - name: Show sccache stats (after clippy)
+        run: sccache --show-stats || true
+      - name: Mount Playwright sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/ms-playwright
+      - run: pnpm exec playwright install chromium
       - run: pnpm test
+      - name: Show sccache stats (after tests)
+        run: sccache --show-stats || true

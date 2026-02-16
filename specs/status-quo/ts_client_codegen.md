@@ -139,6 +139,18 @@ The SubscriptionManager preserves object identity for unchanged items: if a new 
 > `packages/jazz-ts/src/runtime/row-transformer.ts`
 > `packages/jazz-ts/src/runtime/value-converter.ts`
 
+### Reconnection + Query Replay (Runtime/Worker)
+
+The TS runtime intentionally treats upstream attachment as replay boundary for subscriptions:
+
+- On stream failure, runtime detaches upstream (`removeServer`) and schedules reconnect.
+- On `Connected`, runtime stores server-provided `client_id`, re-attaches upstream (`addServer`), and resets backoff.
+- Re-attach triggers replay of active query subscriptions, so subscriptions created while offline still converge after reconnect.
+- Backoff uses exponential delay with jitter (`300ms * 2^attempt`, capped at `10s`, plus `0-199ms` jitter).
+
+> `packages/jazz-ts/src/runtime/client.ts:572-663`
+> `packages/jazz-ts/src/worker/groove-worker.ts:152-241`
+
 ## Test Coverage
 
 | Suite                        | Tests                       | Scope                                           |
