@@ -1102,96 +1102,65 @@ export class SyncManager {
       return; // No-op for empty batches
     }
 
-    const coValueIds = new Set(messages.map((m) => m.id));
-
     // Start both operations in parallel (single attempt for storage and network)
     const storagePromise = this.local.storage
       ? this.local.storage.storeAtomicBatch(messages)
       : Promise.resolve(undefined);
 
-    const syncPromise = this.syncBatchToServers(messages, coValueIds);
+    const syncPromise = this.syncContent({
+      action: "batch",
+      messages: messages,
+    });
 
     // Wait for both to complete
     await Promise.allSettled([storagePromise, syncPromise]);
   }
 
-  private async syncBatchToServers(
-    messages: NewContentMessage[],
-    coValueIds: Set<RawCoID>,
-  ): Promise<void> {
-    // Create single batch message
-    const batchMessage: BatchMessage = {
-      action: "batch",
-      messages: messages,
-    };
-
-    // Track sync state for all CoValues in the batch
-    for (const coValueId of coValueIds) {
-      this.trackSyncState(coValueId);
+  private syncQueue = new LocalTransactionsSyncQueue((contents) => {
+    for (const content of contents) {
+      this.storeContent(content);
+      this.syncContent(content);
     }
-
-    // Send to all server peers for each CoValue
-    // `sentToPeers` is used to avoid sending the same message to the same peer multiple times
-    // e.g. this.getServerPeers(A) and this.getServerPeers(B) both contain the same peer P
-    const sentToPeers = new Set<PeerID>();
-    for (const coValueId of coValueIds) {
-      for (const peer of this.getServerPeers(coValueId)) {
-        if (!sentToPeers.has(peer.id) && !peer.closed) {
-          this.trySendToPeer(peer, batchMessage);
-          sentToPeers.add(peer.id);
-
-          // Update optimistic known state for each CoValue
-          for (const msg of messages) {
-            if (this.getServerPeers(msg.id).some((p) => p.id === peer.id)) {
-              peer.combineOptimisticWith(msg.id, knownStateFromContent(msg));
-              peer.trackToldKnownState(msg.id);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  private syncQueue = new LocalTransactionsSyncQueue((contents) =>
-    this.syncContents(contents),
-  );
+  });
   syncLocalTransaction = this.syncQueue.syncTransaction;
   trackDirtyCoValues = this.syncQueue.trackDirtyCoValues;
 
-  private syncContents(contents: NewContentMessage[]) {
+  private syncContent(content: NewContentMessage | BatchMessage) {
+    const contents = content.action === "batch" ? content.messages : [content];
+
+    // Extract the peers to sync for each CoValue to avoid sending the same message to the same peer multiple times
+    const peersToSync = new Set<PeerState>();
     for (const content of contents) {
-      this.syncContent(content);
+      const coValue = this.local.getCoValue(content.id);
+      this.trackSyncState(coValue.id);
+
+      for (const peer of this.getPeers(coValue.id)) {
+        // Only subscribed CoValues are synced to clients
+        if (
+          peer.role === "client" &&
+          !peer.isCoValueSubscribedToPeer(coValue.id)
+        ) {
+          continue;
+        }
+
+        if (peer.closed || coValue.isErroredInPeer(peer.id)) {
+          peer.emitCoValueChange(coValue.id);
+          continue;
+        }
+
+        peersToSync.add(peer);
+      }
     }
-  }
 
-  private syncContent(content: NewContentMessage) {
-    const coValue = this.local.getCoValue(content.id);
-
-    this.storeContent(content);
-
-    this.trackSyncState(coValue.id);
-
-    const contentKnownState = knownStateFromContent(content);
-
-    for (const peer of this.getPeers(coValue.id)) {
-      // Only subscribed CoValues are synced to clients
-      if (
-        peer.role === "client" &&
-        !peer.isCoValueSubscribedToPeer(coValue.id)
-      ) {
-        continue;
-      }
-
-      if (peer.closed || coValue.isErroredInPeer(peer.id)) {
-        peer.emitCoValueChange(content.id);
-        continue;
-      }
-
+    for (const peer of peersToSync) {
       // We assume that the peer already knows anything before this content
       // Any eventual reconciliation will be handled through the known state messages exchange
+
       this.trySendToPeer(peer, content);
-      peer.combineOptimisticWith(coValue.id, contentKnownState);
-      peer.trackToldKnownState(coValue.id);
+      for (const content of contents) {
+        peer.combineOptimisticWith(content.id, knownStateFromContent(content));
+        peer.trackToldKnownState(content.id);
+      }
     }
   }
 
