@@ -19,6 +19,9 @@
     "pkg/jazz_wasm.js",
     "pkg/jazz_wasm.d.ts"
   ],
+  "dependencies": {
+    "wasm-pack": "^0.14.0"
+  },
   "main": "pkg/jazz_wasm.js",
   "types": "pkg/jazz_wasm.d.ts",
   "scripts": {

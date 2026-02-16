@@ -74,7 +74,6 @@ export function generateWhereInputTypes(schema: WasmSchema): string[] {
  */
 function generateQueryBuilderClass(
   tableName: string,
-  schema: WasmSchema,
   relations: Map<string, Relation[]>,
 ): string[] {
   const lines: string[] = [];
@@ -91,8 +90,9 @@ function generateQueryBuilderClass(
   );
   lines.push(`  readonly _table = "${tableName}";`);
   lines.push(`  readonly _schema: WasmSchema = wasmSchema;`);
-  lines.push(`  declare readonly _rowType: ${interfaceName};`);
-  lines.push(`  declare readonly _initType: ${interfaceName}Init;`);
+  // Definite assignment (!) instead of declare so Babel/Metro can transpile (declare is Flow-only in Babel)
+  lines.push(`  readonly _rowType!: ${interfaceName};`);
+  lines.push(`  readonly _initType!: ${interfaceName}Init;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
   lines.push(`  private _includes: Partial<${includeConstraint}> = {};`);
   lines.push(`  private _orderBys: Array<[string, "asc" | "desc"]> = [];`);
@@ -200,7 +200,7 @@ export function generateQueryBuilderClasses(
   const lines: string[] = [];
 
   for (const tableName of Object.keys(schema.tables)) {
-    lines.push(...generateQueryBuilderClass(tableName, schema, relations));
+    lines.push(...generateQueryBuilderClass(tableName, relations));
   }
 
   return lines;

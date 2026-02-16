@@ -91,67 +91,67 @@ export type TodoWithIncludes<I extends TodoInclude = {}> = Todo & {
 };
 
 export const wasmSchema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [
+  "tables": {
+    "projects": {
+      "columns": [
         {
-          name: "name",
-          column_type: {
-            type: "Text",
+          "name": "name",
+          "column_type": {
+            "type": "Text"
           },
-          nullable: false,
-        },
-      ],
+          "nullable": false
+        }
+      ]
     },
-    todos: {
-      columns: [
+    "todos": {
+      "columns": [
         {
-          name: "title",
-          column_type: {
-            type: "Text",
+          "name": "title",
+          "column_type": {
+            "type": "Text"
           },
-          nullable: false,
+          "nullable": false
         },
         {
-          name: "done",
-          column_type: {
-            type: "Boolean",
+          "name": "done",
+          "column_type": {
+            "type": "Boolean"
           },
-          nullable: false,
+          "nullable": false
         },
         {
-          name: "description",
-          column_type: {
-            type: "Text",
+          "name": "description",
+          "column_type": {
+            "type": "Text"
           },
-          nullable: true,
+          "nullable": true
         },
         {
-          name: "parent",
-          column_type: {
-            type: "Uuid",
+          "name": "parent",
+          "column_type": {
+            "type": "Uuid"
           },
-          nullable: true,
-          references: "todos",
+          "nullable": true,
+          "references": "todos"
         },
         {
-          name: "project",
-          column_type: {
-            type: "Uuid",
+          "name": "project",
+          "column_type": {
+            "type": "Uuid"
           },
-          nullable: true,
-          references: "projects",
-        },
-      ],
-    },
-  },
+          "nullable": true,
+          "references": "projects"
+        }
+      ]
+    }
+  }
 };
 
 export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements QueryBuilder<Project> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Project;
-  declare readonly _initType: ProjectInit;
+  readonly _rowType!: Project;
+  readonly _initType!: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
@@ -224,8 +224,8 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
 export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilder<Todo> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Todo;
-  declare readonly _initType: TodoInit;
+  readonly _rowType!: Todo;
+  readonly _initType!: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
