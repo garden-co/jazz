@@ -4,17 +4,16 @@ use crate::BTreeError;
 use crate::file::SyncFile;
 use crate::page::{
     OverflowRef, Page, PageId, PageKind, RawLeafDeleteResult, RawLeafUpsertResult, ValueCell,
-    ValueCellRef, decode_page, encode_overflow_page_chunk, encode_page, freelist_ids_per_page,
-    overflow_chunk_capacity, page_fits, raw_freelist_page, raw_internal_child_for_key,
-    raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan, raw_leaf_upsert_in_place,
-    raw_overflow_chunk, raw_page_kind, validate_page,
+    ValueCellRef, decode_page, encode_page, freelist_ids_per_page, page_fits, raw_freelist_page,
+    raw_internal_child_for_key, raw_leaf_delete_in_place, raw_leaf_find_value, raw_leaf_scan,
+    raw_leaf_upsert_in_place, raw_page_kind, validate_page,
 };
 use crate::superblock::{Superblock, SuperblockSlot};
 
 const MIN_PAGE_SIZE: usize = 4 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 16 * 1024;
 const DEFAULT_CACHE_BYTES: usize = 32 * 1024 * 1024;
-const DEFAULT_OVERFLOW_THRESHOLD: usize = 8 * 1024;
+const DEFAULT_OVERFLOW_THRESHOLD: usize = 4 * 1024;
 const OVERFLOW_REUSE_MIN_BYTES: usize = 128 * 1024;
 const OVERFLOW_DIRECT_READ_MIN_BYTES: usize = 128 * 1024;
 const BOOTSTRAP_GENERATION: u64 = 1;
@@ -91,6 +90,7 @@ pub struct OpfsBTree<F: SyncFile> {
     root_page_id: Option<PageId>,
     total_pages: u64,
     pages: HashMap<PageId, Vec<u8>>,
+    blob_pages: HashSet<PageId>,
     page_access_epoch: HashMap<PageId, u64>,
     access_epoch: u64,
     dirty_pages: HashSet<PageId>,
@@ -136,6 +136,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             root_page_id: None,
             total_pages: 2,
             pages: HashMap::new(),
+            blob_pages: HashSet::new(),
             page_access_epoch: HashMap::new(),
             access_epoch: 0,
             dirty_pages: HashSet::new(),
@@ -637,12 +638,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         head_page_id: PageId,
         expected_len: usize,
     ) -> Result<Vec<u8>, BTreeError> {
-        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
-        if max_chunk == 0 {
-            return Err(BTreeError::InvalidOptions(
-                "page size too small for overflow pages".to_string(),
-            ));
-        }
+        let max_chunk = self.options.page_size;
         let page_count = overflow_pages_for_len(expected_len, max_chunk);
 
         if expected_len >= OVERFLOW_DIRECT_READ_MIN_BYTES
@@ -661,19 +657,28 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page_raw = self.pages.get(&page_id).ok_or_else(|| {
                 BTreeError::Corrupt(format!("overflow page {} missing in memory", page_id))
             })?;
-            let (chunk, _) = raw_overflow_chunk(page_raw, self.options.page_size)?;
-            out.extend_from_slice(chunk);
+            if page_raw.len() != self.options.page_size {
+                return Err(BTreeError::Corrupt(format!(
+                    "overflow page {} has invalid length {}",
+                    page_id,
+                    page_raw.len()
+                )));
+            }
+            let remaining = expected_len.saturating_sub(out.len());
+            if remaining == 0 {
+                break;
+            }
+            let take = remaining.min(self.options.page_size);
+            out.extend_from_slice(&page_raw[..take]);
         }
 
-        if out.len() < expected_len {
+        if out.len() != expected_len {
             return Err(BTreeError::Corrupt(format!(
                 "overflow payload truncated: expected {}, found {}",
                 expected_len,
                 out.len()
             )));
         }
-
-        out.truncate(expected_len);
         Ok(out)
     }
 
@@ -715,20 +720,21 @@ impl<F: SyncFile> OpfsBTree<F> {
         let mut out = Vec::with_capacity(expected_len);
         for i in 0..page_count {
             let start = i * self.options.page_size;
-            let end = start + self.options.page_size;
-            let page_raw = &raw[start..end];
-            let (chunk, _) = raw_overflow_chunk(page_raw, self.options.page_size)?;
-            out.extend_from_slice(chunk);
+            let remaining = expected_len.saturating_sub(out.len());
+            if remaining == 0 {
+                break;
+            }
+            let take = remaining.min(self.options.page_size);
+            out.extend_from_slice(&raw[start..start + take]);
         }
 
-        if out.len() < expected_len {
+        if out.len() != expected_len {
             return Err(BTreeError::Corrupt(format!(
                 "overflow payload truncated: expected {}, found {}",
                 expected_len,
                 out.len()
             )));
         }
-        out.truncate(expected_len);
         Ok(out)
     }
 
@@ -764,13 +770,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         head_page_id: PageId,
         total_len: usize,
     ) -> Result<(), BTreeError> {
-        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
-        if max_chunk == 0 {
-            return Err(BTreeError::InvalidOptions(
-                "page size too small for overflow pages".to_string(),
-            ));
-        }
-        let page_count = overflow_pages_for_len(total_len, max_chunk);
+        let page_count = overflow_pages_for_len(total_len, self.options.page_size);
 
         for idx in 0..page_count {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
@@ -834,8 +834,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             let start = i * self.options.page_size;
             let end = start + self.options.page_size;
             let page_raw = &raw[start..end];
-            let _ = validate_page(page_raw, self.options.page_size)?;
             self.pages.insert(page_id, page_raw.to_vec());
+            self.blob_pages.insert(page_id);
             self.touch_page(page_id);
         }
         self.evict_pages_if_needed(Some(head_page_id));
@@ -847,12 +847,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok(ValueCell::Inline(value.to_vec()));
         }
 
-        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
-        if max_chunk == 0 {
-            return Err(BTreeError::InvalidOptions(
-                "page size too small for overflow pages".to_string(),
-            ));
-        }
+        let max_chunk = self.options.page_size;
 
         let total_len = u32::try_from(value.len())
             .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
@@ -868,8 +863,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
                 BTreeError::Corrupt("overflow extent page id overflow".to_string())
             })?;
-            let raw = encode_overflow_page_chunk(chunk, None, self.options.page_size)?;
-            self.set_dirty_raw_page(page_id, raw);
+            let raw = build_blob_page(chunk, self.options.page_size)?;
+            self.set_dirty_blob_page(page_id, raw);
         }
 
         Ok(ValueCell::Overflow {
@@ -887,12 +882,7 @@ impl<F: SyncFile> OpfsBTree<F> {
             return Ok((ValueCell::Inline(value.to_vec()), None));
         }
         if let Some(existing) = existing_overflow {
-            let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
-            if max_chunk == 0 {
-                return Err(BTreeError::InvalidOptions(
-                    "page size too small for overflow pages".to_string(),
-                ));
-            }
+            let max_chunk = self.options.page_size;
             let existing_pages = overflow_pages_for_len(existing.total_len as usize, max_chunk);
             let needed_pages = overflow_pages_for_len(value.len(), max_chunk);
             if needed_pages <= existing_pages {
@@ -910,12 +900,7 @@ impl<F: SyncFile> OpfsBTree<F> {
         existing_pages: usize,
         value: &[u8],
     ) -> Result<ValueCell, BTreeError> {
-        let max_chunk = overflow_chunk_capacity(self.options.page_size)?;
-        if max_chunk == 0 {
-            return Err(BTreeError::InvalidOptions(
-                "page size too small for overflow pages".to_string(),
-            ));
-        }
+        let max_chunk = self.options.page_size;
 
         let total_len = u32::try_from(value.len())
             .map_err(|_| BTreeError::InvalidOptions("value too large".to_string()))?;
@@ -934,8 +919,8 @@ impl<F: SyncFile> OpfsBTree<F> {
             let page_id = head_page_id.checked_add(idx as u64).ok_or_else(|| {
                 BTreeError::Corrupt("overflow extent page id overflow".to_string())
             })?;
-            let raw = encode_overflow_page_chunk(chunk, None, self.options.page_size)?;
-            self.set_dirty_raw_page(page_id, raw);
+            let raw = build_blob_page(chunk, self.options.page_size)?;
+            self.set_dirty_blob_page(page_id, raw);
         }
 
         for idx in needed_pages..existing_pages {
@@ -1138,7 +1123,15 @@ impl<F: SyncFile> OpfsBTree<F> {
         for page_id in dirty_page_ids {
             if let Some(raw) = self.pages.get(page_id) {
                 self.validate_writable_page_id(*page_id)?;
-                let _ = validate_page(raw, self.options.page_size)?;
+                if !self.blob_pages.contains(page_id) {
+                    let _ = validate_page(raw, self.options.page_size)?;
+                } else if raw.len() != self.options.page_size {
+                    return Err(BTreeError::Corrupt(format!(
+                        "blob page {} has invalid length {}",
+                        page_id,
+                        raw.len()
+                    )));
+                }
                 encoded_pages.push((*page_id, raw.clone()));
             }
         }
@@ -1217,8 +1210,9 @@ impl<F: SyncFile> OpfsBTree<F> {
         Ok(())
     }
 
-    fn set_dirty_raw_page(&mut self, page_id: PageId, raw: Vec<u8>) {
+    fn set_dirty_blob_page(&mut self, page_id: PageId, raw: Vec<u8>) {
         self.pages.insert(page_id, raw);
+        self.blob_pages.insert(page_id);
         self.mark_dirty_loaded_page(page_id);
     }
 
@@ -1231,6 +1225,7 @@ impl<F: SyncFile> OpfsBTree<F> {
     fn remove_page(&mut self, page_id: PageId) -> Option<Vec<u8>> {
         self.dirty_pages.remove(&page_id);
         self.page_access_epoch.remove(&page_id);
+        self.blob_pages.remove(&page_id);
         self.pages.remove(&page_id)
     }
 
@@ -1442,16 +1437,18 @@ impl<F: SyncFile> OpfsBTree<F> {
                 {
                     return None;
                 }
-                let kind = match raw_page_kind(page, self.options.page_size) {
-                    Ok(kind) => kind,
-                    Err(_) => return None,
+                let priority = match raw_page_kind(page, self.options.page_size) {
+                    Ok(kind) => {
+                        if self.options.pin_internal_pages && kind == PageKind::Internal {
+                            return None;
+                        }
+                        eviction_priority(kind)
+                    }
+                    Err(_) => 0, // blob/raw pages are always evictable when clean
                 };
-                if self.options.pin_internal_pages && kind == PageKind::Internal {
-                    return None;
-                }
 
                 Some((
-                    eviction_priority(kind),
+                    priority,
                     *self.page_access_epoch.get(page_id).unwrap_or(&0),
                     *page_id,
                 ))
@@ -1506,6 +1503,19 @@ fn child_index(keys: &[Vec<u8>], key: &[u8]) -> usize {
 
 fn overflow_pages_for_len(total_len: usize, max_chunk: usize) -> usize {
     total_len.div_ceil(max_chunk).max(1)
+}
+
+fn build_blob_page(chunk: &[u8], page_size: usize) -> Result<Vec<u8>, BTreeError> {
+    if chunk.len() > page_size {
+        return Err(BTreeError::Corrupt(format!(
+            "blob chunk {} exceeds page size {}",
+            chunk.len(),
+            page_size
+        )));
+    }
+    let mut raw = vec![0u8; page_size];
+    raw[..chunk.len()].copy_from_slice(chunk);
+    Ok(raw)
 }
 
 fn ensure_page_fits(page: &Page, page_size: usize, context: &str) -> Result<(), BTreeError> {
@@ -1830,12 +1840,36 @@ mod tests {
     }
 
     #[test]
+    fn overflow_large_patterned_value_round_trip() {
+        let file = MemoryFile::new();
+        let mut tree = OpfsBTree::open(file.clone(), small_options()).expect("open tree");
+
+        let len = 1_048_576 + 513;
+        let big: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        tree.put(b"big-pattern", &big).expect("put big patterned");
+        assert_eq!(
+            tree.get(b"big-pattern").expect("get big patterned"),
+            Some(big.clone())
+        );
+
+        tree.checkpoint().expect("checkpoint");
+        let mut reopened = OpfsBTree::open(file, small_options()).expect("reopen tree");
+        assert_eq!(
+            reopened
+                .get(b"big-pattern")
+                .expect("get patterned after reopen"),
+            Some(big)
+        );
+    }
+
+    #[test]
     fn overflow_update_reuses_existing_extent_when_page_count_matches() {
         let file = MemoryFile::new();
         let mut tree = OpfsBTree::open(file, small_options()).expect("open tree");
 
-        let value_v1 = vec![1u8; 180_000];
-        let value_v2 = vec![2u8; 182_000];
+        // Keep both values within the same 4KiB-page extent footprint.
+        let value_v1 = vec![1u8; 179_000];
+        let value_v2 = vec![2u8; 180_000];
 
         tree.put(b"k", &value_v1).expect("put v1");
         let total_pages_before = tree.total_pages;

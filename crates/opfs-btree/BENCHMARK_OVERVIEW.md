@@ -1,6 +1,6 @@
 # opfs-btree Benchmark Overview
 
-Generated on 2026-02-15.
+Generated on 2026-02-16.
 
 Single baseline table for further `opfs-btree` work. All values are throughput in `K/s` (1 K = 1,000 ops/s), rounded to one decimal.
 Current `opfs-btree` default cache is `32MB`.
@@ -10,31 +10,31 @@ Current `opfs-btree` default cache is `32MB`.
 | mixed_random_70r_30w              |                 32 |              40.7 |                152.3 |           81.9 |          214.0 |             75.5 |          2.2 | [1][5][9]  |
 | mixed_random_70r_30w              |                256 |              48.0 |                225.6 |           89.8 |          256.5 |             81.8 |          2.2 | [1][5][9]  |
 | mixed_random_70r_30w              |              4,096 |              32.6 |                 46.2 |           66.2 |          153.1 |             57.6 |          2.2 | [1][5][9]  |
-| mixed_random_70r_30w              |          1,048,576 |               0.9 |                  0.1 |            N/A |            1.8 |              1.4 |          0.2 | [2][5][9]  |
+| mixed_random_70r_30w              |          1,048,576 |               0.9 |                  0.5 |            N/A |            1.8 |              1.4 |          0.2 | [2][5][9]  |
 | mixed_random_50r_50w_with_updates |                 32 |              40.3 |                107.5 |           98.1 |          265.2 |             77.3 |          2.2 | [1][5][9]  |
 | mixed_random_50r_50w_with_updates |                256 |              47.6 |                184.0 |           77.4 |          263.0 |             84.1 |          2.2 | [1][5][9]  |
 | mixed_random_50r_50w_with_updates |              4,096 |              32.3 |                 37.5 |           56.4 |          143.2 |             49.3 |          2.3 | [1][5][9]  |
-| mixed_random_50r_50w_with_updates |          1,048,576 |               0.8 |                  0.1 |            N/A |            1.8 |              1.3 |          0.2 | [2][5][9]  |
+| mixed_random_50r_50w_with_updates |          1,048,576 |               0.8 |                  0.5 |            N/A |            1.8 |              1.3 |          0.2 | [2][5][9]  |
 | mixed_random_60r_20w_20d          |                 32 |              40.4 |                166.7 |           95.2 |          298.1 |             78.7 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |                256 |              48.1 |                232.6 |           90.3 |          256.3 |             85.5 |          2.2 | [1][5][9]  |
 | mixed_random_60r_20w_20d          |              4,096 |              36.8 |                 40.7 |           71.7 |          176.4 |             63.3 |          2.2 | [1][5][9]  |
-| mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  0.1 |            N/A |            3.4 |              3.0 |          0.2 | [2][5][9]  |
+| mixed_random_60r_20w_20d          |          1,048,576 |               0.9 |                  1.3 |            N/A |            3.4 |              3.0 |          0.2 | [2][5][9]  |
 | range_seq_window_64               |                 32 |             151.9 |                151.5 |          302.4 |           89.6 |            110.3 |          9.0 | [8][11]    |
 | range_seq_window_64               |                256 |             148.9 |                154.6 |          268.2 |           75.7 |            109.2 |          9.0 | [8][11]    |
 | range_seq_window_64               |              4,096 |               3.0 |                  2.0 |           35.9 |           27.2 |             66.4 |         11.3 | [8][11]    |
-| range_seq_window_64               |          1,048,576 |               1.0 |                  0.3 |            N/A |            0.5 |              0.4 |          0.0 | [8][12]    |
+| range_seq_window_64               |          1,048,576 |               1.0 |                  0.1 |            N/A |            0.5 |              0.4 |          0.0 | [8][12]    |
 | range_random_window_64            |                 32 |             149.3 |                172.4 |          312.9 |           89.8 |            110.8 |          8.9 | [8][11]    |
 | range_random_window_64            |                256 |             144.3 |                141.5 |          276.7 |           78.0 |            106.9 |          9.0 | [8][11]    |
 | range_random_window_64            |              4,096 |               2.0 |                  0.3 |           25.5 |           26.9 |             67.6 |         11.4 | [8][11]    |
-| range_random_window_64            |          1,048,576 |               1.1 |                  0.4 |            N/A |            0.5 |              0.5 |          0.0 | [8][12]    |
+| range_random_window_64            |          1,048,576 |               1.1 |                  0.1 |            N/A |            0.5 |              0.5 |          0.0 | [8][12]    |
 | cold_seq_read                     |                 32 |            2491.9 |                750.0 |          890.8 |          716.1 |            268.0 |         18.5 | [3][10]    |
 | cold_seq_read                     |                256 |            1658.4 |                483.9 |          863.3 |          626.8 |            220.1 |         18.4 | [3][10]    |
 | cold_seq_read                     |              4,096 |             279.4 |                 52.4 |          297.6 |          297.4 |            181.7 |         18.9 | [3][10]    |
-| cold_seq_read                     |          1,048,576 |               2.4 |                  0.1 |            N/A |            4.4 |              0.9 |          0.2 | [4][5][10] |
+| cold_seq_read                     |          1,048,576 |               2.4 |                  2.9 |            N/A |            4.4 |              0.9 |          0.2 | [4][5][10] |
 | cold_random_read                  |                 32 |            2154.1 |                882.4 |          694.2 |          664.3 |            261.4 |         18.6 | [3][10]    |
 | cold_random_read                  |                256 |            1560.0 |                400.0 |          654.2 |          641.7 |            262.7 |         18.5 | [3][10]    |
 | cold_random_read                  |              4,096 |             265.4 |                 35.3 |          280.2 |          294.6 |            166.4 |         18.8 | [3][10]    |
-| cold_random_read                  |          1,048,576 |               2.4 |                  0.1 |            N/A |            4.6 |              1.1 |          0.2 | [4][5][10] |
+| cold_random_read                  |          1,048,576 |               2.4 |                  3.1 |            N/A |            4.6 |              1.1 |          0.2 | [4][5][10] |
 
 **Notes**
 
@@ -61,15 +61,17 @@ and
 [7] Current `opfs-btree wasm/opfs` mixed rows reflect the lazy-page-loading phase A/B medians over 3 runs (same seed/commands as [6]), with baseline at commit `b3fe6ae`.
 
 [8] `opfs-btree wasm/opfs` range rows (`32/256/4096`) reflect the latest direct-slot-walk phase medians over 3 runs (`--profile all --include-cold-read`, `count=3000`, seed `0xA5A5A5A501234567`, `cache=32MB`, `pin_internal_pages=true`, `read_coalesce_pages=4`).
-`1,048,576` range rows are still carried forward from the prior baseline (`count=128`).
+`1,048,576` range rows are now from the overflow-threshold tuning medians over 3 runs (`--profile all --include-cold-read`, `count=64`, `overflow-threshold-bytes=4096`, same seed/cache/options).
 
 [9] Current top-table `opfs-btree wasm/opfs` mixed rows for `32/256/4096`
 reflect the latest direct-slot-walk phase medians over 3 runs with `pin_internal_pages=true`,
 seed `0xA5A5A5A501234567`, `count=3000`, `cache=32MB`, `read_coalesce_pages=4`.
-`1,048,576` rows are still carried forward from the prior baseline (`count=64`).
+`1,048,576` mixed rows are now from overflow-threshold tuning medians over 3 runs
+(`--profile all --include-cold-read --count 64 --value-sizes 1048576 --overflow-threshold-bytes=4096`, same seed/cache/options).
 
 [10] Current top-table `opfs-btree wasm/opfs` cold rows for `32/256/4096` reflect the same direct-slot-walk phase medians as [8]/[9].
-`1,048,576` cold rows are still carried forward from the prior baseline (`count=64`).
+`1,048,576` cold rows are now from overflow-threshold tuning medians over 3 runs
+(`--profile all --include-cold-read --count 64 --value-sizes 1048576 --overflow-threshold-bytes=4096`, same seed/cache/options).
 
 [11] Native range rows come from restored cross-engine Criterion groups
 `compare_native_range_seq_window` and `compare_native_range_random_window`
@@ -749,3 +751,69 @@ Focused 1MB all-profile delta (extent baseline -> direct-read):
 | cold_random_read                  |      0.170 |     0.177 | +3.9% |
 
 Interpretation: direct extent-read yields a modest net uplift over the previous extent baseline and improves cold random reads at 1MB, but mixed 1MB scenarios remain near-flat to slightly negative.
+
+## Phase: Overflow Threshold Tuning (Default = 4KB)
+
+Changes in this phase:
+
+- Added a runtime-tunable overflow threshold to the wasm benchmark harness:
+  - Rust export: `bench_set_overflow_threshold_bytes(...)`
+  - JS runner flag: `--overflow-threshold-bytes`
+- Set the default overflow threshold from `8KB` to `4KB`:
+  - `DEFAULT_OVERFLOW_THRESHOLD` in `db.rs`
+  - `DEFAULT_BENCH_OVERFLOW_THRESHOLD` in `wasm_bench.rs`
+  - `DEFAULT_OVERFLOW_THRESHOLD_BYTES` in `run-opfs-bench.cjs`
+
+Benchmark method:
+
+- Threshold candidates: `4096`, `6144`, `8192` bytes.
+- For each candidate, medians over 3 runs were collected for:
+  - `--profile mixed --count 400 --value-sizes 4096,8192,16384,32768,65536`
+  - `--profile mixed --count 64 --value-sizes 1048576`
+- Additional 3-run medians for top-table 1MB rows:
+  - `--profile all --include-cold-read --count 64 --value-sizes 1048576`
+- Common flags:
+  - `--seed 0xA5A5A5A501234567 --cache-mb 32 --pin-internal-pages true --read-coalesce-pages 4`
+
+Candidate summary (3-run medians):
+
+| threshold (bytes) | medium mixed agg K/s (4KB..64KB) | delta vs 8192 | mixed 1MB agg K/s | delta vs 8192 | combined K/s | delta vs 8192 |
+| ----------------: | -------------------------------: | ------------: | ----------------: | ------------: | -----------: | ------------: |
+|             4,096 |                          437.966 |         +7.7% |             2.205 |         -5.8% |      440.232 |         +7.7% |
+|             6,144 |                          409.252 |         +0.7% |             2.261 |         -3.4% |      411.512 |         +0.6% |
+|             8,192 |                          406.573 |      baseline |             2.341 |      baseline |      408.861 |      baseline |
+
+Mixed aggregate by value size (`4096` vs `8192`, 3-run medians):
+
+| value_size | 8192 K/s | 4096 K/s |  delta |
+| ---------: | -------: | -------: | -----: |
+|      4,096 |   93.975 |   92.998 |  -1.0% |
+|      8,192 |   70.541 |  104.743 | +48.5% |
+|     16,384 |   95.026 |   94.741 |  -0.3% |
+|     32,768 |   80.959 |   78.486 |  -3.1% |
+|     65,536 |   64.488 |   66.496 |  +3.1% |
+|  1,048,576 |    2.341 |    2.205 |  -5.8% |
+
+1MB all-profile operation medians (`8192` -> `4096`, 3-run medians):
+
+| operation                         | 8192 K/s | 4096 K/s | delta |
+| --------------------------------- | -------: | -------: | ----: |
+| seq_write                         |    0.241 |    0.235 | -2.4% |
+| random_write                      |    0.314 |    0.315 | +0.3% |
+| seq_read                          |    2.991 |    2.991 | +0.0% |
+| random_read                       |    3.019 |    2.896 | -4.1% |
+| mixed_random_70r_30w              |    0.482 |    0.458 | -4.9% |
+| mixed_random_50r_50w_with_updates |    0.535 |    0.537 | +0.4% |
+| mixed_random_60r_20w_20d          |    1.333 |    1.311 | -1.6% |
+| range_seq_window_64               |    0.051 |    0.053 | +3.7% |
+| range_random_window_64            |    0.053 |    0.053 | -0.6% |
+| cold_seq_read                     |    3.184 |    2.896 | -9.0% |
+| cold_random_read                  |    3.107 |    3.137 | +1.0% |
+
+Extra sanity point:
+
+- `3072` threshold (single-run spot check) produced `430.763 K/s` combined mixed aggregate, below `4096`.
+
+Decision:
+
+- Default threshold is now `4096` as the best simple single-threshold balance for this workload set.

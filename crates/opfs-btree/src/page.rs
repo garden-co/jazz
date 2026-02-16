@@ -90,10 +90,6 @@ struct EncodedFields {
     payload: Vec<u8>,
 }
 
-pub(crate) fn overflow_chunk_capacity(page_size: usize) -> Result<usize, BTreeError> {
-    page_payload_capacity(page_size)
-}
-
 pub(crate) fn freelist_ids_per_page(page_size: usize) -> Result<usize, BTreeError> {
     let payload = page_payload_capacity(page_size)?;
     Ok(payload / 8)
@@ -633,6 +629,7 @@ pub(crate) fn raw_leaf_delete_in_place(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn raw_overflow_chunk(
     raw: &[u8],
     expected_page_size: usize,
@@ -648,6 +645,7 @@ pub(crate) fn raw_overflow_chunk(
     Ok((data, header.next_page_id))
 }
 
+#[cfg(test)]
 pub(crate) fn encode_overflow_page_chunk(
     chunk: &[u8],
     next: Option<PageId>,
