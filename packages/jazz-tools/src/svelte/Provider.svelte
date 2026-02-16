@@ -20,6 +20,12 @@
     children?: Snippet;
     enableSSR?: boolean;
     authSecretStorageKey?: string;
+    navigation?: {
+      beforeNavigate: (
+        callback: (navigation: any) => void | Promise<void>,
+      ) => void;
+      goto: (url: string, opts?: any) => Promise<void>;
+    };
   } = $props();
 
   const contextManager = new JazzBrowserContextManager<S>({
@@ -34,6 +40,37 @@
     JAZZ_AUTH_CTX,
     contextManager.getAuthSecretStorage(),
   );
+
+  if (props.navigation) {
+    let isReplaying = false;
+
+    props.navigation.beforeNavigate(async (navigation: any) => {
+      if (isReplaying || navigation.willUnload) return;
+
+      const current = ctx.current;
+      if (!current) return;
+
+      if (current.node.syncManager.unsyncedTracker.isAllSynced()) return;
+
+      navigation.cancel();
+
+      try {
+        await current.node.syncManager.waitForAllCoValuesSync(3000);
+      } catch {}
+
+      if (navigation.to?.url) {
+        isReplaying = true;
+        try {
+          const url = navigation.to.url;
+          await props.navigation!.goto(
+            url.pathname + url.search + url.hash,
+          );
+        } finally {
+          isReplaying = false;
+        }
+      }
+    });
+  }
 
   $effect(() => {
     props.sync.when;

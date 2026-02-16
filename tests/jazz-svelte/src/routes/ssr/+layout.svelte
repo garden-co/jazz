@@ -1,5 +1,6 @@
 <script lang="ts">
   import { JazzSvelteProvider } from "jazz-tools/svelte";
+  import { beforeNavigate, goto } from "$app/navigation";
   import { co } from "jazz-tools";
 
   if (typeof window !== "undefined") {
@@ -17,6 +18,7 @@
 <JazzSvelteProvider
   AccountSchema={TestAccount}
   sync={{ peer: "ws://localhost:4250/" }}
+  navigation={{ beforeNavigate, goto }}
 >
   {@render children()}
 </JazzSvelteProvider>
