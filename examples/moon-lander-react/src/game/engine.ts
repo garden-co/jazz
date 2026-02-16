@@ -18,11 +18,12 @@ import {
   MOON_SURFACE_WIDTH,
   FUEL_TYPES,
   ASTRONAUT_WIDTH,
+  ASTRONAUT_HEIGHT,
   SHARE_PROXIMITY_RADIUS,
   type PlayerMode,
   type FuelType,
 } from "./constants.js";
-import { drawBackground, drawLander, drawAstronaut, drawDeposit, drawArrow, drawSplash, DEPOSIT_COLOURS } from "./render.js";
+import { drawBackground, drawLander, drawAstronaut, drawDeposit, drawArrow, drawSplash, drawBubbles, DEPOSIT_COLOURS } from "./render.js";
 
 // ---------------------------------------------------------------------------
 // World wrapping — the moon is round
@@ -163,6 +164,9 @@ export function useGameEngine(
     onRefuel?: (fuelType: FuelType) => void;
     onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
     onBurstDeposit?: (fuelType: string, newX: number) => void;
+    chatMessages?: Array<{ id: string; playerId: string; message: string; createdAt: number }>;
+    localPlayerId?: string;
+    chatOpenRef?: React.RefObject<boolean>;
   },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
@@ -202,6 +206,13 @@ export function useGameEngine(
   onShareFuelRef.current = options?.onShareFuel;
   const onBurstDepositRef = useRef(options?.onBurstDeposit);
   onBurstDepositRef.current = options?.onBurstDeposit;
+
+  // Chat
+  const chatMessagesRef = useRef(options?.chatMessages ?? []);
+  chatMessagesRef.current = options?.chatMessages ?? [];
+  const localPlayerIdRef = useRef(options?.localPlayerId ?? "");
+  localPlayerIdRef.current = options?.localPlayerId ?? "";
+  const chatOpenRef = options?.chatOpenRef ?? useRef(false);
 
   // Keep external deposits ref in sync with latest props
   if (isConnected) {
@@ -316,6 +327,7 @@ export function useGameEngine(
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (chatOpenRef.current) return; // suppress game keys while chatting
       keysRef.current.add(e.code);
       if (e.code === "KeyE") actionsRef.current.push("interact");
       if (e.code === "Space") actionsRef.current.push("launch");
@@ -632,6 +644,39 @@ export function useGameEngine(
         // Only draw lander while it's on-screen
         if (screenY > -60 && screenY < h + 60) {
           drawLander(ctx, screenX, screenY, launchElapsedRef.current < 3);
+        }
+      }
+
+      // Draw speech bubbles above players
+      const nowS = Math.floor(Date.now() / 1000);
+      const BUBBLE_EXPIRY_S = 15;
+      const recentMsgs = chatMessagesRef.current.filter(
+        (m) => nowS - m.createdAt < BUBBLE_EXPIRY_S,
+      );
+      if (recentMsgs.length > 0) {
+        // Group by playerId
+        const byPlayer = new Map<string, string[]>();
+        for (const m of recentMsgs) {
+          let arr = byPlayer.get(m.playerId);
+          if (!arr) { arr = []; byPlayer.set(m.playerId, arr); }
+          arr.push(m.message);
+        }
+        // Local player bubbles
+        const localMsgs = byPlayer.get(localPlayerIdRef.current);
+        if (localMsgs) {
+          const spriteTop = groundScreenY - ASTRONAUT_HEIGHT - 16;
+          drawBubbles(ctx, screenX, spriteTop, localMsgs);
+        }
+        // Remote player bubbles
+        for (const rp of remotePlayersRef.current) {
+          const rpMsgs = rp.playerId ? byPlayer.get(rp.playerId) : undefined;
+          if (!rpMsgs) continue;
+          const s = smoothed.get(rp.id);
+          if (!s) continue;
+          const rpSX = wrapScreenX(s.x, cameraX);
+          if (rpSX < -60 || rpSX > w + 60) continue;
+          const spriteTop = groundScreenY - ASTRONAUT_HEIGHT - 16;
+          drawBubbles(ctx, rpSX, spriteTop, rpMsgs);
         }
       }
 

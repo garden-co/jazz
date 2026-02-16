@@ -296,6 +296,61 @@ export function drawDeposit(
 }
 
 // ---------------------------------------------------------------------------
+// Speech bubbles — chat messages above players
+// ---------------------------------------------------------------------------
+
+const BUBBLE_MAX = 4;
+const BUBBLE_LINE_HEIGHT = 18;
+const BUBBLE_PADDING_X = 8;
+const BUBBLE_PADDING_Y = 4;
+const BUBBLE_OFFSET_Y = 8; // gap above the name label
+
+/** Draw a stack of speech bubbles above a player at the given screen position. */
+export function drawBubbles(
+  ctx: CanvasRenderingContext2D,
+  screenX: number,
+  screenY: number, // top of the player sprite (after name label)
+  messages: string[],
+) {
+  if (messages.length === 0) return;
+  const recent = messages.slice(-BUBBLE_MAX);
+
+  ctx.font = "11px monospace";
+  ctx.textAlign = "center";
+
+  for (let i = 0; i < recent.length; i++) {
+    const text = recent[i];
+    // Newest message (last in array) is closest to the player
+    const slot = recent.length - 1 - i;
+    const alpha = 1 - slot * 0.25; // fade older messages
+    const y = screenY - BUBBLE_OFFSET_Y - slot * BUBBLE_LINE_HEIGHT;
+
+    const metrics = ctx.measureText(text);
+    const bw = metrics.width + BUBBLE_PADDING_X * 2;
+    const bh = BUBBLE_LINE_HEIGHT;
+    const bx = Math.floor(screenX - bw / 2);
+    const by = Math.floor(y - bh);
+
+    // Background
+    ctx.fillStyle = `rgba(10, 10, 15, ${0.75 * alpha})`;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 4);
+    ctx.fill();
+
+    // Border
+    ctx.strokeStyle = `rgba(255, 0, 255, ${0.5 * alpha})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Text
+    ctx.fillStyle = `rgba(0, 255, 255, ${alpha})`;
+    ctx.fillText(text, Math.floor(screenX), Math.floor(y - BUBBLE_PADDING_Y));
+  }
+
+  ctx.textAlign = "start"; // reset
+}
+
+// ---------------------------------------------------------------------------
 // Success splash — shown after launch
 // ---------------------------------------------------------------------------
 

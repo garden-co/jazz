@@ -44,24 +44,9 @@ async function signJwt(sub: string, secret: string): Promise<string> {
 async function main() {
   const serverUrl = `http://127.0.0.1:${DEV_SERVER_PORT}`;
 
-  // Check if the Jazz server is running
-  let serverAvailable = false;
-  try {
-    const resp = await fetch(`${serverUrl}/health`);
-    serverAvailable = resp.ok;
-  } catch {
-    // Server not running
-  }
-
-  if (!serverAvailable) {
-    console.warn(
-      "[moon-lander] Jazz server not running at %s — starting without sync.\n" +
-        "Run `pnpm dev:server` in a separate terminal for multiplayer.",
-      serverUrl,
-    );
-    createRoot(document.getElementById("root")!).render(<App />);
-    return;
-  }
+  // Always attempt to connect — JazzProvider handles server unavailability
+  // gracefully via reconnect backoff. Log a hint for developers.
+  console.info("[moon-lander] Connecting to Jazz server at %s", serverUrl);
 
   // Each tab is a separate player. sessionStorage is per-tab (unique across
   // tabs) but survives page refreshes within the same tab, so a refresh

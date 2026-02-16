@@ -1,4 +1,4 @@
-import { useMemo, useRef, useEffect } from "react";
+import { useMemo, useRef, useEffect, useState } from "react";
 import { useGameEngine } from "./game/engine.js";
 import type { RemotePlayerView, Deposit } from "./game/engine.js";
 import { getOrCreatePlayerId, derivePlayerProps } from "./game/player.js";
@@ -42,6 +42,14 @@ export interface RemotePlayer {
   landerX?: number;
 }
 
+/** A chat message from Jazz. */
+export interface ChatMessage {
+  id: string;
+  playerId: string;
+  message: string;
+  createdAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // Game component
 // ---------------------------------------------------------------------------
@@ -51,19 +59,27 @@ interface GameProps {
   remotePlayers?: RemotePlayer[];
   deposits?: Deposit[];
   inventory?: FuelType[];
+  chatMessages?: ChatMessage[];
   onCollectDeposit?: (id: string) => void;
   onRefuel?: (fuelType: FuelType) => void;
   onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
   onBurstDeposit?: (fuelType: string, newX: number) => void;
+  onSendMessage?: (text: string) => void;
   onStateChange?: (state: GameState) => void;
 }
 
 const STALE_THRESHOLD_S = 180; // 3 minutes
 
-export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onStateChange }: GameProps) {
+export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMessages, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onSendMessage, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
+
+  // Chat state
+  const [chatOpen, setChatOpen] = useState(false);
+  const chatOpenRef = useRef(false);
+  chatOpenRef.current = chatOpen;
 
   // Filter stale remote players (Jazz concern, not engine's job)
   const activeRemotes: RemotePlayerView[] = useMemo(() => {
@@ -91,10 +107,13 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
     remotePlayers: activeRemotes,
     deposits,
     inventory,
+    chatMessages,
+    localPlayerId: playerId,
     onCollectDeposit,
     onRefuel,
     onShareFuel,
     onBurstDeposit,
+    chatOpenRef,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)
@@ -114,6 +133,38 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
     });
   }, [engine, onStateChange, playerProps]);
 
+  // Chat: all key handling at document level to work reliably in tests.
+  // Enter toggles chat (open → send/close, closed → open). Escape closes.
+  const onSendMessageRef = useRef(onSendMessage);
+  onSendMessageRef.current = onSendMessage;
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "Escape" && chatOpenRef.current) {
+        setChatOpen(false);
+        return;
+      }
+      if (e.code === "Enter") {
+        if (chatOpenRef.current) {
+          // Send the message and close
+          const text = chatInputRef.current?.value.trim() ?? "";
+          if (text) {
+            onSendMessageRef.current?.(text);
+          }
+          setChatOpen(false);
+        } else {
+          // Open chat
+          e.preventDefault();
+          setChatOpen(true);
+          requestAnimationFrame(() => chatInputRef.current?.focus());
+        }
+        return;
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
     <div
       data-testid="game-container"
@@ -132,6 +183,7 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
       data-deposit-count={engine.depositCount}
       data-inventory={engine.inventory.join(",")}
       data-remote-player-count={engine.remotePlayerCount}
+      data-chat-open={chatOpen ? "true" : "false"}
       style={{ position: "relative", width: "100vw", height: "100vh" }}
     >
       <canvas
@@ -150,6 +202,31 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onColle
         requiredFuelType={playerProps.requiredFuelType}
         inventory={engine.inventory}
       />
+      {chatOpen && (
+        <input
+          ref={chatInputRef}
+          data-testid="chat-input"
+          type="text"
+          maxLength={140}
+          autoFocus
+          style={{
+            position: "absolute",
+            bottom: 40,
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: 320,
+            padding: "6px 12px",
+            fontFamily: "monospace",
+            fontSize: 14,
+            color: "#00ffff",
+            background: "rgba(10, 10, 15, 0.8)",
+            border: "1px solid #ff00ff",
+            borderRadius: 4,
+            outline: "none",
+          }}
+          placeholder="Type a message..."
+        />
+      )}
     </div>
   );
 }

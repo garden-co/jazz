@@ -18,6 +18,22 @@ export interface Player {
   landerSpawnX: number;
 }
 
+export interface FuelDeposit {
+  id: string;
+  fuelType: string;
+  positionX: number;
+  createdAt: number;
+  collected: boolean;
+  collectedBy: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  playerId: string;
+  message: string;
+  createdAt: number;
+}
+
 export interface PlayerInit {
   playerId: string;
   name: string;
@@ -32,6 +48,20 @@ export interface PlayerInit {
   requiredFuelType: string;
   landerFuelLevel: number;
   landerSpawnX: number;
+}
+
+export interface FuelDepositInit {
+  fuelType: string;
+  positionX: number;
+  createdAt: number;
+  collected: boolean;
+  collectedBy: string;
+}
+
+export interface ChatMessageInit {
+  playerId: string;
+  message: string;
+  createdAt: number;
 }
 
 export interface PlayerWhereInput {
@@ -51,23 +81,6 @@ export interface PlayerWhereInput {
   landerSpawnX?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
 }
 
-export interface FuelDeposit {
-  id: string;
-  fuelType: string;
-  positionX: number;
-  createdAt: number;
-  collected: boolean;
-  collectedBy: string;
-}
-
-export interface FuelDepositInit {
-  fuelType: string;
-  positionX: number;
-  createdAt: number;
-  collected: boolean;
-  collectedBy: string;
-}
-
 export interface FuelDepositWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   fuelType?: string | { eq?: string; ne?: string; contains?: string };
@@ -75,6 +88,13 @@ export interface FuelDepositWhereInput {
   createdAt?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   collected?: boolean;
   collectedBy?: string | { eq?: string; ne?: string; contains?: string };
+}
+
+export interface ChatMessageWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  playerId?: string | { eq?: string; ne?: string; contains?: string };
+  message?: string | { eq?: string; ne?: string; contains?: string };
+  createdAt?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
 }
 
 export const wasmSchema: WasmSchema = {
@@ -208,6 +228,31 @@ export const wasmSchema: WasmSchema = {
           "name": "collectedBy",
           "column_type": {
             "type": "Text"
+          },
+          "nullable": false
+        }
+      ]
+    },
+    "chat_messages": {
+      "columns": [
+        {
+          "name": "playerId",
+          "column_type": {
+            "type": "Text"
+          },
+          "nullable": false
+        },
+        {
+          "name": "message",
+          "column_type": {
+            "type": "Text"
+          },
+          "nullable": false
+        },
+        {
+          "name": "createdAt",
+          "column_type": {
+            "type": "Integer"
           },
           "nullable": false
         }
@@ -352,8 +397,77 @@ export class FuelDepositQueryBuilder<I extends Record<string, never> = {}> imple
   }
 }
 
+export class ChatMessageQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<ChatMessage> {
+  readonly _table = "chat_messages";
+  readonly _schema: WasmSchema = wasmSchema;
+  declare readonly _rowType: ChatMessage;
+  declare readonly _initType: ChatMessageInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<Record<string, never>> = {};
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+
+  where(conditions: ChatMessageWhereInput): ChatMessageQueryBuilder<I> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  orderBy(column: keyof ChatMessage, direction: "asc" | "desc" = "asc"): ChatMessageQueryBuilder<I> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): ChatMessageQueryBuilder<I> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): ChatMessageQueryBuilder<I> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+    });
+  }
+
+  private _clone(): ChatMessageQueryBuilder<I> {
+    const clone = new ChatMessageQueryBuilder<I>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    return clone;
+  }
+}
+
 export const app = {
   players: new PlayerQueryBuilder(),
   fuel_deposits: new FuelDepositQueryBuilder(),
+  chat_messages: new ChatMessageQueryBuilder(),
   wasmSchema,
 };

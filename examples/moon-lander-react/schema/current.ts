@@ -23,3 +23,10 @@ table("fuel_deposits", {
   collected: col.boolean(),
   collectedBy: col.string(),
 });
+
+table("chat_messages", {
+  playerId: col.string(),
+  message: col.string(),
+  createdAt: col.int(),
+});
+

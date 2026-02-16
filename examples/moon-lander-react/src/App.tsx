@@ -2,7 +2,7 @@ import { useRef, useCallback, useMemo } from "react";
 import { JazzProvider, useDb, useAll } from "jazz-react";
 import type { DbConfig } from "jazz-ts";
 import { app } from "../schema/app.js";
-import { Game, type RemotePlayer, type GameState } from "./Game.js";
+import { Game, type RemotePlayer, type GameState, type ChatMessage } from "./Game.js";
 import { DB_SYNC_INTERVAL_MS, FUEL_TYPES, MOON_SURFACE_WIDTH } from "./game/constants.js";
 import type { FuelType } from "./game/constants.js";
 import { useEffect } from "react";
@@ -21,6 +21,7 @@ function GameWithSync({
   const db = useDb();
   const allPlayers = useAll(app.players);
   const allDepositsRaw = useAll(app.fuel_deposits);
+  const allChatMessages = useAll(app.chat_messages);
 
   // Track the Jazz row ID for the local player so we can update (not re-insert)
   const dbRowIdRef = useRef<string | null>(null);
@@ -61,6 +62,12 @@ function GameWithSync({
   const pendingBurstsRef = useRef<Array<{ fuelType: string; newX: number }>>([]);
   const handleBurstDeposit = useCallback((fuelType: string, newX: number) => {
     pendingBurstsRef.current.push({ fuelType, newX });
+  }, []);
+
+  // Pending chat messages
+  const pendingMessagesRef = useRef<string[]>([]);
+  const handleSendMessage = useCallback((text: string) => {
+    pendingMessagesRef.current.push(text);
   }, []);
 
   // Seed flag — prevents re-seeding after initial population
@@ -174,6 +181,14 @@ function GameWithSync({
           });
         }
       }
+      // --- Chat message writes ---
+      for (const text of pendingMessagesRef.current.splice(0)) {
+        db.insert(app.chat_messages, {
+          playerId,
+          message: text,
+          createdAt: Math.floor(Date.now() / 1000),
+        });
+      }
     }, DB_SYNC_INTERVAL_MS);
 
     return () => clearInterval(id);
@@ -198,6 +213,20 @@ function GameWithSync({
       .filter((d) => d.collected && d.collectedBy === playerId)
       .map((d) => d.fuelType as FuelType);
   }, [allDepositsRaw, playerId]);
+
+  // Map Jazz chat messages → ChatMessage[] for Game (recent only)
+  const chatMessages: ChatMessage[] = useMemo(() => {
+    if (!allChatMessages) return [];
+    const nowS = Math.floor(Date.now() / 1000);
+    return allChatMessages
+      .filter((m) => nowS - m.createdAt < 60) // only last 60 seconds
+      .map((m) => ({
+        id: m.id,
+        playerId: m.playerId,
+        message: m.message,
+        createdAt: m.createdAt,
+      }));
+  }, [allChatMessages]);
 
   // Map Jazz subscription data → RemotePlayer[] for Game
   // Filter by playerId so we exclude all our own rows (current + any stale)
@@ -228,10 +257,12 @@ function GameWithSync({
       remotePlayers={remotePlayers}
       deposits={deposits}
       inventory={inventory}
+      chatMessages={chatMessages}
       onCollectDeposit={handleCollectDeposit}
       onRefuel={handleRefuel}
       onShareFuel={handleShareFuel}
       onBurstDeposit={handleBurstDeposit}
+      onSendMessage={handleSendMessage}
       onStateChange={handleStateChange}
     />
   );
