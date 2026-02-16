@@ -11,8 +11,21 @@ function verifyJwtAndExtractIdentity(_jwt: string): RequesterIdentity {
   return { userId: "replace-with-verified-sub", claims: {} };
 }
 
+function buildQuery(table: string): string {
+  return JSON.stringify({
+    table,
+    branches: [],
+    disjuncts: [{ conditions: [] }],
+    order_by: [],
+    offset: 0,
+    include_deleted: false,
+    array_subqueries: [],
+    joins: [],
+  });
+}
+
 // #region backend-request-session-ts
-export function requesterSessionFromRequest(req: Request): Session {
+export function sessionFromRequest(req: Request): Session {
   const auth = req.header("authorization");
   if (!auth?.startsWith("Bearer ")) {
     throw new Error("Missing or invalid Authorization header");
@@ -24,9 +37,10 @@ export function requesterSessionFromRequest(req: Request): Session {
 }
 // #endregion backend-request-session-ts
 
-// #region backend-request-scoped-client-ts
-export function scopedClientForRequest(client: JazzClient, req: Request) {
-  const session = requesterSessionFromRequest(req);
-  return client.forSession(session);
+// #region backend-request-handler-ts
+export async function listTodosForRequester(req: Request, client: JazzClient) {
+  const userClient = client.forSession(sessionFromRequest(req));
+  const rows = await userClient.query(buildQuery("todos"));
+  return rows;
 }
-// #endregion backend-request-scoped-client-ts
+// #endregion backend-request-handler-ts
