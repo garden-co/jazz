@@ -45,6 +45,12 @@ function GameWithSync({
     pendingCollectionsRef.current.push(id);
   }, []);
 
+  // Pending refuel consumptions (deposit consumed for lander fuel)
+  const pendingRefuelsRef = useRef<FuelType[]>([]);
+  const handleRefuel = useCallback((fuelType: FuelType) => {
+    pendingRefuelsRef.current.push(fuelType);
+  }, []);
+
   // Seed flag — prevents re-seeding after initial population
   const seededRef = useRef(false);
 
@@ -108,6 +114,22 @@ function GameWithSync({
           collectedBy: playerId,
         });
       }
+
+      // --- Refuel consumption writes ---
+      // Mark consumed deposits as used: collectedBy="" keeps collected=true
+      // so they don't reappear on the surface or in any player's inventory
+      for (const fuelType of pendingRefuelsRef.current.splice(0)) {
+        const deposits = allDepositsRef.current;
+        if (!deposits) continue;
+        const dep = deposits.find(
+          (d) => d.collected && d.collectedBy === playerId && d.fuelType === fuelType,
+        );
+        if (dep) {
+          db.update(app.fuel_deposits, dep.id, {
+            collectedBy: "",
+          });
+        }
+      }
     }, DB_SYNC_INTERVAL_MS);
 
     return () => clearInterval(id);
@@ -124,6 +146,14 @@ function GameWithSync({
         type: d.fuelType as FuelType,
       }));
   }, [allDepositsRaw]);
+
+  // Derive inventory from Jazz: fuel types where collectedBy = this player
+  const inventory = useMemo(() => {
+    if (!allDepositsRaw) return undefined;
+    return allDepositsRaw
+      .filter((d) => d.collected && d.collectedBy === playerId)
+      .map((d) => d.fuelType as FuelType);
+  }, [allDepositsRaw, playerId]);
 
   // Map Jazz subscription data → RemotePlayer[] for Game
   // Filter by playerId so we exclude all our own rows (current + any stale)
@@ -152,7 +182,9 @@ function GameWithSync({
       physicsSpeed={physicsSpeed}
       remotePlayers={remotePlayers}
       deposits={deposits}
+      inventory={inventory}
       onCollectDeposit={handleCollectDeposit}
+      onRefuel={handleRefuel}
       onStateChange={handleStateChange}
     />
   );

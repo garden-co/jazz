@@ -452,11 +452,13 @@ Also supported: `.orderBy(column, "asc" | "desc")`, `.limit(n)`, `.offset(n)`, `
 
 Local inventory must move to Jazz before sharing can work. Currently `inventoryRef` is a local `Set<FuelType>` in the engine — this must become a derived view of `fuel_deposits WHERE collectedBy = myPlayerId AND collected = true`.
 
-- [ ] Remove local `inventoryRef` from engine — inventory comes from Jazz subscription via props
-- [ ] Collection writes `collectedBy = playerId` on the deposit row (already partly done via `onCollectDeposit`)
-- [ ] Engine receives `inventory: FuelType[]` as a prop (derived from DB in App.tsx)
-- [ ] Refuelling consumes the deposit (keeps `collected = true`, used for fuel level calc)
-- [ ] Audit: ensure NO game state is local-only — everything is either deterministic or Jazz-managed
+- [x] Remove local `inventoryRef` from engine — inventory comes from Jazz subscription via props
+- [x] Collection writes `collectedBy = playerId` on the deposit row (already partly done via `onCollectDeposit`)
+- [x] Engine receives `inventory: FuelType[]` as a prop (derived from DB in App.tsx)
+- [x] Refuelling consumes the deposit (`collectedBy = ""` with `collected = true` — invisible to everyone)
+- [x] Audit: ensure NO game state is local-only — everything is either deterministic or Jazz-managed
+- [x] Fix per-tab player identity (sessionStorage for Jazz sync, localStorage for visual identity)
+- [x] Performance fix: conditional engine setState (skip re-renders when nothing changed)
 
 ### Phase 4: Automatic Fuel Sharing
 

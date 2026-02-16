@@ -29,6 +29,7 @@ import {
   GROUND_LEVEL,
   FUEL_TYPES,
   INITIAL_FUEL,
+  WALK_SPEED,
 } from "../../src/game/constants.js";
 import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
@@ -485,6 +486,162 @@ describe("Moon Lander — Phase 2: Multiplayer Basics", () => {
       },
       10000,
       "Instance B should see walking Instance A",
+    );
+  });
+
+  // =========================================================================
+  // 6. Fuel deposit collection in connected mode (Jazz round-trip)
+  //
+  //   App mounts with Jazz → deposits seeded → player lands → walks →
+  //   collects deposit → onCollectDeposit → Jazz write → subscription
+  //   updates → deposit disappears + inventory updates from Jazz state
+  // =========================================================================
+
+  it("collecting a deposit in connected mode updates inventory via Jazz", async () => {
+    /**
+     * This tests the full Jazz round-trip for inventory:
+     *
+     *   engine: walk over deposit
+     *     │  onCollectDeposit(id) → queued
+     *     ▼
+     *   setInterval: db.update(fuel_deposits, id, { collected: true, collectedBy })
+     *     │
+     *     ▼
+     *   Jazz subscription: fuel_deposits updated
+     *     │  App.tsx derives inventory from collectedBy = playerId
+     *     ▼
+     *   Game receives inventory prop → engine uses it
+     *     │
+     *     ▼
+     *   data-inventory reflects Jazz state
+     */
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const token = await signJwt("inv-test", JWT_SECRET);
+    const playerId = crypto.randomUUID();
+
+    const el = await mountApp({
+      appId: APP_ID,
+      dbName: uniqueDbName("inv-a"),
+      serverUrl,
+      jwtToken: token,
+      adminSecret: ADMIN_SECRET,
+      playerId,
+      physicsSpeed: 10,
+    });
+
+    // Wait for landing
+    await waitForAttr(el, "player-mode", "landed", 5000);
+
+    // Exit lander
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    // Initial inventory should be empty
+    const invBefore = readStr(el, "inventory");
+    expect(invBefore).toBe("");
+
+    // Walk right to collect deposits (3s at 10x = ~3600px coverage)
+    pressKey("d", "KeyD");
+    await new Promise((r) => setTimeout(r, 3000));
+    releaseKey("d", "KeyD");
+    await waitFrames(10);
+
+    // Wait for inventory to update (Jazz round-trip may take up to ~500ms)
+    await waitFor(
+      () => {
+        try {
+          const inv = readStr(el, "inventory");
+          return inv !== "";
+        } catch {
+          return false;
+        }
+      },
+      5000,
+      "inventory should update after collecting deposits via Jazz round-trip",
+    );
+
+    const inventory = readStr(el, "inventory").split(",");
+    expect(inventory.length).toBeGreaterThan(0);
+
+    // Each collected type should be a valid fuel type
+    for (const type of inventory) {
+      expect((FUEL_TYPES as readonly string[]).includes(type)).toBe(true);
+    }
+  });
+
+  it("deposit collected by Player A disappears for Player B", async () => {
+    /**
+     * Two players share the same Jazz state. When A collects a deposit,
+     * Jazz updates collectedBy → B's subscription filters it out.
+     *
+     *   Player A          Jazz DB             Player B
+     *   ────────          ───────             ────────
+     *   walk over dep ──→ collected=true ───→ deposit disappears
+     *                     collectedBy=A       deposit-count decreases
+     */
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const tokenA = await signJwt("coll-a", JWT_SECRET);
+    const tokenB = await signJwt("coll-b", JWT_SECRET);
+
+    const elA = await mountApp({
+      appId: APP_ID,
+      dbName: uniqueDbName("coll-a"),
+      serverUrl,
+      jwtToken: tokenA,
+      adminSecret: ADMIN_SECRET,
+      physicsSpeed: 10,
+    });
+
+    const elB = await mountApp({
+      appId: APP_ID,
+      dbName: uniqueDbName("coll-b"),
+      serverUrl,
+      jwtToken: tokenB,
+      adminSecret: ADMIN_SECRET,
+      physicsSpeed: 10,
+    });
+
+    // Both land
+    await waitForAttr(elA, "player-mode", "landed", 5000);
+    await waitForAttr(elB, "player-mode", "landed", 5000);
+
+    // Wait for deposits to be seeded and visible to both
+    await waitFor(
+      () => {
+        try {
+          return readNum(elA, "deposit-count") > 0 && readNum(elB, "deposit-count") > 0;
+        } catch {
+          return false;
+        }
+      },
+      10000,
+      "Both instances should see seeded deposits",
+    );
+
+    const countBefore = readNum(elB, "deposit-count");
+
+    // Player A exits lander and walks to collect deposits
+    pressKey("e", "KeyE");
+    await waitForAttr(elA, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    pressKey("d", "KeyD");
+    await new Promise((r) => setTimeout(r, 3000));
+    releaseKey("d", "KeyD");
+    await waitFrames(10);
+
+    // Wait for Player B to see fewer deposits (Jazz propagation)
+    await waitFor(
+      () => {
+        try {
+          return readNum(elB, "deposit-count") < countBefore;
+        } catch {
+          return false;
+        }
+      },
+      10000,
+      "Player B should see fewer deposits after Player A collects some",
     );
   });
 

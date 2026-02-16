@@ -63,13 +63,15 @@ async function main() {
     return;
   }
 
-  // Each tab gets a unique OPFS database name to avoid lock conflicts.
-  // The player ID (from localStorage) is stable across tabs.
-  const KEY = "moon-lander-player-id";
-  let playerId = localStorage.getItem(KEY);
+  // Each tab is a separate player. sessionStorage is per-tab (unique across
+  // tabs) but survives page refreshes within the same tab, so a refresh
+  // reconnects as the same Jazz player row rather than creating a new one.
+  // Visual identity (name, colour) is derived from localStorage in Game.tsx.
+  const KEY = "moon-lander-session-id";
+  let playerId = sessionStorage.getItem(KEY);
   if (!playerId) {
     playerId = crypto.randomUUID();
-    localStorage.setItem(KEY, playerId);
+    sessionStorage.setItem(KEY, playerId);
   }
 
   const dbName = `moon-lander-${playerId.slice(0, 8)}-${Date.now()}`;

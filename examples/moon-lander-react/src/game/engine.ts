@@ -141,7 +141,9 @@ export function useGameEngine(
     requiredFuelType?: FuelType;
     remotePlayers?: RemotePlayerView[];
     deposits?: Deposit[];
+    inventory?: FuelType[];
     onCollectDeposit?: (id: string) => void;
+    onRefuel?: (fuelType: FuelType) => void;
   },
 ): EngineState {
   const physicsSpeed = options?.physicsSpeed ?? 1;
@@ -175,6 +177,8 @@ export function useGameEngine(
   const localDepositsRef = useRef<Deposit[]>(generateDeposits(requiredFuelType, CANVAS_WIDTH / 2));
   const onCollectDepositRef = useRef(options?.onCollectDeposit);
   onCollectDepositRef.current = options?.onCollectDeposit;
+  const onRefuelRef = useRef(options?.onRefuel);
+  onRefuelRef.current = options?.onRefuel;
 
   // Keep external deposits ref in sync with latest props
   if (isConnected) {
@@ -184,7 +188,35 @@ export function useGameEngine(
   // The active deposits list (connected uses external, standalone uses local)
   const depositsRef = isConnected ? externalDepositsRef : localDepositsRef;
 
+  // Inventory: in connected mode, Jazz-derived prop is the source of truth.
+  // optimisticInventoryRef tracks types collected this session before Jazz confirms.
+  // In standalone mode, inventoryRef is the sole source.
   const inventoryRef = useRef<Set<FuelType>>(new Set());
+  const optimisticInventoryRef = useRef<Set<FuelType>>(new Set());
+
+  // IDs of deposits collected locally but not yet confirmed by Jazz.
+  // Used to prevent flicker: without this, collected deposits reappear
+  // when the next React render overwrites depositsRef from Jazz props.
+  const collectedIdsRef = useRef<Set<string>>(new Set());
+
+  // Merge Jazz inventory into the working set each render (connected mode)
+  if (options?.inventory !== undefined) {
+    inventoryRef.current = new Set([
+      ...options.inventory,
+      ...optimisticInventoryRef.current,
+    ]);
+    // Clean up collected IDs that Jazz has confirmed (no longer in deposit list).
+    // Build a removal list first to avoid mutating the Set during iteration.
+    const toRemove: string[] = [];
+    for (const id of collectedIdsRef.current) {
+      if (!externalDepositsRef.current.some((d) => d.id === id)) {
+        toRemove.push(id);
+      }
+    }
+    for (const id of toRemove) {
+      collectedIdsRef.current.delete(id);
+    }
+  }
 
   // Mirrored into state for external consumption (HUD, data attributes, Jazz)
   const [state, setState] = useState<EngineState>({
@@ -325,19 +357,13 @@ export function useGameEngine(
 
         // Collect deposits the player walks over (skip types already owned)
         const pickupRange = ASTRONAUT_WIDTH;
-        const collected: string[] = [];
-        depositsRef.current = depositsRef.current.filter((d) => {
+        for (const d of depositsRef.current) {
+          if (collectedIdsRef.current.has(d.id)) continue;
           if (wrapDistance(d.x, posXRef.current) < pickupRange && !inventoryRef.current.has(d.type)) {
             inventoryRef.current.add(d.type);
-            collected.push(d.id);
-            return false; // remove from surface
-          }
-          return true;
-        });
-        // Notify Jazz layer of collections (queued, not immediate)
-        if (collected.length > 0 && onCollectDepositRef.current) {
-          for (const id of collected) {
-            onCollectDepositRef.current(id);
+            optimisticInventoryRef.current.add(d.type);
+            collectedIdsRef.current.add(d.id);
+            onCollectDepositRef.current?.(d.id);
           }
         }
 
@@ -350,6 +376,8 @@ export function useGameEngine(
             if (inventoryRef.current.has(requiredFuelType)) {
               fuelRef.current = Math.min(MAX_FUEL, fuelRef.current + REFUEL_AMOUNT);
               inventoryRef.current.delete(requiredFuelType);
+              optimisticInventoryRef.current.delete(requiredFuelType);
+              onRefuelRef.current?.(requiredFuelType);
             }
           }
         }
@@ -395,6 +423,7 @@ export function useGameEngine(
       // Draw fuel deposits on the ground (with world wrapping)
       const groundScreenY = GROUND_LEVEL - cameraY;
       for (const dep of depositsRef.current) {
+        if (collectedIdsRef.current.has(dep.id)) continue;
         const dx = wrapScreenX(dep.x, cameraX);
         if (dx > -20 && dx < w + 20) {
           drawDeposit(ctx, dx, groundScreenY, dep.type);
@@ -484,6 +513,7 @@ export function useGameEngine(
         // Arrow to nearest deposit of the required type
         let nearestDep: { sx: number; dist: number } | null = null;
         for (const dep of depositsRef.current) {
+          if (collectedIdsRef.current.has(dep.id)) continue;
           if (dep.type !== requiredFuelType) continue;
           if (inventoryRef.current.has(dep.type)) continue;
           const dist = wrapDistance(posXRef.current, dep.x);
@@ -500,20 +530,83 @@ export function useGameEngine(
     };
     rafId = requestAnimationFrame(gameLoop);
 
-    // Sync exposed state periodically so data attributes + HUD update
+    // Sync exposed state periodically so data attributes + HUD update.
+    // Only call setState when values actually changed — React compares
+    // by reference, so a new object every 50ms causes 20 re-renders/sec
+    // even when nothing moved. With Jazz cross-sync this compounds badly.
+    const prevRef = {
+      mode: "" as string,
+      positionX: NaN,
+      positionY: NaN,
+      velocityX: NaN,
+      velocityY: NaN,
+      landerX: NaN,
+      landerY: NaN,
+      fuel: NaN,
+      depositCount: NaN,
+      inventoryKey: "",
+      remotePlayerCount: NaN,
+    };
     const syncId = setInterval(() => {
+      const mode = modeRef.current;
+      const positionX = posXRef.current;
+      const positionY = posYRef.current;
+      const velocityX = velXRef.current;
+      const velocityY = velYRef.current;
+      const landerX = landerXRef.current;
+      const landerY = landerYRef.current;
+      const fuel = fuelRef.current;
+      const remotePlayerCount = remotePlayersRef.current.length;
+
+      let depositCount = 0;
+      for (const d of depositsRef.current) {
+        if (!collectedIdsRef.current.has(d.id)) depositCount++;
+      }
+
+      const inventoryArr = [...inventoryRef.current];
+      const inventoryKey = inventoryArr.join(",");
+
+      // Skip setState if nothing changed
+      if (
+        mode === prevRef.mode &&
+        positionX === prevRef.positionX &&
+        positionY === prevRef.positionY &&
+        velocityX === prevRef.velocityX &&
+        velocityY === prevRef.velocityY &&
+        landerX === prevRef.landerX &&
+        landerY === prevRef.landerY &&
+        fuel === prevRef.fuel &&
+        depositCount === prevRef.depositCount &&
+        inventoryKey === prevRef.inventoryKey &&
+        remotePlayerCount === prevRef.remotePlayerCount
+      ) {
+        return;
+      }
+
+      prevRef.mode = mode;
+      prevRef.positionX = positionX;
+      prevRef.positionY = positionY;
+      prevRef.velocityX = velocityX;
+      prevRef.velocityY = velocityY;
+      prevRef.landerX = landerX;
+      prevRef.landerY = landerY;
+      prevRef.fuel = fuel;
+      prevRef.depositCount = depositCount;
+      prevRef.inventoryKey = inventoryKey;
+      prevRef.remotePlayerCount = remotePlayerCount;
+
       setState({
-        mode: modeRef.current,
-        positionX: posXRef.current,
-        positionY: posYRef.current,
-        velocityX: velXRef.current,
-        velocityY: velYRef.current,
-        landerX: landerXRef.current,
-        landerY: landerYRef.current,
-        fuel: fuelRef.current,
-        depositCount: depositsRef.current.length,
-        inventory: [...inventoryRef.current],
-        remotePlayerCount: remotePlayersRef.current.length,
+        mode,
+        positionX,
+        positionY,
+        velocityX,
+        velocityY,
+        landerX,
+        landerY,
+        fuel,
+        depositCount,
+        inventory: inventoryArr,
+        remotePlayerCount,
       });
     }, 50);
 

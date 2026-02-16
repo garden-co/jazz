@@ -49,13 +49,15 @@ interface GameProps {
   physicsSpeed?: number;
   remotePlayers?: RemotePlayer[];
   deposits?: Deposit[];
+  inventory?: FuelType[];
   onCollectDeposit?: (id: string) => void;
+  onRefuel?: (fuelType: FuelType) => void;
   onStateChange?: (state: GameState) => void;
 }
 
 const STALE_THRESHOLD_S = 180; // 3 minutes
 
-export function Game({ physicsSpeed, remotePlayers, deposits, onCollectDeposit, onStateChange }: GameProps) {
+export function Game({ physicsSpeed, remotePlayers, deposits, inventory, onCollectDeposit, onRefuel, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -83,7 +85,9 @@ export function Game({ physicsSpeed, remotePlayers, deposits, onCollectDeposit, 
     requiredFuelType: playerProps.requiredFuelType,
     remotePlayers: activeRemotes,
     deposits,
+    inventory,
     onCollectDeposit,
+    onRefuel,
   });
 
   // Bridge engine state → Jazz sync callback (integers for DB schema)
