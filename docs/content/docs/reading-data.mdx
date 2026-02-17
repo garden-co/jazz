@@ -110,9 +110,7 @@ description: Query APIs across one-shot reads, subscriptions, reactive hooks, an
 // Example schema shape:
 // project_members(project -> projects.id, user -> users.id)
 const memberships = await db.all(
-  app.projectMembers
-    .where({ project: projectId })
-    .include({ user: true, project: true }),
+  app.projectMembers.where({ project: projectId }).include({ user: true, project: true }),
 );
 ```
 
