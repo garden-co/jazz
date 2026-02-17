@@ -66,6 +66,9 @@ SECRET_HASH_KEY="${SECRET_HASH_KEY:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --)
+      shift
+      ;;
     --aws-profile)
       AWS_PROFILE_ARG="$2"
       shift 2

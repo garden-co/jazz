@@ -48,6 +48,9 @@ NO_CONFIG_UPDATE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --)
+      shift
+      ;;
     --stack)
       STACK="$2"
       shift 2
