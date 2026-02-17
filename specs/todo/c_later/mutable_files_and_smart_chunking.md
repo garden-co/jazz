@@ -2,7 +2,7 @@
 
 Support editing files in-place with efficient diff-sync via content-defined chunking.
 
-See also: [Phase 1: static files](../b_mvp/built_in_file_storage.md), [Phase 2: cascade integration](../c_launch/file_storage_cascade_integration.md).
+See also: [Phase 1: static files](../a_mvp/built_in_file_storage.md), [Phase 2: cascade integration](../b_launch/file_storage_cascade_integration.md).
 
 ## FastCDC Chunking
 
@@ -30,7 +30,7 @@ For Dropbox-like incremental editing:
 
 Concurrent edits to the same file need a custom merge strategy that reconciles both the array ordering and the contents of divergent parts. Since chunks are content-addressed, the merge can diff arrays semantically (same chunk IDs = same content, new IDs = changed regions).
 
-See `../b_mvp/complex_merge_strategies.md` for the general merge strategy framework.
+See `../a_mvp/complex_merge_strategies.md` for the general merge strategy framework.
 
 ## Open Questions
 

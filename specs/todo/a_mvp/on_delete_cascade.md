@@ -42,7 +42,7 @@ Refcounting is hard in distributed systems because peers have partial views:
 
 - **Soft delete cascade** — each peer cascades based on its local refcount. If a peer's local refcount hits 0, it soft-deletes the child. When sync brings in the missing reference (file Y), the child is un-soft-deleted. This is safe because soft delete is reversible. Temporary unavailability of a shared part is the worst case.
 
-- **Hard delete cascade** — must only happen on an authority (server) that has a global view of all references. A peer must never hard-delete a shared child based on local refcount alone. This ties into global transactions → see `../c_launch/globally_consistent_transactions.md`.
+- **Hard delete cascade** — must only happen on an authority (server) that has a global view of all references. A peer must never hard-delete a shared child based on local refcount alone. This ties into global transactions → see `../b_launch/globally_consistent_transactions.md`.
 
 ### Implementation Notes
 
@@ -65,7 +65,7 @@ Whether to maintain a materialized refcount (for performance) or compute it on d
 
 **Data loading:** Cascade traversal may need to wait for referenced data to be loaded (child rows might not be local yet). This means cascade is not purely synchronous — it may depend on sync completing.
 
-**Multi-table transactions:** A cascade spanning multiple tables (e.g., delete todo → delete file → delete file_parts) is implicitly a multi-table operation. For atomicity, this should eventually use global transactions → see `../c_launch/globally_consistent_transactions.md`.
+**Multi-table transactions:** A cascade spanning multiple tables (e.g., delete todo → delete file → delete file_parts) is implicitly a multi-table operation. For atomicity, this should eventually use global transactions → see `../b_launch/globally_consistent_transactions.md`.
 
 ## Open Questions
 

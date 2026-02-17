@@ -26,4 +26,4 @@ Surface warnings when the query engine performs a full table scan. This lets dev
 
 ## Future: Smart Automatic Indices
 
-See `../d_later/smart_automatic_indices.md` — observe query patterns and create narrow, per-value indices on demand. Deferred from MVP.
+See `../c_later/smart_automatic_indices.md` — observe query patterns and create narrow, per-value indices on demand. Deferred from MVP.

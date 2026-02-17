@@ -2,7 +2,7 @@
 
 First-class file storage using standard relational tables, typed binary columns, and content-addressed chunking. Assumes files are write-once (immutable after upload). No automatic cascade deletion yet — app developers manually delete files and file_parts when they delete parent rows.
 
-See also: [Phase 2: cascade integration](../c_launch/file_storage_cascade_integration.md), [Phase 3: mutable files](../d_later/mutable_files_and_smart_chunking.md).
+See also: [Phase 2: cascade integration](../b_launch/file_storage_cascade_integration.md), [Phase 3: mutable files](../c_later/mutable_files_and_smart_chunking.md).
 
 ## Design
 

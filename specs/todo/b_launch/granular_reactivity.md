@@ -30,7 +30,7 @@ type Patch<T> =
 
 ## Relationship to Existing Work
 
-- `a_week_2026_02_09/minimal_react_bindings.md` ships first with `useSyncExternalStore` — that's fine for MVP
+- `status-quo/ts_client_codegen.md` documents the current React hooks (`JazzProvider`, `useDb`, `useAll`) shipping with `useSyncExternalStore` semantics — that's fine for MVP
 - This spec upgrades the plumbing so bindings can be smarter post-MVP
 - The Rust query graph's `Materialize` node already knows which rows changed — the patch info exists, it just isn't surfaced through the subscription API yet
 

@@ -8,7 +8,7 @@ Every object has a commit graph. Per-object time travel lets users:
 
 - View the full edit history of a single row
 - Read the state of a row at any previous commit
-- See who made each change and when (pairs with `../b_mvp/magic_columns_edit_metadata.md`)
+- See who made each change and when (pairs with `../a_mvp/magic_columns_edit_metadata.md`)
 
 This is straightforward because the commit graph can be navigated directly — no need to reconstruct state by replaying history.
 
@@ -26,4 +26,4 @@ This is straightforward because the commit graph can be navigated directly — n
 
 ## Future: Full Point-in-Time Queries
 
-Querying _across_ rows at a historical timestamp (e.g., "all todos as of last Tuesday") requires historical index support and is deferred. See `../d_later/point_in_time_queries.md`.
+Querying _across_ rows at a historical timestamp (e.g., "all todos as of last Tuesday") requires historical index support and is deferred. See `../c_later/point_in_time_queries.md`.

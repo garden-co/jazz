@@ -16,4 +16,4 @@ Currently, subscriptions wait for settlement before delivering results. For larg
 - How does this interact with ORDER BY — can we stream in order, or is ordering only guaranteed at settlement?
 - Does the client need to distinguish "streaming partial" from "settled complete"?
 
-Related: `../b_mvp/built_in_file_storage.md`
+Related: `../a_mvp/built_in_file_storage.md`

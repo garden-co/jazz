@@ -2,9 +2,9 @@
 
 Integrate `ON DELETE CASCADE` with the built-in file storage tables. When this lands, app developers no longer need to manually delete files and file_parts — deletion cascades automatically from parent rows.
 
-Depends on: [on_delete_cascade.md](../b_mvp/on_delete_cascade.md). Can be deferred to `d_later/` if cascade isn't ready at launch.
+Depends on: [on_delete_cascade.md](../a_mvp/on_delete_cascade.md). Can be deferred to `c_later/` if cascade isn't ready at launch.
 
-See also: [Phase 1: static files](../b_mvp/built_in_file_storage.md), [Phase 3: mutable files](../d_later/mutable_files_and_smart_chunking.md).
+See also: [Phase 1: static files](../a_mvp/built_in_file_storage.md), [Phase 3: mutable files](../c_later/mutable_files_and_smart_chunking.md).
 
 ## What Changes
 
