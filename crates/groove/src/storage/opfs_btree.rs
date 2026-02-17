@@ -139,18 +139,10 @@ impl OpfsBTreeStorage {
     fn options(cache_size_bytes: usize) -> BTreeOptions {
         BTreeOptions {
             cache_bytes: cache_size_bytes.max(MIN_CACHE_SIZE_BYTES),
+            pin_internal_pages: true,
+            read_coalesce_pages: 4,
             ..Default::default()
         }
-    }
-
-    fn with_tree<R>(
-        &self,
-        f: impl FnOnce(&OpfsBTree<AnyFile>) -> Result<R, StorageError>,
-    ) -> Result<R, StorageError> {
-        let tree = self.tree.try_borrow().map_err(|_| {
-            StorageError::IoError("opfs-btree already mutably borrowed".to_string())
-        })?;
-        f(&tree)
     }
 
     fn with_tree_mut<R>(
@@ -234,7 +226,7 @@ impl OpfsBTreeStorage {
     }
 
     fn tree_read(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        self.with_tree(|tree| tree.get(key.as_bytes()).map_err(map_storage_err))
+        self.with_tree_mut(|tree| tree.get(key.as_bytes()).map_err(map_storage_err))
     }
 
     fn tree_delete(&self, key: &str) -> Result<(), StorageError> {
@@ -273,7 +265,7 @@ impl OpfsBTreeStorage {
             return Ok(Vec::new());
         }
 
-        self.with_tree(|tree| {
+        self.with_tree_mut(|tree| {
             let entries = tree
                 .range(start, end, usize::MAX)
                 .map_err(map_storage_err)?;
@@ -565,7 +557,7 @@ impl Storage for OpfsBTreeStorage {
     }
 
     fn flush_wal(&self) {
-        // opfs-btree has no separate WAL flush API yet; use full checkpoint.
+        // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
         self.flush();
     }
 }
