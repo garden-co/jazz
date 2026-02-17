@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use jazz_transport::ServerEvent;
+use groove::jazz_transport::ServerEvent;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -107,7 +107,7 @@ impl TestServer {
         }
 
         panic!(
-            "jazz-tools binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools` first.",
+            "jazz-tools binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
             jazz_path
         );
     }

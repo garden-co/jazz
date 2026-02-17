@@ -2,7 +2,7 @@
 
 This is the developer-facing layer for schema management. While the [Schema Manager](schema_manager.md) handles runtime concerns (multi-version queries, lens transforms, catalogue sync), this layer handles build-time concerns: how developers define schemas, how versions are tracked on disk, and how migrations are generated.
 
-The design philosophy is "schemas as code": developers edit `current.sql` (or `current.ts`), run `jazz build`, and the tool handles versioning, freezing, and migration generation automatically. Frozen schema files are immutable and content-hash-verified — if someone edits a frozen file, the build fails.
+The design philosophy is "schemas as code": developers edit `current.sql` (or `current.ts`), run `jazz-tools build`, and the tool handles versioning, freezing, and migration generation automatically. Frozen schema files are immutable and content-hash-verified — if someone edits a frozen file, the build fails.
 
 ## SQL Dialect
 
@@ -51,7 +51,7 @@ schema/
 
 > `crates/groove/src/schema_manager/files.rs:374-542` (filename parsing and generation)
 
-## CLI: `jazz build`
+## CLI: `jazz-tools build`
 
 ```bash
 jazz build [--schema-dir ./schema] [--ts]
@@ -71,7 +71,7 @@ Algorithm:
 ## TypeScript DSL
 
 ```typescript
-import { table, col } from "jazz-ts";
+import { table, col } from "jazz-tools";
 
 table("todos", {
   title: col.string(),
@@ -83,7 +83,7 @@ table("todos", {
 Migration:
 
 ```typescript
-import { migrate, col } from "jazz-ts";
+import { migrate, col } from "jazz-tools";
 
 migrate("todos", {
   description: col.add().string({ default: "" }),
@@ -92,22 +92,22 @@ migrate("todos", {
 
 Uses side-effect collection (no export needed).
 
-> `packages/jazz-ts/src/dsl.ts` (DSL implementation)
+> `packages/jazz-tools/src/dsl.ts` (DSL implementation)
 > `examples/todo-server-ts/schema/current.ts` (real example)
 
-### TypeScript CLI: `jazz-ts build`
+### TypeScript CLI: `node ./packages/jazz-tools/dist/cli.js build`
 
 1. Compiles `current.ts` → `current.sql`
 2. Compiles migration `.ts` → `_fwd.sql` + `_bwd.sql`
-3. Runs `jazz build --ts` for validation and versioning
+3. Runs `jazz-tools build --ts` for validation and versioning
 
-> `packages/jazz-ts/src/cli.ts`
+> `packages/jazz-tools/src/cli.ts`
 
 ### TypeScript Codegen
 
 Generates `app.ts` with TypeScript interfaces, init types, WhereInput types, and QueryBuilder classes.
 
-> `packages/jazz-ts/src/codegen/index.ts`
+> `packages/jazz-tools/src/codegen/index.ts`
 > `examples/todo-client-localfirst-ts/schema/app.ts` (generated output)
 
 ## Schema Diff
@@ -143,7 +143,7 @@ Only `current.sql`/`current.ts` can conflict in git, which is resolved by the de
 | `crates/groove/src/schema_manager/files.rs` | File convention API (940+ lines)    |
 | `crates/groove/src/schema_manager/diff.rs`  | Schema diffing (150+ lines)         |
 | `crates/jazz-cli/src/commands/build.rs`     | CLI build command (370+ lines)      |
-| `packages/jazz-ts/src/cli.ts`               | TypeScript CLI (195 lines)          |
-| `packages/jazz-ts/src/dsl.ts`               | TypeScript DSL (180+ lines)         |
-| `packages/jazz-ts/src/sql-gen.ts`           | TS → SQL generation                 |
-| `packages/jazz-ts/src/codegen/index.ts`     | TS codegen (app.ts)                 |
+| `packages/jazz-tools/src/cli.ts`            | TypeScript CLI                      |
+| `packages/jazz-tools/src/dsl.ts`            | TypeScript DSL                      |
+| `packages/jazz-tools/src/sql-gen.ts`        | TS → SQL generation                 |
+| `packages/jazz-tools/src/codegen/index.ts`  | TS codegen (app.ts)                 |

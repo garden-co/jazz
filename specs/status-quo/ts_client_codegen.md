@@ -7,7 +7,7 @@ The generated code sits on top of the [Worker Bridge and WASM runtime](storage.m
 ## Developer Workflow
 
 ```
-schema/current.ts ──► jazz-ts build ──► schema/app.ts (generated)
+schema/current.ts ──► node ./packages/jazz-tools/dist/cli.js build ──► schema/app.ts (generated)
                            │
                            ▼
                   WasmSchema JSON (intermediate)
@@ -30,44 +30,44 @@ schema/current.ts ──► jazz-ts build ──► schema/app.ts (generated)
 
 `col.ref('table')` generates a UUID column with `references` metadata. Supports `.optional()` for nullable FKs. SQL output: `UUID REFERENCES table [NOT NULL]`.
 
-> `packages/jazz-ts/src/dsl.ts:44-62` (RefBuilder class)
-> `packages/jazz-ts/src/sql-gen.test.ts:110-165` (ref SQL generation tests)
+> `packages/jazz-tools/src/dsl.ts:44-62` (RefBuilder class)
+> `packages/jazz-tools/src/sql-gen.test.ts:110-165` (ref SQL generation tests)
 
 ## Part 2: WasmSchema Enhancement
 
 Schema reader converts DSL `Column.references` to `ColumnDescriptor.references` in WasmSchema JSON. Preserves reference metadata through the pipeline.
 
-> `packages/jazz-ts/src/codegen/schema-reader.ts:27-47` (schemaToWasm with references)
-> `packages/jazz-ts/src/codegen/codegen.test.ts:61-97` (ref conversion tests)
+> `packages/jazz-tools/src/codegen/schema-reader.ts:27-47` (schemaToWasm with references)
+> `packages/jazz-tools/src/codegen/codegen.test.ts:61-97` (ref conversion tests)
 
 ## Part 3: Codegen Pipeline
 
 ### Module Structure
 
 ```
-packages/jazz-ts/src/
+packages/jazz-tools/src/
 ├── codegen/
 │   ├── index.ts                    # Entry: generateClient()
 │   ├── schema-reader.ts            # Parse WasmSchema JSON
 │   ├── relation-analyzer.ts        # Derive forward + reverse relations
 │   ├── type-generator.ts           # Generate TypeScript interfaces
 │   └── query-builder-generator.ts  # Generate query builder classes
-└── cli.ts                          # jazz-ts build orchestration
+└── cli.ts                          # TypeScript schema CLI orchestration
 ```
 
 ### CLI Integration
 
-`jazz-ts build --schema-dir ./schema` compiles TS DSL to SQL and generates `schema/app.ts`.
+`node ./packages/jazz-tools/dist/cli.js build --schema-dir ./schema` compiles TS DSL to SQL and generates `schema/app.ts`.
 
-> `packages/jazz-ts/src/cli.ts:63-72` (generateAppTs)
-> `packages/jazz-ts/src/cli.ts:150-175` (build command orchestration)
+> `packages/jazz-tools/src/cli.ts:63-72` (generateAppTs)
+> `packages/jazz-tools/src/cli.ts:150-175` (build command orchestration)
 
 ### Relation Analysis
 
 Derives forward relations (strip `_id` suffix) and reverse relations (`tableViaColumn` naming). Handles self-referential relations. Validates referenced tables exist.
 
-> `packages/jazz-ts/src/codegen/relation-analyzer.ts:48-98` (analyzeRelations)
-> `packages/jazz-ts/src/codegen/codegen.test.ts:272-420` (relation analysis tests)
+> `packages/jazz-tools/src/codegen/relation-analyzer.ts:48-98` (analyzeRelations)
+> `packages/jazz-tools/src/codegen/codegen.test.ts:272-420` (relation analysis tests)
 
 ## Part 4: Type Generation
 
@@ -80,9 +80,9 @@ Generated `schema/app.ts` includes:
 5. **Relations types** — maps relation names to their types (reverse as arrays)
 6. **WithIncludes types** — generic `TodoWithIncludes<I extends TodoInclude>` for type-safe results
 
-> `packages/jazz-ts/src/codegen/type-generator.ts:238-260` (base + init types)
-> `packages/jazz-ts/src/codegen/type-generator.ts:106-155` (include + relations types)
-> `packages/jazz-ts/src/codegen/type-generator.ts:171-214` (WithIncludes generics)
+> `packages/jazz-tools/src/codegen/type-generator.ts:238-260` (base + init types)
+> `packages/jazz-tools/src/codegen/type-generator.ts:106-155` (include + relations types)
+> `packages/jazz-tools/src/codegen/type-generator.ts:171-214` (WithIncludes generics)
 
 ## Part 5: Query Builder Generation
 
@@ -95,9 +95,9 @@ Generates fluent, immutable query builders per table:
 - `._build()` — serializes to JSON for runtime translation
 - `._clone()` — deep copy for immutability
 
-> `packages/jazz-ts/src/codegen/query-builder-generator.ts:75-189` (QueryBuilder class generation)
-> `packages/jazz-ts/src/codegen/query-builder-generator.ts:51-70` (WhereInput generation)
-> `packages/jazz-ts/src/codegen/codegen.test.ts:553-643` (query builder tests)
+> `packages/jazz-tools/src/codegen/query-builder-generator.ts:75-189` (QueryBuilder class generation)
+> `packages/jazz-tools/src/codegen/query-builder-generator.ts:51-70` (WhereInput generation)
+> `packages/jazz-tools/src/codegen/codegen.test.ts:553-643` (query builder tests)
 
 ## Part 6: Runtime Integration
 
@@ -105,8 +105,8 @@ Generates fluent, immutable query builders per table:
 
 `createDb(config)` is the main entry point for application code. It's async because it pre-loads the WASM module, but once initialized, all mutations are synchronous (local-first: writes don't wait for the network). The Db lazily creates and memoizes `JazzClient` instances per schema hash, so multiple schemas can coexist in one app.
 
-> `packages/jazz-ts/src/runtime/db.ts:93-450` (Db class)
-> `packages/jazz-ts/src/runtime/db.ts:479-484` (createDb factory)
+> `packages/jazz-tools/src/runtime/db.ts:93-450` (Db class)
+> `packages/jazz-tools/src/runtime/db.ts:479-484` (createDb factory)
 
 ### Queries
 
@@ -127,7 +127,7 @@ Also: `insertPersisted()`, `updatePersisted()`, `deleteFromPersisted()` — asyn
 
 The SubscriptionManager preserves object identity for unchanged items: if a new todo is added, existing todo objects in the array keep the same JavaScript reference. This makes React's `useMemo`/referential equality checks work naturally.
 
-> `packages/jazz-ts/src/runtime/subscription-manager.ts` (delta management, 10 tests)
+> `packages/jazz-tools/src/runtime/subscription-manager.ts` (delta management, 10 tests)
 
 ### Supporting Infrastructure
 
@@ -135,9 +135,9 @@ The SubscriptionManager preserves object identity for unchanged items: if a new 
 - **Row Transformer**: converts WasmRow to typed objects (16 tests)
 - **Value Converter**: JS ↔ WasmValue conversion (`toValueArray`, `toUpdateRecord`) (22 tests)
 
-> `packages/jazz-ts/src/runtime/query-adapter.ts`
-> `packages/jazz-ts/src/runtime/row-transformer.ts`
-> `packages/jazz-ts/src/runtime/value-converter.ts`
+> `packages/jazz-tools/src/runtime/query-adapter.ts`
+> `packages/jazz-tools/src/runtime/row-transformer.ts`
+> `packages/jazz-tools/src/runtime/value-converter.ts`
 
 ### Reconnection + Query Replay (Runtime/Worker)
 
@@ -148,8 +148,8 @@ The TS runtime intentionally treats upstream attachment as replay boundary for s
 - Re-attach triggers replay of active query subscriptions, so subscriptions created while offline still converge after reconnect.
 - Backoff uses exponential delay with jitter (`300ms * 2^attempt`, capped at `10s`, plus `0-199ms` jitter).
 
-> `packages/jazz-ts/src/runtime/client.ts:572-663`
-> `packages/jazz-ts/src/worker/groove-worker.ts:152-241`
+> `packages/jazz-tools/src/runtime/client.ts:572-663`
+> `packages/jazz-tools/src/worker/groove-worker.ts:152-241`
 
 ## Test Coverage
 

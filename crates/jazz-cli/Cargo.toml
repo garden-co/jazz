@@ -2,37 +2,73 @@
 name = "jazz-tools"
 version = "2.0.0-alpha.0"
 edition = "2024"
-description = "CLI tools for Jazz local-first relational databases."
+description = "Jazz local-first relational database core, runtime, client, and CLI."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/garden-co/jazz2"
+
+[lib]
+name = "groove"
+path = "src/lib.rs"
 
 [[bin]]
 name = "jazz-tools"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+surrealkv = ["dep:surrealkv", "dep:tokio"]
+runtime-tokio = ["dep:tokio"]
+transport = []
+transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
+client = ["runtime-tokio", "transport-http", "surrealkv", "dep:thiserror", "dep:tokio"]
+cli = [
+  "runtime-tokio",
+  "transport",
+  "surrealkv",
+  "dep:tokio",
+  "dep:axum",
+  "dep:clap",
+  "dep:tracing-subscriber",
+  "dep:tower-http",
+  "dep:async-stream",
+  "dep:jsonwebtoken",
+  "dep:base64",
+  "dep:bytes",
+]
 
 [dependencies]
-groove = { package = "jazz-core", path = "../groove", version = "2.0.0-alpha.0", features = [
-  "surrealkv",
-] }
-groove-tokio = { package = "jazz-runtime-tokio", path = "../groove-tokio", version = "2.0.0-alpha.0" }
-jazz-transport = { path = "../jazz-transport", version = "2.0.0-alpha.0" }
-
-tokio = { version = "1", features = ["full"] }
-axum = "0.7"
-bytes = "1"
-axum-extra = { version = "0.9", features = ["typed-header"] }
-clap = { version = "4", features = ["derive", "env"] }
-uuid = { version = "1", features = ["v4", "v7"] }
+opfs-btree = { path = "../opfs-btree", version = "0.1.0" }
+futures = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+blake3 = "1"
+hex = "0.4"
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
-futures = "0.3"
-tokio-stream = "0.1"
-async-stream = "0.3"
-jsonwebtoken = "9"
-base64 = "0.22"
+internment = "0.8"
+smallvec = { version = "1.11", features = ["serde"] }
+smolset = "1.3"
+web-time = "1.1"
+small-map = "0.1"
+bitvec = "1.0"
+ahash = "0.8"
+
+tokio = { version = "1", features = ["full"], optional = true }
+surrealkv = { version = "0.19", optional = true }
+
+axum = { version = "0.7", optional = true }
+bytes = { version = "1", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tower-http = { version = "0.5", features = ["cors", "trace"], optional = true }
+async-stream = { version = "0.3", optional = true }
+jsonwebtoken = { version = "9", optional = true }
+base64 = { version = "0.22", optional = true }
+
+reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
+thiserror = { version = "1", optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -42,4 +78,4 @@ jsonwebtoken = "9"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 futures = "0.3"
-jazz-transport = { path = "../jazz-transport", version = "2.0.0-alpha.0" }
+tokio = { version = "1", features = ["test-util", "full"] }

@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { createDb, Db, type DbConfig } from "jazz-ts";
+import { createDb, Db, type DbConfig } from "../index.js";
 
 export interface JazzProviderProps {
   config: DbConfig;

@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
+use crate::jazz_transport::ServerEvent;
 use bytes::BytesMut;
 use futures::StreamExt;
 use groove::query_manager::query::Query;
@@ -14,8 +16,6 @@ use groove::storage::{Storage, StorageError, SurrealKvStorage};
 use groove::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
 };
-use crate::groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
-use crate::jazz_transport::ServerEvent;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::transport::{AuthConfig, ServerConnection};

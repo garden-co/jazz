@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useDb, useAll } from "jazz-react";
+import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema/app.js";
 
 export function TodoList() {

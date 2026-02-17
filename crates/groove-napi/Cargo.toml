@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-groove = { package = "jazz-core", path = "../groove", version = "2.0.0-alpha.0", features = [
+groove = { package = "jazz-tools", path = "../jazz-cli", version = "2.0.0-alpha.0", default-features = false, features = [
   "surrealkv",
 ] }
 futures = "0.3"

@@ -1,5 +1,5 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
-import type { WasmSchema, QueryBuilder } from "jazz-ts";
+import type { WasmSchema, QueryBuilder } from "jazz-tools";
 
 export interface Project {
   id: string;

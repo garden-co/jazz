@@ -1,4 +1,4 @@
-//! Todo Server - Example backend using jazz-rs.
+//! Todo Server - Example backend using jazz-tools.
 //!
 //! Demonstrates a simple todo list API backed by Jazz for local persistence
 //! and server sync.
@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use groove::schema_manager::SchemaDirectory;
-use jazz_rs::{AppContext, AppId, JazzClient};
+use groove::{AppContext, AppId, JazzClient};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;

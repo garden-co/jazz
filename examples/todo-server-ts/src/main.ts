@@ -10,8 +10,8 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { JazzClient } from "jazz-ts";
-import type { Value, WasmSchema } from "jazz-ts";
+import { JazzClient } from "jazz-tools";
+import type { Value, WasmSchema } from "jazz-tools";
 import { NapiRuntime } from "jazz-napi";
 
 // ============================================================================
