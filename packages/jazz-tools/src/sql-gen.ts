@@ -31,6 +31,9 @@ function formatDefaultValue(value: unknown): string {
   if (value === null) {
     return "NULL";
   }
+  if (Array.isArray(value)) {
+    return `ARRAY[${value.map(formatDefaultValue).join(", ")}]`;
+  }
   throw new Error(`Unsupported default value type: ${typeof value}`);
 }
 

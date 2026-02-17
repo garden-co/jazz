@@ -13,6 +13,8 @@ import type {
   MigrationOp,
   TableMigration,
   ScalarSqlType,
+  TSTypeFromSqlType,
+  ArraySqlType,
 } from "./schema.js";
 
 // ============================================================================
@@ -132,6 +134,17 @@ class AddBuilder<Optional extends boolean = false> {
     return { _type: "add", sqlType: "REAL", default: opts.default };
   }
 
+  array<T extends SqlType>(opts: {
+    of: T;
+    default: MaybeOptional<TSTypeFromSqlType<T>[], Optional>;
+  }): AddOp {
+    return {
+      _type: "add",
+      sqlType: { kind: "ARRAY", element: opts.of },
+      default: opts.default,
+    };
+  }
+
   optional(): AddBuilder<true> {
     return this as AddBuilder<true>;
   }
@@ -156,6 +169,14 @@ class DropBuilder {
 
   float(opts: { backwardsDefault: number }): DropOp {
     return { _type: "drop", sqlType: "REAL", backwardsDefault: opts.backwardsDefault };
+  }
+
+  array<T extends SqlType>(opts: { of: T; backwardsDefault: TSTypeFromSqlType<T>[] }): DropOp {
+    return {
+      _type: "drop",
+      sqlType: { kind: "ARRAY", element: opts.of },
+      backwardsDefault: opts.backwardsDefault,
+    };
   }
 }
 
@@ -215,9 +236,19 @@ export function getCollectedMigration(): Lens | null {
   const operations: LensOp[] = migration.operations.map(({ column, op }) => {
     switch (op._type) {
       case "add":
-        return { type: "introduce" as const, column, sqlType: op.sqlType, value: op.default };
+        return {
+          type: "introduce" as const,
+          column,
+          sqlType: op.sqlType,
+          value: op.default,
+        };
       case "drop":
-        return { type: "drop" as const, column, sqlType: op.sqlType, value: op.backwardsDefault };
+        return {
+          type: "drop" as const,
+          column,
+          sqlType: op.sqlType,
+          value: op.backwardsDefault,
+        };
       case "rename":
         return { type: "rename" as const, column, value: op.oldName };
     }

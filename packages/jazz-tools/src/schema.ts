@@ -14,6 +14,24 @@ export function sqlTypeToString(sqlType: SqlType): string {
   return `${sqlTypeToString(sqlType.element)}[]`;
 }
 
+type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
+  ? string
+  : T extends "BOOLEAN"
+    ? boolean
+    : T extends "INTEGER"
+      ? number
+      : T extends "REAL"
+        ? number
+        : T extends "UUID"
+          ? string
+          : never;
+
+export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
+  ? TSTypeFromScalarSqlType<T>
+  : T extends ArraySqlType
+    ? TSTypeFromSqlType<T["element"]>[]
+    : never;
+
 export interface Column {
   name: string;
   sqlType: SqlType;
