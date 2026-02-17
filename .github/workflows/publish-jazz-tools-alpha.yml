@@ -30,9 +30,13 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
       - uses: taiki-e/install-action@v2
         with:
-          tool: zig,cargo-zigbuild
+          tool: cargo-zigbuild
 
       - name: Build CLI binary
         run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
