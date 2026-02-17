@@ -568,31 +568,39 @@ describe("account.unstable_withTransaction", () => {
   });
 
   test("multiple CoValue mutations are persisted together", async () => {
-    const { clientAccount, serverNode } = await setupTwoNodes();
+    const { clientAccount, serverAccount } = await setupTwoNodes();
 
-    const map1 = TestMap.create(
-      { name: "map1", value: 1 },
-      { owner: clientAccount },
+    const [map1, map2] = await clientAccount.$jazz.unstable_withTransaction(
+      () => {
+        const group = Group.create({ owner: clientAccount });
+        group.addMember(serverAccount, "reader");
+
+        const map1 = TestMap.create({ name: "map1", value: 1 }, group);
+        const map2 = TestMap.create({ name: "map2", value: 2 }, group);
+
+        map1.$jazz.set("name", "map1-updated");
+        map2.$jazz.set("name", "map2-updated");
+
+        return [map1, map2];
+      },
     );
-    const map2 = TestMap.create(
-      { name: "map2", value: 2 },
-      { owner: clientAccount },
-    );
-
-    await clientAccount.$jazz.unstable_withTransaction(() => {
-      map1.$jazz.set("name", "map1-updated");
-      map2.$jazz.set("name", "map2-updated");
-    });
-
-    // Wait for sync to complete
-    await clientAccount.$jazz.waitForAllCoValuesSync({ timeout: 1000 });
 
     // Verify both mutations were synced to server
-    const loadedMap1 = await serverNode.load(map1.$jazz.raw.id);
-    const loadedMap2 = await serverNode.load(map2.$jazz.raw.id);
+    const loadedMap1 = await TestMap.load(map1.$jazz.raw.id, {
+      loadAs: serverAccount,
+    });
+    const loadedMap2 = await TestMap.load(map2.$jazz.raw.id, {
+      loadAs: serverAccount,
+    });
 
-    expect(loadedMap1).not.toBe(CoValueLoadingState.UNAVAILABLE);
-    expect(loadedMap2).not.toBe(CoValueLoadingState.UNAVAILABLE);
+    assertLoaded(loadedMap1);
+    assertLoaded(loadedMap2);
+
+    expect(loadedMap1.name).toBe("map1-updated");
+    expect(loadedMap1.value).toBe(1);
+
+    expect(loadedMap2.name).toBe("map2-updated");
+    expect(loadedMap2.value).toBe(2);
   });
 
   test("throws error for nested transactions (US-5)", async () => {
