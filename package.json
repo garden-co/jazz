@@ -6,7 +6,7 @@
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build",
     "ensure:rust-toolchain": "export CARGO_HOME=\"${CARGO_HOME:-$HOME/.cargo}\" && export RUSTUP_HOME=\"${RUSTUP_HOME:-$HOME/.rustup}\" && export PATH=\"$CARGO_HOME/bin:$PATH\" && (command -v rustup >/dev/null 2>&1 || (curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable)) && rustup toolchain install stable && rustup default stable && rustup target add wasm32-unknown-unknown",
     "ensure:wasm-pack": "export CARGO_HOME=\"${CARGO_HOME:-$HOME/.cargo}\" && export PATH=\"$CARGO_HOME/bin:$PATH\" && (command -v wasm-pack >/dev/null 2>&1 || (curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh))",
-    "build:vercel-docs": "export CARGO_HOME=\"${CARGO_HOME:-$HOME/.cargo}\" && export RUSTUP_HOME=\"${RUSTUP_HOME:-$HOME/.rustup}\" && export PATH=\"$CARGO_HOME/bin:$PATH\" && export RUSTUP_TOOLCHAIN=stable && pnpm run ensure:rust-toolchain && pnpm run ensure:wasm-pack && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build",
+    "build:vercel-docs": "export CARGO_HOME=\"${CARGO_HOME:-$HOME/.cargo}\" && export RUSTUP_HOME=\"${RUSTUP_HOME:-$HOME/.rustup}\" && export PATH=\"$CARGO_HOME/bin:$PATH\" && export RUSTUP_TOOLCHAIN=stable && pnpm run ensure:rust-toolchain && pnpm run ensure:wasm-pack && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs",
     "test": "turbo run test",
     "postinstall": "lefthook install"
   },
