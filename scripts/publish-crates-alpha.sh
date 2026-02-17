@@ -22,35 +22,6 @@ crates=(
   "jazz-tools:2.0.0-alpha.0"
 )
 
-crate_version_exists() {
-  local name="$1"
-  local expected_version="$2"
-  local response
-
-  response="$(curl -fsS "https://crates.io/api/v1/crates/${name}/${expected_version}" 2>/dev/null || true)"
-  if [[ -z "$response" ]]; then
-    return 1
-  fi
-
-  jq -e --arg version "$expected_version" '.version.num == $version' >/dev/null <<<"$response"
-}
-
-wait_for_index() {
-  local name="$1"
-  local expected_version="$2"
-
-  for _ in {1..60}; do
-    if crate_version_exists "$name" "$expected_version"; then
-      echo "crates.io index now has ${name}@${expected_version}"
-      return 0
-    fi
-    sleep 5
-  done
-
-  echo "Timed out waiting for ${name}@${expected_version} to appear in crates.io index"
-  return 1
-}
-
 for crate_spec in "${crates[@]}"; do
   name="${crate_spec%%:*}"
   version="${crate_spec##*:}"
@@ -66,22 +37,19 @@ for crate_spec in "${crates[@]}"; do
     continue
   fi
 
-  if crate_version_exists "$name" "$version"; then
-    echo "==> ${name}@${version} already published, skipping"
-    continue
-  fi
-
   echo "==> cargo publish -p ${name} (publish)"
-  if ! cargo publish -p "$name" --allow-dirty; then
-    if crate_version_exists "$name" "$version"; then
-      echo "==> ${name}@${version} is now published (likely by another run), continuing"
+  publish_log="$(mktemp)"
+  if ! cargo publish -p "$name" --allow-dirty 2>&1 | tee "$publish_log"; then
+    if grep -q "already exists on crates.io index" "$publish_log"; then
+      echo "==> ${name}@${version} already published, skipping"
+      rm -f "$publish_log"
       continue
     fi
+    rm -f "$publish_log"
     echo "==> failed to publish ${name}@${version}"
     exit 1
   fi
-
-  wait_for_index "$name" "$version"
+  rm -f "$publish_log"
 done
 
 echo "Crate publish flow complete (${MODE})."
