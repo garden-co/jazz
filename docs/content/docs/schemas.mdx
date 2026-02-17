@@ -73,20 +73,12 @@ SQL migrations are split into explicit forward and backward files.
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
-    >
+    <include cwd lang="ts">
       ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
     </include>
   </Tab>
   <Tab value="SQL">
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
-    >
+    <include cwd lang="sql">
       ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
     </include>
   </Tab>
@@ -94,9 +86,10 @@ SQL migrations are split into explicit forward and backward files.
 
 ### Backwards default examples
 
-Backwards defaults define what value should be restored when a newer schema rolls back to an older one.
-In TypeScript, this is represented directly in the migration stub.
-In SQL, the rollback file explicitly reintroduces dropped columns with a default.
+Backwards defaults define what older-schema clients see for fields dropped in newer schemas.
+When new clients write rows without that field, the backward lens supplies the configured default to old clients.
+In TypeScript, the same migration stub carries both forward and backward translation behavior.
+In SQL, the backward lens file explicitly reintroduces dropped columns with a default.
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">

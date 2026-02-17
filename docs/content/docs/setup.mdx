@@ -59,22 +59,7 @@ Client-side usage enforces permissions for the local user context.
 Backend usage should derive a requester-scoped client directly from the request.
 In TypeScript backends, `client.forRequest(req)` extracts the bearer JWT payload and scopes the client.
 
-#### 1. Derive requester-scoped access from the incoming request
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-session-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-session-rust
-    </include>
-  </Tab>
-</Tabs>
-
-#### 2. Use that scoped client in handlers
+#### Per-request user-scoped client
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">

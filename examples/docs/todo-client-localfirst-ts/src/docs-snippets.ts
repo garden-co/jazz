@@ -21,22 +21,32 @@ export async function readTodosSettledAtEdge(db: Db) {
 }
 // #endregion reading-settled-tier-ts
 
-// #region reading-query-shaping-ts
-export async function readTodosWithQueryShaping(db: Db) {
+// #region reading-filters-ts
+export async function readTodosWithFilters(db: Db) {
+  return db.all(app.todos.where({ done: false, title: { contains: "docs" } }));
+}
+// #endregion reading-filters-ts
+
+// #region reading-sorting-ts
+export async function readTodosSortedByTitle(db: Db) {
+  return db.all(app.todos.where({ done: false }).orderBy("title", "asc"));
+}
+// #endregion reading-sorting-ts
+
+// #region reading-pagination-ts
+export async function readTodoPage(db: Db, page: number, pageSize = 20) {
+  const offset = Math.max(0, (page - 1) * pageSize);
   return db.all(
-    app.todos
-      .where({ done: false, title: { contains: "docs" } })
-      .orderBy("title", "asc")
-      .limit(20)
-      .offset(0)
-      .include({ project: true, parent: true }),
+    app.todos.where({ done: false }).orderBy("title", "asc").limit(pageSize).offset(offset),
   );
 }
-// #endregion reading-query-shaping-ts
+// #endregion reading-pagination-ts
 
 // #region reading-includes-ts
 export async function readTodosWithIncludes(db: Db) {
-  return db.all(app.todos.where({ done: false }).include({ project: true, parent: true }));
+  return db.all(
+    app.todos.where({ done: false }).include({ project: true, parent: { project: true } }),
+  );
 }
 // #endregion reading-includes-ts
 
