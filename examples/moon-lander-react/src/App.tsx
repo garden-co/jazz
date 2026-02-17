@@ -43,41 +43,76 @@ function seedDepositsIfEmpty(
   }
 }
 
-/** Sync local player state to Jazz (insert or update). */
+/** Returns true if any synced field in GameState has changed meaningfully. */
+function gameStateChanged(a: GameState, b: GameState): boolean {
+  const POSITION_THRESHOLD = 2; // pixels
+  const VELOCITY_THRESHOLD = 0.5; // pixels/tick
+  return (
+    a.mode !== b.mode ||
+    Math.abs(a.positionX - b.positionX) > POSITION_THRESHOLD ||
+    Math.abs(a.positionY - b.positionY) > POSITION_THRESHOLD ||
+    Math.abs(a.velocityX - b.velocityX) > VELOCITY_THRESHOLD ||
+    Math.abs(a.velocityY - b.velocityY) > VELOCITY_THRESHOLD ||
+    a.fuel !== b.fuel ||
+    a.landerSpawnX !== b.landerSpawnX ||
+    a.playerName !== b.playerName ||
+    a.playerColor !== b.playerColor ||
+    a.requiredFuelType !== b.requiredFuelType
+  );
+}
+
+/** Sync local player state to Jazz (insert or update). Skips writes when nothing changed. */
 function syncPlayerState(
   db: ReturnType<typeof useDb>,
   playerId: string,
   state: GameState | null,
   dbRowIdRef: React.MutableRefObject<string | null>,
+  lastSyncedRef: React.MutableRefObject<GameState | null>,
   localPlayerRows: Array<{ id: string }>,
   elapsed: number,
 ) {
   if (!state) return;
   const GRACE_MS = 2000;
-  const playerData = {
-    playerId,
-    name: state.playerName,
-    color: state.playerColor,
-    mode: state.mode,
-    online: true,
-    lastSeen: Math.floor(Date.now() / 1000),
-    positionX: state.positionX,
-    positionY: state.positionY,
-    velocityX: state.velocityX,
-    velocityY: state.velocityY,
-    requiredFuelType: state.requiredFuelType,
-    landerFuelLevel: state.fuel,
-    landerSpawnX: state.landerSpawnX,
-  };
 
   if (!dbRowIdRef.current && localPlayerRows.length > 0) {
     dbRowIdRef.current = localPlayerRows[0].id;
   }
 
   if (dbRowIdRef.current) {
-    db.update(app.players, dbRowIdRef.current, playerData);
+    if (lastSyncedRef.current && !gameStateChanged(lastSyncedRef.current, state)) return;
+    db.update(app.players, dbRowIdRef.current, {
+      playerId,
+      name: state.playerName,
+      color: state.playerColor,
+      mode: state.mode,
+      online: true,
+      lastSeen: Math.floor(Date.now() / 1000),
+      positionX: state.positionX,
+      positionY: state.positionY,
+      velocityX: state.velocityX,
+      velocityY: state.velocityY,
+      requiredFuelType: state.requiredFuelType,
+      landerFuelLevel: state.fuel,
+      landerSpawnX: state.landerSpawnX,
+    });
+    lastSyncedRef.current = { ...state };
   } else if (elapsed > GRACE_MS) {
-    dbRowIdRef.current = db.insert(app.players, playerData);
+    dbRowIdRef.current = db.insert(app.players, {
+      playerId,
+      name: state.playerName,
+      color: state.playerColor,
+      mode: state.mode,
+      online: true,
+      lastSeen: Math.floor(Date.now() / 1000),
+      positionX: state.positionX,
+      positionY: state.positionY,
+      velocityX: state.velocityX,
+      velocityY: state.velocityY,
+      requiredFuelType: state.requiredFuelType,
+      landerFuelLevel: state.fuel,
+      landerSpawnX: state.landerSpawnX,
+    });
+    lastSyncedRef.current = { ...state };
   }
 }
 
@@ -199,6 +234,8 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
   // Buffer latest game state in a ref — written to DB on a separate interval
   // to avoid re-entrant WASM borrows when sync messages trigger React renders
   const latestStateRef = useRef<GameState | null>(null);
+  // Track last synced state to skip redundant writes when nothing changed
+  const lastSyncedStateRef = useRef<GameState | null>(null);
 
   const handleStateChange = useCallback((state: GameState) => {
     latestStateRef.current = state;
@@ -251,6 +288,7 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
         playerId,
         latestStateRef.current,
         dbRowIdRef,
+        lastSyncedStateRef,
         localPlayerRowsRef.current,
         elapsed,
       );
@@ -303,6 +341,19 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
   // Staleness filter applied here so Game receives only active players.
   const remotePlayers: RemotePlayer[] = useMemo(() => {
     const nowS = Math.floor(Date.now() / 1000);
+    // Build a set of playerIds that already own their required fuel type
+    const satisfiedPlayers = new Set<string>();
+    if (allDepositsRaw) {
+      for (const d of allDepositsRaw) {
+        if (d.collected && d.collectedBy) {
+          // Find the remote player row to check if this deposit is their required type
+          const rp = remotePlayerRows.find((p) => p.playerId === d.collectedBy);
+          if (rp && d.fuelType === rp.requiredFuelType) {
+            satisfiedPlayers.add(d.collectedBy);
+          }
+        }
+      }
+    }
     return remotePlayerRows
       .filter((p) => nowS - p.lastSeen < STALE_THRESHOLD_S)
       .map((p) => ({
@@ -319,11 +370,13 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
         landerFuelLevel: p.landerFuelLevel,
         playerId: p.playerId,
         landerX: p.landerSpawnX,
+        hasRequiredFuel: p.playerId ? satisfiedPlayers.has(p.playerId) : false,
       }));
-  }, [remotePlayerRows]);
+  }, [remotePlayerRows, allDepositsRaw]);
 
   return (
     <Game
+      playerId={playerId}
       physicsSpeed={physicsSpeed}
       remotePlayers={remotePlayers}
       deposits={deposits}

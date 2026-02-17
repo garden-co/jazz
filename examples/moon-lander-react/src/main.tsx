@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
+import { getOrCreatePlayerId } from "./game/player.js";
 
 // ---------------------------------------------------------------------------
 // Dev-mode Jazz server config
@@ -48,16 +49,10 @@ async function main() {
   // gracefully via reconnect backoff. Log a hint for developers.
   console.info("[moon-lander] Connecting to Jazz server at %s", serverUrl);
 
-  // Each tab is a separate player. sessionStorage is per-tab (unique across
-  // tabs) but survives page refreshes within the same tab, so a refresh
-  // reconnects as the same Jazz player row rather than creating a new one.
-  // Visual identity (name, colour) is derived from localStorage in Game.tsx.
-  const KEY = "moon-lander-session-id";
-  let playerId = sessionStorage.getItem(KEY);
-  if (!playerId) {
-    playerId = crypto.randomUUID();
-    sessionStorage.setItem(KEY, playerId);
-  }
+  // Single identity from localStorage — shared across all tabs, which is
+  // simpler for a demo. Visual identity (name, colour) is derived from this
+  // same ID in Game.tsx.
+  const playerId = getOrCreatePlayerId();
 
   // Stable dbName per tab — reusing the same OPFS database across refreshes
   // means the local player row and deposits persist, avoiding ghost duplicates.

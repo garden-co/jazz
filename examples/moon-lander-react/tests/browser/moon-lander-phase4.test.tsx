@@ -25,6 +25,7 @@ import {
   CANVAS_WIDTH,
   GROUND_LEVEL,
   LANDER_INTERACT_RADIUS,
+  SHARE_PROXIMITY_RADIUS,
   FUEL_TYPES,
 } from "../../src/game/constants.js";
 
@@ -355,6 +356,117 @@ describe("Moon Lander — Phase 4: Fuel Sharing", () => {
     // Stay in lander (don't press E)
     await waitForAttr(el, "player-mode", "landed", 3000);
 
+    await new Promise((r) => setTimeout(r, 1000));
+
+    expect(shares).toHaveLength(0);
+  });
+
+  // =========================================================================
+  // 6. Proximity hint shows when sharing would be possible at 2x radius
+  //
+  //   Local (walking, has ⬡)     Remote (walking, needs ⬡, 120px away)
+  //        ▼                           ▼
+  //   ════╤═══════════════════════════╤════
+  //        hint zone (80–160px)
+  //        data-share-hint="true"
+  // =========================================================================
+
+  it("shows share hint when a receiver is nearby but not close enough", async () => {
+    // Place remote player at 120px — between SHARE_PROXIMITY_RADIUS (80)
+    // and 2x SHARE_PROXIMITY_RADIUS (160)
+    const hintDistance = SHARE_PROXIMITY_RADIUS + 40; // 120px
+
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: ["hexagon", "circle"],
+      remotePlayers: [
+        remotePlayer({
+          positionX: CANVAS_WIDTH / 2 + hintDistance,
+          requiredFuelType: "hexagon",
+          playerId: "hint-receiver",
+        }),
+      ],
+      onShareFuel: () => {},
+    });
+
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    const localRequired = readStr(el, "required-fuel");
+
+    // Only expect the hint if local doesn't also need hexagon
+    if (localRequired !== "hexagon") {
+      await waitForAttr(el, "share-hint", "true", 3000);
+    }
+  });
+
+  // =========================================================================
+  // 7. No hint when remote is beyond 2x radius
+  //
+  //   Local (walking, has ⬡)     Remote (walking, needs ⬡, 500px away)
+  //        ▼                                    ▼
+  //   ════╤═════════════════════════════════════╤════
+  //        too far for hint → data-share-hint="false"
+  // =========================================================================
+
+  it("does not show share hint when receiver is too far away", async () => {
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: [...FUEL_TYPES],
+      remotePlayers: [
+        remotePlayer({
+          positionX: CANVAS_WIDTH / 2 + 500,
+          requiredFuelType: "hexagon",
+        }),
+      ],
+      onShareFuel: () => {},
+    });
+
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    // Give time for the engine loop to evaluate
+    await new Promise((r) => setTimeout(r, 500));
+
+    expect(readStr(el, "share-hint")).toBe("false");
+  });
+
+  // =========================================================================
+  // 8. No sharing when receiver already has their required fuel
+  //
+  //   Local (has ⬡)     Remote (needs ⬡, already has ⬡)
+  //        ▼                     ▼
+  //   ════╤═════════════════════╤════
+  //        no transfer (receiver satisfied)
+  // =========================================================================
+
+  it("does not share when receiver already has their required fuel", async () => {
+    const shares: Array<{ fuelType: string; receiverPlayerId: string }> = [];
+
+    const el = await mountGameWith({
+      deposits: [],
+      inventory: ["hexagon", "circle"],
+      remotePlayers: [
+        {
+          ...remotePlayer({ requiredFuelType: "hexagon", playerId: "recv-1" }),
+          hasRequiredFuel: true,
+        },
+      ],
+      onShareFuel: (fuelType: string, receiverPlayerId: string) => {
+        shares.push({ fuelType, receiverPlayerId });
+      },
+    });
+
+    await waitForAttr(el, "player-mode", "landed", 3000);
+    pressKey("e", "KeyE");
+    await waitForAttr(el, "player-mode", "walking", 3000);
+    releaseKey("e", "KeyE");
+
+    // Give plenty of time — sharing should NOT fire
     await new Promise((r) => setTimeout(r, 1000));
 
     expect(shares).toHaveLength(0);

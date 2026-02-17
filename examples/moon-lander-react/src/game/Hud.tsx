@@ -92,9 +92,9 @@ export function Hud({
         }}
       >
         {mode === "descending" && "Arrow keys / WASD — thrust"}
-        {mode === "landed" && "Press E to exit lander"}
-        {mode === "in_lander" && (fuel >= 100 ? "Space — launch | E — exit" : "Press E to exit lander")}
-        {mode === "walking" && "A/D — walk | E — enter lander (when near)"}
+        {mode === "landed" && "E — exit lander | Enter — chat"}
+        {mode === "in_lander" && (fuel >= 100 ? "Space — launch | E — exit | Enter — chat" : "E — exit lander | Enter — chat")}
+        {mode === "walking" && "A/D — walk | E — enter lander | Enter — chat"}
       </div>
     </>
   );

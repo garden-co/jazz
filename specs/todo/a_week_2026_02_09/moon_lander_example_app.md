@@ -465,52 +465,52 @@ Local inventory must move to Jazz before sharing can work. Currently `inventoryR
 #### Phase 4a: Data threading + proximity sharing logic
 
 Thread remote player identity through to the engine so sharing decisions can be made:
-- [ ] Add `requiredFuelType` and `playerId` to `RemotePlayerView` (engine needs to know what each remote player needs and who they are for the DB write)
-- [ ] Pass local `playerId` into the engine (needed for the `onShareFuel` callback)
-- [ ] Proximity detection in engine game loop: compare local walking player position with raw DB positions (`remotePlayersRef`) of remote walking players
-- [ ] Auto-share: fires continuously while conditions are met (both walking, within 1x interact radius, giver has fuel the receiver needs and giver doesn't need it). Continuous firing ensures transfers happen despite sync delays.
+- [x] Add `requiredFuelType` and `playerId` to `RemotePlayerView` (engine needs to know what each remote player needs and who they are for the DB write)
+- [x] Pass local `playerId` into the engine (needed for the `onShareFuel` callback)
+- [x] Proximity detection in engine game loop: compare local walking player position with raw DB positions (`remotePlayersRef`) of remote walking players
+- [x] Auto-share: fires continuously while conditions are met (both walking, within 1x interact radius, giver has fuel the receiver needs and giver doesn't need it). Continuous firing ensures transfers happen despite sync delays.
   - Giver's client rewrites `collectedBy` from own playerId to receiver's playerId
   - Guard: `fuelType !== giver.requiredFuelType` (never give away what you need)
   - One-way: each client only gives, never takes
-- [ ] Add `onShareFuel(depositId: string, receiverPlayerId: string)` callback chain: engine → Game → App → `db.update(fuel_deposits, id, { collectedBy: receiverPlayerId })`
-- [ ] Proximity hint: at 2x radius, show "move closer to share fuel" if sharing would be possible (giver has giveable fuel, receiver needs it)
-- [ ] Tests: "Walk past another player, fuel transfers correctly"
+- [x] Add `onShareFuel(depositId: string, receiverPlayerId: string)` callback chain: engine → Game → App → `db.update(fuel_deposits, id, { collectedBy: receiverPlayerId })`
+- [x] Proximity hint: at 2x radius, show "move closer to share fuel" if sharing would be possible (giver has giveable fuel, receiver needs it)
+- [x] Tests: "Walk past another player, fuel transfers correctly"
 
 #### Phase 4b: Inventory burst on lander entry
 
 When a player enters the lander (presses E), ALL collected deposits that are NOT the required fuel type are scattered back onto the moon surface. This always happens on lander entry, regardless of whether the player has the correct fuel.
 
-- [ ] On lander entry: identify all deposits in inventory where `fuelType !== requiredFuelType`
-- [ ] Arc animation: each ejected fuel shape animates in an arc from the player to a new random X position nearby (runs in parallel with gameplay, non-blocking)
-- [ ] DB write fires after animation lands (not before): `collected = false, collectedBy = "", positionX = newX`
-- [ ] Deposits are NOT collectible by anyone during the arc animation (they don't exist on the surface until the write fires)
-- [ ] Add `onBurstDeposit(depositId: string, newX: number)` callback chain: engine → Game → App
-- [ ] The required fuel type deposit stays → consumed for refuelling (existing behaviour)
-- [ ] Tests: "Entering lander scatters non-required fuel back to surface"
+- [x] On lander entry: identify all deposits in inventory where `fuelType !== requiredFuelType`
+- [x] Arc animation: each ejected fuel shape animates in an arc from the player to a new random X position nearby (runs in parallel with gameplay, non-blocking)
+- [x] DB write fires after animation lands (not before): `collected = false, collectedBy = "", positionX = newX`
+- [x] Deposits are NOT collectible by anyone during the arc animation (they don't exist on the surface until the write fires)
+- [x] Add `onBurstDeposit(depositId: string, newX: number)` callback chain: engine → Game → App
+- [x] The required fuel type deposit stays → consumed for refuelling (existing behaviour)
+- [x] Tests: "Entering lander scatters non-required fuel back to surface"
 
 #### Phase 4c: Share visual
 
-- [ ] When a fuel transfer occurs, animate the shape icon in an arc from giver to receiver (canvas, non-blocking)
-- [ ] Animation plays on both screens: giver sees shape leave, receiver sees shape arrive
-- [ ] Giver triggers animation locally on share. Receiver detects the transfer via Jazz subscription (new deposit in their inventory with a nearby giver) and triggers a matching arrival animation.
+- [x] When a fuel transfer occurs, animate the shape icon in an arc from giver to receiver (canvas, non-blocking)
+- [x] Animation plays on both screens: giver sees shape leave, receiver sees shape arrive
+- [x] Giver triggers animation locally on share. Receiver detects the transfer via Jazz subscription (new deposit in their inventory with a nearby giver) and triggers a matching arrival animation.
 
 ### Phase 5: Chat & Polish
 
-- [ ] Chat input UI
-- [ ] Speech bubbles above players
-- [ ] Test: "Send message, appears above head for 5 seconds"
+- [x] Chat input UI
+- [x] Speech bubbles above players
+- [x] Test: "Send message, appears above head for 5 seconds"
 
 ### Phase 5b: Walking Polish
 
-- [ ] Astronaut jumping: Space/W while walking triggers a lunar-gravity jump (low gravity = high, floaty arcs). Adds verticality and makes traversal more fun.
+- [x] Astronaut jumping: Space/W while walking triggers a lunar-gravity jump (low gravity = high, floaty arcs). Adds verticality and makes traversal more fun.
 
 ### Phase 6: Synthwave Aesthetic
 
 - [ ] Replace placeholder sprites with 32-bit pixel art
-- [ ] Apply synthwave colour palette
+- [x] Apply synthwave colour palette
 - [ ] Add glow effects (fuel, thrust, outlines)
 - [ ] Particle effects (thrust, collection sparkles)
-- [ ] Background (Earth, stars, gradient)
+- [x] Background (Earth, stars, gradient)
 - [ ] Share/burst arc animation: add glow, pulsing, and spinning to the fuel shape as it flies
 - [ ] Share arc should reactively track the receiver's current position (chase a moving player, not fly to where they were)
 - [ ] Launch success camera pan: slow down the upward pan so the lander stays visible longer during ascent
@@ -519,7 +519,7 @@ When a player enters the lander (presses E), ALL collected deposits that are NOT
 
 - [ ] Record GIF/video of key moments
 - [ ] Landing page with "How to Play" instructions
-- [ ] E2E browser tests (two players, full gameplay loop)
+- [~] E2E browser tests (two players, full gameplay loop) — phases 1–5 covered; phase 2 sync tests need Jazz server
 - [ ] Deploy to public URL
 
 ## Design Constraints

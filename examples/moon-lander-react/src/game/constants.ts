@@ -28,6 +28,10 @@ export const REFUEL_AMOUNT = 100; // Per correct fuel unit collected
 export const LANDER_INTERACT_RADIUS = 40; // Pixels — how close to walk to enter lander
 export const SHARE_PROXIMITY_RADIUS = 80; // Pixels — how close for automatic fuel sharing
 
+// Walking jump
+export const JUMP_VELOCITY = -140; // Pixels/sec upward (negative = up)
+export const JUMP_GRAVITY = 200; // Pixels/sec² — snappier than descent gravity for a short, floaty hop
+
 // Spawn
 export const INITIAL_ALTITUDE = -400; // Y position at spawn (high above the moon surface)
 
@@ -70,6 +74,13 @@ export const COLOURS = {
   orange: "#ff6600",
   softPink: "#ff66ff",
 } as const;
+
+// Particles
+export const MAX_PARTICLES = 200;
+export const THRUST_EMIT_RATE = 3;  // particles per frame while thrusting
+export const SPARKLE_BURST_COUNT = 10; // particles on deposit pickup
+export const PARTICLE_THRUST_LIFE = 0.4; // seconds
+export const PARTICLE_SPARKLE_LIFE = 0.5;
 
 // DB sync (Phase 2+)
 export const DB_SYNC_INTERVAL_MS = 200;

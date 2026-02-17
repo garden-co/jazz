@@ -14,6 +14,7 @@ export type { GameState, RemotePlayer, ChatMessage } from "./game/types.js";
 // ---------------------------------------------------------------------------
 
 interface GameProps {
+  playerId?: string;
   physicsSpeed?: number;
   remotePlayers?: RemotePlayer[];
   deposits?: Deposit[];
@@ -27,8 +28,9 @@ interface GameProps {
   onStateChange?: (state: GameState) => void;
 }
 
-export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMessages, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onSendMessage, onStateChange }: GameProps) {
-  const playerId = useRef(getOrCreatePlayerId()).current;
+export function Game({ playerId: externalPlayerId, physicsSpeed, remotePlayers, deposits, inventory, chatMessages, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onSendMessage, onStateChange }: GameProps) {
+  const fallbackPlayerId = useRef(getOrCreatePlayerId()).current;
+  const playerId = externalPlayerId ?? fallbackPlayerId;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -52,6 +54,7 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMes
       landerX: rp.landerX,
       requiredFuelType: rp.requiredFuelType,
       playerId: rp.playerId,
+      hasRequiredFuel: rp.hasRequiredFuel,
     }));
   }, [remotePlayers]);
 
@@ -63,6 +66,8 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMes
     inventory,
     chatMessages,
     localPlayerId: playerId,
+    localPlayerName: playerProps.name,
+    localPlayerColor: playerProps.color,
     onCollectDeposit,
     onRefuel,
     onShareFuel,
@@ -137,6 +142,7 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMes
       data-deposit-count={engine.depositCount}
       data-inventory={engine.inventory.join(",")}
       data-remote-player-count={engine.remotePlayerCount}
+      data-share-hint={engine.shareHint ? "true" : "false"}
       data-chat-open={chatOpen ? "true" : "false"}
       style={{ position: "relative", width: "100vw", height: "100vh" }}
     >

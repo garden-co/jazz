@@ -54,6 +54,9 @@ async function mountGame(): Promise<HTMLDivElement> {
     "Game canvas should render",
   );
 
+  // Yield one animation frame so the game loop draws the initial scene
+  await new Promise((r) => requestAnimationFrame(r));
+
   return el;
 }
 

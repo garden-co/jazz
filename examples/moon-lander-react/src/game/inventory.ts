@@ -88,6 +88,8 @@ export function mergeInventory(input: InventoryMergeInput): InventoryMergeResult
         peakHeight: 60 + Math.random() * 30,
         duration: 0.5,
         elapsed: 0,
+        rotation: 0,
+        glowPhase: Math.random() * Math.PI * 2,
       });
     }
   }
