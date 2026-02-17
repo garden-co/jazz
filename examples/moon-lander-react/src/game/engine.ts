@@ -16,7 +16,6 @@ import {
   MAX_FUEL,
   REFUEL_AMOUNT,
   MOON_SURFACE_WIDTH,
-  FUEL_TYPES,
   ASTRONAUT_WIDTH,
   ASTRONAUT_HEIGHT,
   SHARE_PROXIMITY_RADIUS,
@@ -24,129 +23,11 @@ import {
   type FuelType,
 } from "./constants.js";
 import { drawBackground, drawLander, drawAstronaut, drawDeposit, drawArrow, drawSplash, drawBubbles, DEPOSIT_COLOURS } from "./render.js";
+import { wrapX, wrapDistance, wrapLerp, wrapScreenX, generateDeposits } from "./world.js";
+import { mergeInventory } from "./inventory.js";
+import type { ArcAnimation, Deposit, RemotePlayerView, EngineState } from "./types.js";
 
-// ---------------------------------------------------------------------------
-// World wrapping — the moon is round
-// ---------------------------------------------------------------------------
-
-/** Wrap an x coordinate into [0, MOON_SURFACE_WIDTH). */
-function wrapX(x: number): number {
-  return ((x % MOON_SURFACE_WIDTH) + MOON_SURFACE_WIDTH) % MOON_SURFACE_WIDTH;
-}
-
-/** Shortest distance between two x positions on the wrapping surface. */
-function wrapDistance(a: number, b: number): number {
-  const direct = Math.abs(a - b);
-  return Math.min(direct, MOON_SURFACE_WIDTH - direct);
-}
-
-/** Lerp an X position toward a target, taking the shortest wrapping path. */
-function wrapLerp(current: number, target: number, t: number): number {
-  let diff = target - current;
-  if (diff > MOON_SURFACE_WIDTH / 2) diff -= MOON_SURFACE_WIDTH;
-  if (diff < -MOON_SURFACE_WIDTH / 2) diff += MOON_SURFACE_WIDTH;
-  return wrapX(current + diff * t);
-}
-
-/** Convert a world X to a screen X relative to the camera, with wrapping. */
-function wrapScreenX(worldX: number, cameraX: number): number {
-  let dx = worldX - cameraX;
-  if (dx < -MOON_SURFACE_WIDTH / 2) dx += MOON_SURFACE_WIDTH;
-  if (dx > MOON_SURFACE_WIDTH / 2) dx -= MOON_SURFACE_WIDTH;
-  return dx;
-}
-
-// ---------------------------------------------------------------------------
-// Arc animations — fuel shapes flying through the air
-// ---------------------------------------------------------------------------
-
-interface ArcAnimation {
-  fuelType: FuelType;
-  startX: number;   // world X
-  endX: number;     // world X
-  peakHeight: number; // pixels above ground level
-  duration: number; // seconds (game time)
-  elapsed: number;
-  onComplete?: () => void;
-}
-
-// ---------------------------------------------------------------------------
-// Fuel deposits — scattered across the moon surface
-// ---------------------------------------------------------------------------
-
-export interface Deposit {
-  id: string;
-  x: number;
-  type: FuelType;
-}
-
-/** Deterministic pseudo-random (simple sine hash). */
-function seededRand(seed: number): number {
-  const x = Math.sin(seed * 127.1 + seed * 311.7) * 43758.5453;
-  return x - Math.floor(x);
-}
-
-/**
- * Generate fuel deposits across the surface.
- * 3 of each fuel type spread evenly, plus 1 extra of the player's
- * required type placed 1/4–1/2 of the world away from the spawn point.
- * A no-spawn zone keeps deposits away from where the player lands.
- */
-function generateDeposits(requiredFuelType: FuelType, spawnX: number): Deposit[] {
-  const deposits: Deposit[] = [];
-  const noSpawnRadius = 300;
-
-  // 3 of each type, spread across the full surface
-  for (let ti = 0; ti < FUEL_TYPES.length; ti++) {
-    for (let i = 0; i < 3; i++) {
-      const seed = ti * 100 + i;
-      let x = seededRand(seed) * MOON_SURFACE_WIDTH;
-      // Push deposits out of the landing zone
-      if (wrapDistance(x, spawnX) < noSpawnRadius) {
-        x = wrapX(spawnX + noSpawnRadius + seededRand(seed + 0.7) * 1000);
-      }
-      deposits.push({ id: String(deposits.length), x, type: FUEL_TYPES[ti] });
-    }
-  }
-
-  // 1 extra of the required type, placed 1/4–1/2 world away
-  const offset = MOON_SURFACE_WIDTH / 4 + seededRand(9999) * (MOON_SURFACE_WIDTH / 4);
-  deposits.push({ id: String(deposits.length), x: wrapX(spawnX + offset), type: requiredFuelType });
-
-  return deposits;
-}
-
-// ---------------------------------------------------------------------------
-// Engine state — the snapshot exposed to React each tick
-// ---------------------------------------------------------------------------
-
-/** A remote player to render (already filtered for staleness). */
-export interface RemotePlayerView {
-  id: string;
-  name: string;
-  mode: string;
-  positionX: number;
-  positionY: number;
-  velocityY: number;
-  color: string;
-  landerX?: number;
-  requiredFuelType?: string;
-  playerId?: string;
-}
-
-export interface EngineState {
-  mode: PlayerMode;
-  positionX: number;
-  positionY: number;
-  velocityX: number;
-  velocityY: number;
-  landerX: number;
-  landerY: number;
-  fuel: number;
-  depositCount: number;
-  inventory: string[];
-  remotePlayerCount: number;
-}
+export type { Deposit, RemotePlayerView, EngineState } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // useGameEngine — runs physics, input, camera, and rendering on a canvas
@@ -245,62 +126,22 @@ export function useGameEngine(
 
   // Merge Jazz inventory into the working set each render (connected mode)
   if (options?.inventory !== undefined) {
-    const merged = new Set([
-      ...options.inventory,
-      ...optimisticInventoryRef.current,
-    ]);
-    // Exclude fuel types shared out to other players (pending Jazz confirmation)
-    for (const ft of sharedOutRef.current) {
-      merged.delete(ft);
-    }
-    inventoryRef.current = merged;
+    const result = mergeInventory({
+      jazzInventory: options.inventory,
+      optimistic: optimisticInventoryRef.current,
+      sharedOut: sharedOutRef.current,
+      collectedIds: collectedIdsRef.current,
+      prevJazzInventory: prevExternalInventoryRef.current,
+      externalDeposits: externalDepositsRef.current,
+      remotePlayers: remotePlayersRef.current,
+      playerX: posXRef.current,
+    });
 
-    // Clean up sharedOut entries Jazz has confirmed (type gone from props)
-    const propsSet = new Set(options.inventory);
-    const sharedClean: FuelType[] = [];
-    for (const ft of sharedOutRef.current) {
-      if (!propsSet.has(ft)) sharedClean.push(ft);
-    }
-    for (const ft of sharedClean) sharedOutRef.current.delete(ft);
-
-    // Detect received shares: new items in Jazz inventory that weren't
-    // optimistically collected locally → animate fuel arriving from nearest
-    // walking remote player
-    for (const ft of propsSet) {
-      if (!prevExternalInventoryRef.current.has(ft) && !optimisticInventoryRef.current.has(ft)) {
-        let nearestX = posXRef.current;
-        let nearestDist = Infinity;
-        for (const rp of remotePlayersRef.current) {
-          if (rp.mode !== "walking") continue;
-          const dist = wrapDistance(posXRef.current, rp.positionX);
-          if (dist < nearestDist) {
-            nearestDist = dist;
-            nearestX = rp.positionX;
-          }
-        }
-        arcsRef.current.push({
-          fuelType: ft,
-          startX: nearestX,
-          endX: posXRef.current,
-          peakHeight: 60 + Math.random() * 30,
-          duration: 0.5,
-          elapsed: 0,
-        });
-      }
-    }
-    prevExternalInventoryRef.current = propsSet;
-
-    // Clean up collected IDs that Jazz has confirmed (no longer in deposit list).
-    // Build a removal list first to avoid mutating the Set during iteration.
-    const toRemove: string[] = [];
-    for (const id of collectedIdsRef.current) {
-      if (!externalDepositsRef.current.some((d) => d.id === id)) {
-        toRemove.push(id);
-      }
-    }
-    for (const id of toRemove) {
-      collectedIdsRef.current.delete(id);
-    }
+    inventoryRef.current = result.merged;
+    sharedOutRef.current = result.sharedOut;
+    prevExternalInventoryRef.current = result.prevJazzInventory;
+    for (const arc of result.newArcs) arcsRef.current.push(arc);
+    for (const id of result.collectedIdsToRemove) collectedIdsRef.current.delete(id);
   }
 
   // Mirrored into state for external consumption (HUD, data attributes, Jazz)

@@ -2,10 +2,171 @@ import { useRef, useCallback, useMemo } from "react";
 import { JazzProvider, useDb, useAll } from "jazz-react";
 import type { DbConfig } from "jazz-ts";
 import { app } from "../schema/app.js";
-import { Game, type RemotePlayer, type GameState, type ChatMessage } from "./Game.js";
+import { Game } from "./Game.js";
+import type { RemotePlayer, GameState, ChatMessage } from "./game/types.js";
 import { DB_SYNC_INTERVAL_MS, FUEL_TYPES, MOON_SURFACE_WIDTH } from "./game/constants.js";
 import type { FuelType } from "./game/constants.js";
 import { useEffect } from "react";
+
+// ---------------------------------------------------------------------------
+// Jazz write helpers — each function is a self-contained DB write pattern
+// ---------------------------------------------------------------------------
+
+const STALE_THRESHOLD_S = 180; // 3 minutes
+
+/** Seed fuel deposits into the DB if none exist (after a grace period). */
+function seedDepositsIfEmpty(
+  db: ReturnType<typeof useDb>,
+  seededRef: React.MutableRefObject<boolean>,
+  deposits: Array<{ id: string }> | undefined,
+  elapsed: number,
+) {
+  const GRACE_MS = 2000;
+  if (seededRef.current || !deposits) return;
+  if (deposits.length > 0) {
+    seededRef.current = true;
+    return;
+  }
+  if (elapsed <= GRACE_MS) return;
+  seededRef.current = true;
+  const nowS = Math.floor(Date.now() / 1000);
+  for (const fuelType of FUEL_TYPES) {
+    for (let i = 0; i < 3; i++) {
+      db.insert(app.fuel_deposits, {
+        fuelType,
+        positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
+        createdAt: nowS,
+        collected: false,
+        collectedBy: "",
+      });
+    }
+  }
+}
+
+/** Sync local player state to Jazz (insert or update). */
+function syncPlayerState(
+  db: ReturnType<typeof useDb>,
+  playerId: string,
+  state: GameState | null,
+  dbRowIdRef: React.MutableRefObject<string | null>,
+  localPlayerRows: Array<{ id: string }>,
+  elapsed: number,
+) {
+  if (!state) return;
+  const GRACE_MS = 2000;
+  const playerData = {
+    playerId,
+    name: state.playerName,
+    color: state.playerColor,
+    mode: state.mode,
+    online: true,
+    lastSeen: Math.floor(Date.now() / 1000),
+    positionX: state.positionX,
+    positionY: state.positionY,
+    velocityX: state.velocityX,
+    velocityY: state.velocityY,
+    requiredFuelType: state.requiredFuelType,
+    landerFuelLevel: state.fuel,
+    landerSpawnX: state.landerSpawnX,
+  };
+
+  if (!dbRowIdRef.current && localPlayerRows.length > 0) {
+    dbRowIdRef.current = localPlayerRows[0].id;
+  }
+
+  if (dbRowIdRef.current) {
+    db.update(app.players, dbRowIdRef.current, playerData);
+  } else if (elapsed > GRACE_MS) {
+    dbRowIdRef.current = db.insert(app.players, playerData);
+  }
+}
+
+/** Write pending deposit collections to Jazz. */
+function flushDepositCollections(
+  db: ReturnType<typeof useDb>,
+  playerId: string,
+  pending: React.MutableRefObject<string[]>,
+) {
+  for (const depId of pending.current.splice(0)) {
+    db.update(app.fuel_deposits, depId, {
+      collected: true,
+      collectedBy: playerId,
+    });
+  }
+}
+
+/** Write pending refuel consumptions to Jazz. */
+function flushRefuelConsumptions(
+  db: ReturnType<typeof useDb>,
+  playerId: string,
+  pending: React.MutableRefObject<FuelType[]>,
+  deposits: Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }> | undefined,
+) {
+  for (const fuelType of pending.current.splice(0)) {
+    if (!deposits) continue;
+    const dep = deposits.find(
+      (d) => d.collected && d.collectedBy === playerId && d.fuelType === fuelType,
+    );
+    if (dep) {
+      db.update(app.fuel_deposits, dep.id, { collectedBy: "" });
+    }
+  }
+}
+
+/** Write pending fuel shares to Jazz. */
+function flushFuelShares(
+  db: ReturnType<typeof useDb>,
+  playerId: string,
+  pending: React.MutableRefObject<Array<{ fuelType: string; receiverPlayerId: string }>>,
+  deposits: Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }> | undefined,
+) {
+  for (const share of pending.current.splice(0)) {
+    if (!deposits) continue;
+    const dep = deposits.find(
+      (d) => d.collected && d.collectedBy === playerId && d.fuelType === share.fuelType,
+    );
+    if (dep) {
+      db.update(app.fuel_deposits, dep.id, { collectedBy: share.receiverPlayerId });
+    }
+  }
+}
+
+/** Write pending burst deposits to Jazz. */
+function flushBurstDeposits(
+  db: ReturnType<typeof useDb>,
+  playerId: string,
+  pending: React.MutableRefObject<Array<{ fuelType: string; newX: number }>>,
+  deposits: Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }> | undefined,
+) {
+  for (const burst of pending.current.splice(0)) {
+    if (!deposits) continue;
+    const dep = deposits.find(
+      (d) => d.collected && d.collectedBy === playerId && d.fuelType === burst.fuelType,
+    );
+    if (dep) {
+      db.update(app.fuel_deposits, dep.id, {
+        collected: false,
+        collectedBy: "",
+        positionX: Math.floor(burst.newX),
+      });
+    }
+  }
+}
+
+/** Write pending chat messages to Jazz. */
+function flushChatMessages(
+  db: ReturnType<typeof useDb>,
+  playerId: string,
+  pending: React.MutableRefObject<string[]>,
+) {
+  for (const text of pending.current.splice(0)) {
+    db.insert(app.chat_messages, {
+      playerId,
+      message: text,
+      createdAt: Math.floor(Date.now() / 1000),
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GameWithSync — bridges Game ↔ Jazz DB
@@ -82,125 +243,15 @@ function GameWithSync({
   // Flush all DB writes in a single setInterval (player sync + deposit collection + seeding)
   useEffect(() => {
     const id = setInterval(() => {
-      const GRACE_MS = 2000;
       const elapsed = Date.now() - mountedAtRef.current;
 
-      // --- Seed deposits if DB is empty (after grace period) ---
-      if (!seededRef.current && allDepositsRef.current) {
-        if (allDepositsRef.current.length > 0) {
-          seededRef.current = true;
-        } else if (elapsed > GRACE_MS) {
-          seededRef.current = true;
-          const nowS = Math.floor(Date.now() / 1000);
-          for (const fuelType of FUEL_TYPES) {
-            for (let i = 0; i < 3; i++) {
-              db.insert(app.fuel_deposits, {
-                fuelType,
-                positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
-                createdAt: nowS,
-                collected: false,
-                collectedBy: "",
-              });
-            }
-          }
-        }
-      }
-
-      // --- Player state sync (after grace period to find existing row) ---
-      const state = latestStateRef.current;
-      if (state) {
-        const playerData = {
-          playerId,
-          name: state.playerName,
-          color: state.playerColor,
-          mode: state.mode,
-          online: true,
-          lastSeen: Math.floor(Date.now() / 1000),
-          positionX: state.positionX,
-          positionY: state.positionY,
-          velocityX: state.velocityX,
-          velocityY: state.velocityY,
-          requiredFuelType: state.requiredFuelType,
-          landerFuelLevel: state.fuel,
-          landerSpawnX: state.landerSpawnX,
-        };
-
-        if (!dbRowIdRef.current && localPlayerRowsRef.current.length > 0) {
-          dbRowIdRef.current = localPlayerRowsRef.current[0].id;
-        }
-
-        // Wait for grace period before inserting a new row — gives the
-        // subscription time to deliver the existing row from OPFS/server.
-        if (dbRowIdRef.current) {
-          db.update(app.players, dbRowIdRef.current, playerData);
-        } else if (elapsed > GRACE_MS) {
-          dbRowIdRef.current = db.insert(app.players, playerData);
-        }
-      }
-
-      // --- Deposit collection writes ---
-      for (const depId of pendingCollectionsRef.current.splice(0)) {
-        db.update(app.fuel_deposits, depId, {
-          collected: true,
-          collectedBy: playerId,
-        });
-      }
-
-      // --- Refuel consumption writes ---
-      // Mark consumed deposits as used: collectedBy="" keeps collected=true
-      // so they don't reappear on the surface or in any player's inventory
-      for (const fuelType of pendingRefuelsRef.current.splice(0)) {
-        const deposits = allDepositsRef.current;
-        if (!deposits) continue;
-        const dep = deposits.find(
-          (d) => d.collected && d.collectedBy === playerId && d.fuelType === fuelType,
-        );
-        if (dep) {
-          db.update(app.fuel_deposits, dep.id, {
-            collectedBy: "",
-          });
-        }
-      }
-
-      // --- Share writes ---
-      // Transfer fuel: rewrite collectedBy from local player to receiver
-      for (const share of pendingSharesRef.current.splice(0)) {
-        const deposits = allDepositsRef.current;
-        if (!deposits) continue;
-        const dep = deposits.find(
-          (d) => d.collected && d.collectedBy === playerId && d.fuelType === share.fuelType,
-        );
-        if (dep) {
-          db.update(app.fuel_deposits, dep.id, {
-            collectedBy: share.receiverPlayerId,
-          });
-        }
-      }
-
-      // --- Burst writes ---
-      // Eject deposits back to surface: mark uncollected at new position
-      for (const burst of pendingBurstsRef.current.splice(0)) {
-        const deposits = allDepositsRef.current;
-        if (!deposits) continue;
-        const dep = deposits.find(
-          (d) => d.collected && d.collectedBy === playerId && d.fuelType === burst.fuelType,
-        );
-        if (dep) {
-          db.update(app.fuel_deposits, dep.id, {
-            collected: false,
-            collectedBy: "",
-            positionX: Math.floor(burst.newX),
-          });
-        }
-      }
-      // --- Chat message writes ---
-      for (const text of pendingMessagesRef.current.splice(0)) {
-        db.insert(app.chat_messages, {
-          playerId,
-          message: text,
-          createdAt: Math.floor(Date.now() / 1000),
-        });
-      }
+      seedDepositsIfEmpty(db, seededRef, allDepositsRef.current, elapsed);
+      syncPlayerState(db, playerId, latestStateRef.current, dbRowIdRef, localPlayerRowsRef.current, elapsed);
+      flushDepositCollections(db, playerId, pendingCollectionsRef);
+      flushRefuelConsumptions(db, playerId, pendingRefuelsRef, allDepositsRef.current);
+      flushFuelShares(db, playerId, pendingSharesRef, allDepositsRef.current);
+      flushBurstDeposits(db, playerId, pendingBurstsRef, allDepositsRef.current);
+      flushChatMessages(db, playerId, pendingMessagesRef);
     }, DB_SYNC_INTERVAL_MS);
 
     return () => clearInterval(id);
@@ -242,22 +293,26 @@ function GameWithSync({
 
   // Map Jazz subscription → RemotePlayer[] for Game.
   // Jazz query already excludes the local player (ne filter).
+  // Staleness filter applied here so Game receives only active players.
   const remotePlayers: RemotePlayer[] = useMemo(() => {
-    return remotePlayerRows.map((p) => ({
-      id: p.id,
-      name: p.name,
-      mode: p.mode as RemotePlayer["mode"],
-      positionX: p.positionX,
-      positionY: p.positionY,
-      velocityX: p.velocityX,
-      velocityY: p.velocityY,
-      color: p.color,
-      requiredFuelType: p.requiredFuelType,
-      lastSeen: p.lastSeen,
-      landerFuelLevel: p.landerFuelLevel,
-      playerId: p.playerId,
-      landerX: p.landerSpawnX,
-    }));
+    const nowS = Math.floor(Date.now() / 1000);
+    return remotePlayerRows
+      .filter((p) => nowS - p.lastSeen < STALE_THRESHOLD_S)
+      .map((p) => ({
+        id: p.id,
+        name: p.name,
+        mode: p.mode as RemotePlayer["mode"],
+        positionX: p.positionX,
+        positionY: p.positionY,
+        velocityX: p.velocityX,
+        velocityY: p.velocityY,
+        color: p.color,
+        requiredFuelType: p.requiredFuelType,
+        lastSeen: p.lastSeen,
+        landerFuelLevel: p.landerFuelLevel,
+        playerId: p.playerId,
+        landerX: p.landerSpawnX,
+      }));
   }, [remotePlayerRows]);
 
   return (

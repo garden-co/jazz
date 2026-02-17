@@ -4,51 +4,10 @@ import type { RemotePlayerView, Deposit } from "./game/engine.js";
 import { getOrCreatePlayerId, derivePlayerProps } from "./game/player.js";
 import { Hud } from "./game/Hud.js";
 import type { PlayerMode, FuelType } from "./game/constants.js";
-
-// ---------------------------------------------------------------------------
-// Types — the contract between Game and the Jazz sync layer (App.tsx)
-// ---------------------------------------------------------------------------
+import type { GameState, RemotePlayer, ChatMessage } from "./game/types.js";
 
 export type { PlayerMode, FuelType };
-
-/** State pushed to Jazz on each sync tick. */
-export interface GameState {
-  mode: PlayerMode;
-  positionX: number;
-  positionY: number;
-  velocityX: number;
-  velocityY: number;
-  fuel: number;
-  landerSpawnX: number;
-  playerName: string;
-  playerColor: string;
-  requiredFuelType: FuelType;
-}
-
-/** A remote player received from Jazz and rendered in the game world. */
-export interface RemotePlayer {
-  id: string;
-  name: string;
-  mode: PlayerMode;
-  positionX: number;
-  positionY: number;
-  velocityX: number;
-  velocityY: number;
-  color: string;
-  requiredFuelType: string;
-  lastSeen: number;
-  landerFuelLevel: number;
-  playerId?: string;
-  landerX?: number;
-}
-
-/** A chat message from Jazz. */
-export interface ChatMessage {
-  id: string;
-  playerId: string;
-  message: string;
-  createdAt: number;
-}
+export type { GameState, RemotePlayer, ChatMessage } from "./game/types.js";
 
 // ---------------------------------------------------------------------------
 // Game component
@@ -68,8 +27,6 @@ interface GameProps {
   onStateChange?: (state: GameState) => void;
 }
 
-const STALE_THRESHOLD_S = 180; // 3 minutes
-
 export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMessages, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onSendMessage, onStateChange }: GameProps) {
   const playerId = useRef(getOrCreatePlayerId()).current;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
@@ -81,24 +38,21 @@ export function Game({ physicsSpeed, remotePlayers, deposits, inventory, chatMes
   const chatOpenRef = useRef(false);
   chatOpenRef.current = chatOpen;
 
-  // Filter stale remote players (Jazz concern, not engine's job)
+  // Map RemotePlayer → RemotePlayerView (staleness already filtered in App.tsx)
   const activeRemotes: RemotePlayerView[] = useMemo(() => {
     if (!remotePlayers) return [];
-    const nowS = Math.floor(Date.now() / 1000);
-    return remotePlayers
-      .filter((rp) => nowS - rp.lastSeen < STALE_THRESHOLD_S)
-      .map((rp) => ({
-        id: rp.id,
-        name: rp.name,
-        mode: rp.mode,
-        positionX: rp.positionX,
-        positionY: rp.positionY,
-        velocityY: rp.velocityY,
-        color: rp.color,
-        landerX: rp.landerX,
-        requiredFuelType: rp.requiredFuelType,
-        playerId: rp.playerId,
-      }));
+    return remotePlayers.map((rp) => ({
+      id: rp.id,
+      name: rp.name,
+      mode: rp.mode,
+      positionX: rp.positionX,
+      positionY: rp.positionY,
+      velocityY: rp.velocityY,
+      color: rp.color,
+      landerX: rp.landerX,
+      requiredFuelType: rp.requiredFuelType,
+      playerId: rp.playerId,
+    }));
   }, [remotePlayers]);
 
   const engine = useGameEngine(canvasRef, {
