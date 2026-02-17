@@ -6,10 +6,14 @@ import { spawn } from "child_process";
 import { access, readdir, writeFile } from "fs/promises";
 import { join, basename, dirname } from "path";
 import { pathToFileURL } from "url";
+import { register } from "tsx/esm/api";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
 import type { Lens } from "./schema.js";
+
+// Allow loading `.ts` schema files when invoked via `node dist/cli.js`.
+register();
 
 interface BuildOptions {
   jazzBin: string;
