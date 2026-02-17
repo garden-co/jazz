@@ -22,15 +22,26 @@ crates=(
   "jazz-tools:2.0.0-alpha.0"
 )
 
+crate_version_exists() {
+  local name="$1"
+  local expected_version="$2"
+  local response
+
+  response="$(curl -fsS "https://crates.io/api/v1/crates/${name}/${expected_version}" 2>/dev/null || true)"
+  if [[ -z "$response" ]]; then
+    return 1
+  fi
+
+  jq -e --arg version "$expected_version" '.version.num == $version' >/dev/null <<<"$response"
+}
+
 wait_for_index() {
   local name="$1"
   local expected_version="$2"
 
   for _ in {1..60}; do
-    local published
-    published="$(curl -s "https://crates.io/api/v1/crates/${name}" | jq -r '.crate.max_version // empty')"
-    if [[ "$published" == "$expected_version" ]]; then
-      echo "crates.io index now has ${name}@${published}"
+    if crate_version_exists "$name" "$expected_version"; then
+      echo "crates.io index now has ${name}@${expected_version}"
       return 0
     fi
     sleep 5
@@ -55,8 +66,20 @@ for crate_spec in "${crates[@]}"; do
     continue
   fi
 
+  if crate_version_exists "$name" "$version"; then
+    echo "==> ${name}@${version} already published, skipping"
+    continue
+  fi
+
   echo "==> cargo publish -p ${name} (publish)"
-  cargo publish -p "$name" --allow-dirty
+  if ! cargo publish -p "$name" --allow-dirty; then
+    if crate_version_exists "$name" "$version"; then
+      echo "==> ${name}@${version} is now published (likely by another run), continuing"
+      continue
+    fi
+    echo "==> failed to publish ${name}@${version}"
+    exit 1
+  fi
 
   wait_for_index "$name" "$version"
 done

@@ -148,4 +148,4 @@ jobs:
           node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));if(!/^2\.0\.0-alpha\.\d+$/.test(p.version)){throw new Error(`Expected 2.0.0-alpha.N, got ${p.version}`);}console.log(`Publishing ${p.name}@${p.version}`);'
 
       - name: Publish jazz-tools (alpha tag)
-        run: npm publish ./packages/jazz-tools --tag alpha --access public --provenance
+        run: npm publish ./packages/jazz-tools --tag alpha --access public
