@@ -24,8 +24,8 @@
 //! | `/todos/:id` | DELETE | Delete item |
 //! | `/updates` | GET | SSE stream of add/remove events |
 
-mod routes;
 mod docs_snippets;
+mod routes;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
