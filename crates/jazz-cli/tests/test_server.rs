@@ -1,6 +1,6 @@
 //! Test server infrastructure for self-spawning integration tests.
 //!
-//! Spawns the jazz binary as a subprocess and waits for it to become ready.
+//! Spawns the jazz-tools binary as a subprocess and waits for it to become ready.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -64,7 +64,7 @@ impl TestServer {
         server
     }
 
-    /// Find the jazz binary in cargo's target directory.
+    /// Find the jazz-tools binary in cargo's target directory.
     fn find_jazz_binary() -> PathBuf {
         // Get the path to the test binary, which gives us the target directory
         let exe = std::env::current_exe().expect("get current exe");
@@ -73,14 +73,14 @@ impl TestServer {
             .and_then(|p| p.parent()) // debug or release
             .expect("find target dir");
 
-        let jazz_path = target_dir.join("jazz");
+        let jazz_path = target_dir.join("jazz-tools");
         if jazz_path.exists() {
             return jazz_path;
         }
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-cli` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
             jazz_path
         );
     }

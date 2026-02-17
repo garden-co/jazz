@@ -1,4 +1,4 @@
-import { JazzProvider, type JazzProviderProps } from "jazz-react";
+import { JazzProvider, type JazzProviderProps } from "jazz-tools/react";
 import { TodoList } from "./TodoList.js";
 
 function readEnvAppId(): string | undefined {

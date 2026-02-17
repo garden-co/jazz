@@ -1,14 +1,15 @@
-//! E2E integration tests for jazz-cli server.
+//! E2E integration tests for jazz-tools server.
 //!
-//! These tests spawn the actual `jazz` binary and interact via HTTP
+//! These tests spawn the actual `jazz-tools` binary and interact via HTTP
 //! with binary length-prefixed streaming.
 
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use jazz_transport::ServerEvent;
+use groove::jazz_transport::ServerEvent;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -54,7 +55,9 @@ impl TestServer {
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
 
-        let process = Command::new(env!("CARGO_BIN_EXE_jazz"))
+        let jazz_binary = Self::find_jazz_binary();
+
+        let process = Command::new(&jazz_binary)
             .args([
                 "server",
                 app_id,
@@ -67,7 +70,12 @@ impl TestServer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn jazz server");
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to spawn jazz-tools server at {:?}: {}",
+                    jazz_binary, e
+                )
+            });
 
         let server = Self {
             process,
@@ -83,6 +91,25 @@ impl TestServer {
 
     fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn find_jazz_binary() -> PathBuf {
+        // Get the path to the test binary, which gives us the target directory.
+        let exe = std::env::current_exe().expect("get current exe");
+        let target_dir = exe
+            .parent() // deps
+            .and_then(|p| p.parent()) // debug or release
+            .expect("find target dir");
+
+        let jazz_path = target_dir.join("jazz-tools");
+        if jazz_path.exists() {
+            return jazz_path;
+        }
+
+        panic!(
+            "jazz-tools binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
+            jazz_path
+        );
     }
 
     async fn wait_ready(&self) {

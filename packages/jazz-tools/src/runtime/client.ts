@@ -689,7 +689,7 @@ export async function loadWasmModule(): Promise<WasmModule> {
     // Find the .wasm file relative to the groove-wasm package
     const wasmPath = join(
       dirname(fileURLToPath(import.meta.url)),
-      "../../node_modules/groove-wasm/groove_wasm_bg.wasm",
+      "../../node_modules/groove-wasm/pkg/groove_wasm_bg.wasm",
     );
     const wasmBytes = readFileSync(wasmPath);
     wasmModule.initSync(wasmBytes);

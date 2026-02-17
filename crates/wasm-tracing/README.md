@@ -1,6 +1,8 @@
-# `wasm-tracing`
+# `jazz-wasm-tracing`
 
 A maintained fork of [`tracing-wasm`](https://github.com/old-storyai/tracing-wasm) that is compatible with the latest `tracing` and `wasm-bindgen` versions.
+
+Published as `jazz-wasm-tracing` while upstreaming improvements.
 
 Leverage performance profiling with your browser tools with the [tracing crate](https://crates.io/crates/tracing).
 
@@ -9,8 +11,8 @@ Leverage performance profiling with your browser tools with the [tracing crate](
 [![MIT licensed][mit-badge]][mit-url]
 [![APACHE licensed][apache-2-badge]][apache-2-url]
 
-[crates-badge]: https://img.shields.io/crates/v/wasm-tracing.svg
-[crates-url]: https://crates.io/crates/wasm-tracing
+[crates-badge]: https://img.shields.io/crates/v/jazz-wasm-tracing.svg
+[crates-url]: https://crates.io/crates/jazz-wasm-tracing
 [docs-badge]: https://docs.rs/wasm-tracing/badge.svg
 [docs-url]: https://docs.rs/wasm-tracing
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
