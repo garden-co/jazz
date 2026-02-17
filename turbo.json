@@ -6,6 +6,17 @@
       "outputs": ["dist/**", "target/**", "pkg/**"],
       "env": ["JAZZ_NAPI_RELEASE"]
     },
+    "docs#build": {
+      "dependsOn": [
+        "todo-client-localfirst-react#build",
+        "todo-client-localfirst-ts#build",
+        "todo-server-ts#build"
+      ],
+      "outputs": [".next/**", "!.next/cache/**"]
+    },
+    "jazz-napi#build": {
+      "outputs": ["jazz-napi.node", "index.d.ts"]
+    },
     "build:crates": {
       "dependsOn": ["^build:crates"],
       "outputs": ["../target/debug/jazz*"]
