@@ -5,6 +5,7 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
+    "push:image:local": "./push-multi-server.sh",
     "preview": "pulumi preview",
     "up": "pulumi up"
   },
