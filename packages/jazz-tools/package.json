@@ -1,0 +1,24 @@
+{
+  "name": "jazz-tools",
+  "version": "2.0.0-alpha.0",
+  "description": "Jazz 2 command line tools",
+  "bin": {
+    "jazz-tools": "bin/jazz-tools.js"
+  },
+  "files": [
+    "bin/**",
+    "README.md"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "scripts": {
+    "stage:local": "node scripts/stage-local-binary.mjs",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
