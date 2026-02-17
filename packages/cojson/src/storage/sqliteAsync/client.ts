@@ -320,13 +320,14 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     return rows.map((r) => r.id);
   }
 
-  async transaction(
-    operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
-  ): Promise<unknown> {
-    return this.enqueueTx(() =>
-      this.db.transaction((tx) =>
-        operationsCallback(new SQLiteTransactionAsync(tx)),
-      ),
+  async transaction<T>(
+    operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<T>,
+  ): Promise<T> {
+    return this.enqueueTx(
+      () =>
+        this.db.transaction((tx) =>
+          operationsCallback(new SQLiteTransactionAsync(tx)),
+        ) as Promise<T>,
     );
   }
 

@@ -13,6 +13,7 @@ import {
 } from "../storage/sqliteAsync";
 import { SyncMessagesLog } from "./testUtils";
 import { knownStateFromContent } from "../coValueContentMessage";
+import { NewContentMessage } from "../sync";
 
 class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
   private readonly db: DatabaseT;
@@ -214,6 +215,7 @@ function trackStorageMessages(
   storageName: string,
 ) {
   const originalStore = storage.store;
+  const originalStoreAtomicBatch = storage.storeAtomicBatch;
   const originalLoad = storage.load;
   const originalLoadKnownState = storage.loadKnownState;
 
@@ -286,6 +288,19 @@ function trackStorageMessages(
 
       return correctionMessages;
     });
+  };
+
+  storage.storeAtomicBatch = async function (messages: NewContentMessage[]) {
+    SyncMessagesLog.add({
+      from: nodeName,
+      to: storageName,
+      msg: {
+        action: "batch",
+        messages,
+      },
+    });
+
+    return originalStoreAtomicBatch.call(storage, messages);
   };
 
   storage.load = function (id, callback, done) {

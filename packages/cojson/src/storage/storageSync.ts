@@ -289,6 +289,7 @@ export class StorageApiSync implements StorageAPI {
   private handleCorrection(
     knownState: CoValueKnownState,
     correctionCallback: CorrectionCallback,
+    tx?: DBTransactionInterfaceSync,
   ) {
     const correction = correctionCallback(knownState);
 
@@ -300,13 +301,17 @@ export class StorageApiSync implements StorageAPI {
     }
 
     for (const msg of correction) {
-      const success = this.storeSingle(msg, (knownState) => {
-        logger.error("Double correction requested", {
-          msg,
-          knownState,
-        });
-        return undefined;
-      });
+      const success = this.storeSingle(
+        msg,
+        (knownState) => {
+          logger.error("Double correction requested", {
+            msg,
+            knownState,
+          });
+          return undefined;
+        },
+        tx,
+      );
 
       if (!success) {
         return false;
@@ -319,15 +324,30 @@ export class StorageApiSync implements StorageAPI {
   private storeSingle(
     msg: NewContentMessage,
     correctionCallback: CorrectionCallback,
+    tx?: DBTransactionInterfaceSync,
   ): boolean {
+    // utility to run a callback in an existing transaction
+    // or create a new one on every call
+    const runInTransaction = <T>(
+      callback: (tx: DBTransactionInterfaceSync) => T,
+    ): T => {
+      if (tx) {
+        return callback(tx);
+      }
+
+      return this.dbClient.transaction((tx) => callback(tx));
+    };
+
     const id = msg.id;
-    const storedCoValueRowID = this.dbClient.upsertCoValue(id, msg.header);
+    const storedCoValueRowID = runInTransaction((tx) =>
+      tx.upsertCoValue(id, msg.header),
+    );
 
     if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
 
-      return this.handleCorrection(knownState, correctionCallback);
+      return this.handleCorrection(knownState, correctionCallback, tx);
     }
 
     const knownState = this.knownStates.getKnownState(id);
@@ -336,21 +356,35 @@ export class StorageApiSync implements StorageAPI {
     let invalidAssumptions = false;
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      this.dbClient.transaction((tx) => {
-        const sessionHadInvalidAssumptions = this.applyMessageForSession(
-          tx,
-          msg,
-          sessionID,
-          knownState,
+      runInTransaction((tx) => {
+        if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
+          tx.markCoValueAsDeleted(id);
+        }
+
+        const sessionRow = tx.getSingleCoValueSession(
           storedCoValueRowID,
-          {
-            allowInvalidAssumptions: true,
-            coValueId: id as RawCoID,
-          },
+          sessionID,
         );
 
-        if (sessionHadInvalidAssumptions) {
+        if (sessionRow) {
+          setSessionCounter(
+            knownState.sessions,
+            sessionRow.sessionID,
+            sessionRow.lastIdx,
+          );
+        }
+
+        if ((sessionRow?.lastIdx || 0) < (msg.new[sessionID]?.after || 0)) {
           invalidAssumptions = true;
+        } else {
+          const newLastIdx = this.putNewTxs(
+            tx,
+            msg,
+            sessionID,
+            sessionRow,
+            storedCoValueRowID,
+          );
+          setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
       });
     }
@@ -360,71 +394,10 @@ export class StorageApiSync implements StorageAPI {
     this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
-      return this.handleCorrection(knownState, correctionCallback);
+      return this.handleCorrection(knownState, correctionCallback, tx);
     }
 
     return true;
-  }
-
-  /**
-   * Apply a single message to storage for a specific session within an existing
-   * transaction. Shared implementation between single-message and atomic-batch
-   * paths to avoid duplication.
-   *
-   * @returns true if this session had invalid assumptions (only when
-   *          allowInvalidAssumptions is true), otherwise false.
-   */
-  private applyMessageForSession(
-    tx: DBTransactionInterfaceSync,
-    msg: NewContentMessage,
-    sessionID: SessionID,
-    knownState: CoValueKnownState,
-    storedCoValueRowID: number,
-    options: { allowInvalidAssumptions: boolean; coValueId: RawCoID },
-  ): boolean {
-    const { allowInvalidAssumptions, coValueId } = options;
-
-    const sessionRow = tx.getSingleCoValueSession(
-      storedCoValueRowID,
-      sessionID,
-    );
-
-    if (this.deletedValues.has(coValueId) && isDeleteSessionID(sessionID)) {
-      tx.markCoValueAsDeleted(coValueId);
-    }
-
-    if (sessionRow) {
-      setSessionCounter(
-        knownState.sessions,
-        sessionRow.sessionID,
-        sessionRow.lastIdx,
-      );
-    }
-
-    const lastIdx = sessionRow?.lastIdx || 0;
-    const after = msg.new[sessionID]?.after || 0;
-
-    if (lastIdx < after) {
-      if (!allowInvalidAssumptions) {
-        // In atomic batches we expect to have all required data; treat this as an error.
-        throw new Error(
-          `Invalid state assumption for ${coValueId}: lastIdx ${lastIdx} < after ${after}`,
-        );
-      }
-
-      return true;
-    }
-
-    const newLastIdx = this.putNewTxs(
-      tx,
-      msg,
-      sessionID,
-      sessionRow,
-      storedCoValueRowID,
-    );
-    setSessionCounter(knownState.sessions, sessionID, newLastIdx);
-
-    return false;
   }
 
   private putNewTxs(
@@ -577,51 +550,9 @@ export class StorageApiSync implements StorageAPI {
 
     this.dbClient.transaction((tx) => {
       for (const msg of messages) {
-        this.storeMessageInTransaction(tx, msg);
+        this.storeSingle(msg, () => undefined, tx);
       }
     });
-
-    // Update known states after successful commit
-    for (const msg of messages) {
-      this.inMemoryCoValues.add(msg.id);
-    }
-  }
-
-  /**
-   * Store a single message within an existing transaction context.
-   * Used by storeAtomicBatch to store multiple messages atomically.
-   */
-  private storeMessageInTransaction(
-    tx: DBTransactionInterfaceSync,
-    msg: NewContentMessage,
-  ): void {
-    const id = msg.id;
-
-    // Upsert the CoValue header (must happen outside transaction for some DBs)
-    const storedCoValueRowID = this.dbClient.upsertCoValue(id, msg.header);
-
-    if (!storedCoValueRowID) {
-      throw new Error(`Failed to upsert CoValue ${id} in atomic batch`);
-    }
-
-    const knownState = this.knownStates.getKnownState(id);
-    knownState.header = true;
-
-    for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      this.applyMessageForSession(
-        tx,
-        msg,
-        sessionID,
-        knownState,
-        storedCoValueRowID,
-        {
-          allowInvalidAssumptions: false,
-          coValueId: id as RawCoID,
-        },
-      );
-    }
-
-    this.knownStates.handleUpdate(id, knownState);
   }
 
   close() {

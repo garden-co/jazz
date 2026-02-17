@@ -518,7 +518,11 @@ export function setupTestNode(
     });
     node.setStorage(storage);
 
-    return { storage };
+    return {
+      storage,
+      // @ts-expect-error - dbClient is private
+      dbClient: storage.dbClient,
+    };
   }
 
   if (opts.connected) {
@@ -655,7 +659,11 @@ export async function setupTestAccount(
     });
     ctx.node.setStorage(storage);
 
-    return { storage };
+    return {
+      storage,
+      // @ts-expect-error - dbClient is private
+      dbClient: storage.dbClient,
+    };
   }
 
   if (opts.connected) {

@@ -587,6 +587,69 @@ describe("StorageApiSync", () => {
       const finalMap = await loadCoValueOrFail(client.node, mapOnNode2.id);
       expect(finalMap.core.knownState()).toEqual(knownState);
     });
+
+    test("should store coValue with multiple sessions in a single transaction", async () => {
+      const clientStorage = createSyncStorage({
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+
+      const transactionSpy = vi.spyOn(
+        // @ts-expect-error - dbClient is private
+        clientStorage.dbClient,
+        "transaction",
+      );
+
+      const fixtures = setupTestNode();
+      fixtures.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: clientStorage,
+      });
+      // Create a real group and get its content message
+      const group = fixtures.node.createGroup();
+      const map = group.createMap();
+      map.set("key", "value", "trusting");
+
+      const groupMessage = getNewContentSince(
+        group.core,
+        emptyKnownState(group.id),
+      );
+
+      const mapMessage = getNewContentSince(map.core, emptyKnownState(map.id));
+
+      // Get initial known state
+      const initialGroupKnownState = storage.getKnownState(group.id);
+      expect(initialGroupKnownState).toEqual(emptyKnownState(group.id));
+      const initialMapKnownState = storage.getKnownState(map.id);
+      expect(initialMapKnownState).toEqual(emptyKnownState(map.id));
+
+      storage.storeAtomicBatch([groupMessage, mapMessage]);
+
+      // all stores should be in the same transaction
+      expect(transactionSpy).toHaveBeenCalledTimes(1);
+
+      // Verify that storage known state is updated after store
+      const updatedKnownState = storage.getKnownState(group.id);
+      expect(updatedKnownState).toEqual(group.core.knownState());
+
+      const updatedMapKnownState = storage.getKnownState(map.id);
+      expect(updatedMapKnownState).toEqual(map.core.knownState());
+
+      client.addStorage({ storage });
+
+      const groupOnNode = await loadCoValueOrFail(client.node, group.id);
+
+      expect(groupOnNode.core.verified.header).toEqual(
+        group.core.verified.header,
+      );
+    });
   });
 
   describe("delete flow", () => {

@@ -248,6 +248,8 @@ export interface DBClientInterfaceAsync {
 }
 
 export interface DBTransactionInterfaceSync {
+  upsertCoValue(id: RawCoID, header?: CoValueHeader): number | undefined;
+
   getSingleCoValueSession(
     coValueRowId: number,
     sessionID: SessionID,
@@ -308,7 +310,7 @@ export interface DBClientInterfaceSync {
     firstNewTxIdx: number,
   ): Pick<SignatureAfterRow, "idx" | "signature">[];
 
-  transaction(callback: (tx: DBTransactionInterfaceSync) => unknown): unknown;
+  transaction<T>(callback: (tx: DBTransactionInterfaceSync) => T): T;
 
   trackCoValuesSyncState(
     updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],

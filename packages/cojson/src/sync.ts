@@ -1113,7 +1113,13 @@ export class SyncManager {
     });
 
     // Wait for both to complete
-    await Promise.allSettled([storagePromise, syncPromise]);
+    await Promise.allSettled([storagePromise, syncPromise]).then((results) => {
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.error(result.reason);
+        }
+      }
+    });
   }
 
   private syncQueue = new LocalTransactionsSyncQueue((contents) => {
