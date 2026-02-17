@@ -5,6 +5,7 @@
     "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build",
     "test": "turbo run test",
+    "bench:realistic:render": "node benchmarks/realistic/render_deltas.mjs",
     "postinstall": "lefthook install"
   },
   "devDependencies": {
