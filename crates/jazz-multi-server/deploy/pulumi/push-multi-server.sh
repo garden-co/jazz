@@ -9,7 +9,7 @@ Usage:
   ./push-multi-server.sh [options]
 
 Options:
-  --stack <name>        Pulumi stack (default: cloud2)
+  --stack <name>        Pulumi stack (short name or org/project/stack; default: cloud2)
   --tag <tag>           Image tag (default: sha-<short git sha>)
   --image <uri>         Full image URI override
   --repo <name>         ECR repository name (default: jazz-multi-server)
@@ -143,17 +143,18 @@ if [[ "${NO_CONFIG_UPDATE}" -eq 0 ]]; then
   cd "${SCRIPT_DIR}"
 
   pulumi stack select "${STACK}" >/dev/null 2>&1 || pulumi stack init "${STACK}"
+  SELECTED_STACK="$(pulumi stack --show-name)"
 
-  pulumi config set containerImageRepository "${REGISTRY}/${IMAGE_REPO}" --stack "${STACK}"
-  pulumi config set containerImageTag "${IMAGE_TAG}" --stack "${STACK}"
+  pulumi config set containerImageRepository "${REGISTRY}/${IMAGE_REPO}"
+  pulumi config set containerImageTag "${IMAGE_TAG}"
 
   # Ensure repo+tag drives deploys; this key would otherwise take precedence.
-  if pulumi config get containerImage --stack "${STACK}" >/dev/null 2>&1; then
-    pulumi config rm containerImage --stack "${STACK}" || true
+  if pulumi config get containerImage >/dev/null 2>&1; then
+    pulumi config rm containerImage || true
   fi
 
-  echo "Updated Pulumi stack '${STACK}' image config:"
+  echo "Updated Pulumi stack '${SELECTED_STACK}' image config:"
   echo "  containerImageRepository=${REGISTRY}/${IMAGE_REPO}"
   echo "  containerImageTag=${IMAGE_TAG}"
-  echo "Run: pulumi up --stack ${STACK}"
+  echo "Run: pulumi up"
 fi

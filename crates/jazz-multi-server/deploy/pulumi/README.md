@@ -64,24 +64,29 @@ aws sts get-caller-identity --profile <your-profile>
 Select or create stack:
 
 ```bash
+# Use short name if it works in your setup:
 pulumi stack select cloud2 || pulumi stack init cloud2
+
+# If Pulumi asks for a fully qualified stack, use:
+# pulumi stack select <org>/jazz-multi-server-cloud2/cloud2 || \
+#   pulumi stack init <org>/jazz-multi-server-cloud2/cloud2
 ```
 
 Set baseline non-secret config:
 
 ```bash
-pulumi config set region us-east-2 --stack cloud2
-pulumi config set allowedAccountId 851454408348 --stack cloud2
-pulumi config set domainName cloud2.aws.cloud.jazz.tools --stack cloud2
-pulumi config set containerImageRepository 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server --stack cloud2
-pulumi config set containerImageTag latest --stack cloud2
+pulumi config set region us-east-2
+pulumi config set allowedAccountId 851454408348
+pulumi config set domainName cloud2.aws.cloud.jazz.tools
+pulumi config set containerImageRepository 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server
+pulumi config set containerImageTag latest
 ```
 
 Set required secrets (one-time):
 
 ```bash
-pulumi config set --secret internalApiSecret "<redacted>" --stack cloud2
-pulumi config set --secret secretHashKey "<redacted>" --stack cloud2
+pulumi config set --secret internalApiSecret "<redacted>"
+pulumi config set --secret secretHashKey "<redacted>"
 ```
 
 Notes:
@@ -109,13 +114,13 @@ This script:
 ### Step 5: deploy infra
 
 ```bash
-pulumi up --stack cloud2
+pulumi up
 ```
 
 ### Step 6: verify deployment
 
 ```bash
-pulumi stack output --stack cloud2
+pulumi stack output
 curl -i https://cloud2.aws.cloud.jazz.tools/health
 ```
 
@@ -160,7 +165,7 @@ Optional:
 
 ```bash
 pnpm push:image:local -- --aws-profile <your-profile> --stack cloud2
-pulumi up --stack cloud2
+pulumi up
 ```
 
 ### Pulumi Cloud + GitHub model (optional)
@@ -181,7 +186,7 @@ In that model:
 Destroy stack resources:
 
 ```bash
-pulumi destroy --stack cloud2
+pulumi destroy
 ```
 
 ## Troubleshooting
@@ -204,3 +209,15 @@ docker buildx version
 
 Set `route53DelegationRoleArn` in the stack and ensure that role can mutate
 `cloud2.aws.cloud.jazz.tools` in the parent hosted zone.
+
+### Error: "--stack flag requires fully qualified name"
+
+If you see:
+
+`If you're using the --stack flag, pass the fully qualified name (org/project/stack)`
+
+either:
+
+- avoid `--stack` after selecting the stack once with `pulumi stack select`, or
+- use the full name format, for example:
+  `<org>/jazz-multi-server-cloud2/cloud2`
