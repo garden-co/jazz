@@ -42,8 +42,15 @@ pnpm install --ignore-workspace
 If you have not already configured SSO:
 
 ```bash
-aws configure sso
+aws configure sso --profile <your-profile>
 ```
+
+Use these values:
+
+- SSO start URL: `https://d-9067cab0c6.awsapps.com/start`
+- SSO region: `us-east-1`
+- Registration scopes: accept the default `sso:account:access`
+- Default client region: `us-east-2`
 
 Then log in:
 
