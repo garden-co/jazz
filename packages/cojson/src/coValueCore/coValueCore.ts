@@ -312,16 +312,16 @@ export class CoValueCore {
       return "available";
     }
 
+    // Check for lastKnownStateSource (garbageCollected or onlyKnownState)
+    if (this.#lastKnownStateSource) {
+      return this.#lastKnownStateSource;
+    }
+
     // Check for pending peers FIRST - loading takes priority over other states
     for (const peer of this.loadingStatuses.values()) {
       if (peer.type === "pending") {
         return "loading";
       }
-    }
-
-    // Check for lastKnownStateSource (garbageCollected or onlyKnownState)
-    if (this.#lastKnownStateSource) {
-      return this.#lastKnownStateSource;
     }
 
     if (this.loadingStatuses.size === 0) {
