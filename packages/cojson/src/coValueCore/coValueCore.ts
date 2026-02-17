@@ -345,6 +345,14 @@ export class CoValueCore {
     return this.hasVerifiedContent();
   }
 
+  isKnownStateAvailable(): boolean {
+    return (
+      this.loadingState === "available" ||
+      this.loadingState === "onlyKnownState" ||
+      this.loadingState === "garbageCollected"
+    );
+  }
+
   isCompletelyDownloaded(): boolean {
     if (!this.hasVerifiedContent()) {
       return false;

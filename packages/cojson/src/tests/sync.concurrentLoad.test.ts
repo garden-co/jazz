@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   CO_VALUE_LOADING_CONFIG,
+  GARBAGE_COLLECTOR_CONFIG,
+  setGarbageCollectorMaxAge,
   setMaxInFlightLoadsPerPeer,
 } from "../config.js";
 import {
@@ -19,6 +21,7 @@ let jazzCloud: ReturnType<typeof setupTestNode>;
 // Store original config values
 let originalMaxInFlightLoads: number;
 let originalTimeout: number;
+let originalGarbageCollectorMaxAge: number;
 
 beforeEach(async () => {
   // We want to simulate a real world communication that happens asynchronously
@@ -27,6 +30,7 @@ beforeEach(async () => {
   originalMaxInFlightLoads =
     CO_VALUE_LOADING_CONFIG.MAX_IN_FLIGHT_LOADS_PER_PEER;
   originalTimeout = CO_VALUE_LOADING_CONFIG.TIMEOUT;
+  originalGarbageCollectorMaxAge = GARBAGE_COLLECTOR_CONFIG.MAX_AGE;
 
   SyncMessagesLog.clear();
   jazzCloud = setupTestNode({ isSyncServer: true });
@@ -36,6 +40,7 @@ afterEach(() => {
   // Restore original config
   setMaxInFlightLoadsPerPeer(originalMaxInFlightLoads);
   CO_VALUE_LOADING_CONFIG.TIMEOUT = originalTimeout;
+  setGarbageCollectorMaxAge(originalGarbageCollectorMaxAge);
   vi.useRealTimers();
 });
 
@@ -728,5 +733,51 @@ describe("concurrent load", () => {
         "client -> server | KNOWN B sessions: header/1",
       ]
     `);
+  });
+
+  test("should consider garbageCollected load requests processed when server replies with KNOWN", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+    setGarbageCollectorMaxAge(-1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    client.addStorage({ ourName: "client" });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    const { peerState } = client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // Disconnect and GC so the node keeps only garbageCollected shells with cached knownState.
+    peerState.gracefulShutdown();
+    client.node.garbageCollector?.collect();
+    client.node.garbageCollector?.collect();
+
+    const gcGroup = client.node.getCoValue(group.id);
+    const gcMap1 = client.node.getCoValue(map1.id);
+    const gcMap2 = client.node.getCoValue(map2.id);
+
+    expect(gcGroup.loadingState).toBe("garbageCollected");
+    expect(gcMap1.loadingState).toBe("garbageCollected");
+    expect(gcMap2.loadingState).toBe("garbageCollected");
+
+    SyncMessagesLog.clear();
+
+    client.connectToSyncServer();
+
+    const groupOnServer = jazzCloud.node.createGroup();
+    const groupOnClient = await loadCoValueOrFail(
+      client.node,
+      groupOnServer.id,
+    );
+
+    expect(groupOnClient.core.isAvailable()).toBe(true);
   });
 });
