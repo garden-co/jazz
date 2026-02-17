@@ -51,3 +51,20 @@ Artifacts include `manifest.json` as a stable ingestion entrypoint:
 
 - native: `bench-out/native/manifest.json`
 - browser: `bench-out/browser/manifest.json`
+
+## Delta Rendering (Local)
+
+After downloading artifacts for two runs (e.g. `main` vs branch), render deltas:
+
+```bash
+pnpm bench:realistic:render -- \
+  --base ./artifacts/main \
+  --head ./artifacts/branch \
+  --kind all
+```
+
+Notes:
+
+- Script: `benchmarks/realistic/render_deltas.mjs`
+- It auto-discovers `manifest.json` recursively under `--base` and `--head`.
+- It compares the newest native/browser manifests found in each tree.
