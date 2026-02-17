@@ -86,8 +86,11 @@ pulumi config set containerImageTag latest
 Set required secrets (one-time):
 
 ```bash
-pulumi config set --secret internalApiSecret "<redacted>"
-pulumi config set --secret secretHashKey "<redacted>"
+INTERNAL_API_SECRET="${INTERNAL_API_SECRET:-$(openssl rand -hex 32)}"
+SECRET_HASH_KEY="${SECRET_HASH_KEY:-$(openssl rand -hex 32)}"
+
+pulumi config set --secret internalApiSecret "${INTERNAL_API_SECRET}"
+pulumi config set --secret secretHashKey "${SECRET_HASH_KEY}"
 ```
 
 Notes:
