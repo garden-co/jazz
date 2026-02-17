@@ -19,6 +19,7 @@ use groove::jazz_transport::{
     ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
 };
 use groove::object::ObjectId;
+use groove::query_manager::manager::LiveQueryInfo;
 use groove::query_manager::query::QueryBuilder;
 use groove::query_manager::session::Session;
 use groove::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
@@ -92,8 +93,14 @@ enum WorkerCommand {
     SyncAsAdmin {
         app_id: AppId,
         client_id: ClientId,
+        inspector_mode: bool,
         payload: SyncPayload,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    ListLiveQueries {
+        app_id: AppId,
+        include_hidden: bool,
+        response: tokio::sync::oneshot::Sender<Result<Vec<LiveQueryInfo>, String>>,
     },
 }
 
@@ -103,7 +110,8 @@ impl WorkerCommand {
             WorkerCommand::CreateRuntime { app_id, .. }
             | WorkerCommand::EnsureClientWithSession { app_id, .. }
             | WorkerCommand::SyncAsSession { app_id, .. }
-            | WorkerCommand::SyncAsAdmin { app_id, .. } => *app_id,
+            | WorkerCommand::SyncAsAdmin { app_id, .. }
+            | WorkerCommand::ListLiveQueries { app_id, .. } => *app_id,
         }
     }
 }
@@ -289,17 +297,38 @@ impl WorkerPool {
         &self,
         app_id: AppId,
         client_id: ClientId,
+        inspector_mode: bool,
         payload: SyncPayload,
     ) -> Result<(), WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::SyncAsAdmin {
             app_id,
             client_id,
+            inspector_mode,
             payload,
             response: response_tx,
         };
         let worker = self.send_command(command)?;
         Self::await_result(worker, response_rx).await
+    }
+
+    async fn list_live_queries(
+        &self,
+        app_id: AppId,
+        include_hidden: bool,
+    ) -> Result<Vec<LiveQueryInfo>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::ListLiveQueries {
+            app_id,
+            include_hidden,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(entries)) => Ok(entries),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
     }
 
     fn worker_count(&self) -> usize {
@@ -800,6 +829,10 @@ async fn run_worker_loop(
                                 .ensure_client_with_session(client_id, session)
                             {
                                 Err(err.to_string())
+                            } else if let Err(err) =
+                                runtime.runtime.set_client_inspector_mode(client_id, false)
+                            {
+                                Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
                                 source: Source::Client(client_id),
                                 payload,
@@ -823,14 +856,20 @@ async fn run_worker_loop(
                 WorkerCommand::SyncAsAdmin {
                     app_id,
                     client_id,
+                    inspector_mode,
                     payload,
                     response,
                 } => {
                     let result = match app_runtimes.get(&app_id) {
                         Some(runtime) => {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
+                            if let Err(err) = runtime.runtime.ensure_client(client_id) {
                                 Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.set_client_admin(client_id) {
+                                Err(err.to_string())
+                            } else if let Err(err) = runtime
+                                .runtime
+                                .set_client_inspector_mode(client_id, inspector_mode)
+                            {
                                 Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
                                 source: Source::Client(client_id),
@@ -849,6 +888,28 @@ async fn run_worker_loop(
                             app_id = %app_id,
                             client_id = %client_id,
                             "admin-sync response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::ListLiveQueries {
+                    app_id,
+                    include_hidden,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .list_live_queries(include_hidden)
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "list-live-queries response receiver dropped"
                         );
                     }
                 }
@@ -891,6 +952,11 @@ struct AppPath {
 #[derive(Debug, Deserialize)]
 struct EventsParams {
     client_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminLiveQueriesParams {
+    include_hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1021,6 +1087,10 @@ fn create_router(state: Arc<ServerState>) -> Router {
     Router::new()
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
+        .route(
+            "/apps/:app_id/admin/introspection/live-queries",
+            get(admin_live_queries_handler),
+        )
         .route(
             "/internal/apps",
             post(create_app_handler).get(list_apps_handler),
@@ -1374,6 +1444,14 @@ fn validate_admin_secret(
     }
 }
 
+fn has_inspector_header(headers: &HeaderMap) -> bool {
+    headers
+        .get("X-Jazz-Inspector")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn validate_internal_secret(
     headers: &HeaderMap,
     expected_secret: &str,
@@ -1541,6 +1619,8 @@ async fn sync_handler(
     headers: HeaderMap,
     Json(request): Json<SyncPayloadRequest>,
 ) -> impl IntoResponse {
+    let inspector_mode = has_inspector_header(&headers);
+
     let app_id = match parse_app_id(&path.app_id) {
         Ok(id) => id,
         Err((status, msg)) => {
@@ -1578,10 +1658,20 @@ async fn sync_handler(
         }
     };
 
+    if inspector_mode && !is_admin {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::unauthorized(
+                "X-Jazz-Inspector mode requires a valid X-Jazz-Admin-Secret",
+            )),
+        )
+            .into_response();
+    }
+
     let dispatch_result = if is_admin {
         state
             .workers
-            .sync_as_admin(app_id, request.client_id, request.payload)
+            .sync_as_admin(app_id, request.client_id, inspector_mode, request.payload)
             .await
     } else {
         let session = match extract_session(&headers, app_id, &cfg, &state).await {
@@ -1608,6 +1698,74 @@ async fn sync_handler(
 
     match dispatch_result {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn admin_live_queries_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Query(params): Query<AdminLiveQueriesParams>,
+) -> impl IntoResponse {
+    let inspector_mode = has_inspector_header(&headers);
+    if !inspector_mode {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "X-Jazz-Inspector: 1 header required for admin introspection endpoints",
+            )),
+        )
+            .into_response();
+    }
+
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    let is_admin = match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    if !is_admin {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::unauthorized("Missing admin secret")),
+        )
+            .into_response();
+    }
+
+    let include_hidden = params.include_hidden.unwrap_or(false);
+    match state
+        .workers
+        .list_live_queries(app_id, include_hidden)
+        .await
+    {
+        Ok(entries) => Json(entries).into_response(),
         Err(err) => {
             let (status, message) = worker_dispatch_status_and_message(err);
             (status, Json(ErrorResponse::internal(message))).into_response()

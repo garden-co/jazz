@@ -187,6 +187,56 @@ impl ServerProcess {
             .await
             .expect("sync request")
     }
+
+    async fn sync_with_backend_session_inspector(
+        &self,
+        app_id: &str,
+        backend_secret: &str,
+        user_id: &str,
+    ) -> reqwest::Response {
+        self.client
+            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
+            .header("X-Jazz-Backend-Secret", backend_secret)
+            .header("X-Jazz-Session", encode_session(user_id))
+            .header("X-Jazz-Inspector", "1")
+            .json(&sync_body())
+            .send()
+            .await
+            .expect("sync request")
+    }
+
+    async fn sync_as_admin_inspector(&self, app_id: &str, admin_secret: &str) -> reqwest::Response {
+        self.client
+            .post(format!("{}/apps/{app_id}/sync", self.base_url()))
+            .header("X-Jazz-Admin-Secret", admin_secret)
+            .header("X-Jazz-Inspector", "1")
+            .json(&sync_body())
+            .send()
+            .await
+            .expect("sync request")
+    }
+
+    async fn admin_live_queries(
+        &self,
+        app_id: &str,
+        admin_secret: Option<&str>,
+        inspector_header: bool,
+        include_hidden: bool,
+    ) -> reqwest::Response {
+        let mut request = self.client.get(format!(
+            "{}/apps/{app_id}/admin/introspection/live-queries?include_hidden={include_hidden}",
+            self.base_url()
+        ));
+
+        if let Some(secret) = admin_secret {
+            request = request.header("X-Jazz-Admin-Secret", secret);
+        }
+        if inspector_header {
+            request = request.header("X-Jazz-Inspector", "1");
+        }
+
+        request.send().await.expect("admin live queries request")
+    }
 }
 
 impl Drop for ServerProcess {
@@ -334,6 +384,70 @@ async fn backend_session_auth_works_and_secret_rotation_is_enforced() {
         new_secret_sync.status(),
         StatusCode::UNAUTHORIZED,
         "new backend secret should be accepted after rotation"
+    );
+}
+
+#[tokio::test]
+async fn admin_introspection_live_queries_requires_inspector_header_and_admin_secret() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+
+    let created = server
+        .create_app(
+            "inspector-app",
+            "http://example.invalid/jwks",
+            Some("backend-v1"),
+            Some("admin-v1"),
+        )
+        .await;
+
+    let missing_header = server
+        .admin_live_queries(&created.app_id, Some("admin-v1"), false, false)
+        .await;
+    assert_eq!(missing_header.status(), StatusCode::BAD_REQUEST);
+
+    let missing_secret = server
+        .admin_live_queries(&created.app_id, None, true, false)
+        .await;
+    assert_eq!(missing_secret.status(), StatusCode::UNAUTHORIZED);
+
+    let ok = server
+        .admin_live_queries(&created.app_id, Some("admin-v1"), true, false)
+        .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let body: Value = ok.json().await.expect("live query list json");
+    assert!(
+        body.is_array(),
+        "live query introspection should return array"
+    );
+}
+
+#[tokio::test]
+async fn sync_inspector_mode_requires_admin_secret() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+
+    let created = server
+        .create_app(
+            "inspector-sync-app",
+            "http://example.invalid/jwks",
+            Some("backend-v1"),
+            Some("admin-v1"),
+        )
+        .await;
+
+    let unauthorized = server
+        .sync_with_backend_session_inspector(&created.app_id, "backend-v1", "backend-user")
+        .await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let admin_ok = server
+        .sync_as_admin_inspector(&created.app_id, "admin-v1")
+        .await;
+    assert_ne!(
+        admin_ok.status(),
+        StatusCode::UNAUTHORIZED,
+        "admin-authenticated inspector sync should be accepted"
     );
 }
 
