@@ -432,15 +432,22 @@ export class JazzClient {
   }
 
   /**
-   * Insert a row and wait for persistence at the specified tier.
+   * Insert a row and wait for acknowledgement at the specified tier.
    *
    * @param table Table name
    * @param values Array of column values
-   * @param tier Persistence tier to wait for
-   * @returns Promise resolving to the new row's ID when the tier acks
+   * @param tier Acknowledgement tier to wait for
+   * @returns Promise resolving to the new row's ID when the tier acknowledges
+   */
+  async createWithAck(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
+    return this.runtime.insertPersisted(table, values, tier);
+  }
+
+  /**
+   * @deprecated Use createWithAck().
    */
   async createPersisted(table: string, values: Value[], tier: PersistenceTier): Promise<string> {
-    return this.runtime.insertPersisted(table, values, tier);
+    return this.createWithAck(table, values, tier);
   }
 
   /**
@@ -479,14 +486,25 @@ export class JazzClient {
   }
 
   /**
-   * Update a row and wait for persistence at the specified tier.
+   * Update a row and wait for acknowledgement at the specified tier.
+   */
+  async updateWithAck(
+    objectId: string,
+    updates: Record<string, Value>,
+    tier: PersistenceTier,
+  ): Promise<void> {
+    await this.runtime.updatePersisted(objectId, updates, tier);
+  }
+
+  /**
+   * @deprecated Use updateWithAck().
    */
   async updatePersisted(
     objectId: string,
     updates: Record<string, Value>,
     tier: PersistenceTier,
   ): Promise<void> {
-    await this.runtime.updatePersisted(objectId, updates, tier);
+    await this.updateWithAck(objectId, updates, tier);
   }
 
   /**
@@ -499,10 +517,17 @@ export class JazzClient {
   }
 
   /**
-   * Delete a row and wait for persistence at the specified tier.
+   * Delete a row and wait for acknowledgement at the specified tier.
+   */
+  async deleteWithAck(objectId: string, tier: PersistenceTier): Promise<void> {
+    await this.runtime.deletePersisted(objectId, tier);
+  }
+
+  /**
+   * @deprecated Use deleteWithAck().
    */
   async deletePersisted(objectId: string, tier: PersistenceTier): Promise<void> {
-    await this.runtime.deletePersisted(objectId, tier);
+    await this.deleteWithAck(objectId, tier);
   }
 
   /**

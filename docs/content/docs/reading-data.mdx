@@ -127,7 +127,28 @@ const memberships = await db.all(
   </Tab>
 </Tabs>
 
-## Settled Tier Semantics and Local-First Behavior
+## Read Settled Tiers
+
+### API Reference
+
+- `db.all(query, settledTier?)`
+- `db.one(query, settledTier?)`
+- `db.subscribeAll(query, callback, settledTier?)`
+- `settledTier`: `"worker" | "edge" | "core"`
+
+Settled tiers control when initial query delivery is considered confirmed:
+
+- `worker`: wait for worker/local storage acknowledgement.
+- `edge`: wait for edge server acknowledgement.
+- `core`: wait for core server acknowledgement.
+
+Without a `settledTier`, reads are local-first and return immediately from the
+local runtime state.
+
+Tradeoff summary:
+
+- Lower settled tier: lower latency, narrower confirmation scope.
+- Higher settled tier: higher latency, broader confirmation scope.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
@@ -141,6 +162,13 @@ const memberships = await db.all(
     </include>
   </Tab>
 </Tabs>
+
+Read settled tiers pair naturally with write ack tiers:
+
+- Use write ack tiers to gate mutation durability checkpoints.
+- Use settled tiers to gate query/subscription delivery checkpoints.
+
+See [Write Ack Tiers](/docs/writing-data#write-ack-tiers) for write-side semantics.
 
 ## Reactive Hooks (React)
 
