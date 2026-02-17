@@ -27,7 +27,7 @@ use crate::AppState;
 pub struct Todo {
     pub id: Uuid,
     pub title: String,
-    pub completed: bool,
+    pub done: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -43,7 +43,7 @@ pub struct CreateTodoRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateTodoRequest {
     pub title: Option<String>,
-    pub completed: Option<bool>,
+    pub done: Option<bool>,
     pub description: Option<String>,
 }
 
@@ -81,7 +81,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
         Value::Text(s) => s.clone(),
         _ => return None,
     };
-    let completed = match &values[1] {
+    let done = match &values[1] {
         Value::Boolean(b) => *b,
         _ => return None,
     };
@@ -92,7 +92,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     Some(Todo {
         id: *object_id.uuid(),
         title,
-        completed,
+        done,
         description,
     })
 }
@@ -126,6 +126,8 @@ async fn create_todo(
         Value::Text(request.title.clone()),
         Value::Boolean(false),
         Value::Text(description.clone()),
+        Value::Null,
+        Value::Null,
     ];
 
     match state.client.create("todos", values).await {
@@ -133,7 +135,7 @@ async fn create_todo(
             let todo = Todo {
                 id: *row_id.uuid(),
                 title: request.title,
-                completed: false,
+                done: false,
                 description: if description.is_empty() {
                     None
                 } else {
@@ -195,8 +197,8 @@ async fn update_todo(
     if let Some(title) = request.title {
         updates.push(("title".to_string(), Value::Text(title)));
     }
-    if let Some(completed) = request.completed {
-        updates.push(("completed".to_string(), Value::Boolean(completed)));
+    if let Some(done) = request.done {
+        updates.push(("done".to_string(), Value::Boolean(done)));
     }
     if let Some(description) = request.description {
         updates.push(("description".to_string(), Value::Text(description)));

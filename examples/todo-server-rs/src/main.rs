@@ -24,6 +24,7 @@
 //! | `/todos/:id` | DELETE | Delete item |
 //! | `/updates` | GET | SSE stream of add/remove events |
 
+mod docs_snippets;
 mod routes;
 
 use std::net::SocketAddr;
@@ -59,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Configuration from environment or defaults
-    let app_name = std::env::var("TODO_APP_NAME").unwrap_or_else(|_| "todo-app".to_string());
+    let app_id = std::env::var("JAZZ_APP_ID").unwrap_or_else(|_| "todo-app".to_string());
     let server_url =
         std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
@@ -69,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(3000);
 
     info!("Starting todo server");
-    info!("App name: {}", app_name);
+    info!("App ID: {}", app_id);
     info!("Jazz server: {}", server_url);
     info!("Data directory: {}", data_dir);
 
@@ -82,8 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create Jazz client
+    // #region context-setup-rust-backend
     let context = AppContext {
-        app_id: AppId::from_name(&app_name),
+        app_id: AppId::from_name(&app_id),
         client_id: None,
         schema,
         server_url,
@@ -93,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend_secret: None,
         admin_secret: None,
     };
+    // #endregion context-setup-rust-backend
 
     let client = JazzClient::connect(context).await?;
     info!("Connected to Jazz");
