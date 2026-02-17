@@ -1,186 +1,199 @@
-# jazz-multi-server cloud2 Pulumi sketch
+# jazz-multi-server cloud2 infrastructure
 
-This is an MVP deployment sketch for a single hosted `jazz-multi-server` instance on AWS:
+Infrastructure as Code for the `jazz-multi-server` MVP deployment using Pulumi and AWS.
 
-- 1 region (`us-east-2` default)
-- 1 ECS service on EC2 capacity
-- 1 ALB with HTTPS
-- 1 persistent EBS volume mounted at `/mnt/data`
-- Route53 `A` record for `cloud2.aws.cloud.jazz.tools`
+This deployment is intentionally simple:
 
-## What it creates
+- single region (default `us-east-2`)
+- single ECS service (EC2 capacity provider, desired count 1)
+- ALB + HTTPS
+- persistent EBS volume mounted at `/mnt/data`
+- Route53 record `cloud2.aws.cloud.jazz.tools`
 
-- VPC + 2 public subnets (ALB across both)
-- ECS cluster + ASG-backed capacity provider (desired=1)
-- ECS task definition + service (desired=1)
-- ACM cert (DNS validated)
-- ALB listeners (80 -> 443 redirect, 443 forward)
-- Route53 alias record for the deployment hostname
-- Secrets Manager secrets for:
-  - `JAZZ_INTERNAL_API_SECRET`
-  - `JAZZ_SECRET_HASH_KEY`
+## Prerequisites
 
-## Stack config
+- [Node.js](https://nodejs.org/) v22+
+- [pnpm](https://pnpm.io/)
+- [AWS CLI](https://aws.amazon.com/cli/) v2
+- [Pulumi CLI](https://www.pulumi.com/docs/get-started/install/)
+- [Docker](https://docs.docker.com/get-docker/) with Buildx support
+- AWS account with permissions for ECR + ECS + EC2 + ALB + ACM + Route53 + IAM + Secrets Manager
 
-Set these on your stack before `pulumi up`:
+## Project structure
 
-- Required:
-  - Either:
-    - `containerImage` (full image URI), or
-    - `containerImageRepository` + `containerImageTag`
-  - `internalApiSecret` (secret)
-  - `secretHashKey` (secret)
-- Usually required in CI/guardrails:
-  - `allowedAccountId` (AWS account ID for this stack)
+- `index.ts` - Pulumi program
+- `Pulumi.yaml` - Pulumi project
+- `Pulumi.cloud2.yaml` - tracked non-secret stack config for stack `cloud2`
+- `Dockerfile` - container build for `jazz-multi-server`
+- `push-multi-server.sh` - local ECR push + Pulumi image tag update
+- `deploy-local.sh` - end-to-end local build/push/config/deploy helper
 
-Defaults:
+## Getting started (local)
 
-- `region=us-east-2`
-- `domainName=cloud2.aws.cloud.jazz.tools`
-- `sharedServicesStack=garden-computing/jazz-aws/shared-services`
-- `rootZoneId` from `sharedServicesStack.awsCloudZoneId`
-
-Optional:
-
-- `route53DelegationRoleArn` (if stack account cannot directly write Route53 in root zone)
-- `instanceType=t3.large`
-- `dataVolumeSizeGiB=100`
-- `appPort=1625`
-- `workerThreads` (server worker thread override)
-- `dataRoot=/mnt/data`
-- `publicSubnetCidrs=["10.42.0.0/24","10.42.1.0/24"]`
-
-Tracked stack config:
-
-- `Pulumi.cloud2.yaml` is checked in and intended for non-secret config (including image tag rollouts).
-- Keep secrets in Pulumi Cloud stack secrets, not in the repo.
-
-## Example bootstrap
+### Step 1: install dependencies
 
 ```bash
 cd crates/jazz-multi-server/deploy/pulumi
-pnpm install
-
-pulumi stack init cloud2
-pulumi config set containerImage 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server:<tag>
-pulumi config set --secret internalApiSecret '<redacted>'
-pulumi config set --secret secretHashKey '<redacted>'
-pulumi config set allowedAccountId 851454408348
-
-pulumi preview
-pulumi up
+pnpm install --ignore-workspace
 ```
 
-## Local quick deploy script
+### Step 2: configure AWS SSO
 
-You can use:
+If you have not already configured SSO:
 
 ```bash
-cd crates/jazz-multi-server/deploy/pulumi
-./deploy-local.sh --aws-profile <profile> --yes
+aws configure sso
 ```
 
-The script will:
-
-- Build and push `jazz-multi-server` to ECR (linux/amd64)
-- Initialize/select Pulumi stack `cloud2`
-- Set Pulumi config values
-- Generate missing secrets and persist them locally for reuse
-- Run `pulumi up`
-
-Important local file:
-
-- `.deploy-secrets-<stack>.env`
-  - Stores generated `internalApiSecret` and `secretHashKey`
-  - Reused on subsequent deploys so secret hashing remains stable
-
-### Inputs and secrets
-
-Required inputs:
-
-- AWS credentials (`AWS_PROFILE` or default credentials chain)
-- Pulumi login/session (`pulumi login` done)
-
-Required deploy secrets:
-
-- `internalApiSecret` (for `/internal/apps/*` auth)
-- `secretHashKey` (used to hash backend/admin secrets; must stay stable across redeploys)
-
-How secrets are handled:
-
-- If you pass `--internal-api-secret` / `--secret-hash-key`, those are used.
-- If omitted, the script auto-generates both and writes them to `.deploy-secrets-<stack>.env`.
-
-Useful optional inputs:
-
-- `--account-id` / `--allowed-account-id`
-- `--domain` (defaults to `cloud2.aws.cloud.jazz.tools`)
-- `--route53-delegation-role-arn` (for cross-account DNS writes)
-- `--image` with `--skip-build` (if image already exists)
-
-## Infra-composer style local push + deploy
-
-If you want the same pattern as `infra-composer` (`aws ecr get-login-password` + local tag bump), use:
+Then log in:
 
 ```bash
-cd crates/jazz-multi-server/deploy/pulumi
-pnpm push:image:local -- --aws-profile <profile>
+aws sso login --profile <your-profile>
+aws sts get-caller-identity --profile <your-profile>
+```
+
+### Step 3: bootstrap Pulumi stack
+
+Select or create stack:
+
+```bash
+pulumi stack select cloud2 || pulumi stack init cloud2
+```
+
+Set baseline non-secret config:
+
+```bash
+pulumi config set region us-east-2 --stack cloud2
+pulumi config set allowedAccountId 851454408348 --stack cloud2
+pulumi config set domainName cloud2.aws.cloud.jazz.tools --stack cloud2
+pulumi config set containerImageRepository 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server --stack cloud2
+pulumi config set containerImageTag latest --stack cloud2
+```
+
+Set required secrets (one-time):
+
+```bash
+pulumi config set --secret internalApiSecret "<redacted>" --stack cloud2
+pulumi config set --secret secretHashKey "<redacted>" --stack cloud2
+```
+
+Notes:
+
+- `secretHashKey` must remain stable across deploys to preserve secret hash validation semantics.
+- If you use `deploy-local.sh`, missing secrets are auto-generated and persisted in `.deploy-secrets-<stack>.env`.
+
+### Step 4: push image to ECR (infra-composer style)
+
+Use the local push flow that mirrors `infra-composer`:
+
+```bash
+pnpm push:image:local -- --aws-profile <your-profile> --stack cloud2
+```
+
+This script:
+
+- logs in via `aws ecr get-login-password`
+- builds and pushes linux/amd64 image
+- updates stack config:
+  - `containerImageRepository`
+  - `containerImageTag`
+- removes `containerImage` key if present (so repo+tag is authoritative)
+
+### Step 5: deploy infra
+
+```bash
 pulumi up --stack cloud2
 ```
 
-What `push:image:local` does:
+### Step 6: verify deployment
 
-- Logs in to ECR via `aws ecr get-login-password`
-- Builds and pushes linux/amd64 image with `Dockerfile`
-- Updates stack config:
-  - `containerImageRepository`
-  - `containerImageTag`
-- Removes `containerImage` key if set, so repo+tag is authoritative
+```bash
+pulumi stack output --stack cloud2
+curl -i https://cloud2.aws.cloud.jazz.tools/health
+```
 
-## Pulumi Cloud + GitHub Deploy Model (No Local AWS Creds For Infra Apply)
+## Alternative: one-command local deploy
 
-This repo now includes two workflows:
+If you want build+push+config+deploy in one command:
+
+```bash
+./deploy-local.sh --aws-profile <your-profile> --stack cloud2 --yes
+```
+
+## Stack config reference
+
+Required:
+
+- one of:
+  - `containerImage` (full URI), or
+  - `containerImageRepository` + `containerImageTag`
+- `internalApiSecret` (secret)
+- `secretHashKey` (secret)
+
+Common:
+
+- `allowedAccountId`
+- `region` (default `us-east-2`)
+- `domainName` (default `cloud2.aws.cloud.jazz.tools`)
+- `sharedServicesStack` (default `garden-computing/jazz-aws/shared-services`)
+
+Optional:
+
+- `route53DelegationRoleArn` (for cross-account DNS writes)
+- `instanceType` (default `t3.large`)
+- `dataVolumeSizeGiB` (default `100`)
+- `appPort` (default `1625`)
+- `workerThreads`
+- `dataRoot` (default `/mnt/data`)
+- `publicSubnetCidrs` (default `["10.42.0.0/24","10.42.1.0/24"]`)
+
+## Releasing
+
+### Local release (recommended for now)
+
+```bash
+pnpm push:image:local -- --aws-profile <your-profile> --stack cloud2
+pulumi up --stack cloud2
+```
+
+### Pulumi Cloud + GitHub model (optional)
+
+This repo also includes workflows for image publish + PR-based stack tag updates:
 
 - `.github/workflows/publish-multi-server-image.yml`
-  - Builds and pushes a linux/amd64 image to ECR via GitHub OIDC role assumption.
-  - Optionally dispatches a deploy update event.
 - `.github/workflows/deploy-multi-server-image.yml`
-  - Updates `Pulumi.<stack>.yaml` image tag, opens/updates a deployment PR, and enables auto-merge.
-  - Pulumi Cloud should run `pulumi up` on merge to `main`.
 
-### Required GitHub repo configuration
+In that model:
 
-Repository secrets:
+1. publish workflow pushes image
+2. deploy workflow updates `Pulumi.<stack>.yaml` tag in a PR and auto-merges
+3. Pulumi Cloud runs `pulumi up` on merge to `main`
 
-- `AWS_GITHUB_ACTIONS_ROLE_ARN`
-  - IAM role assumable by GitHub OIDC for ECR push.
+## Cleaning up
 
-Repository variables:
+Destroy stack resources:
 
-- `AWS_ACCOUNT_ID`
-  - Account where ECR repository lives.
-- `AWS_REGION` (optional, default `us-east-2`)
-- `JAZZ_MULTI_SERVER_ECR_REPOSITORY` (optional, default `jazz-multi-server`)
+```bash
+pulumi destroy --stack cloud2
+```
 
-### Required Pulumi Cloud setup
+## Troubleshooting
 
-For stack `garden-computing/jazz-multi-server-cloud2/cloud2` (or your equivalent):
+### AWS SSO session expired
 
-- Configure deployment runner/source control to this repo and stack `cloud2`.
-- Configure AWS deployment credentials/role in Pulumi Cloud (not in GitHub workflow).
-- Set required stack secrets in Pulumi Cloud:
-  - `jazz-multi-server-cloud2:internalApiSecret`
-  - `jazz-multi-server-cloud2:secretHashKey`
+```bash
+aws sso login --profile <your-profile>
+```
 
-Once configured:
+### Buildx not available
 
-1. Run **Publish Multi Server Image** workflow (manual dispatch).
-2. It pushes image and triggers deploy dispatch.
-3. Deploy workflow updates `Pulumi.cloud2.yaml` tag in a PR and auto-merges.
-4. Pulumi Cloud applies infra changes from `main`.
+Install/enable Docker Buildx and re-run:
 
-## Notes
+```bash
+docker buildx version
+```
 
-- This is intentionally single-instance and minimal.
-- Internal API auth is secret-based only right now; network-level restriction for `/internal/apps/*` is still a TODO.
-- If you deploy this into a non-shared-services AWS account, configure `route53DelegationRoleArn` (and ensure that role has write permission for `cloud2.aws.cloud.jazz.tools` in the parent zone).
+### Cross-account DNS issues
+
+Set `route53DelegationRoleArn` in the stack and ensure that role can mutate
+`cloud2.aws.cloud.jazz.tools` in the parent hosted zone.
