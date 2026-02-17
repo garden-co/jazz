@@ -1,11 +1,5 @@
 {
   "title": "Reading Data",
   "defaultOpen": true,
-  "pages": [
-    "index",
-    "oneshot-queries",
-    "subscriptions",
-    "common-concepts",
-    "reactive-hooks"
-  ]
+  "pages": ["index", "oneshot-queries", "subscriptions", "common-concepts", "reactive-hooks"]
 }
