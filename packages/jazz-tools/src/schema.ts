@@ -1,6 +1,18 @@
 // Schema type definitions
 
-export type SqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export type ScalarSqlType = "TEXT" | "BOOLEAN" | "INTEGER" | "REAL" | "UUID";
+export interface ArraySqlType {
+  kind: "ARRAY";
+  element: SqlType;
+}
+export type SqlType = ScalarSqlType | ArraySqlType;
+
+export function sqlTypeToString(sqlType: SqlType): string {
+  if (typeof sqlType === "string") {
+    return sqlType;
+  }
+  return `${sqlTypeToString(sqlType.element)}[]`;
+}
 
 export interface Column {
   name: string;
