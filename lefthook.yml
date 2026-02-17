@@ -2,17 +2,16 @@ pre-commit:
   commands:
     rustfmt:
       glob: "*.rs"
-      run: cargo fmt
+      run: cargo fmt -- {staged_files}
       stage_fixed: true
     clippy:
       glob: "*.rs"
-      run: cargo clippy --workspace --fix --allow-dirty --allow-staged -- -D warnings
-      stage_fixed: true
+      run: cargo clippy --workspace -- -D warnings
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md}"
-      run: pnpm oxfmt .
+      run: pnpm oxfmt {staged_files}
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
-      run: pnpm oxlint --fix .
+      run: pnpm oxlint --fix {staged_files}
       stage_fixed: true
