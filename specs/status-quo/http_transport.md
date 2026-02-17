@@ -36,6 +36,15 @@ Note: The original spec described separate endpoints (`/sync/subscribe`, `/sync/
 
 > `crates/jazz-cli/src/routes.rs:62-287`
 
+## Tenancy Model
+
+The in-repo `jazz-cli server` process is single-app per process: `app_id` is fixed at startup and shared by that runtime/storage instance. There is no app-scoped route prefix inside this server (`/events` and `/sync` are process-local routes).
+
+Hosted onboarding currently provisions app IDs out-of-band; clients still use the same transport protocol against their assigned server URL.
+
+> `crates/jazz-cli/src/main.rs` (server CLI args)
+> `crates/jazz-cli/src/commands/server.rs` (fixed `app_id` runtime initialization)
+
 ## Wire Format
 
 **Binary length-prefixed frames** instead of raw JSON over SSE. Standard SSE sends newline-delimited text, which means every message needs escaping and parsing overhead. Binary framing is simpler: read 4 bytes for length, read that many bytes for the JSON payload.
@@ -101,9 +110,10 @@ Admin auth (`X-Jazz-Admin-Secret`) required separately for catalogue sync operat
 
 ### Client-Side Auth
 
-Rust transport module in `jazz-tools` detects catalogue objects by metadata type and automatically sends with admin headers.
+Client transports detect catalogue object payloads (`catalogue_schema`, `catalogue_lens`) and send `X-Jazz-Admin-Secret` automatically; regular row/query payloads use JWT/backend auth paths.
 
 > `crates/jazz-cli/src/transport.rs:66-181`
+> `packages/jazz-tools/src/runtime/sync-transport.ts`
 
 ## Broadcast Channel
 
@@ -128,3 +138,4 @@ Server uses `tokio::sync::broadcast` for SSE routing:
 | `crates/jazz-cli/src/transport_protocol.rs` | Shared types, frame encoding            |
 | `crates/jazz-cli/src/client.rs`             | Rust client (streaming, reconnection)   |
 | `crates/jazz-cli/src/transport.rs`          | Client-side HTTP transport              |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | TS shared sync POST + stream parser |

@@ -16,4 +16,4 @@ Plan the public repo swap so jazz2 becomes the main `jazz` repo while preserving
 - Coordinate Discord: create Jazz 1 channel category
 - Draft the one-liner for the Jazz 1 README pointing to the new repo
 
-Full migration plan (companion post, migration tooling, community comms) is in `../c_launch/jazz1_migration_plan.md`.
+Full migration plan (companion post, migration tooling, community comms) is in `./jazz1_migration_plan.md`.

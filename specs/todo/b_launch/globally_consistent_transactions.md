@@ -19,4 +19,4 @@ MVCC on top of the existing commit graph, with a single global transaction autho
 - Failure mode — what if the authority is unreachable? Queue and retry, or block?
 - Can this reuse the existing commit graph's causal ordering, or does it need a separate log?
 
-Related: `../d_later/edge_transaction_authorities.md`
+Related: `../c_later/edge_transaction_authorities.md`

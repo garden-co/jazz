@@ -29,7 +29,7 @@ Run standard benchmarks (adapted for our SQL subset) to compare against Postgres
 
 ### Large-Scale Example Apps
 
-Build demo apps with realistic data volumes (see `../c_launch/example_apps.md`):
+Build demo apps with realistic data volumes (see `../b_launch/example_apps.md`):
 
 - 10K+ rows with complex queries, filters, sorts
 - Measure and display: local query time, sync latency, settlement time per tier

@@ -4,7 +4,7 @@ Query across rows at a historical timestamp.
 
 ## Overview
 
-Beyond per-object time travel (see `../c_launch/per_object_time_travel.md`), this enables:
+Beyond per-object time travel (see `../b_launch/per_object_time_travel.md`), this enables:
 
 - `SELECT * FROM todos AS OF '2025-01-15T10:00:00Z'` — all rows at a point in time
 - Diff queries: what changed between two timestamps across a table?

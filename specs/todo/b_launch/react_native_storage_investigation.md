@@ -13,7 +13,7 @@ React Native can't use OPFS or Web Workers. The first step is proving that Surre
 - Get basic read/write/flush working from a React Native app
 - Don't worry about code cleanliness or commonality with WASM/NAPI yet — just make it work
 
-This is explicitly a spike / proof-of-concept. The full React Native packaging story is in `../c_launch/react_native_packaging.md`.
+This is explicitly a spike / proof-of-concept. The full React Native packaging story is in `./react_native_packaging.md`.
 
 ## Success Criteria
 

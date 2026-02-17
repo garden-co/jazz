@@ -13,7 +13,7 @@ Instead of developers declaring indices, the system observes query patterns and 
 
 ## Prerequisites
 
-- Explicit indices must be working first (see `../b_mvp/explicit_indices.md`)
+- Explicit indices must be working first (see `../a_mvp/explicit_indices.md`)
 - Observability / slow query detection helps inform which indices to auto-create
 - Future index types (vector, geospatial) may follow different auto-creation strategies
 

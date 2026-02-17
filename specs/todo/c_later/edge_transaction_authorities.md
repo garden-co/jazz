@@ -4,7 +4,7 @@ Smart latency-minimizing transaction authorities at edges.
 
 ## Overview
 
-Extension of `../c_launch/globally_consistent_transactions.md`. Instead of a single global authority, place transaction authorities at edge nodes to minimize round-trip latency for region-local transactions.
+Extension of `../b_launch/globally_consistent_transactions.md`. Instead of a single global authority, place transaction authorities at edge nodes to minimize round-trip latency for region-local transactions.
 
 - Partition authority responsibility by data region or table
 - Edge authorities handle local transactions with low latency
