@@ -23,6 +23,9 @@ importers:
       lefthook:
         specifier: ^2.0.15
         version: 2.0.15
+      next:
+        specifier: 16.1.6
+        version: 16.1.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       oxfmt:
         specifier: ^0.27.0
         version: 0.27.0

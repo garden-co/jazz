@@ -4,11 +4,13 @@
     "format:check": "oxfmt --check . && cargo fmt --check",
     "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build",
+    "build:vercel-docs": "turbo run build:crates --filter=@jazz/rust && turbo run build",
     "test": "turbo run test",
     "postinstall": "lefthook install"
   },
   "devDependencies": {
     "lefthook": "^2.0.15",
+    "next": "16.1.6",
     "oxfmt": "^0.27.0",
     "oxlint": "^1.42.0",
     "playwright": "^1.58.2",
