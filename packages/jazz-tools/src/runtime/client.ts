@@ -79,6 +79,17 @@ export interface Row {
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
 
+/**
+ * QueryBuilder-compatible input accepted by query and subscribe APIs.
+ */
+export interface QueryInput {
+  _build(): string;
+}
+
+function resolveQueryJson(query: string | QueryInput): string {
+  return typeof query === "string" ? query : query._build();
+}
+
 function readHeader(request: RequestLike, name: string): string | undefined {
   const lower = name.toLowerCase();
 
@@ -254,15 +265,15 @@ export class SessionClient {
   /**
    * Query as this session's user.
    */
-  async query(queryJson: string): Promise<Row[]> {
-    return this.client.queryInternal(queryJson, this.session);
+  async query(query: string | QueryInput): Promise<Row[]> {
+    return this.client.queryInternal(resolveQueryJson(query), this.session);
   }
 
   /**
    * Subscribe to a query as this session's user.
    */
-  subscribe(queryJson: string, callback: SubscriptionCallback): number {
-    return this.client.subscribeInternal(queryJson, callback, this.session);
+  subscribe(query: string | QueryInput, callback: SubscriptionCallback): number {
+    return this.client.subscribeInternal(query, callback, this.session);
   }
 }
 
@@ -435,12 +446,12 @@ export class JazzClient {
   /**
    * Execute a query and return all matching rows.
    *
-   * @param queryJson JSON-encoded query specification
+   * @param query Query builder or JSON-encoded query specification
    * @param settledTier Optional tier to hold delivery until confirmed
    * @returns Array of matching rows
    */
-  async query(queryJson: string, settledTier?: PersistenceTier): Promise<Row[]> {
-    return this.queryInternal(queryJson, undefined, settledTier);
+  async query(query: string | QueryInput, settledTier?: PersistenceTier): Promise<Row[]> {
+    return this.queryInternal(resolveQueryJson(query), undefined, settledTier);
   }
 
   /**
@@ -497,17 +508,17 @@ export class JazzClient {
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param queryJson JSON-encoded query specification
+   * @param query Query builder or JSON-encoded query specification
    * @param callback Called with delta whenever results change
    * @param settledTier Optional tier to hold initial delivery until confirmed
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
-    queryJson: string,
+    query: string | QueryInput,
     callback: SubscriptionCallback,
     settledTier?: PersistenceTier,
   ): number {
-    return this.subscribeInternal(queryJson, callback, undefined, settledTier);
+    return this.subscribeInternal(query, callback, undefined, settledTier);
   }
 
   /**
@@ -515,12 +526,13 @@ export class JazzClient {
    * @internal
    */
   subscribeInternal(
-    queryJson: string,
+    query: string | QueryInput,
     callback: SubscriptionCallback,
     session?: Session,
     settledTier?: PersistenceTier,
   ): number {
     const sessionJson = session ? JSON.stringify(session) : undefined;
+    const queryJson = resolveQueryJson(query);
     const subId = this.runtime.subscribe(
       queryJson,
       (deltaJsonOrObject: RowDelta | string) => {

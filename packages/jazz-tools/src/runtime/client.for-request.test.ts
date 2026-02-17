@@ -14,6 +14,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 
 function makeClient() {
   const queryCalls: Array<[string, string | undefined, string | undefined]> = [];
+  const subscribeCalls: Array<[string, string | undefined, string | undefined]> = [];
 
   const runtime: Runtime = {
     insert: () => "00000000-0000-0000-0000-000000000001",
@@ -23,7 +24,15 @@ function makeClient() {
       queryCalls.push([queryJson, sessionJson ?? undefined, settledTier ?? undefined]);
       return [];
     },
-    subscribe: () => 1,
+    subscribe: (
+      queryJson: string,
+      _onUpdate: Function,
+      sessionJson?: string | null,
+      settledTier?: string | null,
+    ) => {
+      subscribeCalls.push([queryJson, sessionJson ?? undefined, settledTier ?? undefined]);
+      return 1;
+    },
     unsubscribe: () => {},
     insertPersisted: async () => "00000000-0000-0000-0000-000000000001",
     updatePersisted: async () => {},
@@ -50,6 +59,7 @@ function makeClient() {
   return {
     client: new JazzClientCtor(runtime, context),
     queryCalls,
+    subscribeCalls,
   };
 }
 
@@ -117,5 +127,41 @@ describe("JazzClient.forRequest", () => {
         },
       }),
     ).toThrow("JWT payload missing sub");
+  });
+
+  it("accepts query builders for session-scoped query calls", async () => {
+    const { client, queryCalls } = makeClient();
+    const token = makeJwt({ sub: "user-789" });
+
+    const scopedClient = client.forRequest({
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    });
+
+    const builder = {
+      _build() {
+        return '{"table":"todos","conditions":[{"column":"done","op":"eq","value":true}]}';
+      },
+    };
+
+    await scopedClient.query(builder);
+
+    expect(queryCalls[0][0]).toBe(builder._build());
+  });
+
+  it("accepts query builders for subscribe calls", () => {
+    const { client, subscribeCalls } = makeClient();
+
+    const builder = {
+      _build() {
+        return '{"table":"todos"}';
+      },
+    };
+
+    const subId = client.subscribe(builder, () => {});
+
+    expect(subId).toBe(1);
+    expect(subscribeCalls[0][0]).toBe(builder._build());
   });
 });

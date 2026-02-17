@@ -1,7 +1,8 @@
 import { migrate, col } from "jazz-tools";
 
 // Example: dropping a column with a backwards default.
-// If you roll back from v2 to v1, Jazz reintroduces the column with this value.
+// Clients still on v1 continue seeing legacy_priority.
+// For rows written by v2 clients, the lens supplies this default value.
 migrate("todos", {
   legacy_priority: col.drop().int({ backwardsDefault: 0 }),
 });

@@ -1,70 +1,47 @@
-import type { Request } from "express";
-import { JazzClient } from "jazz-tools/backend";
+import type { Request, Response } from "express";
+import type { JazzClient } from "jazz-tools/backend";
+import { app } from "../schema/app.js";
 
-function buildQuery(table: string): string {
-  return JSON.stringify({
-    table,
-    branches: [],
-    disjuncts: [{ conditions: [] }],
-    order_by: [],
-    offset: 0,
-    include_deleted: false,
-    array_subqueries: [],
-    joins: [],
-  });
-}
+declare const client: JazzClient;
 
-function buildFolderScopedQuery(folderId: string): string {
-  return JSON.stringify({
-    table: "todos",
-    branches: [],
-    disjuncts: [
-      {
-        conditions: [
-          {
-            column: "folder_id",
-            op: "Eq",
-            value: { type: "Uuid", value: folderId },
-          },
-        ],
-      },
-    ],
-    order_by: [],
-    offset: 0,
-    include_deleted: false,
-    array_subqueries: [],
-    joins: [],
-  });
+function sendQueryError(res: Response): void {
+  res.status(500).json({ error: "Failed to query todos" });
 }
-
-// #region backend-request-session-ts
-export function scopedClientFromRequest(req: Request, client: JazzClient) {
-  return client.forRequest(req);
-}
-// #endregion backend-request-session-ts
 
 // #region backend-request-handler-ts
-export async function listTodosForRequester(req: Request, client: JazzClient) {
-  const userClient = scopedClientFromRequest(req, client);
-  const rows = await userClient.query(buildQuery("todos"));
-  return rows;
+export async function listTodosForRequester(req: Request, res: Response): Promise<void> {
+  try {
+    const rows = await client.forRequest(req).query(app.todos.where({ done: true }));
+    res.json(rows);
+  } catch {
+    sendQueryError(res);
+  }
 }
 // #endregion backend-request-handler-ts
 
 // #region permissions-simple-ts
-export async function listTodosWithSimplePolicy(req: Request, client: JazzClient) {
-  const userClient = scopedClientFromRequest(req, client);
-  return userClient.query(buildQuery("todos"));
+export async function listTodosWithSimplePolicy(req: Request, res: Response): Promise<void> {
+  try {
+    const rows = await client.forRequest(req).query(app.todos.where({ done: false }));
+    res.json(rows);
+  } catch {
+    sendQueryError(res);
+  }
 }
 // #endregion permissions-simple-ts
 
 // #region permissions-inherits-ts
 export async function listTodosWithInheritedPolicy(
-  req: Request,
-  client: JazzClient,
-  folderId: string,
-) {
-  const userClient = scopedClientFromRequest(req, client);
-  return userClient.query(buildFolderScopedQuery(folderId));
+  req: Request<{ projectId: string }>,
+  res: Response,
+): Promise<void> {
+  try {
+    const rows = await client
+      .forRequest(req)
+      .query(app.todos.where({ project: req.params.projectId }));
+    res.json(rows);
+  } catch {
+    sendQueryError(res);
+  }
 }
 // #endregion permissions-inherits-ts
