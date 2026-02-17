@@ -9,5 +9,5 @@ table("todos", {
   done: col.boolean(),
   description: col.string().optional(),
   parent: col.ref("todos").optional(),
-  project: col.ref("projects"),
+  project: col.ref("projects").optional(),
 });

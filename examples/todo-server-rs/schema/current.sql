@@ -1,5 +1,11 @@
+CREATE TABLE projects (
+    name TEXT NOT NULL
+);
+
 CREATE TABLE todos (
     title TEXT NOT NULL,
-    completed BOOLEAN NOT NULL,
-    description TEXT
+    done BOOLEAN NOT NULL,
+    description TEXT,
+    parent UUID REFERENCES todos,
+    project UUID REFERENCES projects
 );
