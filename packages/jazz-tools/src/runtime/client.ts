@@ -10,6 +10,17 @@ import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { sendSyncPayload, readBinaryFrames, generateClientId } from "./sync-transport.js";
 
 /**
+ * Minimal request shape supported by `JazzClient.forRequest()`.
+ *
+ * Works with common server frameworks (Express, Fastify, Hono, Web Request wrappers)
+ * as long as Authorization headers are exposed through `header(name)` or `headers`.
+ */
+export interface RequestLike {
+  header?: (name: string) => string | undefined;
+  headers?: Headers | Record<string, string | string[] | undefined>;
+}
+
+/**
  * Common interface for WASM and NAPI runtimes.
  *
  * Both `WasmRuntime` (from groove-wasm) and `NapiRuntime` (from jazz-napi)
@@ -67,6 +78,83 @@ export interface Row {
  * Subscription callback type.
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
+
+function readHeader(request: RequestLike, name: string): string | undefined {
+  const lower = name.toLowerCase();
+
+  const fromMethod = request.header?.(name) ?? request.header?.(lower);
+  if (typeof fromMethod === "string") {
+    return fromMethod;
+  }
+
+  const headers = request.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    return headers.get(name) ?? headers.get(lower) ?? undefined;
+  }
+
+  const record = headers as Record<string, string | string[] | undefined>;
+  const raw = record[name] ?? record[lower];
+  if (Array.isArray(raw)) {
+    return raw[0];
+  }
+  return raw;
+}
+
+function decodeBase64Url(value: string): string {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+
+  if (typeof atob === "function") {
+    return atob(padded);
+  }
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(padded, "base64").toString("utf8");
+  }
+
+  throw new Error("No base64 decoder available in this runtime");
+}
+
+function sessionFromRequest(request: RequestLike): Session {
+  const authHeader = readHeader(request, "authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    throw new Error("Missing or invalid Authorization header");
+  }
+
+  const token = authHeader.slice("Bearer ".length).trim();
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    throw new Error("Invalid JWT format");
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(decodeBase64Url(parts[1]));
+  } catch {
+    throw new Error("Invalid JWT payload");
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Invalid JWT payload");
+  }
+
+  const typedPayload = payload as { sub?: unknown; claims?: unknown };
+  if (typeof typedPayload.sub !== "string" || typedPayload.sub.length === 0) {
+    throw new Error("JWT payload missing sub");
+  }
+
+  const claims =
+    typedPayload.claims &&
+    typeof typedPayload.claims === "object" &&
+    !Array.isArray(typedPayload.claims)
+      ? (typedPayload.claims as Record<string, unknown>)
+      : {};
+
+  return { user_id: typedPayload.sub, claims };
+}
 
 /**
  * Session-scoped client for backend operations.
@@ -305,6 +393,20 @@ export class JazzClient {
       throw new Error("serverUrl required for session impersonation");
     }
     return new SessionClient(this, session);
+  }
+
+  /**
+   * Create a session-scoped client from an authenticated HTTP request.
+   *
+   * Extracts `Authorization: Bearer <jwt>` and maps payload fields:
+   * - `sub` -> `session.user_id`
+   * - `claims` -> `session.claims` (defaults to `{}`)
+   *
+   * This helper only extracts payload fields and does not validate JWT signatures.
+   * JWT verification should happen in your auth middleware before request handling.
+   */
+  forRequest(request: RequestLike): SessionClient {
+    return this.forSession(sessionFromRequest(request));
   }
 
   /**

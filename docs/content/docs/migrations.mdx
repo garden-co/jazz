@@ -17,13 +17,13 @@ description: Schema evolution workflow and generated migration stubs.
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
-    <include cwd lang="bash" meta='title="examples/todo-server-ts/docs/migrations-workflow.sh"'>
-      ../examples/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
+    <include cwd lang="bash">
+      ../examples/docs/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
     </include>
   </Tab>
   <Tab value="SQL">
-    <include cwd lang="bash" meta='title="examples/todo-server-rs/docs/migrations-workflow.sh"'>
-      ../examples/todo-server-rs/docs/migrations-workflow.sh#migrations-workflow-sql
+    <include cwd lang="bash">
+      ../examples/docs/todo-server-rs/docs/migrations-workflow.sh#migrations-workflow-sql
     </include>
   </Tab>
 </Tabs>
@@ -38,18 +38,18 @@ For SQL migrations, keep explicit forward/backward files and edit each direction
     <include
       cwd
       lang="ts"
-      meta='title="examples/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
     >
-      ../examples/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
     </include>
   </Tab>
   <Tab value="SQL">
     <include
       cwd
       lang="sql"
-      meta='title="examples/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
     >
-      ../examples/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
     </include>
   </Tab>
 </Tabs>
@@ -61,18 +61,18 @@ For SQL migrations, keep explicit forward/backward files and edit each direction
     <include
       cwd
       lang="ts"
-      meta='title="examples/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
     >
-      ../examples/todo-server-ts/schema/migration_v1_v2_customized_example.ts
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
     </include>
   </Tab>
   <Tab value="SQL">
     <include
       cwd
       lang="sql"
-      meta='title="examples/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
     >
-      ../examples/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
     </include>
   </Tab>
 </Tabs>

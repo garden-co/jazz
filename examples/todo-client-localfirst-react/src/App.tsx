@@ -6,7 +6,6 @@ function readEnvAppId(): string | undefined {
     ?.JAZZ_APP_ID;
 }
 
-// #region context-setup-react
 function defaultConfig(): NonNullable<JazzProviderProps["config"]> {
   return {
     appId: readEnvAppId() ?? "todo-react-example",
@@ -14,7 +13,6 @@ function defaultConfig(): NonNullable<JazzProviderProps["config"]> {
     userBranch: "main",
   };
 }
-// #endregion context-setup-react
 
 export function App({ config, fallback }: Partial<JazzProviderProps> = {}) {
   return (

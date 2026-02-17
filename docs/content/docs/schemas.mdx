@@ -7,13 +7,13 @@ description: Define tables and relationships in TS DSL or SQL, then use the CLI 
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/schema/current.ts"'>
-      ../examples/todo-client-localfirst-ts/schema/current.ts
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
     </include>
   </Tab>
   <Tab value="SQL">
-    <include cwd lang="sql" meta='title="examples/todo-server-rs/schema/current.sql"'>
-      ../examples/todo-server-rs/schema/current.sql
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-rs/schema/current.sql
     </include>
   </Tab>
 </Tabs>
@@ -28,31 +28,43 @@ description: Define tables and relationships in TS DSL or SQL, then use the CLI 
 
 ### TS Client Codegen
 
-<include cwd lang="bash" meta='title="examples/todo-client-localfirst-ts/docs/schema-codegen.sh"'>
-  ../examples/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
+<include cwd lang="bash">
+  ../examples/docs/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
 </include>
 
-This regenerates `schema/current.sql` and typed client bindings (for example `schema/app.ts`) from `schema/current.ts`.
+Run this from a normal app root. It regenerates `schema/current.sql` and typed client bindings (for example `schema/app.ts`) from `schema/current.ts`.
 
 ### Generated migration stubs
+
+TypeScript migration stubs encode both forward and backward behavior in one file.
+SQL migrations are split into explicit forward and backward files.
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
     <include
       cwd
       lang="ts"
-      meta='title="examples/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
     >
-      ../examples/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
     </include>
   </Tab>
   <Tab value="SQL">
+    Forward:
     <include
       cwd
       lang="sql"
-      meta='title="examples/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
     >
-      ../examples/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
+    </include>
+    Backward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
     </include>
   </Tab>
 </Tabs>
@@ -64,18 +76,54 @@ This regenerates `schema/current.sql` and typed client bindings (for example `sc
     <include
       cwd
       lang="ts"
-      meta='title="examples/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts"'
     >
-      ../examples/todo-server-ts/schema/migration_v1_v2_customized_example.ts
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
     </include>
   </Tab>
   <Tab value="SQL">
     <include
       cwd
       lang="sql"
-      meta='title="examples/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql"'
     >
-      ../examples/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
+    </include>
+  </Tab>
+</Tabs>
+
+### Backwards default examples
+
+Backwards defaults define what value should be restored when a newer schema rolls back to an older one.
+In TypeScript, this is represented directly in the migration stub.
+In SQL, the rollback file explicitly reintroduces dropped columns with a default.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include
+      cwd
+      lang="ts"
+      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts"'
+    >
+      ../examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    Forward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql
+    </include>
+    Backward:
+    <include
+      cwd
+      lang="sql"
+      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql"'
+    >
+      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql
     </include>
   </Tab>
 </Tabs>
