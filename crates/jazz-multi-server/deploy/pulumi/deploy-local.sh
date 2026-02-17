@@ -232,7 +232,7 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     "${TMP_CONTEXT}/"
 
   cat > "${TMP_CONTEXT}/Dockerfile" <<'EOF'
-FROM rust:1.86-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release -p jazz-multi-server
