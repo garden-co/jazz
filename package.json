@@ -4,7 +4,8 @@
     "format:check": "oxfmt --check . && cargo fmt --check",
     "lint": "oxlint . && cargo clippy --workspace -- -D warnings",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build",
-    "build:vercel-docs": "turbo run build:crates --filter=@jazz/rust && turbo run build",
+    "ensure:wasm-pack": "export PATH=\"$HOME/.cargo/bin:$PATH\" && (command -v wasm-pack >/dev/null 2>&1 || (curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh))",
+    "build:vercel-docs": "pnpm run ensure:wasm-pack && export PATH=\"$HOME/.cargo/bin:$PATH\" && turbo run build:crates --filter=@jazz/rust && turbo run build",
     "test": "turbo run test",
     "postinstall": "lefthook install"
   },
