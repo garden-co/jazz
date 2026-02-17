@@ -75,10 +75,11 @@ pulumi stack select dev || pulumi stack init dev
 Set baseline non-secret config:
 
 ```bash
+ACCOUNT_ID="$(aws sts get-caller-identity --profile <your-profile> --query Account --output text)"
 pulumi config set region us-east-2
-pulumi config set allowedAccountId 851454408348
+pulumi config set allowedAccountId "${ACCOUNT_ID}"
 pulumi config set domainName cloud2.aws.cloud.jazz.tools
-pulumi config set containerImageRepository 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server
+pulumi config set containerImageRepository "${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server"
 pulumi config set containerImageTag latest
 ```
 
