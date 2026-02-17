@@ -208,6 +208,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       $jazz: {
         value: new CoFeedJazzApi(this, options.fromRaw),
         enumerable: false,
+        configurable: true,
       },
     });
 
@@ -823,10 +824,15 @@ export class FileStream extends CoValueBase implements CoValue {
     }
 
     Object.defineProperties(this, {
-      [TypeSym]: { value: "BinaryCoStream", enumerable: false },
+      [TypeSym]: {
+        value: "BinaryCoStream",
+        enumerable: false,
+        configurable: true,
+      },
       $jazz: {
         value: new FileStreamJazzApi(this, raw),
         enumerable: false,
+        configurable: true,
       },
     });
   }

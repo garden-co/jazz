@@ -47,12 +47,17 @@ export class CoPlainText extends String implements CoValue {
       super(options.fromRaw.toString());
       const raw = options.fromRaw;
       Object.defineProperties(this, {
-        [TypeSym]: { value: "CoPlainText", enumerable: false },
+        [TypeSym]: {
+          value: "CoPlainText",
+          enumerable: false,
+          configurable: true,
+        },
         $jazz: {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
+          configurable: true,
         },
-        $isLoaded: { value: true, enumerable: false },
+        $isLoaded: { value: true, enumerable: false, configurable: true },
       });
       return;
     }
@@ -61,12 +66,17 @@ export class CoPlainText extends String implements CoValue {
       super(options.text);
       const raw = options.owner.$jazz.raw.createPlainText(options.text);
       Object.defineProperties(this, {
-        [TypeSym]: { value: "CoPlainText", enumerable: false },
+        [TypeSym]: {
+          value: "CoPlainText",
+          enumerable: false,
+          configurable: true,
+        },
         $jazz: {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
+          configurable: true,
         },
-        $isLoaded: { value: true, enumerable: false },
+        $isLoaded: { value: true, enumerable: false, configurable: true },
       });
       return;
     }

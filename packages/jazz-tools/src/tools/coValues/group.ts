@@ -92,6 +92,7 @@ export class Group extends CoValueBase implements CoValue {
       $jazz: {
         value: new GroupJazzApi(proxy, raw),
         enumerable: false,
+        configurable: true,
       },
     });
 
