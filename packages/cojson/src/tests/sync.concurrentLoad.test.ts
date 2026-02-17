@@ -474,6 +474,88 @@ describe("concurrent load", () => {
     `);
   });
 
+  test("should forward client LOAD to core even when edge is at concurrency limit", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+    CO_VALUE_LOADING_CONFIG.TIMEOUT = 60_000;
+
+    const core = jazzCloud;
+    const edge = setupTestNode({ connected: false });
+
+    const { peerOnServer: edgePeerOnCore, peerState: corePeerOnEdge } =
+      edge.connectToSyncServer({
+        ourName: "edge",
+        syncServerName: "core",
+        syncServer: core.node,
+        persistent: true,
+      });
+
+    const client = setupTestNode({ connected: false });
+    client.connectToSyncServer({
+      ourName: "client",
+      syncServerName: "edge",
+      syncServer: edge.node,
+    });
+
+    // Create two CoValues on core so edge has to forward LOADs to core.
+    const group = core.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    // Keep the first edge->core load in-flight to saturate the concurrency limit.
+    const blocker = blockMessageTypeOnOutgoingPeer(
+      edgePeerOnCore,
+      "content",
+      {},
+    );
+
+    const edgeLoadPromise = edge.node.loadCoValueCore(map1.id);
+
+    await waitFor(() => {
+      const simplified = SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map1: map1.core,
+        Map2: map2.core,
+      });
+      return simplified.some(
+        (m) => m === "edge -> core | LOAD Map1 sessions: empty",
+      );
+    });
+
+    // Ensure the edge->core peer is already at its concurrency limit (1 in-flight load).
+    // @ts-expect-error loadQueue is private
+    expect(corePeerOnEdge.loadQueue.inFlightCount).toBe(1);
+
+    SyncMessagesLog.clear();
+
+    // Now the client asks the edge for map2. Edge must forward the LOAD to core
+    // even though it already has an in-flight load to core and the limit is 1.
+    const clientLoadPromise = client.node.loadCoValueCore(map2.id);
+
+    await waitFor(() => {
+      const simplified = SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map1: map1.core,
+        Map2: map2.core,
+      });
+      expect(simplified).toContain("edge -> core | LOAD Map2 sessions: empty");
+      return true;
+    });
+
+    blocker.unblock();
+    blocker.sendBlockedMessages();
+
+    const [map1OnEdge, map2OnClient] = await Promise.all([
+      edgeLoadPromise,
+      clientLoadPromise,
+    ]);
+
+    expect(map1OnEdge.isAvailable()).toBe(true);
+    expect(map2OnClient.isAvailable()).toBe(true);
+  });
+
   test("should keep load slot occupied while streaming large CoValues", async () => {
     setMaxInFlightLoadsPerPeer(1);
 

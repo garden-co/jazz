@@ -273,7 +273,20 @@ export class SyncManager {
     }
   }
 
-  sendNewContent(id: RawCoID, peer: PeerState, seen: Set<RawCoID> = new Set()) {
+  sendNewContent(
+    id: RawCoID,
+    peer: PeerState,
+    forceKnownReplyOnNoDelta: boolean = false,
+  ) {
+    this.#sendNewContent(id, peer, new Set(), forceKnownReplyOnNoDelta);
+  }
+
+  #sendNewContent(
+    id: RawCoID,
+    peer: PeerState,
+    seen: Set<RawCoID>,
+    forceKnownReplyOnNoDelta: boolean,
+  ) {
     if (seen.has(id)) {
       return;
     }
@@ -289,7 +302,7 @@ export class SyncManager {
     const includeDependencies = peer.role !== "server";
     if (includeDependencies) {
       for (const dependency of coValue.getDependedOnCoValues()) {
-        this.sendNewContent(dependency, peer, seen);
+        this.#sendNewContent(dependency, peer, seen, false);
       }
     }
 
@@ -303,7 +316,7 @@ export class SyncManager {
       }
 
       peer.combineOptimisticWith(id, coValue.knownState());
-    } else if (!peer.toldKnownState.has(id)) {
+    } else if (forceKnownReplyOnNoDelta || !peer.toldKnownState.has(id)) {
       if (coValue.isDeleted) {
         // This way we make the peer believe that we've always ingested all the content they sent, even though we skipped it because the coValue is deleted
         this.trySendToPeer(
@@ -796,7 +809,7 @@ export class SyncManager {
 
     // Fast path: CoValue is already in memory
     if (coValue.isAvailable()) {
-      this.sendNewContent(msg.id, peer);
+      this.sendNewContent(msg.id, peer, true);
       return;
     }
 
@@ -812,7 +825,7 @@ export class SyncManager {
     coValue.getKnownStateFromStorage((storageKnownState) => {
       // Race condition: CoValue might have been loaded while we were waiting for storage
       if (coValue.isAvailable()) {
-        this.sendNewContent(msg.id, peer);
+        this.sendNewContent(msg.id, peer, true);
         return;
       }
 
@@ -835,7 +848,7 @@ export class SyncManager {
         // Even though we responded with KNOWN (client has everything), we need
         // to establish a subscription so that updates from core flow to us.
         const serverPeers = this.getServerPeers(msg.id, peer.id);
-        coValue.loadFromPeers(serverPeers);
+        coValue.loadFromPeers(serverPeers, "low-priority");
 
         return;
       }
@@ -856,7 +869,7 @@ export class SyncManager {
   ) {
     coValue.loadFromStorage((found) => {
       if (found && coValue.isAvailable()) {
-        this.sendNewContent(id, peer);
+        this.sendNewContent(id, peer, true);
       } else {
         this.loadFromPeersAndRespond(id, peer, coValue);
       }
@@ -872,7 +885,7 @@ export class SyncManager {
     coValue: CoValueCore,
   ) {
     const peers = this.getServerPeers(id, peer.id);
-    coValue.loadFromPeers(peers);
+    coValue.loadFromPeers(peers, "immediate");
 
     const handleLoadResult = () => {
       if (coValue.isAvailable()) {
@@ -947,7 +960,12 @@ export class SyncManager {
       }
     }
 
-    peer.trackLoadRequestComplete(coValue);
+    // KNOWN with header=true does not guarantee that content arrived.
+    // Keep the request in-flight until content (or a terminal state) lands,
+    // so queue timeout logic can mark this peer as unavailable if needed.
+    if (!availableOnPeer || coValue.isAvailable()) {
+      peer.trackLoadRequestComplete(coValue);
+    }
   }
 
   handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
@@ -1340,7 +1358,7 @@ export class SyncManager {
       if (peer.isCoValueSubscribedToPeer(coValue.id)) {
         this.sendNewContent(coValue.id, peer);
       } else if (peer.role === "server") {
-        peer.sendLoadRequest(coValue);
+        peer.sendLoadRequest(coValue, "low-priority");
       }
     }
   }

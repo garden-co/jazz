@@ -21,6 +21,8 @@ export type CreateWebSocketPeerOpts = {
    */
   meta?: Record<string, string | number>;
   meter?: Meter;
+  enablePingDelayLogs?: boolean;
+  pingDelayLogsData?: Record<string, string | number>;
 };
 
 function createPingTimeoutListener(
@@ -36,16 +38,50 @@ function createPingTimeoutListener(
   }
 
   let pingTimeout: ReturnType<typeof setTimeout> | null = null;
+  let pingDeadline = 0;
+  let cleared = false;
+
+  function scheduleTimeout() {
+    if (cleared || pingTimeout !== null || pingDeadline === 0) {
+      return;
+    }
+
+    pingTimeout = setTimeout(
+      () => {
+        pingTimeout = null;
+
+        if (cleared) {
+          return;
+        }
+
+        if (Date.now() >= pingDeadline) {
+          cleared = true;
+          callback();
+          return;
+        }
+
+        scheduleTimeout();
+      },
+      Math.max(0, pingDeadline - Date.now()),
+    );
+  }
 
   return {
     reset() {
-      pingTimeout && clearTimeout(pingTimeout);
-      pingTimeout = setTimeout(() => {
-        callback();
-      }, timeout);
+      if (cleared) {
+        return;
+      }
+
+      pingDeadline = Date.now() + timeout;
+      scheduleTimeout();
     },
     clear() {
-      pingTimeout && clearTimeout(pingTimeout);
+      cleared = true;
+
+      if (pingTimeout !== null) {
+        clearTimeout(pingTimeout);
+        pingTimeout = null;
+      }
     },
   };
 }
@@ -72,14 +108,19 @@ export function createWebSocketPeer({
   onClose,
   meter,
   meta,
+  enablePingDelayLogs = false,
+  pingDelayLogsData = {},
 }: CreateWebSocketPeerOpts): Peer {
-  const ingressBytesCounter = (
-    meter ?? metrics.getMeter("cojson-transport-ws")
-  ).createCounter("jazz.usage.ingress", {
-    description: "Total ingress bytes from peer",
-    unit: "bytes",
-    valueType: ValueType.INT,
-  });
+  const meterProvider = meter ?? metrics.getMeter("cojson-transport-ws");
+
+  const ingressBytesCounter = meterProvider.createCounter(
+    "jazz.usage.ingress",
+    {
+      description: "Total ingress bytes from peer",
+      unit: "bytes",
+      valueType: ValueType.INT,
+    },
+  );
 
   // Initialize the counter by adding 0
   ingressBytesCounter.add(0, meta);
@@ -164,7 +205,19 @@ export function createWebSocketPeer({
     }
 
     for (const msg of messages) {
-      if (msg && "action" in msg) {
+      if (!msg) {
+        continue;
+      }
+
+      if (enablePingDelayLogs && "time" in msg) {
+        logger.info("Ping delay", {
+          delay: Math.max(0, Date.now() - msg.time),
+          server: msg.dc,
+          ...pingDelayLogsData,
+        });
+      }
+
+      if ("action" in msg) {
         incoming.push(msg);
 
         if (msg.action === "content") {

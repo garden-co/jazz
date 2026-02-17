@@ -81,6 +81,7 @@ export class BatchedOutgoingMessages
       !hasWebSocketTooMuchBufferedData(this.websocket)
     ) {
       this.processMessage(msg, true);
+      this.queue.trackPushPull(msg);
       return;
     }
 

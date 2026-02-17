@@ -63,6 +63,7 @@ describe("sync after the garbage collector has run", () => {
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/1",
         "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]
@@ -105,6 +106,7 @@ describe("sync after the garbage collector has run", () => {
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/1",
         "client -> server | KNOWN Group sessions: header/4",
         "client -> server | KNOWN Map sessions: header/1",
       ]

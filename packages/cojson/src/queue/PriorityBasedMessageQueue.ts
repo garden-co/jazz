@@ -46,4 +46,14 @@ export class PriorityBasedMessageQueue {
 
     return this.queues[priority]?.shift();
   }
+
+  public trackPushPull(msg: SyncMessage) {
+    let priority = "priority" in msg ? msg.priority : this.defaultPriority;
+
+    if (msg.action === "reconcile") {
+      priority = CO_VALUE_PRIORITY.LOW;
+    }
+
+    this.getQueue(priority).trackPushPull();
+  }
 }

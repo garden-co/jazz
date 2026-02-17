@@ -82,9 +82,11 @@ describe("full storage reconciliation", () => {
         "client -> storage | LOAD Group sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
@@ -138,6 +140,7 @@ describe("full storage reconciliation", () => {
         "client -> server | LOAD Group sessions: header/4",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 2",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
+        "client -> server | KNOWN Map sessions: header/2",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/2",
       ]
@@ -225,9 +228,11 @@ describe("full storage reconciliation", () => {
         "client -> storage | LOAD Group sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
         "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Group sessions: header/4",
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
       ]
@@ -440,9 +445,11 @@ describe("full storage reconciliation", () => {
           "client -> storage | LOAD Group sessions: empty",
           "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
           "client -> server | CONTENT Group header: true new: After: 0 New: 4",
+          "client -> server | KNOWN Group sessions: header/4",
           "client -> storage | LOAD Map sessions: empty",
           "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
           "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+          "client -> server | KNOWN Map sessions: header/1",
           "server -> client | KNOWN Group sessions: header/4",
           "server -> client | KNOWN Map sessions: header/1",
         ]

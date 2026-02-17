@@ -739,6 +739,7 @@ describe("client syncs with a server with storage", () => {
         "server -> bob | CONTENT ParentGroup header: false new: After: 150 New: 56",
         "server -> bob | CONTENT Group header: true new: After: 0 New: 6",
         "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> bob | KNOWN Map sessions: header/1",
         "bob -> server | KNOWN ParentGroup sessions: header/77",
         "bob -> server | KNOWN ParentGroup sessions: header/150",
         "bob -> server | KNOWN ParentGroup sessions: header/206",
