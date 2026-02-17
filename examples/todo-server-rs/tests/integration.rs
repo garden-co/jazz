@@ -31,7 +31,7 @@ use uuid::Uuid;
 pub struct Todo {
     pub id: Uuid,
     pub title: String,
-    pub completed: bool,
+    pub done: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -46,7 +46,7 @@ pub struct CreateTodoRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateTodoRequest {
     pub title: Option<String>,
-    pub completed: Option<bool>,
+    pub done: Option<bool>,
     pub description: Option<String>,
 }
 
@@ -58,11 +58,14 @@ pub struct AppState {
 
 fn test_schema() -> jazz_rs::Schema {
     SchemaBuilder::new()
+        .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
-                .column("completed", ColumnType::Boolean)
-                .nullable_column("description", ColumnType::Text),
+                .column("done", ColumnType::Boolean)
+                .nullable_column("description", ColumnType::Text)
+                .nullable_fk_column("parent", "todos")
+                .nullable_fk_column("project", "projects"),
         )
         .build()
 }
@@ -113,7 +116,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
         Value::Text(s) => s.clone(),
         _ => return None,
     };
-    let completed = match &values[1] {
+    let done = match &values[1] {
         Value::Boolean(b) => *b,
         _ => return None,
     };
@@ -124,7 +127,7 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     Some(Todo {
         id: *object_id.uuid(),
         title,
-        completed,
+        done,
         description,
     })
 }
@@ -204,13 +207,15 @@ async fn create_todo(
         Value::Text(request.title.clone()),
         Value::Boolean(false),
         Value::Text(description.clone()),
+        Value::Null,
+        Value::Null,
     ];
     match state.client.create("todos", values).await {
         Ok(row_id) => {
             let todo = Todo {
                 id: *row_id.uuid(),
                 title: request.title,
-                completed: false,
+                done: false,
                 description: if description.is_empty() {
                     None
                 } else {
@@ -238,8 +243,8 @@ async fn update_todo(
     if let Some(title) = request.title {
         updates.push(("title".to_string(), Value::Text(title)));
     }
-    if let Some(completed) = request.completed {
-        updates.push(("completed".to_string(), Value::Boolean(completed)));
+    if let Some(done) = request.done {
+        updates.push(("done".to_string(), Value::Boolean(done)));
     }
     if let Some(description) = request.description {
         updates.push(("description".to_string(), Value::Text(description)));
@@ -365,7 +370,7 @@ async fn test_crud_operations() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let created_todo: Todo = serde_json::from_slice(&body).unwrap();
     assert_eq!(created_todo.title, "Buy milk");
-    assert!(!created_todo.completed);
+    assert!(!created_todo.done);
 
     // 3. List todos (should have one)
     let response = app
@@ -386,7 +391,7 @@ async fn test_crud_operations() {
     // 4. Update the todo
     let update_req = UpdateTodoRequest {
         title: None,
-        completed: Some(true),
+        done: Some(true),
         description: None,
     };
     let response = app
@@ -405,7 +410,7 @@ async fn test_crud_operations() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let updated_todo: Todo = serde_json::from_slice(&body).unwrap();
-    assert!(updated_todo.completed, "Should be completed");
+    assert!(updated_todo.done, "Should be done");
 
     // 5. Delete the todo
     let response = app
@@ -460,6 +465,8 @@ async fn test_local_persistence() {
             Value::Text("Persist me".to_string()),
             Value::Boolean(false),
             Value::Text(String::new()),
+            Value::Null,
+            Value::Null,
         ];
         let row_id = client.create("todos", values).await.unwrap();
 
@@ -692,6 +699,8 @@ async fn test_server_resync() {
             Value::Text("Synced todo".to_string()),
             Value::Boolean(false),
             Value::Text(String::new()),
+            Value::Null,
+            Value::Null,
         ];
         let _row_id = client.create("todos", values).await.unwrap();
 
@@ -813,7 +822,7 @@ async fn test_todos_live_sse() {
         .put(format!("{}/todos/{}", base_url, created.id))
         .json(&UpdateTodoRequest {
             title: None,
-            completed: Some(true),
+            done: Some(true),
             description: None,
         })
         .send()
@@ -822,7 +831,7 @@ async fn test_todos_live_sse() {
 
     let after_update = next_todos(&mut es).await;
     assert_eq!(after_update.len(), 1);
-    assert!(after_update[0].completed, "Should be completed");
+    assert!(after_update[0].done, "Should be done");
 
     // 4. Delete the todo - should see empty list again
     client

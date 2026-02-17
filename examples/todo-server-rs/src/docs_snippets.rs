@@ -109,7 +109,7 @@ pub async fn read_todos_settled_edge(client: &JazzClient) -> jazz_rs::Result<usi
 #[allow(dead_code)]
 pub async fn read_todos_with_query_shaping(client: &JazzClient) -> jazz_rs::Result<usize> {
     let query = QueryBuilder::new("todos")
-        .filter_eq("completed", Value::Boolean(false))
+        .filter_eq("done", Value::Boolean(false))
         .order_by("title")
         .limit(20)
         .offset(0)
@@ -139,13 +139,15 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
         Value::Text("Write docs".to_string()),
         Value::Boolean(false),
         Value::Text(String::new()),
+        Value::Null,
+        Value::Null,
     ];
 
     let _new_id = client.create("todos", values).await?;
     client
         .update(
             existing_id,
-            vec![("completed".to_string(), Value::Boolean(true))],
+            vec![("done".to_string(), Value::Boolean(true))],
         )
         .await?;
     client.delete(existing_id).await?;
@@ -163,6 +165,8 @@ pub async fn write_todo_with_default_ack(client: &JazzClient) -> jazz_rs::Result
                 Value::Text("Write docs with default ack behavior".to_string()),
                 Value::Boolean(false),
                 Value::Text(String::new()),
+                Value::Null,
+                Value::Null,
             ],
         )
         .await?;
