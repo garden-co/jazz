@@ -1,0 +1,53 @@
+# Realistic E2E Benchmarks
+
+Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
+
+## Files
+
+- `schema/project_board.schema.json`: canonical collaborative app schema
+- `profiles/s.json`: smoke/team-dev profile (`S`)
+- `profiles/m.json`: medium profile (`M`)
+- `scenarios/w1_interactive.json`: read-heavy interactive session
+- `scenarios/w3_offline_reconnect.json`: offline writes then reconnect
+- `scenarios/w4_cold_start.json`: reopen and first-query latency
+
+## Native Runner (SurrealKV)
+
+Run from workspace root:
+
+```bash
+RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+  --profile benchmarks/realistic/profiles/s.json \
+  --scenario benchmarks/realistic/scenarios/w1_interactive.json
+```
+
+`W3` requires a running server and `--server-url`:
+
+```bash
+RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+  --profile benchmarks/realistic/profiles/s.json \
+  --scenario benchmarks/realistic/scenarios/w3_offline_reconnect.json \
+  --server-url http://127.0.0.1:1625
+```
+
+## Browser Runner (OPFS Worker)
+
+Run the browser benchmark test:
+
+```bash
+pnpm --dir packages/jazz-ts run bench:realistic:browser
+```
+
+The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.
+
+The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
+
+## CI / Runner
+
+- Workflow: `/Users/anselm/.codex/worktrees/f472/jazz2-clean/.github/workflows/benchmarks.yml`
+- AWS setup: `/Users/anselm/.codex/worktrees/f472/jazz2-clean/benchmarks/realistic/aws_runner_setup.md`
+
+Artifacts include `manifest.json` as a stable ingestion entrypoint:
+
+- native: `bench-out/native/manifest.json`
+- browser: `bench-out/browser/manifest.json`

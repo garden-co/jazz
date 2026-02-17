@@ -1,0 +1,217 @@
+name: Realistic Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Profile id (s or m)"
+        required: false
+        default: "s"
+      include_browser:
+        description: "Run browser/OPFS benchmark suite"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Nightly UTC
+    - cron: "0 5 * * *"
+
+concurrency:
+  # Prevent overlapping benchmark runs on the same dedicated runner pool.
+  group: realistic-benchmarks
+  cancel-in-progress: false
+
+env:
+  BENCH_PROFILE: ${{ github.event.inputs.profile || 's' }}
+
+jobs:
+  native:
+    name: Native Bench (SurrealKV)
+    runs-on: [self-hosted, linux, x64, jazz-bench]
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Collect host metadata
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/native
+          cat > bench-out/native/metadata.json <<EOF
+          {
+            "workflow": "${GITHUB_WORKFLOW}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "sha": "${GITHUB_SHA}",
+            "ref": "${GITHUB_REF}",
+            "profile": "${BENCH_PROFILE}",
+            "runner_name": "${RUNNER_NAME}",
+            "runner_os": "${RUNNER_OS}",
+            "runner_arch": "${RUNNER_ARCH}"
+          }
+          EOF
+          rustc -V > bench-out/native/rustc.txt
+          uname -a > bench-out/native/uname.txt
+          lscpu > bench-out/native/lscpu.txt
+
+      - name: Run W1 (interactive)
+        run: |
+          set -euo pipefail
+          RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+            --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
+            --scenario benchmarks/realistic/scenarios/w1_interactive.json \
+            > bench-out/native/w1_interactive.json
+
+      - name: Run W4 (cold start)
+        run: |
+          set -euo pipefail
+          RUST_LOG=warn cargo run -p jazz-rs --example realistic_bench -- \
+            --profile "benchmarks/realistic/profiles/${BENCH_PROFILE}.json" \
+            --scenario benchmarks/realistic/scenarios/w4_cold_start.json \
+            > bench-out/native/w4_cold_start.json
+
+      - name: Build native manifest
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg profile "${BENCH_PROFILE}" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg w1_sha256 "$(sha256sum bench-out/native/w1_interactive.json | awk '{print $1}')" \
+            --arg w4_sha256 "$(sha256sum bench-out/native/w4_cold_start.json | awk '{print $1}')" \
+            '{
+              kind: "realistic-bench-native",
+              generated_at: $generated_at,
+              workflow: $workflow,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              repository: $repository,
+              sha: $sha,
+              ref: $ref,
+              profile: $profile,
+              files: [
+                { path: "metadata.json" },
+                { path: "rustc.txt" },
+                { path: "uname.txt" },
+                { path: "lscpu.txt" },
+                { path: "w1_interactive.json", sha256: $w1_sha256 },
+                { path: "w4_cold_start.json", sha256: $w4_sha256 }
+              ]
+            }' > bench-out/native/manifest.json
+
+      - name: Upload native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-out/native
+          if-no-files-found: error
+
+  browser:
+    name: Browser Bench (TS + OPFS)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_browser }}
+    runs-on: [self-hosted, linux, x64, jazz-bench]
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Collect host metadata
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/browser
+          cat > bench-out/browser/metadata.json <<EOF
+          {
+            "workflow": "${GITHUB_WORKFLOW}",
+            "run_id": "${GITHUB_RUN_ID}",
+            "run_attempt": "${GITHUB_RUN_ATTEMPT}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "sha": "${GITHUB_SHA}",
+            "ref": "${GITHUB_REF}",
+            "profile": "${BENCH_PROFILE}",
+            "runner_name": "${RUNNER_NAME}",
+            "runner_os": "${RUNNER_OS}",
+            "runner_arch": "${RUNNER_ARCH}"
+          }
+          EOF
+          node -v > bench-out/browser/node.txt
+          pnpm -v > bench-out/browser/pnpm.txt
+          rustc -V > bench-out/browser/rustc.txt
+          uname -a > bench-out/browser/uname.txt
+
+      - name: Build jazz CLI server binary
+        run: cargo build -p jazz-cli
+
+      - name: Build groove-wasm package
+        run: pnpm --dir crates/groove-wasm run build
+
+      - name: Run browser benchmark suite
+        run: |
+          set -euo pipefail
+          pnpm --dir packages/jazz-ts run bench:realistic:browser | tee bench-out/browser/realistic.log
+
+      - name: Extract benchmark JSON line
+        run: |
+          set -euo pipefail
+          grep '^\[realistic-bench\]' bench-out/browser/realistic.log | tail -n1 | sed 's/^\[realistic-bench\] //' > bench-out/browser/realistic.json
+          test -s bench-out/browser/realistic.json
+
+      - name: Build browser manifest
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg profile "${BENCH_PROFILE}" \
+            --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg realistic_sha256 "$(sha256sum bench-out/browser/realistic.json | awk '{print $1}')" \
+            --arg log_sha256 "$(sha256sum bench-out/browser/realistic.log | awk '{print $1}')" \
+            '{
+              kind: "realistic-bench-browser",
+              generated_at: $generated_at,
+              workflow: $workflow,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              repository: $repository,
+              sha: $sha,
+              ref: $ref,
+              profile: $profile,
+              files: [
+                { path: "metadata.json" },
+                { path: "node.txt" },
+                { path: "pnpm.txt" },
+                { path: "rustc.txt" },
+                { path: "uname.txt" },
+                { path: "realistic.json", sha256: $realistic_sha256 },
+                { path: "realistic.log", sha256: $log_sha256 }
+              ]
+            }' > bench-out/browser/manifest.json
+
+      - name: Upload browser artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench-out/browser
+          if-no-files-found: error

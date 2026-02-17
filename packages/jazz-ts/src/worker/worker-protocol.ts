@@ -20,6 +20,8 @@ export interface InitMessage {
   serverUrl?: string;
   jwtToken?: string;
   adminSecret?: string;
+  /** Optional WASM tracing log level for this worker runtime. */
+  logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
 /** Forward a sync payload from main thread to worker. */

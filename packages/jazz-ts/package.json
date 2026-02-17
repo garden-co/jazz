@@ -9,7 +9,8 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc && cp src/worker/groove-worker.ts dist/worker/groove-worker.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts"
   },
   "dependencies": {
     "groove-wasm": "workspace:*",

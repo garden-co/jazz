@@ -61,6 +61,9 @@ async function startup(): Promise<void> {
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("groove-wasm");
+    if (msg.logLevel) {
+      (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel;
+    }
     initComplete = false;
     isShuttingDown = false;
     activeServerUrl = msg.serverUrl ?? null;
