@@ -39,24 +39,28 @@ pnpm install --ignore-workspace
 
 ### Step 2: configure AWS SSO
 
-If you have not already configured SSO:
+Configure two profiles: one for staging compute resources and one for shared-services DNS.
 
 ```bash
-aws configure sso --profile <your-profile>
+aws configure sso --profile jazz2:staging
+aws configure sso --profile jazz2:shared
 ```
 
 Use these values:
 
-- SSO start URL: `https://d-9067cab0c6.awsapps.com/start`
-- SSO region: `us-east-1`
+- SSO start URL: `https://d-9a675128f3.awsapps.com/start/`
+- SSO region: `us-east-2`
 - Registration scopes: accept the default `sso:account:access`
 - Default client region: `us-east-2`
 
 Then log in:
 
 ```bash
-aws sso login --profile <your-profile>
-aws sts get-caller-identity --profile <your-profile>
+aws sso login --profile jazz2:staging
+aws sso login --profile jazz2:shared
+
+aws sts get-caller-identity --profile jazz2:staging
+aws sts get-caller-identity --profile jazz2:shared
 ```
 
 ### Step 3: bootstrap Pulumi stack
@@ -75,11 +79,17 @@ pulumi stack select dev || pulumi stack init dev
 Set baseline non-secret config:
 
 ```bash
-ACCOUNT_ID="$(aws sts get-caller-identity --profile <your-profile> --query Account --output text)"
+STAGING_PROFILE="jazz2:staging"
+DNS_PROFILE="jazz2:shared"
+STAGING_ACCOUNT_ID="$(aws sts get-caller-identity --profile "${STAGING_PROFILE}" --query Account --output text)"
+
 pulumi config set region us-east-2
-pulumi config set allowedAccountId "${ACCOUNT_ID}"
+pulumi config set awsPrimaryProfile "${STAGING_PROFILE}"
+pulumi config set awsDnsProfile "${DNS_PROFILE}"
+pulumi config rm route53DelegationRoleArn || true
+pulumi config set allowedAccountId "${STAGING_ACCOUNT_ID}"
 pulumi config set domainName cloud2.aws.cloud.jazz.tools
-pulumi config set containerImageRepository "${ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server"
+pulumi config set containerImageRepository "${STAGING_ACCOUNT_ID}.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server"
 pulumi config set containerImageTag latest
 ```
 
@@ -103,7 +113,7 @@ Notes:
 Use the local push flow that mirrors `infra-composer`:
 
 ```bash
-pnpm push:image:local -- --aws-profile <your-profile> --stack dev
+pnpm push:image:local -- --aws-profile jazz2:staging --stack dev
 ```
 
 This script:
@@ -133,7 +143,7 @@ curl -i https://cloud2.aws.cloud.jazz.tools/health
 If you want build+push+config+deploy in one command:
 
 ```bash
-./deploy-local.sh --aws-profile <your-profile> --stack dev --yes
+./deploy-local.sh --aws-profile jazz2:staging --stack dev --yes
 ```
 
 ## Stack config reference
@@ -151,11 +161,13 @@ Common:
 - `allowedAccountId`
 - `region` (default `us-east-2`)
 - `domainName` (default `cloud2.aws.cloud.jazz.tools`)
+- `awsPrimaryProfile` (profile for ECS/EC2/ECR resources in staging account)
+- `awsDnsProfile` (profile for Route53/ACM DNS records in shared-services account)
 - `sharedServicesStack` (default `garden-computing/jazz-aws/shared-services`)
 
 Optional:
 
-- `route53DelegationRoleArn` (for cross-account DNS writes)
+- `route53DelegationRoleArn` (alternative to `awsDnsProfile` when using assume-role DNS writes)
 - `instanceType` (default `t3.large`)
 - `dataVolumeSizeGiB` (default `100`)
 - `appPort` (default `1625`)
@@ -168,7 +180,7 @@ Optional:
 ### Local release (recommended for now)
 
 ```bash
-pnpm push:image:local -- --aws-profile <your-profile> --stack dev
+pnpm push:image:local -- --aws-profile jazz2:staging --stack dev
 pulumi up
 ```
 
@@ -198,7 +210,8 @@ pulumi destroy
 ### AWS SSO session expired
 
 ```bash
-aws sso login --profile <your-profile>
+aws sso login --profile jazz2:staging
+aws sso login --profile jazz2:shared
 ```
 
 ### Buildx not available
@@ -211,8 +224,15 @@ docker buildx version
 
 ### Cross-account DNS issues
 
-Set `route53DelegationRoleArn` in the stack and ensure that role can mutate
-`cloud2.aws.cloud.jazz.tools` in the parent hosted zone.
+Use a shared-services profile for DNS writes:
+
+```bash
+pulumi config set awsDnsProfile jazz2:shared
+pulumi config rm route53DelegationRoleArn || true
+```
+
+If you prefer assume-role instead of a second profile, set `route53DelegationRoleArn`
+and ensure that your primary profile can `sts:AssumeRole` into that role.
 
 ### Error: "--stack flag requires fully qualified name"
 

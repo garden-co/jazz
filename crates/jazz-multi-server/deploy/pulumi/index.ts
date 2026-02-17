@@ -29,6 +29,8 @@ const containerMemoryReservationMiB = cfg.getNumber("containerMemoryReservationM
 const containerMemoryMiB = cfg.getNumber("containerMemoryMiB");
 
 const allowedAccountId = cfg.get("allowedAccountId");
+const awsPrimaryProfile = cfg.get("awsPrimaryProfile");
+const awsDnsProfile = cfg.get("awsDnsProfile");
 const route53DelegationRoleArn = cfg.get("route53DelegationRoleArn");
 const sharedServicesStackName =
   cfg.get("sharedServicesStack") ?? "garden-computing/jazz-aws/shared-services";
@@ -63,17 +65,29 @@ const providerArgs: aws.ProviderArgs = {
 if (allowedAccountId) {
   providerArgs.allowedAccountIds = [allowedAccountId];
 }
+if (awsPrimaryProfile) {
+  providerArgs.profile = awsPrimaryProfile;
+}
 
 const primary = new aws.Provider("primary", providerArgs);
 
-const dnsProvider = route53DelegationRoleArn
-  ? new aws.Provider("dns-delegation", {
-      region,
-      skipRegionValidation: true,
-      assumeRole: { roleArn: route53DelegationRoleArn },
-      defaultTags: { tags },
-    })
-  : primary;
+const dnsProviderArgs: aws.ProviderArgs = {
+  region,
+  skipRegionValidation: true,
+  defaultTags: { tags },
+};
+
+if (awsDnsProfile) {
+  dnsProviderArgs.profile = awsDnsProfile;
+}
+if (route53DelegationRoleArn) {
+  dnsProviderArgs.assumeRole = { roleArn: route53DelegationRoleArn };
+}
+
+const dnsProvider =
+  awsDnsProfile || route53DelegationRoleArn
+    ? new aws.Provider("dns-delegation", dnsProviderArgs)
+    : primary;
 
 const rootZoneIdFromConfig = cfg.get("rootZoneId");
 const rootZoneId = rootZoneIdFromConfig
