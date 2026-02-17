@@ -1,8 +1,0 @@
-config:
-  jazz-multi-server-cloud2:region: us-east-2
-  jazz-multi-server-cloud2:allowedAccountId: "851454408348"
-  jazz-multi-server-cloud2:domainName: cloud2.aws.cloud.jazz.tools
-  jazz-multi-server-cloud2:containerImageRepository: 851454408348.dkr.ecr.us-east-2.amazonaws.com/jazz-multi-server
-  jazz-multi-server-cloud2:containerImageTag: latest
-  jazz-multi-server-cloud2:dataVolumeSizeGiB: "100"
-  jazz-multi-server-cloud2:instanceType: t3.large
