@@ -5,7 +5,7 @@
 //! # Usage
 //!
 //! ```text
-//! jazz build [--schema-dir ./schema]
+//! jazz-tools build [--schema-dir ./schema]
 //! ```
 //!
 //! # Algorithm

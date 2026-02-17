@@ -35,12 +35,12 @@ jobs:
           tool: zig,cargo-zigbuild
 
       - name: Build CLI binary
-        run: cargo zigbuild -p jazz-cli --bin jazz --release --target ${{ matrix.target }}
+        run: cargo zigbuild -p jazz-tools --bin jazz-tools --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/jazz dist/${{ matrix.output }}
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -69,12 +69,12 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build CLI binary
-        run: cargo build -p jazz-cli --bin jazz --release --target ${{ matrix.target }}
+        run: cargo build -p jazz-tools --bin jazz-tools --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/jazz dist/${{ matrix.output }}
+          cp target/${{ matrix.target }}/release/jazz-tools dist/${{ matrix.output }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -93,13 +93,13 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Build CLI binary
-        run: cargo build -p jazz-cli --bin jazz --release --target x86_64-pc-windows-msvc
+        run: cargo build -p jazz-tools --bin jazz-tools --release --target x86_64-pc-windows-msvc
 
       - name: Stage artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/jazz.exe dist/jazz-tools-windows-x64.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/jazz-tools.exe dist/jazz-tools-windows-x64.exe
 
       - uses: actions/upload-artifact@v4
         with:

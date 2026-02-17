@@ -3,8 +3,8 @@
 //! # Commands
 //!
 //! ```text
-//! jazz create app [--name <NAME>]    # Returns AppId (random or deterministic from name)
-//! jazz server <APP_ID> [--port 1625] [--data-dir ./data]
+//! jazz-tools create app [--name <NAME>]    # Returns AppId (random or deterministic from name)
+//! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data]
 //! ```
 
 mod commands;
@@ -15,7 +15,8 @@ use clap::{Parser, Subcommand};
 use middleware::AuthConfig;
 
 #[derive(Parser)]
-#[command(name = "jazz")]
+#[command(name = "jazz-tools")]
+#[command(bin_name = "jazz-tools")]
 #[command(about = "Jazz distributed database CLI")]
 struct Cli {
     #[command(subcommand)]
@@ -41,7 +42,7 @@ enum Commands {
     },
     /// Run a Jazz server
     Server {
-        /// Application ID (from `jazz create app`)
+        /// Application ID (from `jazz-tools create app`)
         app_id: String,
 
         /// Port to listen on
@@ -87,6 +88,7 @@ async fn main() {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("jazz=info".parse().unwrap())
+                .add_directive("jazz_tools=info".parse().unwrap())
                 .add_directive("tower_http=debug".parse().unwrap()),
         )
         .init();

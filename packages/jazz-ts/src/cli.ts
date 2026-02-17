@@ -19,7 +19,7 @@ interface BuildOptions {
 function parseArgs(): { command: string; options: BuildOptions } {
   const args = process.argv.slice(2);
   const command = args[0] || "";
-  let jazzBin = "jazz";
+  let jazzBin = "jazz-tools";
   let schemaDir = join(process.cwd(), "schema");
 
   for (let i = 1; i < args.length; i++) {
@@ -137,7 +137,14 @@ const findMonorepoJazzBinary = async (): Promise<string | null> => {
   let currentDir = process.cwd();
   while (true) {
     const cargoTomlPath = join(currentDir, "Cargo.toml");
+    const monorepoJazzToolsPath = join(currentDir, "target", "debug", "jazz-tools");
     const monorepoJazzPath = join(currentDir, "target", "debug", "jazz");
+
+    if ((await pathExists(cargoTomlPath)) && (await pathExists(monorepoJazzToolsPath))) {
+      return monorepoJazzToolsPath;
+    }
+
+    // Backward compatibility for older local builds.
     if ((await pathExists(cargoTomlPath)) && (await pathExists(monorepoJazzPath))) {
       return monorepoJazzPath;
     }
@@ -171,7 +178,9 @@ async function runJazzBuild(
   });
   if (result.type === "close") {
     if (result.code !== 0) {
-      console.warn(`jazz build exited with code ${result.code} (versioned schemas not generated)`);
+      console.warn(
+        `jazz-tools build exited with code ${result.code} (versioned schemas not generated)`,
+      );
     }
     return;
   }
@@ -181,18 +190,18 @@ async function runJazzBuild(
     const monorepoJazzPath = searchJazzBinOnError ? await findMonorepoJazzBinary() : null;
     if (monorepoJazzPath) {
       console.log(
-        `jazz binary not found at '${jazzBin}'. Using monorepo jazz binary at '${monorepoJazzPath}'`,
+        `jazz-tools binary not found at '${jazzBin}'. Using monorepo binary at '${monorepoJazzPath}'`,
       );
       return runJazzBuild(monorepoJazzPath, schemaDir, false);
     } else {
       console.warn(
-        `jazz binary not found at '${jazzBin}'. Use --jazz-bin to specify the path.\n` +
+        `jazz-tools binary not found at '${jazzBin}'. Use --jazz-bin to specify the path.\n` +
           `Versioned schemas will not be generated.`,
       );
     }
   }
 
-  console.warn(`jazz build failed: ${error.message}`);
+  console.warn(`jazz-tools build failed: ${error.message}`);
 }
 
 async function build(options: BuildOptions): Promise<void> {
@@ -234,9 +243,9 @@ switch (command) {
   default:
     console.log("Usage: jazz-ts build [options]");
     console.log("\nCommands:");
-    console.log("  build    Generate SQL from TypeScript schemas and run jazz build");
+    console.log("  build    Generate SQL from TypeScript schemas and run jazz-tools build");
     console.log("\nOptions:");
-    console.log("  --jazz-bin <path>    Path to jazz binary (default: jazz)");
+    console.log("  --jazz-bin <path>    Path to jazz binary (default: jazz-tools)");
     console.log("  --schema-dir <path>  Path to schema directory (default: ./schema)");
     process.exit(command ? 1 : 0);
 }

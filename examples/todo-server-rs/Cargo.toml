@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 jazz-rs = { path = "../../crates/jazz-rs" }
-groove = { path = "../../crates/groove" }
+groove = { package = "jazz-core", path = "../../crates/groove", version = "2.0.0-alpha.0" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

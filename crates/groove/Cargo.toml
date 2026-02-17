@@ -1,14 +1,20 @@
 [package]
-name = "groove"
-version = "0.1.0"
+name = "jazz-core"
+version = "2.0.0-alpha.0"
 edition = "2024"
+description = "Core local-first relational engine for Jazz."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/garden-co/jazz2"
+
+[lib]
+name = "groove"
 
 [features]
 default = []
 surrealkv = ["dep:surrealkv", "dep:tokio"]
 
 [dependencies]
-opfs-btree = { path = "../opfs-btree" }
+opfs-btree = { path = "../opfs-btree", version = "0.1.0" }
 futures = "0.3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v5", "v7", "serde"] }

@@ -1,16 +1,19 @@
 [package]
-name = "jazz-cli"
-version = "0.1.0"
+name = "jazz-tools"
+version = "2.0.0-alpha.0"
 edition = "2024"
+description = "CLI tools for Jazz local-first relational databases."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/garden-co/jazz2"
 
 [[bin]]
-name = "jazz"
+name = "jazz-tools"
 path = "src/main.rs"
 
 [dependencies]
-groove = { path = "../groove", features = ["surrealkv"] }
-groove-tokio = { path = "../groove-tokio" }
-jazz-transport = { path = "../jazz-transport" }
+groove = { package = "jazz-core", path = "../groove", version = "2.0.0-alpha.0", features = ["surrealkv"] }
+groove-tokio = { package = "jazz-runtime-tokio", path = "../groove-tokio", version = "2.0.0-alpha.0" }
+jazz-transport = { path = "../jazz-transport", version = "2.0.0-alpha.0" }
 
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
@@ -37,4 +40,4 @@ jsonwebtoken = "9"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 futures = "0.3"
-jazz-transport = { path = "../jazz-transport" }
+jazz-transport = { path = "../jazz-transport", version = "2.0.0-alpha.0" }
