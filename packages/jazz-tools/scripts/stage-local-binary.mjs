@@ -12,7 +12,7 @@ const sourceBinary = join(
   repoRoot,
   "target",
   "release",
-  process.platform === "win32" ? "jazz.exe" : "jazz",
+  process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools",
 );
 
 stageBinary({

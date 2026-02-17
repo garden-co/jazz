@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-groove = { path = "../groove", features = ["surrealkv"] }
-groove-tokio = { path = "../groove-tokio" }
-jazz-transport = { path = "../jazz-transport" }
+groove = { package = "jazz-core", path = "../groove", version = "2.0.0-alpha.0", features = ["surrealkv"] }
+groove-tokio = { package = "jazz-runtime-tokio", path = "../groove-tokio", version = "2.0.0-alpha.0" }
+jazz-transport = { path = "../jazz-transport", version = "2.0.0-alpha.0" }
 
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }

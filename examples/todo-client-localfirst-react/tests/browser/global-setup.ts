@@ -1,5 +1,5 @@
 /**
- * Global setup for browser tests — spawns a real jazz-cli server.
+ * Global setup for browser tests — spawns a real jazz-tools server.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -30,7 +30,7 @@ async function waitForHealth(port: number): Promise<void> {
 export async function setup(): Promise<void> {
   dataDir = mkdtempSync(join(tmpdir(), "jazz-react-test-"));
 
-  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz");
+  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz-tools");
 
   serverProcess = spawn(
     jazzBinary,

@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-groove = { path = "../groove", features = ["surrealkv"] }
+groove = { package = "jazz-core", path = "../groove", version = "2.0.0-alpha.0", features = ["surrealkv"] }
 futures = "0.3"
 napi = { version = "2", features = ["napi5", "serde-json"] }
 napi-derive = "2"

@@ -1,13 +1,17 @@
 [package]
-name = "groove-tokio"
-version = "0.1.0"
+name = "jazz-runtime-tokio"
+version = "2.0.0-alpha.0"
 edition = "2024"
+description = "Tokio runtime integration for Jazz core."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/garden-co/jazz2"
 
 [lib]
+name = "groove_tokio"
 doctest = false
 
 [dependencies]
-groove = { path = "../groove" }
+groove = { package = "jazz-core", path = "../groove", version = "2.0.0-alpha.0" }
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 
 [dev-dependencies]

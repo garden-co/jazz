@@ -7,8 +7,8 @@
 //!
 //! ```bash
 //! # First, create an app and start the Jazz server
-//! jazz create app --name todo-app
-//! jazz server <APP_ID> --port 1625
+//! jazz-tools create app --name todo-app
+//! jazz-tools server <APP_ID> --port 1625
 //!
 //! # Then run the todo backend
 //! cargo run -p todo-server

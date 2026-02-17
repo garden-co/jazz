@@ -560,7 +560,7 @@ impl TestServer {
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
 
-        // Find the jazz binary. When running tests, look in target/debug or target/release.
+        // Find the jazz-tools binary. When running tests, look in target/debug or target/release.
         let jazz_binary = Self::find_jazz_binary();
 
         let process = Command::new(&jazz_binary)
@@ -593,7 +593,7 @@ impl TestServer {
         server
     }
 
-    /// Find the jazz binary in cargo's target directory.
+    /// Find the jazz-tools binary in cargo's target directory.
     fn find_jazz_binary() -> PathBuf {
         // Get the path to the test binary, which gives us the target directory
         let exe = std::env::current_exe().expect("get current exe");
@@ -602,14 +602,14 @@ impl TestServer {
             .and_then(|p| p.parent()) // debug or release
             .expect("find target dir");
 
-        let jazz_path = target_dir.join("jazz");
+        let jazz_path = target_dir.join("jazz-tools");
         if jazz_path.exists() {
             return jazz_path;
         }
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-cli` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools` first.",
             jazz_path
         );
     }
@@ -668,7 +668,7 @@ fn get_free_port() -> u16 {
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]
 async fn test_server_resync() {
-    // 1. Start jazz-cli server
+    // 1. Start jazz-tools server
     let port = get_free_port();
     let server = TestServer::start(port).await;
 

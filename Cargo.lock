@@ -880,52 +880,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "groove"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bitvec",
- "blake3",
- "criterion",
- "futures",
- "hex",
- "internment",
- "opfs-btree",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "small-map",
- "smallvec",
- "smolset",
- "surrealkv",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
- "web-time",
-]
-
-[[package]]
 name = "groove-napi"
 version = "0.1.0"
 dependencies = [
  "futures",
- "groove",
+ "jazz-core",
  "napi",
  "napi-build",
  "napi-derive",
  "serde",
  "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "groove-tokio"
-version = "0.1.0"
-dependencies = [
- "groove",
- "tempfile",
- "tokio",
  "uuid",
 ]
 
@@ -936,7 +900,7 @@ dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
- "groove",
+ "jazz-core",
  "jazz-transport",
  "js-sys",
  "serde",
@@ -1386,8 +1350,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
-name = "jazz-cli"
+name = "jazz-core"
+version = "2.0.0-alpha.0"
+dependencies = [
+ "ahash",
+ "bitvec",
+ "blake3",
+ "criterion",
+ "futures",
+ "hex",
+ "internment",
+ "opfs-btree",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "small-map",
+ "smallvec",
+ "smolset",
+ "surrealkv",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "jazz-rs"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures",
+ "jazz-core",
+ "jazz-runtime-tokio",
+ "jazz-transport",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jazz-runtime-tokio"
+version = "2.0.0-alpha.0"
+dependencies = [
+ "jazz-core",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-tools"
+version = "2.0.0-alpha.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -1396,8 +1415,8 @@ dependencies = [
  "bytes",
  "clap",
  "futures",
- "groove",
- "groove-tokio",
+ "jazz-core",
+ "jazz-runtime-tokio",
  "jazz-transport",
  "jsonwebtoken",
  "reqwest",
@@ -1413,29 +1432,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-rs"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bytes",
- "futures",
- "groove",
- "groove-tokio",
- "jazz-transport",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "jazz-transport"
-version = "0.1.0"
+version = "2.0.0-alpha.0"
 dependencies = [
- "groove",
+ "jazz-core",
  "serde",
  "serde_json",
 ]
@@ -2753,8 +2753,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "groove",
  "http-body-util",
+ "jazz-core",
  "jazz-rs",
  "jsonwebtoken",
  "reqwest",
