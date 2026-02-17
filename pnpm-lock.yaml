@@ -240,13 +240,11 @@ importers:
         specifier: catalog:default
         version: 4.0.18(@types/node@20.19.30)(@vitest/browser-playwright@4.0.18)(jiti@2.6.1)(lightningcss@1.30.2)(tsx@4.21.0)
 
-  packages/groove-wasm: {}
-
   packages/jazz-tools:
     dependencies:
       groove-wasm:
         specifier: workspace:*
-        version: link:../groove-wasm
+        version: link:../../crates/groove-wasm
       react:
         specifier: ^18 || ^19
         version: 19.2.4

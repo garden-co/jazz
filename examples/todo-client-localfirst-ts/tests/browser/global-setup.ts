@@ -57,12 +57,25 @@ export async function setup(): Promise<void> {
 
 export async function teardown(): Promise<void> {
   if (serverProcess) {
-    serverProcess.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      serverProcess?.on("exit", () => resolve());
-      setTimeout(resolve, 2000);
-    });
+    const proc = serverProcess;
     serverProcess = null;
+
+    proc.stdout?.removeAllListeners();
+    proc.stderr?.removeAllListeners();
+    proc.stdout?.destroy();
+    proc.stderr?.destroy();
+    proc.kill("SIGTERM");
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        proc.kill("SIGKILL");
+        resolve();
+      }, 2000);
+      proc.on("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   if (dataDir) {
