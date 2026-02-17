@@ -65,59 +65,6 @@ Server Worker credentials are typically stored and provided as environment varia
 
 **Take extra care with the Account Secret &mdash; handle it like any other secret environment variable such as a DB password.**
 
-## Wasm on Edge runtimes
+## Next steps
 
-On some edge platforms, such as Cloudflare Workers or Vercel Edge Functions, environment security restrictions may trigger WASM crypto to fail.
-  
-To avoid this failure, you can ensure that Jazz uses the WASM implementation by importing the WASM loader before using Jazz. For example:
-
-<CodeGroup>
-```ts loadJazz.ts
-```
-</CodeGroup>
-
-Currently, the Jazz Loader is tested on the following edge environments:
-- Cloudflare Workers
-- Vercel Functions
-
-### Requirements
-
-- Edge runtime environment that supports WebAssembly
-- `jazz-tools/load-edge-wasm` must be imported before any Jazz import
-
-
-## Node-API
-Jazz uses a WASM-based crypto implementation that provides near-native performance while ensuring full compatibility across a wide variety of environments.
-
-For even higher performance on Node.js or Deno, you can enable the native crypto (Node-API) implementation. Node-API is Node.js's native API for building modules in Native Code (Rust/C++)
-that interact directly with the underlying system, allowing for true native execution speed.
-
-You can use it as follows:
-
-<CodeGroup>
-```ts index.ts#NapiCrypto
-```
-</CodeGroup>
-
-<Alert variant="info" className="mt-4" title="Note">
-  The Node-API implementation is not available on all platforms. It is only available on Node.js 20.x and higher.
-  The supported platforms are:
-  - macOS (x64, ARM64)
-  - Linux (x64, ARM64, ARM, musl)
-
-  It does not work in edge runtimes.
-</Alert>
-
-### On Next.js
-
-In order to use Node-API with Next.js, you need to tell Next.js to bundle the native modules in your build.
-
-You can do this by adding the required packages to the [`serverExternalPackages`](https://nextjs.org/docs/app/api-reference/config/next-config-js/serverExternalPackages) array in your `next.config.js`.
-
-**Note**: if you're deploying to Vercel, be sure to use the `nodejs` runtime!
-
-<FileName>next.config.js</FileName>
-<CodeGroup>
-```ts next.config.js
-```
-</CodeGroup>
+For configuring crypto implementations and choosing deployment strategies for different runtimes, see [Deployment](/docs/server-side/deployment).

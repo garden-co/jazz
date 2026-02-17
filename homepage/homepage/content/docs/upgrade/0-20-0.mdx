@@ -9,7 +9,7 @@ We have removed the JavaScript compatibility layer, meaning our native Rust core
 
 Before 0.20.0, Jazz relied on a JavaScript crypto implementation to work around compatibility issues in some runtimes-most notably React Native.
 As a result, our native Rust core wasn’t running in React Native and, on some Edge runtimes, 
-only worked when WASM was explicitly initialized (see [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes)).
+only worked when WASM was explicitly initialized (see [WASM on Edge runtimes](/docs/server-side/deployment#wasm-on-edge-runtimes)).
 
 The JavaScript crypto implementation is much slower than native Rust crypto. Although workarounds like RNQuickCrypto for React Native improved performance, they still only wrapped certain native libraries, rather than running Jazz's full Rust crypto.
 
@@ -32,7 +32,7 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 ### Edge runtimes
 
 If you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized, there is no more fallback to Javascript crypto.
-See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
+See more details at [WASM on Edge runtimes](/docs/server-side/deployment#wasm-on-edge-runtimes).
 
 <CodeGroup>
 ```ts

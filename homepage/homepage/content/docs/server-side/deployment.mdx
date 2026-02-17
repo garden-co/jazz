@@ -1,0 +1,119 @@
+export const metadata = {
+  description: "Configure crypto implementations and deploy Jazz server workers across different runtimes and environments."
+};
+
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
+
+# Deploying Server Workers
+
+This page covers runtime-specific configuration and deployment strategies for Jazz server workers. For setting up your server worker code, see [Setup](/docs/server-side/setup).
+
+## Crypto implementations
+
+Jazz uses a WASM-based crypto implementation by default, providing near-native performance with broad compatibility. Depending on your deployment target, you may want to use the edge WASM loader or the native Node-API implementation.
+
+## WASM on Edge runtimes
+
+On some edge platforms, such as Cloudflare Workers or Vercel Edge Functions, environment security restrictions may trigger WASM crypto to fail.
+
+To avoid this failure, you can ensure that Jazz uses the WASM implementation by importing the WASM loader before using Jazz. For example:
+
+<CodeGroup>
+```ts loadJazz.ts
+```
+</CodeGroup>
+
+Currently, the Jazz Loader is tested on the following edge environments:
+- Cloudflare Workers
+- Vercel Functions
+
+### Requirements
+
+- Edge runtime environment that supports WebAssembly
+- `jazz-tools/load-edge-wasm` must be imported before any Jazz import
+
+
+## Node-API
+
+For even higher performance on Node.js or Deno, you can enable the native crypto (Node-API) implementation. Node-API is Node.js's native API for building modules in Native Code (Rust/C++)
+that interact directly with the underlying system, allowing for true native execution speed.
+
+You can use it as follows:
+
+<CodeGroup>
+```ts index.ts#NapiCrypto
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4" title="Note">
+  The Node-API implementation is not available on all platforms. It is only available on Node.js 20.x and higher.
+  The supported platforms are:
+  - macOS (x64, ARM64)
+  - Linux (x64, ARM64, ARM, musl)
+
+  It does not work in edge runtimes.
+</Alert>
+
+### On Next.js
+
+In order to use Node-API with Next.js, you need to tell Next.js to bundle the native modules in your build.
+
+You can do this by adding the required packages to the [`serverExternalPackages`](https://nextjs.org/docs/app/api-reference/config/next-config-js/serverExternalPackages) array in your `next.config.js`.
+
+**Note**: if you're deploying to Vercel, be sure to use the `nodejs` runtime!
+
+<FileName>next.config.js</FileName>
+<CodeGroup>
+```ts next.config.js
+```
+</CodeGroup>
+
+## Deployment patterns
+
+### Single Instance Requirements
+
+Some operations need to happen one at a time and in the same place, otherwise the data can get out of sync.
+
+For example, if you are checking capacity for an event and creating tickets, you must ensure only one server is doing it.
+If multiple servers check at the same time, they might all think there is space and allow too many tickets.
+
+Jazz uses eventual consistency (data takes a moment to sync between regions), so this problem is worse if you run multiple server copies in different locations.
+
+Until Jazz supports transactions across regions, the solution is to deploy a single server instance for these sensitive operations.
+
+Examples of when you must deploy on a single instance are:
+1. Distribute a limited number of tickets
+   * Limiting ticket sales so that only 100 tickets are sold for an event.
+   * The check ("is there space left?") and ticket creation must happen together, or you risk overselling.
+2. Inventory stock deduction
+   * Managing a product stock count (e.g., 5 items left in store).
+   * Multiple instances could let multiple buyers purchase the last item at the same time.
+3. Sequential ID or token generation
+   * Generating unique incremental order numbers (e.g., #1001, #1002).
+   * Multiple instances could produce duplicates if not coordinated.
+
+Single servers are necessary to enforce invariants or provide a consistent view of the data.
+
+As a rule of thumb, when the output of the request depends on the state of the database, you should probably deploy on a single instance.
+
+### Multi-Region Deployment
+
+If your code doesn't need strict rules to keep data in sync (no counters, no limits, no "check‑then‑update" logic), you can run your workers in many regions at the same time.
+
+This way:
+* Users connect to the closest server (faster).
+* If one region goes down, others keep running (more reliable).
+
+Examples of when it's acceptable to deploy across multiple regions are:
+1. Sending confirmation emails
+   * After an action is complete, sending an email to the user does not depend on current database state.
+2. Pushing notifications
+   * Broadcasting "event booked" notifications to multiple users can be done from any region.
+3. Logging or analytics events
+   * Recording "user clicked this button" or "page viewed" events, since these are additive and don't require strict ordering.
+4. Calling external APIs (e.g., LLMs, payment confirmations)
+   * If the response does not modify shared counters or limits, it can be done from any region.
+5. Pre-computing cached data or summaries
+   * Generating read-only previews or cached summaries where stale data is acceptable and does not affect core logic.
+
+Generally speaking, if the output of the request does not depend on the state of the database, you can deploy across multiple regions.
