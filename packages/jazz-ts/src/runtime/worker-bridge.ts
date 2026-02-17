@@ -21,6 +21,7 @@ export interface WorkerBridgeOptions {
   serverUrl?: string;
   jwtToken?: string;
   adminSecret?: string;
+  logLevel?: "error" | "warn" | "info" | "debug" | "trace";
 }
 
 /**
@@ -81,6 +82,7 @@ export class WorkerBridge {
       serverUrl: options.serverUrl,
       jwtToken: options.jwtToken,
       adminSecret: options.adminSecret,
+      logLevel: options.logLevel,
       clientId: "", // Worker generates its own client ID for main thread
     };
 

@@ -26,11 +26,30 @@ use wasm_bindgen::prelude::*;
 fn init_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        let max_level = wasm_log_level_from_global();
         let config = wasm_tracing::WasmLayerConfig::new()
-            .with_max_level(tracing::Level::TRACE)
+            .with_max_level(max_level)
             .with_console_group_spans();
         let _ = wasm_tracing::set_as_global_default_with_config(config);
     });
+}
+
+fn wasm_log_level_from_global() -> tracing::Level {
+    let global = js_sys::global();
+    let key = JsValue::from_str("__JAZZ_WASM_LOG_LEVEL");
+    let maybe_level = js_sys::Reflect::get(&global, &key)
+        .ok()
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_ascii_lowercase());
+
+    match maybe_level.as_deref() {
+        Some("error") => tracing::Level::ERROR,
+        Some("warn") | Some("warning") => tracing::Level::WARN,
+        Some("info") => tracing::Level::INFO,
+        Some("debug") => tracing::Level::DEBUG,
+        Some("trace") => tracing::Level::TRACE,
+        _ => tracing::Level::TRACE,
+    }
 }
 
 use groove::object::ObjectId;

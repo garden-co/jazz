@@ -6,6 +6,11 @@ import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
+  server: {
+    fs: {
+      allow: [resolve(__dirname, "../..")],
+    },
+  },
   resolve: {
     alias: {
       // Needed because jazz-ts browser tests import from source (../../src/),

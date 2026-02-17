@@ -18,6 +18,13 @@ import { transformRows, type IncludeSpec } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 
+type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
+
+function setGlobalWasmLogLevel(level?: WasmLogLevel): void {
+  if (!level) return;
+  (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level;
+}
+
 /**
  * Configuration for creating a Db instance.
  */
@@ -38,6 +45,8 @@ export interface DbConfig {
   adminSecret?: string;
   /** Database name for OPFS persistence (browser only, default: appId) */
   dbName?: string;
+  /** Optional WASM tracing level for benchmark/debug scenarios. */
+  logLevel?: WasmLogLevel;
 }
 
 /**
@@ -180,6 +189,8 @@ export class Db {
     const key = JSON.stringify(schema);
 
     if (!this.clients.has(key)) {
+      setGlobalWasmLogLevel(this.config.logLevel);
+
       // Create in-memory runtime (works for both direct and worker mode)
       const client = JazzClient.connectSync(this.wasmModule, {
         appId: this.config.appId,
@@ -209,6 +220,7 @@ export class Db {
             serverUrl: this.config.serverUrl,
             jwtToken: this.config.jwtToken,
             adminSecret: this.config.adminSecret,
+            logLevel: this.config.logLevel,
           })
           .then(() => undefined);
       }
