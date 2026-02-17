@@ -1,5 +1,5 @@
 import type { Request } from "express";
-import { JazzClient, type Session } from "jazz-ts";
+import { JazzClient, type Session } from "jazz-tools";
 
 type RequesterIdentity = {
   userId: string;

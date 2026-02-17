@@ -13,7 +13,7 @@ More generally: as the system grows, we need a way to understand what's happenin
 - **groove crate**: zero tracing
 - **groove-wasm**: zero tracing/logging
 - **jazz-cli**: `tracing` + `tracing-subscriber` with `env-filter`; ~5 ad-hoc `info!`/`warn!`/`error!` calls in routes
-- **jazz-rs**: `tracing` in Cargo.toml but unused
+- **jazz-tools client module**: `tracing` available but instrumentation coverage is uneven
 - **opfs-btree**: trace points available in the storage crate, not fully wired into end-to-end spans yet
 - **TypeScript**: scattered `console.error` for failures, no structured logging
 
@@ -146,7 +146,7 @@ Or just hardcode TRACE during development — the browser console has its own le
 
 ## Implementation steps
 
-1. Add `tracing` dependency to `groove` Cargo.toml (it's already in jazz-cli and jazz-rs)
+1. Ensure `tracing` dependency coverage in unified `crates/jazz-cli/Cargo.toml` for core + client modules
 2. Add `tracing-wasm` dependency to `groove-wasm` Cargo.toml
 3. Initialize `tracing-wasm` in `WasmRuntime::new()`
 4. Instrument groove core: SchemaManager write path (insert/update/delete)

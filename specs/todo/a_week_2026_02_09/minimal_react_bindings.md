@@ -2,7 +2,7 @@
 
 Smallest useful React integration: context, hook, type inference from query builders.
 
-New package: `packages/jazz-react/`. Depends on `jazz-ts` (workspace), `react` as peerDep. Build with tsc (matches jazz-ts). Entry: `dist/index.js` + `dist/index.d.ts`.
+React bindings now live in `packages/jazz-tools/src/react/` and are published from the `jazz-tools/react` subpath export. They share the same build as `jazz-tools` and use `react` as a peer dependency.
 
 ## API
 
@@ -50,7 +50,7 @@ React port of `examples/todo-client-localfirst-ts/`. Same schema, same todo CRUD
 
 ### Dependencies
 
-- `jazz-ts`, `jazz-react` (workspace)
+- `jazz-tools` (workspace, including `jazz-tools/react`)
 - `react`, `react-dom`
 - devDeps: `@vitejs/plugin-react`, `vite`, `typescript`, `@types/react`, `@types/react-dom`
 
@@ -85,7 +85,7 @@ db.deleteFrom(app.todos, id);
 
 ## E2E tests
 
-Browser e2e tests in the example app, following the pattern in `packages/jazz-ts/tests/browser/`:
+Browser e2e tests in the example app, following the pattern in `packages/jazz-tools/tests/browser/`:
 
 - Vitest browser mode + Playwright chromium (headless)
 - `global-setup.ts` spawns a real jazz CLI server on a test port
@@ -106,7 +106,7 @@ Browser e2e tests in the example app, following the pattern in `packages/jazz-ts
 examples/todo-client-localfirst-react/
   tests/
     browser/
-      global-setup.ts        # spawn jazz server (reuse pattern from jazz-ts)
+      global-setup.ts        # spawn jazz server (reuse pattern from jazz-tools tests)
       test-constants.ts
       todo-app.test.ts        # e2e tests against the React app
   vitest.config.browser.ts

@@ -4,7 +4,7 @@
  * Runs in a real Chromium browser via @vitest/browser + playwright.
  * Uses real groove-wasm, real dedicated Workers, real OPFS storage.
  *
- * Server sync tests use a real jazz-cli server spawned by global-setup.
+ * Server sync tests use a real jazz-tools server spawned by global-setup.
  */
 
 import { describe, it, expect, afterEach } from "vitest";

@@ -1,8 +1,8 @@
 /**
- * Global setup for browser tests — spawns a real jazz-cli server.
+ * Global setup for browser tests — spawns a real jazz-tools server.
  *
  * Pattern mirrors crates/jazz-cli/tests/test_server.rs:
- * - Spawn `jazz server` with known secrets on a fixed port
+ * - Spawn `jazz-tools server` with known secrets on a fixed port
  * - Poll /health until ready
  * - Tear down on completion
  */
@@ -36,8 +36,8 @@ async function waitForHealth(port: number): Promise<void> {
 export async function setup(): Promise<void> {
   dataDir = mkdtempSync(join(tmpdir(), "jazz-browser-test-"));
 
-  // Path to the jazz binary (relative to this file → ../../../../target/debug/jazz)
-  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz");
+  // Path to the jazz binary (relative to this file → ../../../../target/debug/jazz-tools)
+  const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz-tools");
 
   serverProcess = spawn(
     jazzBinary,

@@ -576,11 +576,11 @@ fn sql_type_to_col_method(column_type: &ColumnType) -> &'static str {
 
 /// Convert a LensTransform to TypeScript code.
 ///
-/// Generates a TypeScript file with the migration definition using the jazz-ts DSL.
+/// Generates a TypeScript file with the migration definition using the jazz-tools DSL.
 /// Uses side-effect collection - no export needed.
 fn lens_transform_to_ts(transform: &LensTransform) -> String {
     let mut lines = Vec::new();
-    lines.push("import { migrate, col } from \"jazz-ts\"".to_string());
+    lines.push("import { migrate, col } from \"jazz-tools\"".to_string());
     lines.push(String::new());
 
     // Group operations by table

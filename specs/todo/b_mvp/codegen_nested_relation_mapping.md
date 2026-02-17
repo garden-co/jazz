@@ -8,4 +8,4 @@ Row transformer has a TODO for mapping nested arrays to relation names:
 
 Nested relation loading in row transformation may have edge cases when includes are multi-level.
 
-> `packages/jazz-ts/src/runtime/row-transformer.ts:157`
+> `packages/jazz-tools/src/runtime/row-transformer.ts:157`
