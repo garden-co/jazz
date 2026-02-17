@@ -848,7 +848,7 @@ export class SyncManager {
         // Even though we responded with KNOWN (client has everything), we need
         // to establish a subscription so that updates from core flow to us.
         const serverPeers = this.getServerPeers(msg.id, peer.id);
-        coValue.loadFromPeers(serverPeers);
+        coValue.loadFromPeers(serverPeers, "low-priority");
 
         return;
       }
@@ -885,7 +885,7 @@ export class SyncManager {
     coValue: CoValueCore,
   ) {
     const peers = this.getServerPeers(id, peer.id);
-    coValue.loadFromPeers(peers);
+    coValue.loadFromPeers(peers, "immediate");
 
     const handleLoadResult = () => {
       if (coValue.isAvailable()) {
@@ -1358,7 +1358,7 @@ export class SyncManager {
       if (peer.isCoValueSubscribedToPeer(coValue.id)) {
         this.sendNewContent(coValue.id, peer);
       } else if (peer.role === "server") {
-        peer.sendLoadRequest(coValue);
+        peer.sendLoadRequest(coValue, "low-priority");
       }
     }
   }
