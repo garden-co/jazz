@@ -1,0 +1,39 @@
+---
+title: Writing Data
+description: Insert, update, and delete APIs with write acknowledgement semantics.
+---
+
+## Insert, Update, Delete
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Write Ack Tier
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#writing-ack-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#writing-ack-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Backend Request Context Reminder
+
+Backend writes should always run under a requester-scoped session.
+See [Setup](/docs/setup) for context setup details.

@@ -1,0 +1,56 @@
+---
+title: Permissions
+description: Fast RLS (ReBAC), simple policies, and INHERITS policies.
+---
+
+## Fast RLS (ReBAC)
+
+Jazz permissions use relationship-based policy evaluation with requester session context.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Simple Policies
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#permissions-simple-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#permissions-simple-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## INHERITS Policies
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-server-ts/src/request-context.ts"'>
+      ../examples/todo-server-ts/src/request-context.ts#permissions-inherits-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#permissions-inherits-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Backend Request Context Reminder
+
+Backend endpoints must extract requester identity and use a user-scoped client/session before reads and writes.
+See [Setup](/docs/setup) for context setup details.

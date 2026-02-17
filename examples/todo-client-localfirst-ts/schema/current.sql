@@ -7,5 +7,5 @@ CREATE TABLE todos (
     done BOOLEAN NOT NULL,
     description TEXT,
     parent UUID REFERENCES todos,
-    project UUID REFERENCES projects NOT NULL
+    project UUID REFERENCES projects
 );

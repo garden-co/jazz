@@ -1,0 +1,12 @@
+{
+  "title": "Jazz 2",
+  "pages": [
+    "index",
+    "setup",
+    "schemas",
+    "reading-data",
+    "writing-data",
+    "permissions",
+    "migrations"
+  ]
+}
