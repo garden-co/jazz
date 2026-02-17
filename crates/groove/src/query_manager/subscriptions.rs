@@ -264,12 +264,19 @@ impl QueryManager {
     /// 1. Removes the local subscription
     /// 2. Sends a QueryUnsubscription to all connected servers
     pub fn unsubscribe_with_sync(&mut self, id: QuerySubscriptionId) {
+        let should_propagate = self
+            .subscriptions
+            .get(&id)
+            .map(|sub| sub.propagate_to_servers)
+            .unwrap_or(true);
         self.subscriptions.remove(&id);
 
-        // Send QueryUnsubscription to all servers
-        let query_id = QueryId(id.0);
-        self.sync_manager
-            .send_query_unsubscription_to_servers(query_id);
+        if should_propagate {
+            // Send QueryUnsubscription to all servers
+            let query_id = QueryId(id.0);
+            self.sync_manager
+                .send_query_unsubscription_to_servers(query_id);
+        }
     }
 
     /// Build the sync payload query for upstream forwarding.
@@ -308,6 +315,7 @@ impl QueryManager {
         let downstream_subs: Vec<(QueryId, Query, Option<Session>)> = self
             .server_subscriptions
             .iter()
+            .filter(|(_, sub)| sub.propagate_to_servers)
             .map(|((_, query_id), sub)| (*query_id, sub.query.clone(), sub.session.clone()))
             .collect();
 

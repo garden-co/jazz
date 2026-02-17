@@ -290,6 +290,7 @@ impl SyncManager {
                         query_id: *query_id,
                         query: query.clone(),
                         session: session.clone(),
+                        inspector_mode: client.inspector_mode,
                     });
             }
             // Handle query unsubscription

@@ -137,6 +137,11 @@ pub struct QueryScope {
 pub struct ClientState {
     /// Client's role for access control.
     pub role: ClientRole,
+    /// True when this client is an inspector connection.
+    ///
+    /// Inspector query subscriptions are hidden by default and should stay
+    /// local to this server unless explicitly requested otherwise.
+    pub inspector_mode: bool,
     /// Client's session for policy evaluation.
     pub session: Option<Session>,
     /// Active queries from this client.
@@ -319,6 +324,8 @@ pub struct PendingQuerySubscription {
     pub query_id: QueryId,
     pub query: Query,
     pub session: Option<Session>,
+    /// Snapshot of whether the originating client was in inspector mode.
+    pub inspector_mode: bool,
 }
 
 /// A pending query unsubscription that needs cleanup.

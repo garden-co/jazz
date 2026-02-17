@@ -5324,6 +5324,102 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
     );
 }
 
+/// Inspector-mode client subscriptions stay local and hidden.
+#[test]
+fn mid_tier_inspector_subscriptions_do_not_propagate_upstream() {
+    use crate::sync_manager::{
+        ClientId, ClientRole, Destination, InboxEntry, QueryId, ServerId, Source, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    // Setup mid-tier server
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Add upstream server and inspector client
+    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    mid_tier.sync_manager_mut().add_server(upstream_id);
+    mid_tier.sync_manager_mut().add_client(client_id);
+    mid_tier
+        .sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Admin);
+    mid_tier
+        .sync_manager_mut()
+        .set_client_inspector_mode(client_id, true);
+
+    // Clear outbox (add_server queues full sync)
+    let _ = mid_tier.sync_manager_mut().take_outbox();
+
+    let query = mid_tier
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+    let query_id = QueryId(77);
+
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id,
+            query,
+            session: None,
+        },
+    });
+    mid_tier.process(&mut storage);
+
+    // Inspector subscription should not be forwarded upstream.
+    let outbox_after_subscribe = mid_tier.sync_manager_mut().take_outbox();
+    let forwarded_subs: Vec<_> = outbox_after_subscribe
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == upstream_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QuerySubscription { .. }))
+        .collect();
+    assert!(
+        forwarded_subs.is_empty(),
+        "Inspector subscriptions should remain local and not be forwarded"
+    );
+
+    // Hidden by default in live-query introspection.
+    let visible_live = mid_tier.list_live_queries(false);
+    assert!(
+        visible_live
+            .iter()
+            .all(|q| !(q.query_id == query_id && q.source == LiveQuerySource::DownstreamClient)),
+        "Inspector subscriptions should be hidden by default"
+    );
+
+    let all_live = mid_tier.list_live_queries(true);
+    let inspector_live = all_live
+        .iter()
+        .find(|q| q.query_id == query_id && q.source == LiveQuerySource::DownstreamClient)
+        .expect("Inspector subscription should appear when include_hidden=true");
+    assert_eq!(inspector_live.origin, SubscriptionOrigin::Inspector);
+    assert_eq!(inspector_live.visibility, SubscriptionVisibility::Hidden);
+    assert!(
+        !inspector_live.propagate_to_servers,
+        "Inspector subscription should be marked non-propagating"
+    );
+
+    // Unsubscription should also stay local.
+    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QueryUnsubscription { query_id },
+    });
+    mid_tier.process(&mut storage);
+
+    let outbox_after_unsubscribe = mid_tier.sync_manager_mut().take_outbox();
+    let forwarded_unsubs: Vec<_> = outbox_after_unsubscribe
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Server(id) if id == upstream_id))
+        .filter(|e| matches!(e.payload, SyncPayload::QueryUnsubscription { .. }))
+        .collect();
+    assert!(
+        forwarded_unsubs.is_empty(),
+        "Inspector unsubscriptions should remain local and not be forwarded"
+    );
+}
+
 /// Test that objects from upstream are relayed to downstream clients with matching scope.
 #[test]
 fn mid_tier_relays_objects_to_clients_with_matching_scope() {
@@ -5978,13 +6074,14 @@ fn inspector_local_only_subscription_is_not_forwarded_or_replayed() {
     let _ = qm.sync_manager_mut().take_outbox();
 
     let query = qm.query("users").build();
-    qm.subscribe_with_sync_options(
-        query,
-        None,
-        None,
-        SubscriptionOptions::inspector_hidden_local(),
-    )
-    .unwrap();
+    let sub_id = qm
+        .subscribe_with_sync_options(
+            query,
+            None,
+            None,
+            SubscriptionOptions::inspector_hidden_local(),
+        )
+        .unwrap();
 
     let outbox_after_subscribe = qm.sync_manager_mut().take_outbox();
     assert!(
@@ -6002,5 +6099,14 @@ fn inspector_local_only_subscription_is_not_forwarded_or_replayed() {
             .iter()
             .all(|e| !matches!(e.payload, SyncPayload::QuerySubscription { .. })),
         "Inspector local-only subscriptions should not be replayed upstream"
+    );
+
+    qm.unsubscribe_with_sync(sub_id);
+    let outbox_after_unsubscribe = qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox_after_unsubscribe
+            .iter()
+            .all(|e| !matches!(e.payload, SyncPayload::QueryUnsubscription { .. })),
+        "Inspector local-only subscriptions should not send upstream unsubscriptions"
     );
 }

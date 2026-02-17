@@ -356,4 +356,83 @@ mod integration_tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    /// Inspector mode on /sync requires admin authentication.
+    #[tokio::test]
+    async fn test_sync_inspector_mode_requires_admin_secret() {
+        let server = TestServer::start().await;
+        let token = make_jwt("jwt-user", json!({"role": "user"}), JWT_SECRET);
+
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Jazz-Inspector", "1")
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Admin introspection endpoint requires explicit inspector header.
+    #[tokio::test]
+    async fn test_admin_introspection_requires_inspector_header() {
+        let server = TestServer::start().await;
+
+        let resp = client()
+            .get(format!(
+                "{}/admin/introspection/live-queries",
+                server.base_url()
+            ))
+            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Admin introspection endpoint requires valid admin secret.
+    #[tokio::test]
+    async fn test_admin_introspection_requires_admin_secret() {
+        let server = TestServer::start().await;
+
+        let resp = client()
+            .get(format!(
+                "{}/admin/introspection/live-queries",
+                server.base_url()
+            ))
+            .header("X-Jazz-Inspector", "1")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Admin introspection endpoint returns live query list with both headers.
+    #[tokio::test]
+    async fn test_admin_introspection_live_queries_success() {
+        let server = TestServer::start().await;
+
+        let resp = client()
+            .get(format!(
+                "{}/admin/introspection/live-queries",
+                server.base_url()
+            ))
+            .header("X-Jazz-Inspector", "1")
+            .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            body.is_array(),
+            "live query introspection response should be a JSON array"
+        );
+    }
 }

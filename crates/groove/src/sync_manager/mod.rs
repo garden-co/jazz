@@ -142,7 +142,7 @@ impl SyncManager {
 
     /// Add a client connection.
     pub fn add_client(&mut self, client_id: ClientId) {
-        self.clients.insert(client_id, ClientState::default());
+        self.clients.entry(client_id).or_default();
     }
 
     /// Remove a client connection.
@@ -181,6 +181,13 @@ impl SyncManager {
     pub fn set_client_role(&mut self, client_id: ClientId, role: ClientRole) {
         if let Some(client) = self.clients.get_mut(&client_id) {
             client.role = role;
+        }
+    }
+
+    /// Mark whether a client is using inspector mode.
+    pub fn set_client_inspector_mode(&mut self, client_id: ClientId, enabled: bool) {
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.inspector_mode = enabled;
         }
     }
 

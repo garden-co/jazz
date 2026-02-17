@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
@@ -136,7 +138,7 @@ fn current_timestamp_ms() -> u64 {
 }
 
 /// Origin of a live query subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SubscriptionOrigin {
     #[default]
     App,
@@ -144,7 +146,7 @@ pub enum SubscriptionOrigin {
 }
 
 /// Visibility of a live query subscription in introspection views.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SubscriptionVisibility {
     #[default]
     Public,
@@ -152,7 +154,7 @@ pub enum SubscriptionVisibility {
 }
 
 /// Metadata attached to a query subscription.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionMetadata {
     pub origin: SubscriptionOrigin,
     pub visibility: SubscriptionVisibility,
@@ -209,7 +211,7 @@ impl SubscriptionOptions {
 }
 
 /// Source of a live query entry in introspection output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LiveQuerySource {
     /// Subscription created locally in this QueryManager instance.
     Local,
@@ -218,7 +220,7 @@ pub enum LiveQuerySource {
 }
 
 /// Introspection snapshot entry for an active query.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveQueryInfo {
     /// Local subscription ID for local entries, or downstream query ID for server entries.
     pub query_id: QueryId,
@@ -230,6 +232,7 @@ pub struct LiveQueryInfo {
     pub has_session: bool,
     pub settled_once: bool,
     pub settled_tier: Option<PersistenceTier>,
+    pub propagate_to_servers: bool,
     pub origin: SubscriptionOrigin,
     pub visibility: SubscriptionVisibility,
     pub created_at_ms: u64,
@@ -303,6 +306,8 @@ pub(super) struct ServerQuerySubscription {
     /// Flag indicating this server subscription has settled at least once.
     /// Used to emit QuerySettled to the client on first settlement.
     pub(super) settled_once: bool,
+    /// Whether this subscription should be forwarded/replayed to upstream servers.
+    pub(super) propagate_to_servers: bool,
     /// Introspection metadata for this subscription.
     pub(super) metadata: SubscriptionMetadata,
 }
@@ -601,6 +606,7 @@ impl QueryManager {
                 has_session: sub.session.is_some(),
                 settled_once: sub.settled_once,
                 settled_tier: sub.settled_tier,
+                propagate_to_servers: sub.propagate_to_servers,
                 origin: sub.metadata.origin,
                 visibility: sub.metadata.visibility,
                 created_at_ms: sub.metadata.created_at_ms,
@@ -620,6 +626,7 @@ impl QueryManager {
                 has_session: sub.session.is_some(),
                 settled_once: sub.settled_once,
                 settled_tier: None,
+                propagate_to_servers: sub.propagate_to_servers,
                 origin: sub.metadata.origin,
                 visibility: sub.metadata.visibility,
                 created_at_ms: sub.metadata.created_at_ms,

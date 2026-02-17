@@ -871,6 +871,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.immediate_tick();
     }
 
+    /// Ensure a client exists without modifying session or role.
+    pub fn ensure_client(&mut self, client_id: ClientId) {
+        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
+        if sm.get_client(client_id).is_none() {
+            sm.add_client(client_id);
+            self.immediate_tick();
+        }
+    }
+
     /// Ensure a client exists with the given session.
     ///
     /// If the client already exists, updates the session. This is idempotent —
@@ -907,6 +916,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .set_client_role(client_id, ClientRole::Admin);
     }
 
+    /// Mark whether the client is in inspector mode.
+    pub fn set_client_inspector_mode(&mut self, client_id: ClientId, enabled: bool) {
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .set_client_inspector_mode(client_id, enabled);
+    }
+
     /// Set a client's role.
     pub fn set_client_role_by_name(
         &mut self,
@@ -926,6 +943,16 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Get the current schema.
     pub fn current_schema(&self) -> &Schema {
         self.schema_manager.current_schema()
+    }
+
+    /// List active live queries for introspection.
+    pub fn list_live_queries(
+        &self,
+        include_hidden: bool,
+    ) -> Vec<crate::query_manager::manager::LiveQueryInfo> {
+        self.schema_manager
+            .query_manager()
+            .list_live_queries(include_hidden)
     }
 
     /// Get mutable access to the underlying SchemaManager.

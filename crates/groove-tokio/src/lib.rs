@@ -374,6 +374,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Ensure a client exists without modifying session/role.
+    pub fn ensure_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client(client_id);
+        Ok(())
+    }
+
     /// Ensure a client exists with the given session.
     ///
     /// A session is always required — callers must authenticate before
@@ -402,6 +409,17 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Mark whether the client is in inspector mode.
+    pub fn set_client_inspector_mode(
+        &self,
+        client_id: ClientId,
+        enabled: bool,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_client_inspector_mode(client_id, enabled);
+        Ok(())
+    }
+
     // =========================================================================
     // Schema Access
     // =========================================================================
@@ -410,6 +428,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn current_schema(&self) -> Result<Schema, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.current_schema().clone())
+    }
+
+    /// List active live queries for introspection.
+    pub fn list_live_queries(
+        &self,
+        include_hidden: bool,
+    ) -> Result<Vec<groove::query_manager::manager::LiveQueryInfo>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.list_live_queries(include_hidden))
     }
 
     /// Access the underlying storage (for flushing, etc).

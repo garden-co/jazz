@@ -28,6 +28,11 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/events", get(events_handler))
         // Unified sync endpoint - all client→server communication flows through here
         .route("/sync", post(sync_handler))
+        // Admin-only introspection endpoints
+        .route(
+            "/admin/introspection/live-queries",
+            get(admin_live_queries_handler),
+        )
         // Health check
         .route("/health", get(health_handler))
         // Add middleware
@@ -41,6 +46,21 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 struct EventsParams {
     /// Client-provided ID for reconnect support.
     client_id: Option<String>,
+}
+
+/// Query parameters for admin live-queries endpoint.
+#[derive(Debug, Deserialize)]
+struct AdminLiveQueriesParams {
+    /// Include hidden inspector-owned subscriptions in results.
+    include_hidden: Option<bool>,
+}
+
+fn has_inspector_header(headers: &HeaderMap) -> bool {
+    headers
+        .get("X-Jazz-Inspector")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Encode a ServerEvent as a length-prefixed binary frame.
@@ -201,6 +221,8 @@ async fn sync_handler(
     use groove::sync_manager::{InboxEntry, Source};
     tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
 
+    let inspector_mode = has_inspector_header(&headers);
+
     // Check admin secret — if present and valid, promote client to Admin role
     let is_admin = {
         let admin_secret = headers
@@ -217,10 +239,20 @@ async fn sync_handler(
         }
     };
 
+    if inspector_mode && !is_admin {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::unauthorized(
+                "X-Jazz-Inspector mode requires a valid X-Jazz-Admin-Secret",
+            )),
+        )
+            .into_response();
+    }
+
     // Admin-authenticated requests (server-to-server catalogue sync) don't need a session.
     // Regular clients must provide JWT or backend secret.
     if is_admin {
-        if let Err(e) = state.runtime.add_client(request.client_id, None) {
+        if let Err(e) = state.runtime.ensure_client(request.client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -228,6 +260,16 @@ async fn sync_handler(
                 .into_response();
         }
         if let Err(e) = state.runtime.set_client_admin(request.client_id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
+        if let Err(e) = state
+            .runtime
+            .set_client_inspector_mode(request.client_id, inspector_mode)
+        {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -267,6 +309,16 @@ async fn sync_handler(
             )
                 .into_response();
         }
+        if let Err(e) = state
+            .runtime
+            .set_client_inspector_mode(request.client_id, false)
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(e.to_string())),
+            )
+                .into_response();
+        }
     }
 
     let entry = InboxEntry {
@@ -276,6 +328,46 @@ async fn sync_handler(
 
     match state.runtime.push_sync_inbox(entry) {
         Ok(()) => Json(SuccessResponse::default()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(e.to_string())),
+        )
+            .into_response(),
+    }
+}
+
+/// Admin-only live query introspection endpoint.
+///
+/// Requires BOTH:
+/// - `X-Jazz-Admin-Secret` (valid)
+/// - `X-Jazz-Inspector: 1` (explicit inspector mode)
+async fn admin_live_queries_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Query(params): Query<AdminLiveQueriesParams>,
+) -> impl IntoResponse {
+    let inspector_mode = has_inspector_header(&headers);
+
+    if !inspector_mode {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "X-Jazz-Inspector: 1 header required for admin introspection endpoints",
+            )),
+        )
+            .into_response();
+    }
+
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+    if let Err((status, msg)) = validate_admin_secret(admin_secret, &state.auth_config) {
+        return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+    }
+
+    let include_hidden = params.include_hidden.unwrap_or(false);
+    match state.runtime.list_live_queries(include_hidden) {
+        Ok(queries) => Json(queries).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::internal(e.to_string())),

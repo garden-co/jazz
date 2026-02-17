@@ -22,6 +22,7 @@ Developers need a "what is in the system now" tool that works both for local bro
 
 - Reuse existing query/mutation code paths as much as possible.
 - Keep inspector read/write behavior aligned with normal runtime behavior.
+- Make inspector data views real-time by default via subscriptions.
 - Support admin-only auth bypass for inspector operations where required.
 - Add live-query introspection without polluting that introspection with inspector-owned meta-queries.
 - Provide one conceptual inspector model that can be rendered in:
@@ -92,6 +93,14 @@ Inspector meta-queries use:
 - `local_only` (do not forward upstream)
 - `origin=inspector`
 
+### Subscription-First Inspector UX
+
+Inspector data display should be subscription-driven by default:
+
+- default inspector reads use subscriptions (reactive/live)
+- one-shot inspector queries are explicit opt-in for ad-hoc fetch/export flows
+- inspector subscriptions should be marked hidden/local-only unless explicitly requested otherwise
+
 ## Live Query Introspection Without Self-Pollution
 
 ### Requirement
@@ -125,7 +134,8 @@ Examples:
 - `getInspectorSchemas()`
 - `getInspectorPolicies()`
 - `listInspectorLiveQueries(includeHidden?: boolean)`
-- `inspectTableRows(table, filters, pagination, options)`
+- `subscribeInspectorTableRows(table, filters, options)` (default path)
+- `inspectTableRowsOnce(table, filters, pagination, options)` (explicit one-shot)
 - `inspectMutate(table/object, operation, payload, options)`
 
 These should route to existing `RuntimeCore`/`SchemaManager`/`QueryManager` operations with execution options.
@@ -138,7 +148,10 @@ Examples:
 
 - `GET /admin/introspection/schemas`
 - `GET /admin/introspection/policies`
-- `POST /admin/introspection/query`
+- `POST /admin/introspection/subscribe`
+- `POST /admin/introspection/unsubscribe`
+- `GET /admin/introspection/events` (inspector stream)
+- `POST /admin/introspection/query-once` (explicit one-shot)
 - `POST /admin/introspection/mutate`
 - `GET /admin/introspection/live-queries`
 - `GET /admin/introspection/sync-state`
@@ -154,6 +167,7 @@ This avoids accidental policy bypass through generic endpoints.
 
 - Admin bypass is allowed only on explicit admin introspection routes (or equivalent internal API paths).
 - Normal `/sync` and app query APIs keep current auth semantics.
+- If inspector mode is enabled over `/sync` (`X-Jazz-Inspector: 1`), it must require valid admin secret and default inspector subscriptions to hidden + `local_only`.
 - Inspector endpoints should be deny-by-default if admin auth is not configured.
 - CORS for admin introspection routes should be more restrictive than current permissive defaults.
 
@@ -233,7 +247,6 @@ Initial approach:
 
 - Should inspector-origin writes be tagged in commit metadata for explicit audit trails?
 - Should admin introspection have rate limits separate from app traffic?
-- Do we need a dedicated streaming endpoint for live-query/sync diagnostics, or is polling sufficient for MVP?
 - How much of sync-manager internal state should be exposed vs summarized?
 
 ## Immediate Next Steps

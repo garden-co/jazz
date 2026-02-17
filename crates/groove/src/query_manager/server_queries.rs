@@ -28,6 +28,13 @@ impl QueryManager {
         let mut deferred = Vec::new();
 
         for sub in pending {
+            let metadata = if sub.inspector_mode {
+                SubscriptionMetadata::inspector_hidden()
+            } else {
+                SubscriptionMetadata::app()
+            };
+            let propagate_to_servers = !sub.inspector_mode;
+
             // Resolve schema: use self.schema if available, otherwise look up from known_schemas (server mode)
             let schema_for_compile: Arc<Schema> = if !self.schema.is_empty() {
                 self.schema.clone()
@@ -131,11 +138,13 @@ impl QueryManager {
 
             // Forward QuerySubscription to upstream servers (multi-tier forwarding)
             // This allows hub servers to know about the query and push matching data
-            self.sync_manager.send_query_subscription_to_servers(
-                sub.query_id,
-                sub.query.clone(),
-                sub.session.clone(),
-            );
+            if propagate_to_servers {
+                self.sync_manager.send_query_subscription_to_servers(
+                    sub.query_id,
+                    sub.query.clone(),
+                    sub.session.clone(),
+                );
+            }
 
             // Store the server subscription for reactive updates
             self.server_subscriptions.insert(
@@ -148,7 +157,8 @@ impl QueryManager {
                     last_scope: scope,
                     needs_recompile: false,
                     settled_once: false,
-                    metadata: SubscriptionMetadata::app(),
+                    propagate_to_servers,
+                    metadata,
                 },
             );
         }
@@ -170,12 +180,19 @@ impl QueryManager {
 
         for unsub in pending {
             // Remove the server subscription
-            self.server_subscriptions
+            let removed = self
+                .server_subscriptions
                 .remove(&(unsub.client_id, unsub.query_id));
 
             // Forward unsubscription to upstream servers
-            self.sync_manager
-                .send_query_unsubscription_to_servers(unsub.query_id);
+            if removed
+                .as_ref()
+                .map(|sub| sub.propagate_to_servers)
+                .unwrap_or(true)
+            {
+                self.sync_manager
+                    .send_query_unsubscription_to_servers(unsub.query_id);
+            }
         }
     }
 
