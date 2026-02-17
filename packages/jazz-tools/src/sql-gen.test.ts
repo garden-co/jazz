@@ -268,4 +268,56 @@ describe("lensToSql", () => {
     expect(lensToSql(lens, "bwd")).toBe(`ALTER TABLE todos ADD COLUMN priority INTEGER DEFAULT 0;
 `);
   });
+
+  it("supports array defaults in migration SQL generation", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.add().string({ default: [] as unknown as string }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE projects ADD COLUMN todos TEXT DEFAULT ARRAY[];
+`);
+  });
+
+  it("supports adding array columns in lenses", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.add().array({ of: "UUID", default: [] }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY[];
+`,
+    );
+  });
+
+  it("supports adding array columns with default values in lenses", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.add().array({ of: "UUID", default: ["123e4567-e89b-12d3-a456-426614174000"] }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(
+      `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY['123e4567-e89b-12d3-a456-426614174000'];
+`,
+    );
+  });
+
+  it("supports dropping array columns with backward re-add", () => {
+    resetCollectedState();
+    migrate("projects", {
+      todos: col.drop().array({ of: "UUID", backwardsDefault: [] }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE projects DROP COLUMN todos;
+`);
+    expect(lensToSql(lens, "bwd")).toBe(
+      `ALTER TABLE projects ADD COLUMN todos UUID[] DEFAULT ARRAY[];
+`,
+    );
+  });
 });
