@@ -1,5 +1,5 @@
 import { useMemo, useSyncExternalStore } from "react";
-import type { QueryBuilder, PersistenceTier } from "jazz-ts";
+import type { QueryBuilder, PersistenceTier } from "../index.js";
 import { useDb } from "./provider.js";
 
 export function useAll<T extends { id: string }>(query: QueryBuilder<T>): T[];

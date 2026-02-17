@@ -14,8 +14,8 @@ use groove::storage::{Storage, StorageError, SurrealKvStorage};
 use groove::sync_manager::{
     ClientId, Destination, InboxEntry, PersistenceTier, ServerId, Source, SyncManager,
 };
-use groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
-use jazz_transport::ServerEvent;
+use crate::groove_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
+use crate::jazz_transport::ServerEvent;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::transport::{AuthConfig, ServerConnection};

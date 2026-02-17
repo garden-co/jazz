@@ -1,4 +1,4 @@
-import { migrate, col } from "jazz-ts";
+import { migrate, col } from "jazz-tools";
 
 // Example of editing a generated migration stub.
 migrate("todos", {

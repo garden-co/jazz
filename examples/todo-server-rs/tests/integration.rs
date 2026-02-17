@@ -14,10 +14,10 @@ use axum::http::{Request, StatusCode};
 use axum::response::sse::{Event, Sse};
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
-use http_body_util::BodyExt;
-use jazz_rs::{
+use groove::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
 };
+use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -56,7 +56,7 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
-fn test_schema() -> jazz_rs::Schema {
+fn test_schema() -> groove::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
@@ -80,7 +80,6 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         client_id: None,
         schema: test_schema(),
         server_url: String::new(),
-        server_path_prefix: None,
         data_dir,
         jwt_token: None,
         backend_secret: None,
@@ -107,7 +106,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use jazz_rs::{ObjectId, QueryBuilder, Value};
+use groove::{ObjectId, QueryBuilder, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {
@@ -454,7 +453,6 @@ async fn test_local_persistence() {
             client_id: None,
             schema: test_schema(),
             server_url: String::new(),
-            server_path_prefix: None,
             data_dir: data_path.clone(),
             jwt_token: None,
             backend_secret: None,
@@ -490,7 +488,6 @@ async fn test_local_persistence() {
             client_id: None,
             schema: test_schema(),
             server_url: String::new(),
-            server_path_prefix: None,
             data_dir: data_path,
             jwt_token: None,
             backend_secret: None,
@@ -563,7 +560,7 @@ impl TestServer {
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
 
-        // Find the jazz binary. When running tests, look in target/debug or target/release.
+        // Find the jazz-tools binary. When running tests, look in target/debug or target/release.
         let jazz_binary = Self::find_jazz_binary();
 
         let process = Command::new(&jazz_binary)
@@ -596,7 +593,7 @@ impl TestServer {
         server
     }
 
-    /// Find the jazz binary in cargo's target directory.
+    /// Find the jazz-tools binary in cargo's target directory.
     fn find_jazz_binary() -> PathBuf {
         // Get the path to the test binary, which gives us the target directory
         let exe = std::env::current_exe().expect("get current exe");
@@ -605,14 +602,14 @@ impl TestServer {
             .and_then(|p| p.parent()) // debug or release
             .expect("find target dir");
 
-        let jazz_path = target_dir.join("jazz");
+        let jazz_path = target_dir.join("jazz-tools");
         if jazz_path.exists() {
             return jazz_path;
         }
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-cli` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
             jazz_path
         );
     }
@@ -671,7 +668,7 @@ fn get_free_port() -> u16 {
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]
 async fn test_server_resync() {
-    // 1. Start jazz-cli server
+    // 1. Start jazz-tools server
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
@@ -690,7 +687,6 @@ async fn test_server_resync() {
             client_id: None,
             schema: test_schema(),
             server_url: server.base_url(),
-            server_path_prefix: None,
             data_dir: data_path.clone(),
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
@@ -734,7 +730,6 @@ async fn test_server_resync() {
             client_id: None,
             schema: test_schema(),
             server_url: server.base_url(),
-            server_path_prefix: None,
             data_dir: data_path,
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,

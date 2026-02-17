@@ -1,4 +1,4 @@
-import { table, col } from "jazz-ts";
+import { table, col } from "jazz-tools";
 
 table("projects", {
   name: col.string(),

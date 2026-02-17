@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use groove::runtime_tokio::TokioRuntime;
 use groove::schema_manager::{AppId, SchemaManager};
 use groove::storage::SurrealKvStorage;
 use groove::sync_manager::{ClientId, Destination, PersistenceTier, SyncManager, SyncPayload};
-use groove_tokio::TokioRuntime;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 

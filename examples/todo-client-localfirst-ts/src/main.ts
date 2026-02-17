@@ -1,4 +1,4 @@
-import { createDb, type DbConfig, type Db } from "jazz-ts";
+import { createDb, type DbConfig, type Db } from "jazz-tools";
 import { app, Todo } from "../schema/app.js";
 
 function readEnvAppId(): string | undefined {

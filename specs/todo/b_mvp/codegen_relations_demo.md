@@ -7,4 +7,4 @@ The example schema (`examples/todo-client-localfirst-ts/schema/current.ts`) does
 - Application code using `.include({ parent: true })`
 
 > `examples/todo-client-localfirst-ts/schema/current.ts` (currently no relations)
-> `packages/jazz-ts/src/codegen/codegen.test.ts:272-420` (relation analysis is tested, just not demoed)
+> `packages/jazz-tools/src/codegen/codegen.test.ts:272-420` (relation analysis is tested, just not demoed)

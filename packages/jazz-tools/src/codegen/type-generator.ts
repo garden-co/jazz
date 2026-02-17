@@ -230,7 +230,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
 export function generateTypes(schema: WasmSchema): string {
   const lines: string[] = [
     "// AUTO-GENERATED FILE - DO NOT EDIT",
-    'import type { WasmSchema, QueryBuilder } from "jazz-ts";',
+    'import type { WasmSchema, QueryBuilder } from "jazz-tools";',
     "",
   ];
 

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use jazz_rs::{
+use groove::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
 };
@@ -188,7 +188,7 @@ fn make_jwt(sub: &str) -> String {
     .expect("encode jwt")
 }
 
-fn test_schema() -> jazz_rs::Schema {
+fn test_schema() -> groove::Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -208,8 +208,7 @@ fn make_context(
         app_id,
         client_id: None,
         schema: test_schema(),
-        server_url,
-        server_path_prefix: Some(format!("/apps/{app_id}")),
+        server_url: format!("{server_url}/apps/{app_id}"),
         data_dir,
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
@@ -221,13 +220,9 @@ async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
     timeout: Duration,
-) -> Vec<(jazz_rs::ObjectId, Vec<Value>)> {
+    settled_tier: Option<PersistenceTier>,
+) -> Vec<(groove::ObjectId, Vec<Value>)> {
     let query = QueryBuilder::new("todos").build();
-    let settled_tier = if expected_count == 0 {
-        None
-    } else {
-        Some(PersistenceTier::EdgeServer)
-    };
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();
 
@@ -253,7 +248,7 @@ async fn wait_for_todos_count(
 }
 
 #[tokio::test]
-async fn jazz_rs_clients_sync_queries_and_mutations_over_multi_server() {
+async fn jazz_tools_clients_sync_queries_and_mutations_over_multi_server() {
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let server = ServerProcess::start(server_data.path()).await;
@@ -284,7 +279,13 @@ async fn jazz_rs_clients_sync_queries_and_mutations_over_multi_server() {
         .await
         .expect("client a create todo");
 
-    let _ = wait_for_todos_count(&client_a, 1, Duration::from_secs(10)).await;
+    let _ = wait_for_todos_count(
+        &client_a,
+        1,
+        Duration::from_secs(10),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
 
     let client_b_dir = TempDir::new().expect("client b dir");
     let client_b = JazzClient::connect(make_context(
@@ -296,7 +297,13 @@ async fn jazz_rs_clients_sync_queries_and_mutations_over_multi_server() {
     .await
     .expect("connect client b");
 
-    let rows = wait_for_todos_count(&client_b, 1, Duration::from_secs(15)).await;
+    let rows = wait_for_todos_count(
+        &client_b,
+        1,
+        Duration::from_secs(15),
+        Some(PersistenceTier::EdgeServer),
+    )
+    .await;
     assert_eq!(rows[0].0, row_id);
     assert_eq!(rows[0].1[0], Value::Text("from-client-a".to_string()));
 
@@ -326,7 +333,7 @@ async fn jazz_rs_clients_sync_queries_and_mutations_over_multi_server() {
     assert!(saw_update, "client b should observe mutation from client a");
 
     client_a.delete(row_id).await.expect("client a delete todo");
-    let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(15)).await;
+    let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(15), None).await;
     assert!(rows_after_delete.is_empty());
 
     client_a.shutdown().await.expect("shutdown client a");
@@ -334,7 +341,7 @@ async fn jazz_rs_clients_sync_queries_and_mutations_over_multi_server() {
 }
 
 #[tokio::test]
-async fn jazz_rs_client_resyncs_after_server_restart_with_persisted_app_data() {
+async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data() {
     let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let app = {
@@ -363,7 +370,13 @@ async fn jazz_rs_client_resyncs_after_server_restart_with_persisted_app_data() {
             .await
             .expect("writer create");
 
-        wait_for_todos_count(&writer, 1, Duration::from_secs(10)).await;
+        wait_for_todos_count(
+            &writer,
+            1,
+            Duration::from_secs(10),
+            Some(PersistenceTier::EdgeServer),
+        )
+        .await;
         writer.shutdown().await.expect("shutdown writer");
         app
     };
@@ -381,7 +394,7 @@ async fn jazz_rs_client_resyncs_after_server_restart_with_persisted_app_data() {
     .await
     .expect("connect reader");
 
-    let rows = wait_for_todos_count(&reader, 1, Duration::from_secs(20)).await;
+    let rows = wait_for_todos_count(&reader, 1, Duration::from_secs(20), None).await;
     assert_eq!(rows[0].1[0], Value::Text("persisted-on-server".to_string()));
     reader.shutdown().await.expect("shutdown reader");
 }
