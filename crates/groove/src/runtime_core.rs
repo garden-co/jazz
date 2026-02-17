@@ -456,8 +456,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             self.sync_sender.send_sync_message(msg);
         }
 
-        // Flush WAL so writes survive a hard kill (tab close, crash).
-        // This is cheap (append-only buffer → OPFS) vs snapshot which rewrites everything.
+        // Flush the storage durability barrier so writes survive a hard kill (tab close, crash).
         self.storage.flush_wal();
     }
 
