@@ -154,7 +154,11 @@ function extractBrowser(browserDir) {
     .map((x) => scenarioSummary(x));
   if (scenarios.length === 0) return [];
 
-  const generatedAt = realistic.generated_at ?? manifest.generated_at ?? metadata.generated_at ?? new Date().toISOString();
+  const generatedAt =
+    realistic.generated_at ??
+    manifest.generated_at ??
+    metadata.generated_at ??
+    new Date().toISOString();
   const branch = toBranch(metadata.ref ?? manifest.ref);
   return [
     {
