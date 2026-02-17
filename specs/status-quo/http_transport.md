@@ -131,11 +131,11 @@ Server uses `tokio::sync::broadcast` for SSE routing:
 
 ## Key Files
 
-| File                                        | Purpose                                 |
-| ------------------------------------------- | --------------------------------------- |
-| `crates/jazz-cli/src/routes.rs`             | Server endpoints (events, sync, health) |
-| `crates/jazz-cli/src/middleware/auth.rs`    | Authentication middleware               |
-| `crates/jazz-cli/src/transport_protocol.rs` | Shared types, frame encoding            |
-| `crates/jazz-cli/src/client.rs`             | Rust client (streaming, reconnection)   |
-| `crates/jazz-cli/src/transport.rs`          | Client-side HTTP transport              |
-| `packages/jazz-tools/src/runtime/sync-transport.ts` | TS shared sync POST + stream parser |
+| File                                                | Purpose                                 |
+| --------------------------------------------------- | --------------------------------------- |
+| `crates/jazz-cli/src/routes.rs`                     | Server endpoints (events, sync, health) |
+| `crates/jazz-cli/src/middleware/auth.rs`            | Authentication middleware               |
+| `crates/jazz-cli/src/transport_protocol.rs`         | Shared types, frame encoding            |
+| `crates/jazz-cli/src/client.rs`                     | Rust client (streaming, reconnection)   |
+| `crates/jazz-cli/src/transport.rs`                  | Client-side HTTP transport              |
+| `packages/jazz-tools/src/runtime/sync-transport.ts` | TS shared sync POST + stream parser     |

@@ -2,6 +2,7 @@ packages:
   - docs
   - packages/*
   - examples/*
+  - examples/docs/*
   - crates
   - crates/groove-wasm
   - crates/groove-napi
