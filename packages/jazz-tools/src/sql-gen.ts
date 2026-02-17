@@ -37,7 +37,7 @@ function formatDefaultValue(value: unknown): string {
 function lensOpToForwardSql(table: string, op: LensOp): string {
   switch (op.type) {
     case "introduce":
-      return `ALTER TABLE ${table} ADD COLUMN ${op.column} TEXT DEFAULT ${formatDefaultValue(op.value)};`;
+      return `ALTER TABLE ${table} ADD COLUMN ${op.column} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
     case "drop":
       return `ALTER TABLE ${table} DROP COLUMN ${op.column};`;
     case "rename":
@@ -50,7 +50,7 @@ function lensOpToBackwardSql(table: string, op: LensOp): string {
     case "introduce":
       return `ALTER TABLE ${table} DROP COLUMN ${op.column};`;
     case "drop":
-      return `ALTER TABLE ${table} ADD COLUMN ${op.column} TEXT DEFAULT ${formatDefaultValue(op.value)};`;
+      return `ALTER TABLE ${table} ADD COLUMN ${op.column} ${sqlTypeToString(op.sqlType)} DEFAULT ${formatDefaultValue(op.value)};`;
     case "rename":
       return `ALTER TABLE ${table} RENAME COLUMN ${op.value} TO ${op.column};`;
   }

@@ -246,4 +246,26 @@ describe("lensToSql", () => {
 `,
     );
   });
+
+  it("preserves SQL type for add lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      priority: col.add().int({ default: 0 }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "fwd")).toBe(`ALTER TABLE todos ADD COLUMN priority INTEGER DEFAULT 0;
+`);
+  });
+
+  it("preserves SQL type for drop lens operations", () => {
+    resetCollectedState();
+    migrate("todos", {
+      priority: col.drop().int({ backwardsDefault: 0 }),
+    });
+    const lens = getCollectedMigration()!;
+
+    expect(lensToSql(lens, "bwd")).toBe(`ALTER TABLE todos ADD COLUMN priority INTEGER DEFAULT 0;
+`);
+  });
 });

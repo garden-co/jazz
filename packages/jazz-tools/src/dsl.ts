@@ -215,9 +215,9 @@ export function getCollectedMigration(): Lens | null {
   const operations: LensOp[] = migration.operations.map(({ column, op }) => {
     switch (op._type) {
       case "add":
-        return { type: "introduce" as const, column, value: op.default };
+        return { type: "introduce" as const, column, sqlType: op.sqlType, value: op.default };
       case "drop":
-        return { type: "drop" as const, column, value: op.backwardsDefault };
+        return { type: "drop" as const, column, sqlType: op.sqlType, value: op.backwardsDefault };
       case "rename":
         return { type: "rename" as const, column, value: op.oldName };
     }

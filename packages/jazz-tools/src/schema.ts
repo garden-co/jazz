@@ -62,13 +62,29 @@ export interface MigrationOpEntry {
 }
 
 // Lens format for SQL generation
-export type LensOpType = "introduce" | "drop" | "rename";
-
-export interface LensOp {
-  type: LensOpType;
+export interface IntroduceLensOp {
+  type: "introduce";
   column: string;
+  sqlType: SqlType;
   value: unknown;
 }
+
+export interface DropLensOp {
+  type: "drop";
+  column: string;
+  sqlType: SqlType;
+  value: unknown;
+}
+
+export interface RenameLensOp {
+  type: "rename";
+  column: string;
+  value: string;
+}
+
+export type LensOp = IntroduceLensOp | DropLensOp | RenameLensOp;
+
+export type LensOpType = LensOp["type"];
 
 export interface Lens {
   table: string;
