@@ -2,6 +2,14 @@
   "name": "jazz-tools",
   "version": "2.0.0-alpha.0",
   "description": "Jazz TypeScript SDK, React bindings, and CLI tools",
+  "bin": {
+    "jazz-tools": "bin/jazz-tools.js"
+  },
+  "files": [
+    "bin/**",
+    "dist/**",
+    "README.md"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,14 +28,6 @@
     },
     "./package.json": "./package.json"
   },
-  "bin": {
-    "jazz-tools": "bin/jazz-tools.js"
-  },
-  "files": [
-    "bin/**",
-    "dist/**",
-    "README.md"
-  ],
   "publishConfig": {
     "access": "public",
     "tag": "alpha"
@@ -43,9 +43,6 @@
     "groove-wasm": "workspace:*",
     "tsx": "^4.0.0"
   },
-  "peerDependencies": {
-    "react": "^18 || ^19"
-  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
@@ -56,6 +53,9 @@
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
     "vitest": "catalog:default"
+  },
+  "peerDependencies": {
+    "react": "^18 || ^19"
   },
   "engines": {
     "node": ">=20"
