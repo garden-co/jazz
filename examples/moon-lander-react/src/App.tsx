@@ -1,6 +1,6 @@
 import { useRef, useCallback, useMemo } from "react";
-import { JazzProvider, useDb, useAll } from "jazz-react";
-import type { DbConfig } from "jazz-ts";
+import { JazzProvider, useDb, useAll } from "jazz-tools/react";
+import type { DbConfig } from "jazz-tools";
 import { app } from "../schema/app.js";
 import { Game } from "./Game.js";
 import type { RemotePlayer, GameState, ChatMessage } from "./game/types.js";
@@ -100,7 +100,9 @@ function flushRefuelConsumptions(
   db: ReturnType<typeof useDb>,
   playerId: string,
   pending: React.MutableRefObject<FuelType[]>,
-  deposits: Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }> | undefined,
+  deposits:
+    | Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }>
+    | undefined,
 ) {
   for (const fuelType of pending.current.splice(0)) {
     if (!deposits) continue;
@@ -118,7 +120,9 @@ function flushFuelShares(
   db: ReturnType<typeof useDb>,
   playerId: string,
   pending: React.MutableRefObject<Array<{ fuelType: string; receiverPlayerId: string }>>,
-  deposits: Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }> | undefined,
+  deposits:
+    | Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }>
+    | undefined,
 ) {
   for (const share of pending.current.splice(0)) {
     if (!deposits) continue;
@@ -136,7 +140,9 @@ function flushBurstDeposits(
   db: ReturnType<typeof useDb>,
   playerId: string,
   pending: React.MutableRefObject<Array<{ fuelType: string; newX: number }>>,
-  deposits: Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }> | undefined,
+  deposits:
+    | Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }>
+    | undefined,
 ) {
   for (const burst of pending.current.splice(0)) {
     if (!deposits) continue;
@@ -172,13 +178,7 @@ function flushChatMessages(
 // GameWithSync — bridges Game ↔ Jazz DB
 // ---------------------------------------------------------------------------
 
-function GameWithSync({
-  physicsSpeed,
-  playerId,
-}: {
-  physicsSpeed?: number;
-  playerId: string;
-}) {
+function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playerId: string }) {
   const db = useDb();
   // Jazz-native filtering: only subscribe to remote players (ne = local)
   const remotePlayerRows = useAll(app.players.where({ playerId: { ne: playerId } }));
@@ -246,7 +246,14 @@ function GameWithSync({
       const elapsed = Date.now() - mountedAtRef.current;
 
       seedDepositsIfEmpty(db, seededRef, allDepositsRef.current, elapsed);
-      syncPlayerState(db, playerId, latestStateRef.current, dbRowIdRef, localPlayerRowsRef.current, elapsed);
+      syncPlayerState(
+        db,
+        playerId,
+        latestStateRef.current,
+        dbRowIdRef,
+        localPlayerRowsRef.current,
+        elapsed,
+      );
       flushDepositCollections(db, playerId, pendingCollectionsRef);
       flushRefuelConsumptions(db, playerId, pendingRefuelsRef, allDepositsRef.current);
       flushFuelShares(db, playerId, pendingSharesRef, allDepositsRef.current);

@@ -15,14 +15,22 @@ import {
   FUEL_BURN_X,
   MAX_FUEL,
   REFUEL_AMOUNT,
-  MOON_SURFACE_WIDTH,
   ASTRONAUT_WIDTH,
   ASTRONAUT_HEIGHT,
   SHARE_PROXIMITY_RADIUS,
   type PlayerMode,
   type FuelType,
 } from "./constants.js";
-import { drawBackground, drawLander, drawAstronaut, drawDeposit, drawArrow, drawSplash, drawBubbles, DEPOSIT_COLOURS } from "./render.js";
+import {
+  drawBackground,
+  drawLander,
+  drawAstronaut,
+  drawDeposit,
+  drawArrow,
+  drawSplash,
+  drawBubbles,
+  DEPOSIT_COLOURS,
+} from "./render.js";
 import { wrapX, wrapDistance, wrapLerp, wrapScreenX, generateDeposits } from "./world.js";
 import { mergeInventory } from "./inventory.js";
 import type { ArcAnimation, Deposit, RemotePlayerView, EngineState } from "./types.js";
@@ -286,7 +294,10 @@ export function useGameEngine(
         const pickupRange = ASTRONAUT_WIDTH;
         for (const d of depositsRef.current) {
           if (collectedIdsRef.current.has(d.id)) continue;
-          if (wrapDistance(d.x, posXRef.current) < pickupRange && !inventoryRef.current.has(d.type)) {
+          if (
+            wrapDistance(d.x, posXRef.current) < pickupRange &&
+            !inventoryRef.current.has(d.type)
+          ) {
             inventoryRef.current.add(d.type);
             optimisticInventoryRef.current.add(d.type);
             collectedIdsRef.current.add(d.id);
@@ -426,10 +437,7 @@ export function useGameEngine(
       }
 
       // Draw parked lander (if we've landed and are walking)
-      if (
-        modeRef.current === "walking" &&
-        landerXRef.current !== 0
-      ) {
+      if (modeRef.current === "walking" && landerXRef.current !== 0) {
         const landerSX = wrapScreenX(landerXRef.current, cameraX);
         if (landerSX > -40 && landerSX < w + 40) {
           drawLander(ctx, landerSX, groundScreenY, false);
@@ -509,7 +517,10 @@ export function useGameEngine(
         const byPlayer = new Map<string, string[]>();
         for (const m of recentMsgs) {
           let arr = byPlayer.get(m.playerId);
-          if (!arr) { arr = []; byPlayer.set(m.playerId, arr); }
+          if (!arr) {
+            arr = [];
+            byPlayer.set(m.playerId, arr);
+          }
           arr.push(m.message);
         }
         // Local player bubbles
@@ -556,7 +567,14 @@ export function useGameEngine(
           }
         }
         if (nearestDep) {
-          drawArrow(ctx, nearestDep.sx, w, h, DEPOSIT_COLOURS[requiredFuelType], `fuel ${Math.floor(nearestDep.dist)}`);
+          drawArrow(
+            ctx,
+            nearestDep.sx,
+            w,
+            h,
+            DEPOSIT_COLOURS[requiredFuelType],
+            `fuel ${Math.floor(nearestDep.dist)}`,
+          );
         }
       }
 

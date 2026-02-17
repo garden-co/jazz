@@ -1,4 +1,4 @@
-import { table, col } from "jazz-ts";
+import { table, col } from "jazz-tools";
 
 table("players", {
   playerId: col.string(),
@@ -29,4 +29,3 @@ table("chat_messages", {
   message: col.string(),
   createdAt: col.int(),
 });
-

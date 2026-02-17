@@ -1,5 +1,5 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
-import type { WasmSchema, QueryBuilder } from "jazz-ts";
+import type { WasmSchema, QueryBuilder } from "jazz-tools";
 
 export interface Player {
   id: string;
@@ -71,21 +71,39 @@ export interface PlayerWhereInput {
   color?: string | { eq?: string; ne?: string; contains?: string };
   mode?: string | { eq?: string; ne?: string; contains?: string };
   online?: boolean;
-  lastSeen?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  positionX?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  positionY?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  velocityX?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  velocityY?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  lastSeen?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  positionX?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  positionY?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  velocityX?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  velocityY?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   requiredFuelType?: string | { eq?: string; ne?: string; contains?: string };
-  landerFuelLevel?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  landerSpawnX?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  landerFuelLevel?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  landerSpawnX?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
 }
 
 export interface FuelDepositWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   fuelType?: string | { eq?: string; ne?: string; contains?: string };
-  positionX?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  createdAt?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  positionX?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  createdAt?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   collected?: boolean;
   collectedBy?: string | { eq?: string; ne?: string; contains?: string };
 }
@@ -94,174 +112,178 @@ export interface ChatMessageWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   playerId?: string | { eq?: string; ne?: string; contains?: string };
   message?: string | { eq?: string; ne?: string; contains?: string };
-  createdAt?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  createdAt?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
 }
 
 export const wasmSchema: WasmSchema = {
-  "tables": {
-    "players": {
-      "columns": [
+  tables: {
+    players: {
+      columns: [
         {
-          "name": "playerId",
-          "column_type": {
-            "type": "Text"
+          name: "playerId",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "name",
-          "column_type": {
-            "type": "Text"
+          name: "name",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "color",
-          "column_type": {
-            "type": "Text"
+          name: "color",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "mode",
-          "column_type": {
-            "type": "Text"
+          name: "mode",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "online",
-          "column_type": {
-            "type": "Boolean"
+          name: "online",
+          column_type: {
+            type: "Boolean",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "lastSeen",
-          "column_type": {
-            "type": "Integer"
+          name: "lastSeen",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "positionX",
-          "column_type": {
-            "type": "Integer"
+          name: "positionX",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "positionY",
-          "column_type": {
-            "type": "Integer"
+          name: "positionY",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "velocityX",
-          "column_type": {
-            "type": "Integer"
+          name: "velocityX",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "velocityY",
-          "column_type": {
-            "type": "Integer"
+          name: "velocityY",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "requiredFuelType",
-          "column_type": {
-            "type": "Text"
+          name: "requiredFuelType",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "landerFuelLevel",
-          "column_type": {
-            "type": "Integer"
+          name: "landerFuelLevel",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "landerSpawnX",
-          "column_type": {
-            "type": "Integer"
+          name: "landerSpawnX",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
-        }
-      ]
+          nullable: false,
+        },
+      ],
     },
-    "fuel_deposits": {
-      "columns": [
+    fuel_deposits: {
+      columns: [
         {
-          "name": "fuelType",
-          "column_type": {
-            "type": "Text"
+          name: "fuelType",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "positionX",
-          "column_type": {
-            "type": "Integer"
+          name: "positionX",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "createdAt",
-          "column_type": {
-            "type": "Integer"
+          name: "createdAt",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "collected",
-          "column_type": {
-            "type": "Boolean"
+          name: "collected",
+          column_type: {
+            type: "Boolean",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "collectedBy",
-          "column_type": {
-            "type": "Text"
+          name: "collectedBy",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
-        }
-      ]
+          nullable: false,
+        },
+      ],
     },
-    "chat_messages": {
-      "columns": [
+    chat_messages: {
+      columns: [
         {
-          "name": "playerId",
-          "column_type": {
-            "type": "Text"
+          name: "playerId",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "message",
-          "column_type": {
-            "type": "Text"
+          name: "message",
+          column_type: {
+            type: "Text",
           },
-          "nullable": false
+          nullable: false,
         },
         {
-          "name": "createdAt",
-          "column_type": {
-            "type": "Integer"
+          name: "createdAt",
+          column_type: {
+            type: "Integer",
           },
-          "nullable": false
-        }
-      ]
-    }
-  }
+          nullable: false,
+        },
+      ],
+    },
+  },
 };
 
-export class PlayerQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<Player> {
+export class PlayerQueryBuilder<
+  I extends Record<string, never> = {},
+> implements QueryBuilder<Player> {
   readonly _table = "players";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: Player;
@@ -329,7 +351,9 @@ export class PlayerQueryBuilder<I extends Record<string, never> = {}> implements
   }
 }
 
-export class FuelDepositQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<FuelDeposit> {
+export class FuelDepositQueryBuilder<
+  I extends Record<string, never> = {},
+> implements QueryBuilder<FuelDeposit> {
   readonly _table = "fuel_deposits";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: FuelDeposit;
@@ -357,7 +381,10 @@ export class FuelDepositQueryBuilder<I extends Record<string, never> = {}> imple
     return clone;
   }
 
-  orderBy(column: keyof FuelDeposit, direction: "asc" | "desc" = "asc"): FuelDepositQueryBuilder<I> {
+  orderBy(
+    column: keyof FuelDeposit,
+    direction: "asc" | "desc" = "asc",
+  ): FuelDepositQueryBuilder<I> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -397,7 +424,9 @@ export class FuelDepositQueryBuilder<I extends Record<string, never> = {}> imple
   }
 }
 
-export class ChatMessageQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<ChatMessage> {
+export class ChatMessageQueryBuilder<
+  I extends Record<string, never> = {},
+> implements QueryBuilder<ChatMessage> {
   readonly _table = "chat_messages";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ChatMessage;
@@ -425,7 +454,10 @@ export class ChatMessageQueryBuilder<I extends Record<string, never> = {}> imple
     return clone;
   }
 
-  orderBy(column: keyof ChatMessage, direction: "asc" | "desc" = "asc"): ChatMessageQueryBuilder<I> {
+  orderBy(
+    column: keyof ChatMessage,
+    direction: "asc" | "desc" = "asc",
+  ): ChatMessageQueryBuilder<I> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
