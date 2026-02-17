@@ -72,6 +72,24 @@ describe("schemaToSql", () => {
     expect(sql).toContain("real_null REAL");
   });
 
+  it("handles array column types", () => {
+    resetCollectedState();
+    table("arrays", {
+      numbers: col.array(col.int()),
+      tags: col.array(col.string()),
+      flags: col.array(col.boolean()),
+      matrix: col.array(col.array(col.int())),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("numbers INTEGER[] NOT NULL");
+    expect(sql).toContain("flags BOOLEAN[] NOT NULL");
+    expect(sql).toContain("tags TEXT[]");
+    expect(sql).toContain("matrix INTEGER[][] NOT NULL");
+  });
+
   it("generates UUID REFERENCES for required ref", () => {
     resetCollectedState();
     table("todos", {
@@ -116,6 +134,19 @@ describe("schemaToSql", () => {
     expect(parent.sqlType).toBe("UUID");
     expect(parent.references).toBe("todos");
     expect(parent.nullable).toBe(true);
+  });
+
+  it("stores references in array(ref(...)) metadata", () => {
+    resetCollectedState();
+    table("files", {
+      parts: col.array(col.ref("file_parts")),
+    });
+    const schema = getCollectedSchema();
+
+    const parts = schema.tables[0].columns.find((c) => c.name === "parts")!;
+    expect(parts.sqlType).toEqual({ kind: "ARRAY", element: "UUID" });
+    expect(parts.references).toBe("file_parts");
+    expect(parts.nullable).toBe(false);
   });
 
   it("generates complete table with mixed columns and refs", () => {

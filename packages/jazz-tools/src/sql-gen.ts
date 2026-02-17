@@ -1,11 +1,12 @@
 // SQL generation from schema AST
 
 import type { Schema, Table, Column, Lens, LensOp } from "./schema.js";
+import { sqlTypeToString } from "./schema.js";
 
 function columnToSql(column: Column): string {
   const ref = column.references ? ` REFERENCES ${column.references}` : "";
   const nullability = column.nullable ? "" : " NOT NULL";
-  return `    ${column.name} ${column.sqlType}${ref}${nullability}`;
+  return `    ${column.name} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
 }
 
 function tableToSql(table: Table): string {
