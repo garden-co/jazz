@@ -24,6 +24,9 @@ concurrency:
 env:
   BENCH_PROFILE: ${{ github.event.inputs.profile || 's' }}
 
+permissions:
+  contents: read
+
 jobs:
   native:
     name: Native Bench (SurrealKV)
@@ -215,3 +218,75 @@ jobs:
           name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: bench-out/browser
           if-no-files-found: error
+
+  site:
+    name: Build Benchmark Site
+    runs-on: ubuntu-latest
+    needs: [native, browser]
+    if: ${{ always() && needs.native.result == 'success' && (needs.browser.result == 'success' || needs.browser.result == 'skipped') }}
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: site-input/native
+
+      - name: Download browser artifacts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.include_browser }}
+        uses: actions/download-artifact@v5
+        with:
+          name: realistic-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: site-input/browser
+
+      - name: Update benchmark history
+        run: |
+          set -euo pipefail
+          args=(
+            --history benchmarks/realistic/history/bench_history.json
+            --native site-input/native
+            --max-runs 5000
+          )
+          if [ -d site-input/browser ]; then
+            args+=(--browser site-input/browser)
+          fi
+          node benchmarks/realistic/update_history.mjs "${args[@]}"
+
+      - name: Build static benchmark site
+        run: |
+          set -euo pipefail
+          node benchmarks/realistic/build_site.mjs \
+            --history benchmarks/realistic/history/bench_history.json \
+            --out benchmarks/realistic/site
+
+      - name: Upload site artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: realistic-site-${{ github.run_id }}-${{ github.run_attempt }}
+          path: benchmarks/realistic/site
+          if-no-files-found: error
+
+      - name: Commit updated history and site
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add benchmarks/realistic/history/bench_history.json benchmarks/realistic/site
+          if git diff --cached --quiet; then
+            echo "No benchmark history/site changes to commit."
+            exit 0
+          fi
+          git commit -m "bench: update realistic benchmark site (${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT})"
+          git push origin HEAD:main

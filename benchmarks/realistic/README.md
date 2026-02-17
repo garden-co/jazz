@@ -52,6 +52,14 @@ Artifacts include `manifest.json` as a stable ingestion entrypoint:
 - native: `bench-out/native/manifest.json`
 - browser: `bench-out/browser/manifest.json`
 
+The workflow also has a `site` job that:
+
+- pulls the benchmark artifacts for that run
+- updates `history/bench_history.json` with absolute metrics
+- rebuilds `site/index.html` + `site/history.json`
+- uploads `site/` as an artifact
+- commits refreshed history/site back to `main` when the workflow itself runs on `main`
+
 ## Delta Rendering (Local)
 
 After downloading artifacts for two runs (e.g. `main` vs branch), render deltas:
@@ -68,3 +76,24 @@ Notes:
 - Script: `benchmarks/realistic/render_deltas.mjs`
 - It auto-discovers `manifest.json` recursively under `--base` and `--head`.
 - It compares the newest native/browser manifests found in each tree.
+
+## Static Site (Local + Vercel)
+
+Build locally from raw artifacts:
+
+```bash
+pnpm bench:realistic:update-history -- \
+  --history benchmarks/realistic/history/bench_history.json \
+  --native ./site-input/native \
+  --browser ./site-input/browser
+
+pnpm bench:realistic:build-site -- \
+  --history benchmarks/realistic/history/bench_history.json \
+  --out benchmarks/realistic/site
+```
+
+For Vercel hosting:
+
+- set project root directory to `benchmarks/realistic/site`
+- use no install command and no build command (prebuilt static files)
+- deploy from `main` so each benchmark CI run refreshes the dashboard automatically

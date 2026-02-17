@@ -114,7 +114,9 @@ function selectLatestByKind(manifests, kind) {
   const filtered = manifests.filter((m) => m.data.kind === kind);
   if (filtered.length === 0) return null;
 
-  filtered.sort((a, b) => parseIsoOrZero(b.data.generated_at) - parseIsoOrZero(a.data.generated_at));
+  filtered.sort(
+    (a, b) => parseIsoOrZero(b.data.generated_at) - parseIsoOrZero(a.data.generated_at),
+  );
   return filtered[0];
 }
 
