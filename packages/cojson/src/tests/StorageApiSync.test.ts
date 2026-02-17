@@ -1,8 +1,13 @@
-import { describe, expect, test, vi, afterEach } from "vitest";
+import { describe, expect, test, vi, afterEach, onTestFinished } from "vitest";
 import { CoID, RawCoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
 import { CoValueKnownState, emptyKnownState } from "../knownState.js";
+import { TRANSACTION_CONFIG, setMaxRecommendedTxSize } from "../config.js";
+import type {
+  ReplaceSessionHistoryInput,
+  StorageAPI,
+} from "../storage/types.js";
 import {
   createSyncStorage,
   getAllCoValuesWaitingForDelete,
@@ -11,9 +16,40 @@ import {
 } from "./testStorage.js";
 import {
   fillCoMapWithLargeData,
+  importContentIntoNode,
   loadCoValueOrFail,
   setupTestNode,
 } from "./testUtils.js";
+
+async function loadAllFromStorage(
+  storage: StorageAPI,
+  id: RawCoID,
+): Promise<NewContentMessage[]> {
+  const messages: NewContentMessage[] = [];
+
+  await new Promise<void>((resolve) => {
+    void storage.load(
+      id,
+      (msg) => {
+        messages.push(msg);
+      },
+      () => {
+        // `StorageApiSync.load` can enqueue streamed chunks via `streamingQueue`,
+        // so drain it here to ensure tests observe all chunks.
+        while (true) {
+          const next = storage.streamingQueue?.pull();
+          if (!next) {
+            break;
+          }
+          next();
+        }
+        resolve();
+      },
+    );
+  });
+
+  return messages;
+}
 
 /**
  * Helper function that gets new content since a known state, throwing if:
@@ -215,6 +251,195 @@ describe("StorageApiSync", () => {
   });
 
   describe("store", () => {
+    test("should replace session history and update subsequent loads", async () => {
+      const dbPath = getDbPath();
+      const storage = createSyncStorage({
+        filename: dbPath,
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+
+      const main = setupTestNode();
+      const group = main.node.createGroup();
+
+      const sessionID = main.node.currentSessionID;
+
+      // Spawn another node with the same session ID to create a conflict
+      const otherSession = main.spawnNewSession(sessionID);
+
+      importContentIntoNode(group.core, otherSession.node);
+
+      const groupOtherSession = await loadCoValueOrFail(
+        otherSession.node,
+        group.id,
+      );
+
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      groupOtherSession.addMember("everyone", "writer");
+
+      const replacementContent =
+        groupOtherSession.core.verified?.getFullSessionContent(sessionID) ?? [];
+
+      expect(replacementContent.length).toBeGreaterThan(0);
+      const expectedTxCount = replacementContent.reduce(
+        (total, piece) => total + piece.newTransactions.length,
+        0,
+      );
+
+      const parentGroup = main.node.createGroup();
+      group.extend(parentGroup);
+      await group.core.waitForSync();
+
+      const fullContent = getNewContentSince(
+        group.core,
+        emptyKnownState(group.id),
+      );
+      storage.store(fullContent, vi.fn());
+
+      const replacement: ReplaceSessionHistoryInput = {
+        action: "replaceSessionHistory",
+        coValueId: group.id,
+        sessionID,
+        content: replacementContent,
+      };
+
+      const before = await loadAllFromStorage(storage, group.id);
+      const beforeTxCount = before.reduce((total, msg) => {
+        const piece = msg.new[sessionID];
+        return total + (piece?.newTransactions.length ?? 0);
+      }, 0);
+
+      expect(beforeTxCount).toBeGreaterThan(expectedTxCount);
+
+      storage.store(replacement, vi.fn());
+
+      expect(storage.getKnownState(group.id).sessions[sessionID]).toBe(
+        expectedTxCount,
+      );
+
+      const after = await loadAllFromStorage(storage, group.id);
+      const afterTxCount = after.reduce((total, msg) => {
+        const piece = msg.new[sessionID];
+        return total + (piece?.newTransactions.length ?? 0);
+      }, 0);
+
+      expect(afterTxCount).toBe(expectedTxCount);
+
+      const checkNode = setupTestNode();
+      checkNode.addStorage({ storage });
+      const groupAfterReplacement = await loadCoValueOrFail(
+        checkNode.node,
+        group.id,
+      );
+      expect(groupAfterReplacement.get("everyone")).toEqual("writer");
+    });
+
+    test("should replace multi-signature session history and stream on load", async () => {
+      const originalMax = TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
+      setMaxRecommendedTxSize(1024);
+      onTestFinished(() => {
+        setMaxRecommendedTxSize(originalMax);
+      });
+
+      const dbPath = getDbPath();
+      const storage = createSyncStorage({
+        filename: dbPath,
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+
+      const main = setupTestNode();
+      const group = main.node.createGroup();
+      const map = group.createMap();
+
+      const sessionID = main.node.currentSessionID;
+
+      // Spawn another node with the same session ID to create a conflict.
+      const otherSession = main.spawnNewSession(sessionID);
+
+      map.set("bootstrap", "1", "trusting");
+      await map.core.waitForSync();
+
+      importContentIntoNode(group.core, otherSession.node);
+      importContentIntoNode(map.core, otherSession.node);
+
+      const mapOtherSession = await loadCoValueOrFail(
+        otherSession.node,
+        map.id,
+      );
+
+      const largeValue = Buffer.alloc(2048, "v").toString("base64");
+      for (let i = 0; i < 10; i++) {
+        mapOtherSession.set(`key${i}`, largeValue, "trusting");
+      }
+      await mapOtherSession.core.waitForSync();
+
+      const expectedValue = mapOtherSession.get("key0");
+      expect(expectedValue).toBe(largeValue);
+
+      const replacementContent =
+        mapOtherSession.core.verified?.getFullSessionContent(sessionID) ?? [];
+
+      expect(replacementContent.length).toBeGreaterThan(1);
+      const expectedTxCount = replacementContent.reduce(
+        (total, piece) => total + piece.newTransactions.length,
+        0,
+      );
+
+      map.set("k", "main", "trusting");
+      await map.core.waitForSync();
+
+      const groupContent = getNewContentSince(
+        group.core,
+        emptyKnownState(group.id),
+      );
+      storage.store(groupContent, vi.fn());
+
+      const fullContent = getNewContentSince(map.core, emptyKnownState(map.id));
+      storage.store(fullContent, vi.fn());
+
+      const replacement: ReplaceSessionHistoryInput = {
+        action: "replaceSessionHistory",
+        coValueId: map.id,
+        sessionID,
+        content: replacementContent,
+      };
+
+      storage.store(replacement, vi.fn());
+
+      expect(storage.getKnownState(map.id).sessions[sessionID]).toBe(
+        expectedTxCount,
+      );
+
+      // Reset internal in-memory tracking so `load()` also returns dependency CoValues.
+      // @ts-expect-error - `inMemoryCoValues` is private; tests need a "fresh reader" behavior.
+      storage.inMemoryCoValues.clear();
+
+      const after = await loadAllFromStorage(storage, map.id);
+      const mapMessages = after.filter((msg) => msg.id === map.id);
+      expect(mapMessages.length).toBeGreaterThan(1);
+
+      const streamedExpected = mapMessages[0]?.expectContentUntil?.[sessionID];
+      expect(streamedExpected).toBe(expectedTxCount);
+
+      const afterTxCount = mapMessages.reduce((total, msg) => {
+        const piece = msg.new[sessionID];
+        return total + (piece?.newTransactions.length ?? 0);
+      }, 0);
+
+      expect(afterTxCount).toBe(expectedTxCount);
+
+      const checkNode = setupTestNode();
+      checkNode.addStorage({ storage });
+      const mapAfterReplacement = await loadCoValueOrFail(
+        checkNode.node,
+        map.id,
+      );
+      expect(mapAfterReplacement.get("key0")).toBe(expectedValue);
+    }, 15_000);
+
     test("should successfully store new coValue with header and update known state", async () => {
       const fixtures = setupTestNode();
       fixtures.addStorage({

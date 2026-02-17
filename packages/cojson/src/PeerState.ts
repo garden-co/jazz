@@ -1,6 +1,6 @@
 import { PeerKnownState } from "./coValueCore/PeerKnownState.js";
 import { CoValueCore } from "./exports.js";
-import { RawCoID } from "./ids.js";
+import { RawCoID, SessionID } from "./ids.js";
 import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
 import { type LoadMode, OutgoingLoadQueue } from "./queue/OutgoingLoadQueue.js";
@@ -57,7 +57,23 @@ export class PeerState {
 
   readonly toldKnownState: Set<RawCoID> = new Set();
   readonly loadRequestSent: Set<RawCoID> = new Set();
+  private sentSignatureMismatch = new Set<string>();
   private loadQueue: OutgoingLoadQueue;
+
+  private getSignatureMismatchKey(id: RawCoID, sessionID: SessionID): string {
+    return `${id}::${sessionID}`;
+  }
+
+  shouldSendSignatureMismatch(id: RawCoID, sessionID: SessionID): boolean {
+    const key = this.getSignatureMismatchKey(id, sessionID);
+
+    if (this.sentSignatureMismatch.has(key)) {
+      return false;
+    }
+
+    this.sentSignatureMismatch.add(key);
+    return true;
+  }
 
   sendLoadRequest(coValue: CoValueCore, mode?: LoadMode): void {
     this.toldKnownState.add(coValue.id);

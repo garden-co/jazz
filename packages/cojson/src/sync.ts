@@ -25,6 +25,7 @@ import { CoValuePriority } from "./priority.js";
 import { IncomingMessagesQueue } from "./queue/IncomingMessagesQueue.js";
 import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.js";
 import type { StorageStreamingQueue } from "./queue/StorageStreamingQueue.js";
+import { recoverSignatureMismatch } from "./recovery/index.js";
 import { StorageReconciliationAckTracker } from "./StorageReconciliationAckTracker.js";
 import {
   CoValueKnownState,
@@ -39,6 +40,7 @@ export type SyncMessage =
   | KnownStateMessage
   | NewContentMessage
   | DoneMessage
+  | SignatureMismatchErrorMessage
   | ReconcileMessage
   | ReconcileAckMessage;
 
@@ -73,6 +75,15 @@ export type SessionNewContent = {
 export type DoneMessage = {
   action: "done";
   id: RawCoID;
+};
+
+export type SignatureMismatchErrorMessage = {
+  action: "error";
+  errorType: "SignatureMismatch";
+  id: RawCoID;
+  sessionID: SessionID;
+  content: SessionNewContent[];
+  reason: string;
 };
 
 export type ReconcileMessage = {
@@ -139,7 +150,6 @@ export class SyncManager {
   peers: { [key: PeerID]: PeerState } = {};
   local: LocalNode;
   private reconciliationAckTracker = new StorageReconciliationAckTracker();
-
   get pendingReconciliationAck(): Map<string, number> {
     return this.reconciliationAckTracker.pendingReconciliationAck;
   }
@@ -209,7 +219,7 @@ export class SyncManager {
     return this.getServerPeers(id).filter((peer) => peer.persistent);
   }
 
-  handleSyncMessage(msg: SyncMessage, peer: PeerState) {
+  async handleSyncMessage(msg: SyncMessage, peer: PeerState) {
     if (msg.action === "reconcile") {
       this.handleReconcile(msg, peer);
       return;
@@ -246,7 +256,10 @@ export class SyncManager {
       return;
     }
 
-    if (this.local.getCoValue(msg.id).isErroredInPeer(peer.id)) {
+    if (
+      msg.action !== "error" &&
+      this.local.getCoValue(msg.id).isErroredInPeer(peer.id)
+    ) {
       logger.warn(
         `Skipping message ${msg.action} on errored coValue ${msg.id} from peer ${peer.id}`,
       );
@@ -266,11 +279,45 @@ export class SyncManager {
         return this.handleNewContent(msg, peer);
       case "done":
         return;
+      case "error":
+        return this.handleErrorMessage(msg, peer);
       default:
         throw new Error(
-          `Unknown message type ${(msg as { action: "string" }).action}`,
+          `Unknown message type ${(msg as { action: string }).action}`,
         );
     }
+  }
+
+  private async handleErrorMessage(
+    msg: SignatureMismatchErrorMessage,
+    peer: PeerState,
+  ) {
+    if (msg.errorType !== "SignatureMismatch") {
+      return;
+    }
+
+    if (peer.role !== "server") {
+      logger.warn("Ignoring SignatureMismatch error from non-server peer", {
+        peerId: peer.id,
+        role: peer.role,
+        id: msg.id,
+        sessionID: msg.sessionID,
+      });
+      return;
+    }
+
+    recoverSignatureMismatch(this.local, msg);
+
+    logger.warn(
+      "Received SignatureMismatch error and processed session recovery",
+      {
+        peerId: peer.id,
+        id: msg.id,
+        sessionID: msg.sessionID,
+        contentPieces: msg.content.length,
+        reason: msg.reason,
+      },
+    );
   }
 
   sendNewContent(
@@ -696,7 +743,7 @@ export class SyncManager {
       const messageEntry = this.messagesQueue.pull();
       if (messageEntry) {
         try {
-          this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
+          await this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
         } catch (err) {
           logger.error("Error processing message", { err });
         }
@@ -1235,6 +1282,33 @@ export class SyncManager {
       );
 
       if (error) {
+        if (peer?.role === "client" && error.type === "InvalidSignature") {
+          if (peer.shouldSendSignatureMismatch(msg.id, sessionID)) {
+            this.trySendToPeer(peer, {
+              action: "error",
+              errorType: "SignatureMismatch",
+              id: msg.id,
+              sessionID,
+              content: coValue.verified.getFullSessionContent(sessionID),
+              reason:
+                error.error instanceof Error
+                  ? error.error.message
+                  : "Signature verification failed",
+            });
+
+            logger.warn(
+              "Detected signature mismatch while handling new content",
+              {
+                peerId: peer.id,
+                id: msg.id,
+                sessionID,
+              },
+            );
+          }
+
+          return;
+        }
+
         if (peer) {
           logger.error("Failed to add transactions", {
             peerId: peer.id,
