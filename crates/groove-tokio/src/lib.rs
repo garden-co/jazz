@@ -2,12 +2,12 @@
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
 //! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
-//! that handles async scheduling via `tokio::spawn`.
+//! that handles async scheduling via a dedicated tick thread.
 //!
 //! # Architecture
 //!
 //! - `S: Storage + Send + 'static` provides synchronous storage
-//! - `TokioScheduler<S>` implements `Scheduler` using tokio::spawn for batched ticks
+//! - `TokioScheduler<S>` implements `Scheduler` using a dedicated OS thread
 //! - `CallbackSyncSender` implements `SyncSender` with a user-provided callback
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
@@ -35,31 +35,79 @@ use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, S
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
 
-/// Scheduler implementation for Tokio.
+/// Scheduler implementation using a dedicated OS thread.
 ///
-/// Spawns a tokio task to call `batched_tick()` on the RuntimeCore.
-/// Debounced: only one task is scheduled at a time.
+/// A single background thread parks waiting for a channel signal. When
+/// `schedule_batched_tick()` is called it sends a wake-up; the thread
+/// acquires the core Mutex, runs `batched_tick()`, then parks again.
+///
+/// This avoids both:
+/// - blocking tokio worker threads (`tokio::spawn` + `std::sync::Mutex`)
+/// - thread-pool scheduling overhead (`spawn_blocking`)
 pub struct TokioScheduler<S: Storage + Send + 'static> {
-    /// Debounce flag for scheduled ticks.
+    /// Channel to wake the dedicated tick thread.
+    notify: std::sync::mpsc::Sender<()>,
+    /// Flag for checking if a tick is in flight (used by flush).
     scheduled: Arc<AtomicBool>,
-    /// Weak reference back to RuntimeCore for spawned tasks.
-    core_ref: Weak<Mutex<TokioCoreType<S>>>,
+    /// Receiver held until `set_core_ref` spawns the thread.
+    receiver: Option<std::sync::mpsc::Receiver<()>>,
+    _phantom: std::marker::PhantomData<S>,
 }
 
 impl<S: Storage + Send + 'static> TokioScheduler<S> {
     /// Create a new TokioScheduler.
     ///
-    /// Note: `core_ref` starts as empty and is set after RuntimeCore is created.
+    /// The dedicated thread is spawned later in `set_core_ref` once
+    /// the RuntimeCore reference is available.
     fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         Self {
+            notify: tx,
             scheduled: Arc::new(AtomicBool::new(false)),
-            core_ref: Weak::new(),
+            receiver: Some(rx),
+            _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Set the core reference (called after RuntimeCore is wrapped in Arc<Mutex>).
+    /// Set the core reference and spawn the dedicated tick thread.
     fn set_core_ref(&mut self, core_ref: Weak<Mutex<TokioCoreType<S>>>) {
-        self.core_ref = core_ref;
+        if let Some(rx) = self.receiver.take() {
+            let scheduled = self.scheduled.clone();
+            let tokio_handle = tokio::runtime::Handle::current();
+            std::thread::Builder::new()
+                .name("groove-tick".into())
+                .spawn(move || {
+                    // Install tokio runtime context so sync callbacks
+                    // can use tokio::spawn, timers, etc. transparently.
+                    let _guard = tokio_handle.enter();
+                    // Park until woken. Exits when the Sender is dropped
+                    // (i.e. when the TokioScheduler/RuntimeCore is dropped).
+                    while rx.recv().is_ok() {
+                        // Drain any extra notifications (debounce)
+                        while rx.try_recv().is_ok() {}
+
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Some(core_arc) = core_ref.upgrade()
+                                && let Ok(mut core) = core_arc.lock()
+                            {
+                                core.batched_tick();
+                            }
+                        }));
+
+                        if let Err(e) = result {
+                            let msg = e
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))
+                                .unwrap_or("unknown");
+                            tracing::error!("groove-tick panicked: {msg}");
+                        }
+
+                        scheduled.store(false, Ordering::SeqCst);
+                    }
+                })
+                .expect("failed to spawn groove-tick thread");
+        }
     }
 
     /// Check if a batched_tick is currently scheduled.
@@ -70,22 +118,10 @@ impl<S: Storage + Send + 'static> TokioScheduler<S> {
 
 impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
     fn schedule_batched_tick(&self) {
-        // Debounce: only schedule if not already scheduled
         if !self.scheduled.swap(true, Ordering::SeqCst) {
-            let core_ref = self.core_ref.clone();
-            let flag = self.scheduled.clone();
-
-            tokio::spawn(async move {
-                // Call batched_tick on the core
-                if let Some(core_arc) = core_ref.upgrade()
-                    && let Ok(mut core) = core_arc.lock()
-                {
-                    core.batched_tick();
-                }
-
-                // Clear the scheduled flag AFTER tick completes
-                flag.store(false, Ordering::SeqCst);
-            });
+            // Wake the dedicated thread — non-blocking, can't fail
+            // unless the thread has exited (receiver dropped).
+            let _ = self.notify.send(());
         }
     }
 }
@@ -562,5 +598,74 @@ mod tests {
         // Cleanup
         drop(updates_vec);
         runtime.unsubscribe(handle).unwrap();
+    }
+
+    /// The server hang scenario: when batched_tick is slow (e.g. sync
+    /// callbacks doing I/O, WAL flush), the tokio event loop must remain
+    /// responsive. With a single-threaded tokio runtime and the old
+    /// tokio::spawn approach, a slow batched_tick blocks the only worker
+    /// thread, freezing all async progress. With a dedicated OS thread
+    /// for ticks, the tokio thread stays free.
+    ///
+    /// Setup:
+    ///   - current_thread tokio runtime (one worker, worst case)
+    ///   - sync callback sleeps 500ms (simulates slow I/O during tick)
+    ///   - insert triggers schedule_batched_tick
+    ///   - yield_now gives the executor a chance to run queued tasks
+    ///
+    /// Old behaviour (tokio::spawn): yield_now runs the spawned
+    /// batched_tick task on the tokio thread → blocks 500ms → FAIL.
+    ///
+    /// New behaviour (dedicated thread): no tokio tasks queued,
+    /// yield_now returns immediately → PASS.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_slow_tick_does_not_block_tokio() {
+        use std::time::{Duration, Instant};
+
+        let schema = test_schema();
+        let app_id = AppId::from_name("test-slow-tick");
+        let sync_manager = SyncManager::new();
+        let schema_manager =
+            SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+
+        let callback_fired = Arc::new(AtomicBool::new(false));
+        let callback_fired_clone = callback_fired.clone();
+
+        let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), move |_msg| {
+            callback_fired_clone.store(true, Ordering::SeqCst);
+            // Simulate slow sync I/O (network send, WAL flush, etc.)
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        // Add a server so the sync outbox has a destination
+        runtime.add_server(ServerId(uuid::Uuid::new_v4())).unwrap();
+
+        // Insert triggers schedule_batched_tick
+        let values = vec![
+            Value::Uuid(ObjectId::new()),
+            Value::Text("Alice".to_string()),
+        ];
+        runtime.insert("users", values, None).unwrap();
+
+        // Yield to the executor. With tokio::spawn, the spawned
+        // batched_tick task runs here and blocks the thread for 500ms.
+        // With the dedicated thread, nothing is queued — returns fast.
+        let start = Instant::now();
+        tokio::task::yield_now().await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "Tokio thread was blocked for {elapsed:?} during batched_tick — \
+             slow ticks must not block the event loop"
+        );
+
+        // Wait for the dedicated thread to actually process the tick
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        assert!(
+            callback_fired.load(Ordering::SeqCst),
+            "Sync callback should have fired (batched_tick should have run)"
+        );
     }
 }

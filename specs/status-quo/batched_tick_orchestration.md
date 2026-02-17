@@ -56,19 +56,31 @@ The second flush is critical: the scheduler's debounce prevents `immediate_tick(
 
 Both platform implementations use a boolean flag to prevent overlapping batched_tick calls:
 
-- **Tokio**: Sets flag before spawn, clears after completion
+- **Tokio**: Sets flag before signalling the tick thread, clears after tick completes
 - **WASM**: Sets flag before spawn_local, clears before calling batched_tick
 
-> `crates/groove-tokio/src/lib.rs:72-90` (TokioScheduler)
+> `crates/groove-tokio/src/lib.rs` (TokioScheduler)
 > `crates/groove-wasm/src/runtime.rs:91-106` (WasmScheduler)
 
 ## Platform Implementations
 
 ### Tokio (groove-tokio)
 
-`TokioScheduler` spawns `batched_tick()` via tokio task. `CallbackSyncSender` sends sync messages via closure.
+`TokioScheduler` runs `batched_tick()` on a dedicated OS thread (`groove-tick`), not via `tokio::spawn`. This is critical for server responsiveness.
 
-> `crates/groove-tokio/src/lib.rs:42-91` (TokioScheduler), `164-206` (TokioRuntime)
+**Problem.** `batched_tick()` acquires the `Arc<Mutex<RuntimeCore>>` and holds it while processing sync callbacks and flushing the WAL. Every HTTP request handler also needs this lock. The previous `tokio::spawn` approach ran ticks on tokio worker threads, so a slow tick would block a worker while holding the lock. Under load, all workers would end up parked waiting for the mutex, and the server would hang.
+
+**Solution.** A dedicated OS thread parks on `std::sync::mpsc::channel`, waiting for a wake signal. When `schedule_batched_tick()` is called, it sends a `()` through the channel. The thread wakes, drains any extra signals (debounce), acquires the mutex, runs `batched_tick()`, and parks again. Tokio workers never hold the lock during tick processing.
+
+**Tokio context.** The thread calls `tokio::runtime::Handle::enter()` on startup, installing the tokio runtime context. This means sync callbacks can use `tokio::spawn`, timers, and other tokio APIs transparently, exactly as if they were running on a tokio worker.
+
+**Panic resilience.** Each tick is wrapped in `std::panic::catch_unwind`. If a tick panics, the error is logged via `tracing::error!` and the thread continues to the next tick. Without this, a single panic would kill the thread and silently stop all future ticks.
+
+**Lifecycle.** The thread exits when the `mpsc::Sender` is dropped, which happens when the `TokioScheduler` (and thus the `RuntimeCore`) is dropped.
+
+**Trade-offs.** The coarse `Mutex<RuntimeCore>` still exists. Individual HTTP request handlers can still briefly block a tokio worker when they contend with a running tick for the lock. The improvement is that the tick itself never occupies a tokio worker, so the event loop stays responsive (accepting connections, parsing requests, running non-mutex tasks).
+
+> `crates/groove-tokio/src/lib.rs` (TokioScheduler, TokioRuntime)
 
 ### WASM (groove-wasm)
 
@@ -88,10 +100,14 @@ Each CRUD method (insert, update, delete) on RuntimeCore:
 
 ## Testing
 
-Tests use `NoopScheduler` (no-op scheduling) and `VecSyncSender` (collects messages in a Vec). Manual calls to `immediate_tick()` and `batched_tick()` drive execution.
+Core tests use `NoopScheduler` (no-op scheduling) and `VecSyncSender` (collects messages in a Vec). Manual calls to `immediate_tick()` and `batched_tick()` drive execution.
 
 > `crates/groove/src/runtime_core.rs:68-101` (NoopScheduler, VecSyncSender)
 > `crates/groove/src/runtime_core.rs:904-1049` (test setup)
+
+The TokioScheduler has a dedicated behavioural test (`test_slow_tick_does_not_block_tokio`) that verifies the core property: a slow `batched_tick` (simulated via a 500ms sleep in the sync callback) must not block the tokio event loop. The test uses a `current_thread` runtime (single worker, worst case) and asserts that `yield_now` returns within 100ms after triggering a tick. This test fails with the old `tokio::spawn` approach and passes with the dedicated thread.
+
+> `crates/groove-tokio/src/lib.rs` (test_slow_tick_does_not_block_tokio)
 
 ## Key Files
 
