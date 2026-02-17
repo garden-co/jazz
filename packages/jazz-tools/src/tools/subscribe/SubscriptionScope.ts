@@ -270,7 +270,7 @@ export class SubscriptionScope<D extends CoValue> {
         const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
           {
             code: CoValueLoadingState.UNAVAILABLE,
-            message: `Jazz Unavailable Error: unable to load ${this.id}`,
+            message: `Jazz Unavailable Error: unable to load ${this.id}${this.node.syncWhen === "never" ? '. Sync is disabled (when: "never"), so this CoValue can only be loaded from local storage.' : this.node.syncWhen === "signedUp" ? ". Sync is set to when: \"signedUp\" — if the user hasn't signed up, the CoValue can't be loaded from the server." : ""}`,
             params: {
               id: this.id,
             },

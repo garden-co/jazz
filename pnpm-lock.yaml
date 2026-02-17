@@ -2690,9 +2690,6 @@ importers:
       '@bam.tech/react-native-image-resizer':
         specifier: '*'
         version: 3.0.11(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
-      '@manuscripts/prosemirror-recreate-steps':
-        specifier: ^0.1.4
-        version: 0.1.4
       '@op-engineering/op-sqlite':
         specifier: '*'
         version: 14.1.4(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -6859,9 +6856,6 @@ packages:
     peerDependencies:
       svelte: ^5
 
-  '@manuscripts/prosemirror-recreate-steps@0.1.4':
-    resolution: {integrity: sha512-z3/PGcWB3SbOzhUkiZKAAMeWVz3jR1uacUXuYfJfSE+XgTUCtxB/xnbmx7SpTvtBEtw9EFXomTqjoG6DGlC2nQ==}
-
   '@manypkg/find-root@1.1.0':
     resolution: {integrity: sha512-mki5uBvhHzO8kYYix/WRy2WX8S3B5wdVSc9D6KcU5lQNglP2yt58/VfLuAK49glRXChosY8ap2oJ1qgma3GUVA==}
 
@@ -10043,26 +10037,6 @@ packages:
     resolution: {integrity: sha512-EULJ8LApcVEPbrfND0cRQqutIOdiIgJ1Mgrhpy755r14xMohPTEpkV/k28SJvuOs9bHRFW8x+KeDAEPiGQPB9Q==}
     deprecated: This is a stub types definition. parse-path provides its own type definitions, so you do not need this installed.
 
-  '@types/prosemirror-model@1.17.0':
-    resolution: {integrity: sha512-lG5xEMkE8r8Soa80KdWPTbCLUaSHBHVHpTIEsQiebfONpvmS5061IMGzHUdb1oWjgrwh8EJq0GgMNwXHUx5mVg==}
-    deprecated: This is a stub types definition. prosemirror-model provides its own type definitions, so you do not need this installed.
-
-  '@types/prosemirror-schema-basic@1.2.0':
-    resolution: {integrity: sha512-WrQLRv3Ss48e2XBnocoZNMLw3xZwiW2cSjPvrZ/Ui6PicAMsabkb6EKTdLU0B52LuQjShNPtq0tFejrbLOMbpQ==}
-    deprecated: This is a stub types definition. prosemirror-schema-basic provides its own type definitions, so you do not need this installed.
-
-  '@types/prosemirror-schema-list@1.2.0':
-    resolution: {integrity: sha512-njvba73mgBanQOt2/piYMeP+nsu8lzomA350Lh7/sdr6NPsRvYPggwJDIZEG0Cb/MB0fnv4PdRaTi93PoLHArw==}
-    deprecated: This is a stub types definition. prosemirror-schema-list provides its own type definitions, so you do not need this installed.
-
-  '@types/prosemirror-state@1.4.0':
-    resolution: {integrity: sha512-71epLy1HD2H7Qn6iOoQrFdbdFP32Cg5U7OvlCXMuYO8ygUdz07dfqA1lNj1y+KLf3HkRCXVkfvi3OnNa/tFZ3A==}
-    deprecated: This is a stub types definition. prosemirror-state provides its own type definitions, so you do not need this installed.
-
-  '@types/prosemirror-transform@1.5.0':
-    resolution: {integrity: sha512-++krMS5bt3SxNOqjrftispPLRkvfXXw2BtVq4VPJ8Vpf+Sne1MhxVoj0EFCM+14MFlX0EHYQvX3k9AaQzob9ZQ==}
-    deprecated: This is a stub types definition. prosemirror-transform provides its own type definitions, so you do not need this installed.
-
   '@types/qrcode@1.5.5':
     resolution: {integrity: sha512-CdfBi/e3Qk+3Z/fXYShipBT13OJ2fDO2Q2w5CIP5anLTLIndQG9z6P1cnm+8zCWSpm5dnxMFd/uREtb0EXuQzg==}
 
@@ -12167,10 +12141,6 @@ packages:
   diff-sequences@29.6.3:
     resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
-
-  diff@3.5.0:
-    resolution: {integrity: sha512-A46qtFgd+g7pDZinpnwiRJtxbC1hpgf0uzP3iG89scHk0AUC7A1TGxf5OiiOUv/JMZR8GOt8hL900hV0bOy5xA==}
-    engines: {node: '>=0.3.1'}
 
   diff@4.0.2:
     resolution: {integrity: sha512-58lmxKSA4BNyLz+HHMUzlOEpg09FV+ev6ZMe3vJihgdxzgcwZ8VoEEPmALCZG9LmqfVoNMMKpttIYTVG6uDY7A==}
@@ -16271,9 +16241,6 @@ packages:
       yjs:
         optional: true
 
-  prosemirror-changeset@1.2.1:
-    resolution: {integrity: sha512-qqwG1z8z+KkM3PZWmANYhqvoZdstFmzfkr7FPJ6suBwKs/UvZbvnRvDBvJC5eDbXbE7MhIGO+LY1Dq29zBAbIw==}
-
   prosemirror-changeset@2.3.1:
     resolution: {integrity: sha512-j0kORIBm8ayJNl3zQvD1TTPHJX3g042et6y/KQhZhnPrruO8exkTgG8X+NRpj7kIyMMEx74Xb3DyMIBtO0IKkQ==}
 
@@ -16967,9 +16934,6 @@ packages:
   reusify@1.0.4:
     resolution: {integrity: sha512-U9nH88a3fc/ekCF1l0/UP1IosiuIjyTh7hBvXVMHYgVcfGvt897Xguj2UOLDeI5BG2m7/uwyaLVT6fbtCwTyzw==}
     engines: {iojs: '>=1.0.0', node: '>=0.10.0'}
-
-  rfc6902@5.1.2:
-    resolution: {integrity: sha512-zxcb+PWlE8PwX0tiKE6zP97THQ8/lHmeiwucRrJ3YFupWEmp25RmFSlB1dNTqjkovwqG4iq+u1gzJMBS3um8mA==}
 
   rfdc@1.4.1:
     resolution: {integrity: sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==}
@@ -19607,9 +19571,9 @@ snapshots:
       eslint-visitor-keys: 2.1.0
       semver: 6.3.1
 
-  '@babel/eslint-parser@7.27.0(@babel/core@7.28.5)(eslint@9.39.1(jiti@2.6.1))':
+  '@babel/eslint-parser@7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1))':
     dependencies:
-      '@babel/core': 7.28.5
+      '@babel/core': 7.28.3
       '@nicolo-ribaudo/eslint-scope-5-internals': 5.1.1-v1
       eslint: 9.39.1(jiti@2.6.1)
       eslint-visitor-keys: 2.1.0
@@ -25291,24 +25255,6 @@ snapshots:
     dependencies:
       svelte: 5.46.4
 
-  '@manuscripts/prosemirror-recreate-steps@0.1.4':
-    dependencies:
-      '@types/prosemirror-model': 1.17.0
-      '@types/prosemirror-schema-basic': 1.2.0
-      '@types/prosemirror-schema-list': 1.2.0
-      '@types/prosemirror-state': 1.4.0
-      '@types/prosemirror-transform': 1.5.0
-      diff: 3.5.0
-      prosemirror-changeset: 1.2.1
-      prosemirror-example-setup: 1.2.3
-      prosemirror-model: 1.25.1
-      prosemirror-schema-basic: 1.2.4
-      prosemirror-schema-list: 1.5.1
-      prosemirror-state: 1.4.3
-      prosemirror-transform: 1.10.4
-      prosemirror-view: 1.39.2
-      rfc6902: 5.1.2
-
   '@manypkg/find-root@1.1.0':
     dependencies:
       '@babel/runtime': 7.28.4
@@ -27756,7 +27702,7 @@ snapshots:
   '@react-native/eslint-config@0.81.5(eslint@9.39.1(jiti@2.6.1))(jest@29.7.0(@types/node@24.3.0)(babel-plugin-macros@3.1.0)(ts-node@10.9.2(@swc/core@1.11.29(@swc/helpers@0.5.17))(@types/node@24.3.0)(typescript@5.9.2)))(prettier@3.6.2)(typescript@5.9.2)':
     dependencies:
       '@babel/core': 7.28.3
-      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.5)(eslint@9.39.1(jiti@2.6.1))
+      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1))
       '@react-native/eslint-plugin': 0.81.5
       '@typescript-eslint/eslint-plugin': 7.18.0(@typescript-eslint/parser@7.18.0(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2))(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2)
       '@typescript-eslint/parser': 7.18.0(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2)
@@ -29422,26 +29368,6 @@ snapshots:
   '@types/parse-path@7.1.0':
     dependencies:
       parse-path: 7.1.0
-
-  '@types/prosemirror-model@1.17.0':
-    dependencies:
-      prosemirror-model: 1.25.1
-
-  '@types/prosemirror-schema-basic@1.2.0':
-    dependencies:
-      prosemirror-schema-basic: 1.2.4
-
-  '@types/prosemirror-schema-list@1.2.0':
-    dependencies:
-      prosemirror-schema-list: 1.5.1
-
-  '@types/prosemirror-state@1.4.0':
-    dependencies:
-      prosemirror-state: 1.4.3
-
-  '@types/prosemirror-transform@1.5.0':
-    dependencies:
-      prosemirror-transform: 1.10.4
 
   '@types/qrcode@1.5.5':
     dependencies:
@@ -32524,8 +32450,6 @@ snapshots:
 
   diff-sequences@29.6.3: {}
 
-  diff@3.5.0: {}
-
   diff@4.0.2:
     optional: true
 
@@ -32951,7 +32875,7 @@ snapshots:
 
   eslint-plugin-ft-flow@2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1)))(eslint@9.39.1(jiti@2.6.1)):
     dependencies:
-      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.5)(eslint@9.39.1(jiti@2.6.1))
+      '@babel/eslint-parser': 7.27.0(@babel/core@7.28.3)(eslint@9.39.1(jiti@2.6.1))
       eslint: 9.39.1(jiti@2.6.1)
       lodash: 4.17.21
       string-natural-compare: 3.0.1
@@ -38138,10 +38062,6 @@ snapshots:
       - refractor
       - sugar-high
 
-  prosemirror-changeset@1.2.1:
-    dependencies:
-      prosemirror-transform: 1.10.4
-
   prosemirror-changeset@2.3.1:
     dependencies:
       prosemirror-transform: 1.10.4
@@ -39390,8 +39310,6 @@ snapshots:
   retry@0.13.1: {}
 
   reusify@1.0.4: {}
-
-  rfc6902@5.1.2: {}
 
   rfdc@1.4.1: {}
 

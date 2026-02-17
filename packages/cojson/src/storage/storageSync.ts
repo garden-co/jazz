@@ -29,6 +29,7 @@ import type {
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
+  StorageReconciliationAcquireResult,
 } from "./types.js";
 import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
 import {
@@ -68,26 +69,48 @@ export class StorageApiSync implements StorageAPI {
     return this.knownStates.getKnownState(id);
   }
 
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void {
+    const batch = this.dbClient.getCoValueIDs(limit, offset);
+    callback(batch);
+  }
+
+  getCoValueCount(callback: (count: number) => void): void {
+    callback(this.dbClient.getCoValueCount());
+  }
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    callback: (result: StorageReconciliationAcquireResult) => void,
+  ): void {
+    const result = this.dbClient.tryAcquireStorageReconciliationLock(
+      sessionId,
+      peerId,
+    );
+    callback(result);
+  }
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    this.dbClient.renewStorageReconciliationLock(sessionId, peerId, offset);
+  }
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
+    this.dbClient.releaseStorageReconciliationLock(sessionId, peerId);
+  }
+
   loadKnownState(
     id: string,
     callback: (knownState: CoValueKnownState | undefined) => void,
   ): void {
-    // Check in-memory cache first
-    const cached = this.knownStates.getCachedKnownState(id);
-    if (cached) {
-      callback(cached);
-      return;
-    }
-
-    // Load from database
-    const knownState = this.dbClient.getCoValueKnownState(id);
-
-    if (knownState) {
-      // Cache for future use
-      this.knownStates.setKnownState(id, knownState);
-    }
-
-    callback(knownState);
+    callback(this.dbClient.getCoValueKnownState(id));
   }
 
   async load(
@@ -535,6 +558,7 @@ export class StorageApiSync implements StorageAPI {
 
   onCoValueUnmounted(id: RawCoID): void {
     this.inMemoryCoValues.delete(id);
+    this.knownStates.deleteKnownState(id);
   }
 
   /**
@@ -558,6 +582,7 @@ export class StorageApiSync implements StorageAPI {
   close() {
     this.deletedCoValuesEraserScheduler?.dispose();
     this.inMemoryCoValues.clear();
+    this.knownStates.clear();
     return undefined;
   }
 }

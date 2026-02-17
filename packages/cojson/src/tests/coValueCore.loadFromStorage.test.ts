@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { RawCoID } from "../ids";
 import { PeerID } from "../sync";
-import { StorageAPI } from "../storage/types";
+import type {
+  StorageAPI,
+  StorageReconciliationAcquireResult,
+} from "../storage/types";
 import {
   createTestMetricReader,
   createTestNode,
@@ -29,6 +32,12 @@ function setup() {
 
 function createMockStorage(
   opts: {
+    getCoValueIDs?: (
+      limit: number,
+      offset: number,
+      callback: (batch: { id: RawCoID }[]) => void,
+    ) => void;
+    getCoValueCount?: (callback: (count: number) => void) => void;
     load?: (
       id: RawCoID,
       callback: (data: any) => void,
@@ -50,9 +59,26 @@ function createMockStorage(
     markDeleteAsValid?: (id: RawCoID) => void;
     enableDeletedCoValuesErasure?: () => void;
     eraseAllDeletedCoValues?: () => Promise<void>;
+    tryAcquireStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback: (result: StorageReconciliationAcquireResult) => void,
+    ) => void;
+    renewStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      offset: number,
+    ) => void;
+    releaseStorageReconciliationLock?: (
+      sessionId: string,
+      peerId: string,
+      callback?: () => void,
+    ) => void;
   } = {},
 ): StorageAPI {
   return {
+    getCoValueIDs: opts.getCoValueIDs || vi.fn(),
+    getCoValueCount: opts.getCoValueCount || vi.fn(),
     markDeleteAsValid: opts.markDeleteAsValid || vi.fn(),
     enableDeletedCoValuesErasure: opts.enableDeletedCoValuesErasure || vi.fn(),
     eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
@@ -68,6 +94,15 @@ function createMockStorage(
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
     onCoValueUnmounted: opts.onCoValueUnmounted || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
+    tryAcquireStorageReconciliationLock:
+      opts.tryAcquireStorageReconciliationLock ||
+      vi.fn((_sessionId, _peerId, callback) =>
+        callback({ acquired: false as const, reason: "not_due" as const }),
+      ),
+    renewStorageReconciliationLock:
+      opts.renewStorageReconciliationLock || vi.fn(),
+    releaseStorageReconciliationLock:
+      opts.releaseStorageReconciliationLock || vi.fn(),
   };
 }
 

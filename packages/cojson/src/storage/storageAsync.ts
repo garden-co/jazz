@@ -30,6 +30,7 @@ import type {
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
+  StorageReconciliationAcquireResult,
 } from "./types.js";
 import { isDeleteSessionID } from "../ids.js";
 
@@ -538,6 +539,40 @@ export class StorageApiAsync implements StorageAPI {
     this.dbClient.trackCoValuesSyncState(updates).then(() => done?.());
   }
 
+  getCoValueIDs(
+    limit: number,
+    offset: number,
+    callback: (batch: { id: RawCoID }[]) => void,
+  ): void {
+    this.dbClient.getCoValueIDs(limit, offset).then(callback);
+  }
+
+  getCoValueCount(callback: (count: number) => void): void {
+    this.dbClient.getCoValueCount().then(callback);
+  }
+
+  tryAcquireStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    callback: (result: StorageReconciliationAcquireResult) => void,
+  ): void {
+    this.dbClient
+      .tryAcquireStorageReconciliationLock(sessionId, peerId)
+      .then(callback);
+  }
+
+  renewStorageReconciliationLock(
+    sessionId: SessionID,
+    peerId: PeerID,
+    offset: number,
+  ): void {
+    this.dbClient.renewStorageReconciliationLock(sessionId, peerId, offset);
+  }
+
+  releaseStorageReconciliationLock(sessionId: SessionID, peerId: PeerID): void {
+    this.dbClient.releaseStorageReconciliationLock(sessionId, peerId);
+  }
+
   getUnsyncedCoValueIDs(
     callback: (unsyncedCoValueIDs: RawCoID[]) => void,
   ): void {
@@ -550,6 +585,7 @@ export class StorageApiAsync implements StorageAPI {
 
   onCoValueUnmounted(id: RawCoID): void {
     this.inMemoryCoValues.delete(id);
+    this.knownStates.deleteKnownState(id);
   }
 
   /**
@@ -580,6 +616,7 @@ export class StorageApiAsync implements StorageAPI {
   close() {
     this.deletedCoValuesEraserScheduler?.dispose();
     this.inMemoryCoValues.clear();
+    this.knownStates.clear();
     return this.storeQueue.close();
   }
 }

@@ -458,13 +458,20 @@ export function setupTestNode(
     connected?: boolean;
     secret?: AgentSecret;
     syncWhen?: SyncWhen;
+    enableFullStorageReconciliation?: boolean;
   } = {},
 ) {
   const [admin, session] = opts.secret
     ? agentAndSessionIDFromSecret(opts.secret)
     : randomAgentAndSessionID();
 
-  let node = new LocalNode(admin.agentSecret, session, Crypto, opts.syncWhen);
+  let node = new LocalNode(
+    admin.agentSecret,
+    session,
+    Crypto,
+    opts.syncWhen,
+    opts.enableFullStorageReconciliation,
+  );
 
   if (opts.isSyncServer) {
     syncServer.current = node;
@@ -545,6 +552,7 @@ export function setupTestNode(
         session,
         Crypto,
         opts.syncWhen,
+        opts.enableFullStorageReconciliation,
       );
 
       if (opts.isSyncServer) {
@@ -558,6 +566,7 @@ export function setupTestNode(
         secret: node.agentSecret,
         connected: opts.connected,
         isSyncServer: opts.isSyncServer,
+        enableFullStorageReconciliation: opts.enableFullStorageReconciliation,
       });
     },
     disconnect: () => {

@@ -61,6 +61,36 @@ test("return 'unavailable' if id is invalid", async () => {
   );
 });
 
+test("return 'unavailable' with sync hint when syncWhen is 'never'", async () => {
+  const Person = co.map({
+    name: z.string(),
+  });
+
+  const account = Account.getMe();
+  (account.$jazz.localNode as { syncWhen: string }).syncWhen = "never";
+
+  const john = await Person.load("test");
+  expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+  expect(lastError?.message).toBe(
+    'Jazz Unavailable Error: unable to load test. Sync is disabled (when: "never"), so this CoValue can only be loaded from local storage.',
+  );
+});
+
+test("return 'unavailable' with sync hint when syncWhen is 'signedUp'", async () => {
+  const Person = co.map({
+    name: z.string(),
+  });
+
+  const account = Account.getMe();
+  (account.$jazz.localNode as { syncWhen: string }).syncWhen = "signedUp";
+
+  const john = await Person.load("test");
+  expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+  expect(lastError?.message).toBe(
+    "Jazz Unavailable Error: unable to load test. Sync is set to when: \"signedUp\" — if the user hasn't signed up, the CoValue can't be loaded from the server.",
+  );
+});
+
 test("load a missing optional value (co.optional)", async () => {
   const Dog = co.map({
     name: z.string(),
