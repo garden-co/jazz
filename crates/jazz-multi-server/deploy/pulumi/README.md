@@ -118,6 +118,25 @@ Useful optional inputs:
 - `--route53-delegation-role-arn` (for cross-account DNS writes)
 - `--image` with `--skip-build` (if image already exists)
 
+## Infra-composer style local push + deploy
+
+If you want the same pattern as `infra-composer` (`aws ecr get-login-password` + local tag bump), use:
+
+```bash
+cd crates/jazz-multi-server/deploy/pulumi
+pnpm push:image:local -- --aws-profile <profile>
+pulumi up --stack cloud2
+```
+
+What `push:image:local` does:
+
+- Logs in to ECR via `aws ecr get-login-password`
+- Builds and pushes linux/amd64 image with `Dockerfile`
+- Updates stack config:
+  - `containerImageRepository`
+  - `containerImageTag`
+- Removes `containerImage` key if set, so repo+tag is authoritative
+
 ## Pulumi Cloud + GitHub Deploy Model (No Local AWS Creds For Infra Apply)
 
 This repo now includes two workflows:
