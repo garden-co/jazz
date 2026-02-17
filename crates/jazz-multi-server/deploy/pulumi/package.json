@@ -1,5 +1,5 @@
 {
-  "name": "jazz-multi-server-cloud2-pulumi",
+  "name": "jazz-cloud2-pulumi",
   "private": true,
   "type": "module",
   "scripts": {

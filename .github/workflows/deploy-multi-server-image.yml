@@ -8,7 +8,7 @@ on:
       stack:
         description: "Pulumi stack config file suffix (Pulumi.<stack>.yaml)"
         required: true
-        default: cloud2
+        default: dev
         type: string
       image_tag:
         description: "Image tag to deploy (e.g. sha-abc123, v1.2.3)"
@@ -40,7 +40,7 @@ jobs:
           fi
 
           if [ -z "${STACK}" ]; then
-            STACK="cloud2"
+            STACK="dev"
           fi
 
           if [ -z "${TAG}" ]; then
@@ -84,8 +84,8 @@ jobs:
           config_path = pathlib.Path(sys.argv[1])
           tag = sys.argv[2]
           content = config_path.read_text()
-          pattern = re.compile(r"^(\s*jazz-multi-server-cloud2:containerImageTag:\s*)(?:\"[^\"]*\"|\S+)\s*$", re.MULTILINE)
-          replacement_line = f'  jazz-multi-server-cloud2:containerImageTag: "{tag}"'
+          pattern = re.compile(r"^(\s*jazz-cloud2:containerImageTag:\s*)(?:\"[^\"]*\"|\S+)\s*$", re.MULTILINE)
+          replacement_line = f'  jazz-cloud2:containerImageTag: "{tag}"'
 
           if pattern.search(content):
               content = pattern.sub(replacement_line, content)

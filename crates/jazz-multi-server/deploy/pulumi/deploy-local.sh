@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Quick local deploy helper for jazz-multi-server cloud2 stack.
+Quick local deploy helper for jazz-multi-server jazz-cloud2/dev stack.
 
 Usage:
   ./deploy-local.sh [options]
@@ -11,7 +11,7 @@ Usage:
 Options:
   --aws-profile <profile>             AWS profile to use (optional)
   --aws-region <region>               AWS region (default: us-east-2)
-  --stack <name>                      Pulumi stack name (default: cloud2)
+  --stack <name>                      Pulumi stack name (short or org/project/stack; default: dev)
   --account-id <id>                   AWS account ID (default: from STS)
   --allowed-account-id <id>           Pulumi allowedAccountId (default: account-id)
   --repo <name>                       ECR repo name (default: jazz-multi-server)
@@ -29,7 +29,7 @@ Options:
 
 Secrets persistence:
   Generated secrets are written to:
-    crates/jazz-multi-server/deploy/pulumi/.deploy-secrets-<stack>.env
+    crates/jazz-multi-server/deploy/pulumi/.deploy-secrets-<stack-id>.env
   so repeat deploys reuse the same key material.
 EOF
 }
@@ -47,7 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 AWS_REGION="us-east-2"
-STACK="cloud2"
+STACK="dev"
 ECR_REPOSITORY="jazz-multi-server"
 IMAGE_TAG="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
 DOMAIN_NAME="cloud2.aws.cloud.jazz.tools"
@@ -174,7 +174,8 @@ if [[ "${SKIP_BUILD}" -eq 1 && -z "${IMAGE_URI}" ]]; then
   die "--skip-build requires --image"
 fi
 
-SECRETS_FILE="${SCRIPT_DIR}/.deploy-secrets-${STACK}.env"
+STACK_ID_FOR_PATH="$(printf '%s' "${STACK}" | tr '/:' '__')"
+SECRETS_FILE="${SCRIPT_DIR}/.deploy-secrets-${STACK_ID_FOR_PATH}.env"
 if [[ -f "${SECRETS_FILE}" ]]; then
   # shellcheck disable=SC1090
   source "${SECRETS_FILE}"

@@ -9,7 +9,7 @@ Usage:
   ./push-multi-server.sh [options]
 
 Options:
-  --stack <name>        Pulumi stack (short name or org/project/stack; default: cloud2)
+  --stack <name>        Pulumi stack (short name or org/project/stack; default: dev)
   --tag <tag>           Image tag (default: sha-<short git sha>)
   --image <uri>         Full image URI override
   --repo <name>         ECR repository name (default: jazz-multi-server)
@@ -21,7 +21,7 @@ Options:
 
 Examples:
   ./push-multi-server.sh --aws-profile jazz
-  ./push-multi-server.sh --stack cloud2 --tag v0.1.0
+  ./push-multi-server.sh --stack dev --tag v0.1.0
 EOF
 }
 
@@ -37,7 +37,7 @@ need_cmd() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
-STACK="cloud2"
+STACK="dev"
 TAG="sha-$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
 IMAGE_URI=""
 ECR_REPOSITORY="jazz-multi-server"

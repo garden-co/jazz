@@ -10,7 +10,7 @@ on:
       stack:
         description: "Target stack for auto-dispatch"
         required: true
-        default: cloud2
+        default: dev
         type: string
       dispatch_deploy:
         description: "Dispatch deploy workflow after push"

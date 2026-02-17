@@ -3,5 +3,5 @@ bin/
 .pulumi/
 Pulumi.*.yaml
 !Pulumi.yaml
-!Pulumi.cloud2.yaml
+!Pulumi.dev.yaml
 .deploy-secrets-*.env

@@ -1,4 +1,4 @@
-# jazz-multi-server cloud2 infrastructure
+# jazz-cloud2 infrastructure
 
 Infrastructure as Code for the `jazz-multi-server` MVP deployment using Pulumi and AWS.
 
@@ -23,7 +23,7 @@ This deployment is intentionally simple:
 
 - `index.ts` - Pulumi program
 - `Pulumi.yaml` - Pulumi project
-- `Pulumi.cloud2.yaml` - tracked non-secret stack config for stack `cloud2`
+- `Pulumi.dev.yaml` - tracked non-secret stack config for stack `dev`
 - `Dockerfile` - container build for `jazz-multi-server`
 - `push-multi-server.sh` - local ECR push + Pulumi image tag update
 - `deploy-local.sh` - end-to-end local build/push/config/deploy helper
@@ -65,11 +65,11 @@ Select or create stack:
 
 ```bash
 # Use short name if it works in your setup:
-pulumi stack select cloud2 || pulumi stack init cloud2
+pulumi stack select dev || pulumi stack init dev
 
 # If Pulumi asks for a fully qualified stack, use:
-# pulumi stack select <org>/jazz-multi-server-cloud2/cloud2 || \
-#   pulumi stack init <org>/jazz-multi-server-cloud2/cloud2
+# pulumi stack select garden-computing/jazz-cloud2/dev || \
+#   pulumi stack init garden-computing/jazz-cloud2/dev
 ```
 
 Set baseline non-secret config:
@@ -92,14 +92,14 @@ pulumi config set --secret secretHashKey "<redacted>"
 Notes:
 
 - `secretHashKey` must remain stable across deploys to preserve secret hash validation semantics.
-- If you use `deploy-local.sh`, missing secrets are auto-generated and persisted in `.deploy-secrets-<stack>.env`.
+- If you use `deploy-local.sh`, missing secrets are auto-generated and persisted in `.deploy-secrets-<stack-id>.env`.
 
 ### Step 4: push image to ECR (infra-composer style)
 
 Use the local push flow that mirrors `infra-composer`:
 
 ```bash
-pnpm push:image:local -- --aws-profile <your-profile> --stack cloud2
+pnpm push:image:local -- --aws-profile <your-profile> --stack dev
 ```
 
 This script:
@@ -129,7 +129,7 @@ curl -i https://cloud2.aws.cloud.jazz.tools/health
 If you want build+push+config+deploy in one command:
 
 ```bash
-./deploy-local.sh --aws-profile <your-profile> --stack cloud2 --yes
+./deploy-local.sh --aws-profile <your-profile> --stack dev --yes
 ```
 
 ## Stack config reference
@@ -164,7 +164,7 @@ Optional:
 ### Local release (recommended for now)
 
 ```bash
-pnpm push:image:local -- --aws-profile <your-profile> --stack cloud2
+pnpm push:image:local -- --aws-profile <your-profile> --stack dev
 pulumi up
 ```
 
@@ -220,4 +220,4 @@ either:
 
 - avoid `--stack` after selecting the stack once with `pulumi stack select`, or
 - use the full name format, for example:
-  `<org>/jazz-multi-server-cloud2/cloud2`
+  `garden-computing/jazz-cloud2/dev`
