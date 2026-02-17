@@ -14,7 +14,6 @@ import type {
   TableMigration,
   ScalarSqlType,
   TSTypeFromSqlType,
-  ArraySqlType,
 } from "./schema.js";
 
 // ============================================================================
