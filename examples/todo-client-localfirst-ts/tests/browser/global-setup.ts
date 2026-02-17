@@ -28,7 +28,7 @@ async function waitForHealth(port: number): Promise<void> {
 }
 
 export async function setup(): Promise<void> {
-  dataDir = mkdtempSync(join(tmpdir(), "jazz-ts-test-"));
+  dataDir = mkdtempSync(join(tmpdir(), "jazz-tools-ts-test-"));
 
   const jazzBinary = join(import.meta.dirname ?? __dirname, "../../../../target/debug/jazz-tools");
 

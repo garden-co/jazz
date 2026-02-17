@@ -14,12 +14,11 @@ if [[ "$MODE" == "publish" && -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
 fi
 
 # Workspace publish order based on dependency graph.
-# opfs-btree -> jazz-core -> (jazz-runtime-tokio, jazz-transport) -> jazz-tools
+# opfs-btree -> jazz-tools
+# jazz-wasm-tracing is independent and can be published in either position.
 crates=(
   "opfs-btree:0.1.0"
-  "jazz-core:2.0.0-alpha.0"
-  "jazz-runtime-tokio:2.0.0-alpha.0"
-  "jazz-transport:2.0.0-alpha.0"
+  "jazz-wasm-tracing:3.0.0-alpha.0"
   "jazz-tools:2.0.0-alpha.0"
 )
 

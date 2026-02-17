@@ -20,26 +20,31 @@ function fail(message) {
 
 const key = `${process.platform}-${process.arch}`;
 const binaryName = BINARIES[key];
-
-if (!binaryName) {
-  fail(
-    [
-      `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
-      "Install from source with Cargo for unsupported targets.",
-    ].join("\n"),
-  );
-}
-
 const here = dirname(fileURLToPath(import.meta.url));
-const binaryPath = join(here, "native", binaryName);
+const localBinaryName = process.platform === "win32" ? "jazz-tools.exe" : "jazz-tools";
+const fallbackCandidates = [
+  join(here, "..", "..", "..", "target", "debug", localBinaryName),
+  join(here, "..", "..", "..", "target", "release", localBinaryName),
+];
 
-if (!existsSync(binaryPath)) {
-  fail(
-    [
-      `Bundled binary missing: ${binaryName}`,
-      "This package may be corrupted or published without target artifacts.",
-    ].join("\n"),
-  );
+const bundledBinaryPath = binaryName ? join(here, "native", binaryName) : undefined;
+const binaryPath =
+  (bundledBinaryPath && existsSync(bundledBinaryPath) ? bundledBinaryPath : undefined) ??
+  fallbackCandidates.find((candidate) => existsSync(candidate));
+
+if (!binaryPath) {
+  const lines = [];
+  if (!binaryName) {
+    lines.push(
+      `jazz-tools does not include a bundled binary for ${process.platform}/${process.arch}.`,
+    );
+  } else {
+    lines.push(`Bundled binary missing: ${binaryName}`);
+    lines.push("This package may be corrupted or published without target artifacts.");
+  }
+  lines.push("No local Cargo build was found in target/debug or target/release.");
+  lines.push("Run `cargo build -p jazz-tools --bin jazz-tools --features cli` to build locally.");
+  fail(lines.join("\n"));
 }
 
 const result = spawnSync(binaryPath, process.argv.slice(2), {

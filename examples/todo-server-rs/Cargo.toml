@@ -8,8 +8,9 @@ name = "todo-server"
 path = "src/main.rs"
 
 [dependencies]
-jazz-rs = { path = "../../crates/jazz-rs" }
-groove = { package = "jazz-core", path = "../../crates/groove", version = "2.0.0-alpha.0" }
+groove = { package = "jazz-tools", path = "../../crates/jazz-cli", version = "2.0.0-alpha.0", default-features = false, features = [
+  "client",
+] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

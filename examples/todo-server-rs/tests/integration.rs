@@ -14,10 +14,10 @@ use axum::http::{Request, StatusCode};
 use axum::response::sse::{Event, Sse};
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
-use http_body_util::BodyExt;
-use jazz_rs::{
+use groove::{
     AppContext, AppId, ColumnType, JazzClient, PersistenceTier, SchemaBuilder, TableSchema,
 };
+use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -56,7 +56,7 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
-fn test_schema() -> jazz_rs::Schema {
+fn test_schema() -> groove::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
@@ -106,7 +106,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use jazz_rs::{ObjectId, QueryBuilder, Value};
+use groove::{ObjectId, QueryBuilder, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {
@@ -609,7 +609,7 @@ impl TestServer {
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
             jazz_path
         );
     }

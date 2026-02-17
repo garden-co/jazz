@@ -69,7 +69,7 @@ The browser case is the interesting one. We can't block the main thread on stora
 OPFS provides synchronous I/O via `FileSystemSyncAccessHandle` in Dedicated Workers — no need for async storage abstractions.
 
 > `crates/groove-wasm/src/runtime.rs` (WasmRuntime with OpfsBTreeStorage)
-> `packages/jazz-ts/src/worker/groove-worker.ts` (worker entry point)
+> `packages/jazz-tools/src/worker/groove-worker.ts` (worker entry point)
 
 ### Native (Node.js / Rust)
 

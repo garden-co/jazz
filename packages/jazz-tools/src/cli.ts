@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// CLI for jazz-ts schema tooling
+// CLI for jazz-tools schema tooling
 
 import { spawn } from "child_process";
 import { access, readdir, writeFile } from "fs/promises";
@@ -241,7 +241,7 @@ switch (command) {
     });
     break;
   default:
-    console.log("Usage: jazz-ts build [options]");
+    console.log("Usage: node <path-to-jazz-tools>/dist/cli.js build [options]");
     console.log("\nCommands:");
     console.log("  build    Generate SQL from TypeScript schemas and run jazz-tools build");
     console.log("\nOptions:");

@@ -80,7 +80,7 @@ impl TestServer {
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
             jazz_path
         );
     }

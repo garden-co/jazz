@@ -2,4 +2,4 @@
 
 Reconnection uses fixed 5s delay. Should implement exponential backoff with jitter.
 
-> `crates/jazz-rs/src/client.rs:252`
+> `crates/jazz-cli/src/client.rs:252`

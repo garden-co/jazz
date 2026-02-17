@@ -1,4 +1,4 @@
-import { migrate, col } from "jazz-ts";
+import { migrate, col } from "jazz-tools";
 
 migrate("todos", {
   project: col.add().optional().string({ default: null }),

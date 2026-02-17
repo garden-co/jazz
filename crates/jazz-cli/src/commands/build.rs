@@ -254,7 +254,7 @@ fn generate_migration_if_needed(
             }
 
             println!(
-                "  Review the generated migration, then run `jazz-ts build` again to generate SQL."
+                "  Review the generated migration, then run the TypeScript schema build command again to generate SQL."
             );
         }
         // Note: When TS stub exists but SQL files are missing, the TypeScript CLI

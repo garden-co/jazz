@@ -3,7 +3,7 @@
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use groove::query_manager::policy::{Operation, PolicyExpr};
 use groove::query_manager::types::TablePolicies;
-use jazz_rs::{JazzClient, ObjectId, PersistenceTier, QueryBuilder, Session, SessionClient, Value};
+use groove::{JazzClient, ObjectId, PersistenceTier, QueryBuilder, Session, SessionClient, Value};
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
@@ -79,7 +79,7 @@ pub fn inherits_select_policy() -> TablePolicies {
 
 // #region reading-oneshot-rust
 #[allow(dead_code)]
-pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_rs::Result<usize> {
+pub async fn read_todos_oneshot(client: &JazzClient) -> groove::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client.query(query, None).await?;
     Ok(rows.len())
@@ -88,7 +88,7 @@ pub async fn read_todos_oneshot(client: &JazzClient) -> jazz_rs::Result<usize> {
 
 // #region reading-subscriptions-rust
 #[allow(dead_code)]
-pub async fn subscribe_todos(client: &JazzClient) -> jazz_rs::Result<jazz_rs::SubscriptionStream> {
+pub async fn subscribe_todos(client: &JazzClient) -> groove::Result<groove::SubscriptionStream> {
     let query = QueryBuilder::new("todos").build();
     client.subscribe(query).await
 }
@@ -96,7 +96,7 @@ pub async fn subscribe_todos(client: &JazzClient) -> jazz_rs::Result<jazz_rs::Su
 
 // #region reading-settled-tier-rust
 #[allow(dead_code)]
-pub async fn read_todos_settled_edge(client: &JazzClient) -> jazz_rs::Result<usize> {
+pub async fn read_todos_settled_edge(client: &JazzClient) -> groove::Result<usize> {
     let query = QueryBuilder::new("todos").build();
     let rows = client
         .query(query, Some(PersistenceTier::EdgeServer))
@@ -107,7 +107,7 @@ pub async fn read_todos_settled_edge(client: &JazzClient) -> jazz_rs::Result<usi
 
 // #region reading-query-shaping-rust
 #[allow(dead_code)]
-pub async fn read_todos_with_query_shaping(client: &JazzClient) -> jazz_rs::Result<usize> {
+pub async fn read_todos_with_query_shaping(client: &JazzClient) -> groove::Result<usize> {
     let query = QueryBuilder::new("todos")
         .filter_eq("done", Value::Boolean(false))
         .order_by("title")
@@ -122,7 +122,7 @@ pub async fn read_todos_with_query_shaping(client: &JazzClient) -> jazz_rs::Resu
 
 // #region reading-includes-rust
 #[allow(dead_code)]
-pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_rs::Result<usize> {
+pub async fn read_todos_with_related_rows(client: &JazzClient) -> groove::Result<usize> {
     // Rust currently composes related data using additional queries.
     // If rows carry foreign keys, query related tables and join in application code.
     let rows = client
@@ -134,7 +134,7 @@ pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_rs::Resul
 
 // #region writing-crud-rust
 #[allow(dead_code)]
-pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_rs::Result<()> {
+pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> groove::Result<()> {
     let values = vec![
         Value::Text("Write docs".to_string()),
         Value::Boolean(false),
@@ -157,7 +157,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 
 // #region writing-ack-tier-rust
 #[allow(dead_code)]
-pub async fn write_todo_with_default_ack(client: &JazzClient) -> jazz_rs::Result<ObjectId> {
+pub async fn write_todo_with_default_ack(client: &JazzClient) -> groove::Result<ObjectId> {
     let id = client
         .create(
             "todos",
