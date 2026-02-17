@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
@@ -126,6 +127,114 @@ impl InsertHandle {
     }
 }
 
+/// Current unix timestamp in milliseconds.
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Origin of a live query subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubscriptionOrigin {
+    #[default]
+    App,
+    Inspector,
+}
+
+/// Visibility of a live query subscription in introspection views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubscriptionVisibility {
+    #[default]
+    Public,
+    Hidden,
+}
+
+/// Metadata attached to a query subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionMetadata {
+    pub origin: SubscriptionOrigin,
+    pub visibility: SubscriptionVisibility,
+    /// Creation timestamp (unix ms).
+    pub created_at_ms: u64,
+}
+
+impl SubscriptionMetadata {
+    /// Metadata for normal app-owned subscriptions.
+    pub fn app() -> Self {
+        Self {
+            origin: SubscriptionOrigin::App,
+            visibility: SubscriptionVisibility::Public,
+            created_at_ms: current_timestamp_ms(),
+        }
+    }
+
+    /// Metadata for inspector-owned meta subscriptions.
+    pub fn inspector_hidden() -> Self {
+        Self {
+            origin: SubscriptionOrigin::Inspector,
+            visibility: SubscriptionVisibility::Hidden,
+            created_at_ms: current_timestamp_ms(),
+        }
+    }
+}
+
+/// Options that control subscription behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionOptions {
+    /// Metadata used by live-query introspection.
+    pub metadata: SubscriptionMetadata,
+    /// Whether this subscription should be forwarded/replayed to upstream servers.
+    pub propagate_to_servers: bool,
+}
+
+impl Default for SubscriptionOptions {
+    fn default() -> Self {
+        Self {
+            metadata: SubscriptionMetadata::app(),
+            propagate_to_servers: true,
+        }
+    }
+}
+
+impl SubscriptionOptions {
+    /// Options for local-only inspector meta-queries.
+    pub fn inspector_hidden_local() -> Self {
+        Self {
+            metadata: SubscriptionMetadata::inspector_hidden(),
+            propagate_to_servers: false,
+        }
+    }
+}
+
+/// Source of a live query entry in introspection output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveQuerySource {
+    /// Subscription created locally in this QueryManager instance.
+    Local,
+    /// Subscription created by a downstream client and tracked on this server.
+    DownstreamClient,
+}
+
+/// Introspection snapshot entry for an active query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveQueryInfo {
+    /// Local subscription ID for local entries, or downstream query ID for server entries.
+    pub query_id: QueryId,
+    pub source: LiveQuerySource,
+    /// Downstream client ID (only set for server-side client subscriptions).
+    pub client_id: Option<ClientId>,
+    pub table: String,
+    pub branches: Vec<String>,
+    pub has_session: bool,
+    pub settled_once: bool,
+    pub settled_tier: Option<PersistenceTier>,
+    pub origin: SubscriptionOrigin,
+    pub visibility: SubscriptionVisibility,
+    pub created_at_ms: u64,
+}
+
 /// Query subscription info.
 #[derive(Debug)]
 pub(crate) struct QuerySubscription {
@@ -146,6 +255,10 @@ pub(crate) struct QuerySubscription {
     pub(crate) settled_tier: Option<PersistenceTier>,
     /// Tiers that have confirmed settlement for this query.
     pub(crate) achieved_tiers: HashSet<PersistenceTier>,
+    /// Introspection metadata for this subscription.
+    pub(crate) metadata: SubscriptionMetadata,
+    /// Whether this subscription should be forwarded/replayed to upstream servers.
+    pub(crate) propagate_to_servers: bool,
 }
 
 /// Update for a query subscription.
@@ -190,6 +303,8 @@ pub(super) struct ServerQuerySubscription {
     /// Flag indicating this server subscription has settled at least once.
     /// Used to emit QuerySettled to the client on first settlement.
     pub(super) settled_once: bool,
+    /// Introspection metadata for this subscription.
+    pub(super) metadata: SubscriptionMetadata,
 }
 
 /// A catalogue object update received via sync.
@@ -465,6 +580,54 @@ impl QueryManager {
     /// Get the schema.
     pub fn schema(&self) -> &Schema {
         &self.schema
+    }
+
+    /// List currently active live queries.
+    ///
+    /// Inspector-owned meta queries can be hidden by default via `include_hidden=false`.
+    pub fn list_live_queries(&self, include_hidden: bool) -> Vec<LiveQueryInfo> {
+        let mut out = Vec::new();
+
+        for (sub_id, sub) in &self.subscriptions {
+            if !include_hidden && sub.metadata.visibility == SubscriptionVisibility::Hidden {
+                continue;
+            }
+            out.push(LiveQueryInfo {
+                query_id: QueryId(sub_id.0),
+                source: LiveQuerySource::Local,
+                client_id: None,
+                table: sub.query.table.as_str().to_string(),
+                branches: sub.branches.clone(),
+                has_session: sub.session.is_some(),
+                settled_once: sub.settled_once,
+                settled_tier: sub.settled_tier,
+                origin: sub.metadata.origin,
+                visibility: sub.metadata.visibility,
+                created_at_ms: sub.metadata.created_at_ms,
+            });
+        }
+
+        for ((client_id, query_id), sub) in &self.server_subscriptions {
+            if !include_hidden && sub.metadata.visibility == SubscriptionVisibility::Hidden {
+                continue;
+            }
+            out.push(LiveQueryInfo {
+                query_id: *query_id,
+                source: LiveQuerySource::DownstreamClient,
+                client_id: Some(*client_id),
+                table: sub.query.table.as_str().to_string(),
+                branches: sub.branches.clone(),
+                has_session: sub.session.is_some(),
+                settled_once: sub.settled_once,
+                settled_tier: None,
+                origin: sub.metadata.origin,
+                visibility: sub.metadata.visibility,
+                created_at_ms: sub.metadata.created_at_ms,
+            });
+        }
+
+        out.sort_by_key(|entry| entry.created_at_ms);
+        out
     }
 
     /// Get subscription results as decoded rows with ObjectIds (for testing).

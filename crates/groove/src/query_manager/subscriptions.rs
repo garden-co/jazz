@@ -8,7 +8,9 @@ use crate::sync_manager::{PersistenceTier, QueryId, ServerId};
 use super::encoding::decode_row;
 use super::graph::QueryGraph;
 use super::graph_nodes::output::QuerySubscriptionId;
-use super::manager::{CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QueryUpdate};
+use super::manager::{
+    CatalogueUpdate, QueryError, QueryManager, QuerySubscription, QueryUpdate, SubscriptionOptions,
+};
 use super::query::{Query, QueryBuilder};
 use super::session::Session;
 #[cfg(test)]
@@ -44,6 +46,22 @@ impl QueryManager {
         query: Query,
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_session_options(
+            query,
+            session,
+            settled_tier,
+            SubscriptionOptions::default(),
+        )
+    }
+
+    /// Subscribe to query results with explicit execution options.
+    pub fn subscribe_with_session_options(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        options: SubscriptionOptions,
     ) -> Result<QuerySubscriptionId, QueryError> {
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?settled_tier).entered();
@@ -86,6 +104,8 @@ impl QueryManager {
                 settled_once: false,
                 settled_tier,
                 achieved_tiers: HashSet::new(),
+                metadata: options.metadata,
+                propagate_to_servers: options.propagate_to_servers,
             },
         );
 
@@ -110,6 +130,24 @@ impl QueryManager {
         schema: &Schema,
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
+    ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_explicit_context_options(
+            query,
+            schema,
+            schema_context,
+            session,
+            SubscriptionOptions::default(),
+        )
+    }
+
+    /// Subscribe with explicit schema/context and execution options.
+    pub fn subscribe_with_explicit_context_options(
+        &mut self,
+        query: Query,
+        schema: &Schema,
+        schema_context: &crate::schema_manager::SchemaContext,
+        session: Option<Session>,
+        options: SubscriptionOptions,
     ) -> Result<QuerySubscriptionId, QueryError> {
         let table_name = &query.table;
         let _table_schema = schema
@@ -150,6 +188,8 @@ impl QueryManager {
                 settled_once: false,
                 settled_tier: None,
                 achieved_tiers: HashSet::new(),
+                metadata: options.metadata,
+                propagate_to_servers: options.propagate_to_servers,
             },
         );
 
@@ -173,16 +213,38 @@ impl QueryManager {
         session: Option<Session>,
         settled_tier: Option<PersistenceTier>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        self.subscribe_with_sync_options(
+            query,
+            session,
+            settled_tier,
+            SubscriptionOptions::default(),
+        )
+    }
+
+    /// Subscribe to query results and sync with explicit execution options.
+    pub fn subscribe_with_sync_options(
+        &mut self,
+        query: Query,
+        session: Option<Session>,
+        settled_tier: Option<PersistenceTier>,
+        options: SubscriptionOptions,
+    ) -> Result<QuerySubscriptionId, QueryError> {
         // Create local subscription
-        let sub_id = self.subscribe_with_session(query.clone(), session.clone(), settled_tier)?;
+        let sub_id = self.subscribe_with_session_options(
+            query.clone(),
+            session.clone(),
+            settled_tier,
+            options,
+        )?;
 
-        let sync_query = self.sync_query_payload_for_upstream(&query);
-
-        // Send QuerySubscription to all servers
-        // Use the subscription ID as the query ID for simplicity
-        let query_id = QueryId(sub_id.0);
-        self.sync_manager
-            .send_query_subscription_to_servers(query_id, sync_query, session);
+        if options.propagate_to_servers {
+            let sync_query = self.sync_query_payload_for_upstream(&query);
+            // Send QuerySubscription to all servers
+            // Use the subscription ID as the query ID for simplicity
+            let query_id = QueryId(sub_id.0);
+            self.sync_manager
+                .send_query_subscription_to_servers(query_id, sync_query, session);
+        }
 
         Ok(sub_id)
     }
@@ -228,6 +290,7 @@ impl QueryManager {
         let local_subs: Vec<(QueryId, Query, Option<Session>)> = self
             .subscriptions
             .iter()
+            .filter(|(_, sub)| sub.propagate_to_servers)
             .map(|(sub_id, sub)| {
                 (
                     QueryId(sub_id.0),

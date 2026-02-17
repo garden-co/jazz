@@ -10,8 +10,9 @@ use crate::storage::MemoryStorage;
 use crate::sync_manager::SyncManager;
 
 use super::{
-    ColumnDescriptor, ColumnType, PolicyExpr, QueryError, QueryManager, RowDescriptor, Schema,
-    Session as PolicySession, TableName, TablePolicies, TableSchema, Value, decode_row,
+    ColumnDescriptor, ColumnType, LiveQuerySource, PolicyExpr, QueryError, QueryManager,
+    RowDescriptor, Schema, Session as PolicySession, SubscriptionOptions, SubscriptionOrigin,
+    SubscriptionVisibility, TableName, TablePolicies, TableSchema, Value, decode_row,
 };
 
 fn test_schema() -> Schema {
@@ -5915,4 +5916,91 @@ fn e2e_permissions_prevent_new_row_sync() {
     let results = client.get_subscription_results(sub_id);
     assert_eq!(results.len(), 1, "Client should NOT receive Bob's doc");
     assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
+}
+
+#[test]
+fn live_queries_include_app_queries_by_default() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let sub_id = qm.query("users").build();
+    let sub_id = qm.subscribe(sub_id).unwrap();
+
+    let live = qm.list_live_queries(false);
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].query_id.0, sub_id.0);
+    assert_eq!(live[0].source, LiveQuerySource::Local);
+    assert_eq!(live[0].origin, SubscriptionOrigin::App);
+    assert_eq!(live[0].visibility, SubscriptionVisibility::Public);
+}
+
+#[test]
+fn live_queries_hide_inspector_owned_subscriptions_by_default() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let query = qm.query("users").build();
+    let sub_id = qm
+        .subscribe_with_session_options(
+            query,
+            None,
+            None,
+            SubscriptionOptions::inspector_hidden_local(),
+        )
+        .unwrap();
+
+    let visible = qm.list_live_queries(false);
+    assert!(
+        visible.is_empty(),
+        "Hidden inspector subscription should not appear by default"
+    );
+
+    let all = qm.list_live_queries(true);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].query_id.0, sub_id.0);
+    assert_eq!(all[0].source, LiveQuerySource::Local);
+    assert_eq!(all[0].origin, SubscriptionOrigin::Inspector);
+    assert_eq!(all[0].visibility, SubscriptionVisibility::Hidden);
+}
+
+#[test]
+fn inspector_local_only_subscription_is_not_forwarded_or_replayed() {
+    use crate::sync_manager::{ServerId, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, _storage) = create_query_manager(sync_manager, schema);
+
+    // Attach an upstream server and clear initial full-sync outbox noise.
+    qm.add_server(ServerId::new());
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let query = qm.query("users").build();
+    qm.subscribe_with_sync_options(
+        query,
+        None,
+        None,
+        SubscriptionOptions::inspector_hidden_local(),
+    )
+    .unwrap();
+
+    let outbox_after_subscribe = qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox_after_subscribe
+            .iter()
+            .all(|e| !matches!(e.payload, SyncPayload::QuerySubscription { .. })),
+        "Inspector local-only subscriptions should not forward upstream"
+    );
+
+    // Add another upstream server; replay should still skip local-only subscriptions.
+    qm.add_server(ServerId::new());
+    let outbox_after_replay = qm.sync_manager_mut().take_outbox();
+    assert!(
+        outbox_after_replay
+            .iter()
+            .all(|e| !matches!(e.payload, SyncPayload::QuerySubscription { .. })),
+        "Inspector local-only subscriptions should not be replayed upstream"
+    );
 }

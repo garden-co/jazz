@@ -8,7 +8,9 @@ use crate::storage::Storage;
 use crate::sync_manager::{ClientId, PendingPermissionCheck, QueryId};
 
 use super::graph::QueryGraph;
-use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
+use super::manager::{
+    PolicyCheckState, QueryManager, ServerQuerySubscription, SubscriptionMetadata,
+};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
@@ -146,6 +148,7 @@ impl QueryManager {
                     last_scope: scope,
                     needs_recompile: false,
                     settled_once: false,
+                    metadata: SubscriptionMetadata::app(),
                 },
             );
         }
