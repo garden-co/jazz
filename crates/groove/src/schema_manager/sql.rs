@@ -742,7 +742,7 @@ fn lens_op_to_sql(op: &LensOp) -> String {
     }
 }
 
-fn column_type_to_sql(ct: &ColumnType) -> String {
+pub(crate) fn column_type_to_sql(ct: &ColumnType) -> String {
     match ct {
         ColumnType::Integer => "INTEGER".to_string(),
         ColumnType::BigInt => "BIGINT".to_string(),
