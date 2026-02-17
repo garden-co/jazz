@@ -1,0 +1,310 @@
+# Ralph Task Cache
+# Auto-generated from RALPH_TASK.md
+# DO NOT EDIT - regenerated on task file change
+
+source_file: RALPH_TASK.md
+source_mtime: 1770374428
+generated_at: 2026-02-06T10:41:32Z
+
+tasks:
+  - id: "line_51"
+    line_number: 51
+    status: completed
+    parallel_group: 999999
+    description: Create `crates/cojson-storage` crate with core storage traits
+    indent_level: 0
+    raw_marker: 1.
+  - id: "line_52"
+    line_number: 52
+    status: completed
+    parallel_group: 999999
+    description: Define `StorageBackend` trait matching TypeScript `DBClientInterfaceSync`
+    indent_level: 0
+    raw_marker: 2.
+  - id: "line_53"
+    line_number: 53
+    status: completed
+    parallel_group: 999999
+    description: Define `StorageBackendAsync` trait matching TypeScript `DBClientInterfaceAsync`
+    indent_level: 0
+    raw_marker: 3.
+  - id: "line_54"
+    line_number: 54
+    status: completed
+    parallel_group: 999999
+    description: Implement serialization for CoValue headers, transactions, and signatures
+    indent_level: 0
+    raw_marker: 4.
+  - id: "line_55"
+    line_number: 55
+    status: completed
+    parallel_group: 999999
+    description: Add comprehensive unit tests for storage trait implementations
+    indent_level: 0
+    raw_marker: 5.
+  - id: "line_61"
+    line_number: 61
+    status: completed
+    parallel_group: 999999
+    description: Add `bf-tree` as dependency in `cojson-storage` (BTreeMap fallback due to cfg-if conflict)
+    indent_level: 0
+    raw_marker: 6.
+  - id: "line_62"
+    line_number: 62
+    status: completed
+    parallel_group: 999999
+    description: Implement `BfTreeStorage` backend with read-write-optimized concurrent index
+    indent_level: 0
+    raw_marker: 7.
+  - id: "line_63"
+    line_number: 63
+    status: completed
+    parallel_group: 999999
+    description: Support larger-than-memory datasets via BF-Tree's memory management (design ready)
+    indent_level: 0
+    raw_marker: 8.
+  - id: "line_64"
+    line_number: 64
+    status: completed
+    parallel_group: 999999
+    description: Implement range queries for efficient CoValue session lookups
+    indent_level: 0
+    raw_marker: 9.
+  - id: "line_65"
+    line_number: 65
+    status: pending
+    parallel_group: 999999
+    description: Add benchmarks comparing BF-Tree vs SQLite performance
+    indent_level: 0
+    raw_marker: 10.
+  - id: "line_71"
+    line_number: 71
+    status: completed
+    parallel_group: 999999
+    description: Define `FileIO` trait for platform-agnostic file operations
+    indent_level: 0
+    raw_marker: 11.
+  - id: "line_72"
+    line_number: 72
+    status: completed
+    parallel_group: 999999
+    description: Implement `StdFileIO` for Node.js and React Native (std::fs with disk persistence)
+    indent_level: 0
+    raw_marker: 12.
+  - id: "line_73"
+    line_number: 73
+    status: completed
+    parallel_group: 999999
+    description: Implement `OpfsFileIO` for browsers using Origin Private File System
+    indent_level: 0
+    raw_marker: 13.
+  - id: "line_74"
+    line_number: 74
+    status: completed
+    parallel_group: 999999
+    description: Use OPFS Synchronous Access Handle for optimal BF-Tree performance
+    indent_level: 0
+    raw_marker: 14.
+  - id: "line_75"
+    line_number: 75
+    status: completed
+    parallel_group: 999999
+    description: Implement `InMemoryFileIO` for Cloudflare Workers (VFS /tmp doesn't persist across requests)
+    indent_level: 0
+    raw_marker: 15.
+  - id: "line_83"
+    line_number: 83
+    status: completed
+    parallel_group: 999999
+    description: Export `NativeStorage` class from `cojson-core-napi`
+    indent_level: 0
+    raw_marker: 16.
+  - id: "line_84"
+    line_number: 84
+    status: completed
+    parallel_group: 999999
+    description: Support file-based persistence using BF-Tree with file backing
+    indent_level: 0
+    raw_marker: 17.
+  - id: "line_85"
+    line_number: 85
+    status: pending
+    parallel_group: 999999
+    description: Implement async operations via NAPI ThreadSafeFunction
+    indent_level: 0
+    raw_marker: 18.
+  - id: "line_89"
+    line_number: 89
+    status: completed
+    parallel_group: 999999
+    description: Export `NativeStorage` from `cojson-core-wasm`
+    indent_level: 0
+    raw_marker: 19.
+  - id: "line_90"
+    line_number: 90
+    status: completed
+    parallel_group: 999999
+    description: Use BF-Tree with OPFS file backing for browsers (design ready)
+    indent_level: 0
+    raw_marker: 20.
+  - id: "line_91"
+    line_number: 91
+    status: completed
+    parallel_group: 999999
+    description: Use BF-Tree with in-memory file backing for Cloudflare Workers
+    indent_level: 0
+    raw_marker: 21.
+  - id: "line_92"
+    line_number: 92
+    status: completed
+    parallel_group: 999999
+    description: Add runtime detection to choose OPFS vs in-memory based on environment
+    indent_level: 0
+    raw_marker: 22.
+  - id: "line_96"
+    line_number: 96
+    status: completed
+    parallel_group: 999999
+    description: Export `NativeStorage` from `cojson-core-rn`
+    indent_level: 0
+    raw_marker: 23.
+  - id: "line_97"
+    line_number: 97
+    status: completed
+    parallel_group: 999999
+    description: Use file-based BF-Tree storage in app documents directory
+    indent_level: 0
+    raw_marker: 24.
+  - id: "line_98"
+    line_number: 98
+    status: completed
+    parallel_group: 999999
+    description: Handle platform-specific paths (iOS vs Android)
+    indent_level: 0
+    raw_marker: 25.
+  - id: "line_102"
+    line_number: 102
+    status: pending
+    parallel_group: 999999
+    description: Create `packages/cojson/src/storage/native/` directory
+    indent_level: 0
+    raw_marker: 26.
+  - id: "line_103"
+    line_number: 103
+    status: pending
+    parallel_group: 999999
+    description: Implement `NativeStorageWrapper` implementing `StorageAPI`
+    indent_level: 0
+    raw_marker: 27.
+  - id: "line_104"
+    line_number: 104
+    status: pending
+    parallel_group: 999999
+    description: Add factory function `createNativeStorage(options)` with platform detection
+    indent_level: 0
+    raw_marker: 28.
+  - id: "line_105"
+    line_number: 105
+    status: pending
+    parallel_group: 999999
+    description: Implement automatic fallback to SQLite if native unavailable
+    indent_level: 0
+    raw_marker: 29.
+  - id: "line_106"
+    line_number: 106
+    status: pending
+    parallel_group: 999999
+    description: Update `LocalNode` to support native storage via `setStorage()`
+    indent_level: 0
+    raw_marker: 30.
+  - id: "line_110"
+    line_number: 110
+    status: pending
+    parallel_group: 999999
+    description: Port existing storage tests to work with native storage
+    indent_level: 0
+    raw_marker: 31.
+  - id: "line_111"
+    line_number: 111
+    status: pending
+    parallel_group: 999999
+    description: Add integration tests for each platform
+    indent_level: 0
+    raw_marker: 32.
+  - id: "line_112"
+    line_number: 112
+    status: pending
+    parallel_group: 999999
+    description: Add cross-platform sync tests (native ↔ SQLite interop)
+    indent_level: 0
+    raw_marker: 33.
+  - id: "line_113"
+    line_number: 113
+    status: pending
+    parallel_group: 999999
+    description: Document storage backend selection and configuration
+    indent_level: 0
+    raw_marker: 34.
+  - id: "line_114"
+    line_number: 114
+    status: pending
+    parallel_group: 999999
+    description: Add migration guide from SQLite to native storage
+    indent_level: 0
+    raw_marker: 35.
+  - id: "line_451"
+    line_number: 451
+    status: pending
+    parallel_group: 999999
+    description: Native storage passes all existing storage tests
+    indent_level: 0
+    raw_marker: 1.
+  - id: "line_452"
+    line_number: 452
+    status: pending
+    parallel_group: 999999
+    description: Performance improvement of ≥2x for write operations vs SQLite
+    indent_level: 0
+    raw_marker: 2.
+  - id: "line_453"
+    line_number: 453
+    status: pending
+    parallel_group: 999999
+    description: Memory usage stays bounded for large datasets (BF-Tree larger-than-memory)
+    indent_level: 0
+    raw_marker: 3.
+  - id: "line_454"
+    line_number: 454
+    status: pending
+    parallel_group: 999999
+    description: Works in browsers with BF-Tree + OPFS file backing
+    indent_level: 0
+    raw_marker: 4.
+  - id: "line_455"
+    line_number: 455
+    status: pending
+    parallel_group: 999999
+    description: Works in Cloudflare Workers with BF-Tree in-memory (VFS /tmp is per-request only)
+    indent_level: 0
+    raw_marker: 5.
+  - id: "line_456"
+    line_number: 456
+    status: pending
+    parallel_group: 999999
+    description: Seamless fallback to TypeScript storage when native unavailable
+    indent_level: 0
+    raw_marker: 6.
+  - id: "line_457"
+    line_number: 457
+    status: pending
+    parallel_group: 999999
+    description: Zero breaking changes to existing `LocalNode.setStorage()` API
+    indent_level: 0
+    raw_marker: 7.
+  - id: "line_458"
+    line_number: 458
+    status: pending
+    parallel_group: 999999
+    description: OPFS Synchronous Access Handle used for optimal browser performance
+    indent_level: 0
+    raw_marker: 8.

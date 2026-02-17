@@ -1,8 +1,14 @@
 use cojson_core::core::{CoJsonCoreError, KnownState as RustKnownState, SessionMapImpl};
-use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
 use thiserror::Error;
+
+// ============================================================================
+// Storage Module - Native Storage Backend
+// ============================================================================
+
+pub mod storage;
+pub use storage::NativeStorage;
 
 // ============================================================================
 // KnownState - Native JavaScript Object

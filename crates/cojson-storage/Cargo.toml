@@ -1,0 +1,65 @@
+[package]
+name = "cojson-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Core storage abstractions for Jazz/CoJSON"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/garden-co/jazz"
+
+[features]
+default = []
+# Enable async storage backend support
+async = ["tokio"]
+# Enable serde serialization
+serde = ["dep:serde", "dep:serde_json"]
+# Enable BF-Tree storage backend (not available on WASM)
+# Note: bf-tree has a cfg-if version conflict with cargo-tarpaulin
+# We'll use a local implementation initially
+bftree = ["serde"]
+# Enable OPFS (Origin Private File System) support for WASM
+opfs = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+
+[dependencies]
+thiserror = "1.0"
+
+# Optional dependencies
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+tokio = { version = "1.0", features = ["sync"], optional = true }
+
+# WASM/OPFS dependencies (only for wasm32 target)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Navigator",
+    "StorageManager",
+    "Window",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemSyncAccessHandle",
+    "FileSystemWritableFileStream",
+    "FileSystemGetFileOptions",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemCreateWritableOptions",
+    "FileSystemReadWriteOptions",
+] }
+
+# BF-Tree dependency commented out due to cfg-if version conflict
+# Will be enabled once the upstream dependency is updated
+# [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# bf-tree = { version = "0.4.7", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["rt", "macros"] }
+serde_json = "1.0"
+tempfile = "3.10"
+criterion = { version = "0.5", features = ["html_reports"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+rand = "0.8"
+
+[[bench]]
+name = "storage_benchmark"
+harness = false
+required-features = ["bftree"]

@@ -35,3 +35,5 @@ test-results
 .claude/settings.local.json
 
 playwright-report
+# Ralph config (may contain API key)
+.cursor/ralph-config.json
