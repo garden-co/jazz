@@ -3,7 +3,7 @@
 use base64::Engine;
 use groove::query_manager::session::Session;
 use groove::sync_manager::{ClientId, SyncPayload};
-use jazz_transport::SyncPayloadRequest;
+use crate::jazz_transport::SyncPayloadRequest;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 

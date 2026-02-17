@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
   resolve: {
     alias: {
-      // Needed because jazz-ts browser tests import from source (../../src/),
+      // Needed because jazz-tools browser tests import from source (../../src/),
       // bypassing node_modules resolution. Consumers don't need this.
       "groove-wasm": resolve(__dirname, "../../crates/groove-wasm/pkg"),
     },

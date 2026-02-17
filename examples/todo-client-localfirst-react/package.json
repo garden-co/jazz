@@ -5,13 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "jazz-ts build && vite build",
+    "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
-    "jazz-react": "workspace:*",
-    "jazz-ts": "workspace:*",
+    "jazz-tools": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

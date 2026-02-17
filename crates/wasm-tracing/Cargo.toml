@@ -1,5 +1,5 @@
 [package]
-name = "wasm-tracing"
+name = "jazz-wasm-tracing"
 version = "3.0.0-alpha.0"
 authors = ["Daniel Gallups <dsgallups@protonmail.com>"]
 edition = "2021"
@@ -10,6 +10,9 @@ keywords = ["logging", "metrics", "wasm", "spans", "tracing"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/dsgallups/wasm-tracing"
+
+[lib]
+name = "wasm_tracing"
 
 
 [features]

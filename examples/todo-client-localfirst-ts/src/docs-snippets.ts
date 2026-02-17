@@ -1,4 +1,4 @@
-import type { Db } from "jazz-ts";
+import type { Db } from "jazz-tools";
 import { app } from "../schema/app.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";

@@ -15,7 +15,7 @@ use axum::{
 };
 use futures_util::StreamExt as FuturesStreamExt;
 use futures_util::stream::Stream;
-use jazz_rs::{ObjectId, QueryBuilder, Value};
+use groove::{ObjectId, QueryBuilder, Value};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;

@@ -210,13 +210,13 @@ describe("generateTypes", () => {
     expect(output).toContain('"todos"');
   });
 
-  it("imports WasmSchema and QueryBuilder from jazz-ts", () => {
+  it("imports WasmSchema and QueryBuilder from jazz-tools", () => {
     table("todos", { title: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain('import type { WasmSchema, QueryBuilder } from "jazz-ts";');
+    expect(output).toContain('import type { WasmSchema, QueryBuilder } from "jazz-tools";');
   });
 
   it("includes auto-generated header comment", () => {
@@ -245,7 +245,7 @@ describe("generateClient", () => {
 
     // Header
     expect(output).toContain("// AUTO-GENERATED FILE - DO NOT EDIT");
-    expect(output).toContain('import type { WasmSchema, QueryBuilder } from "jazz-ts";');
+    expect(output).toContain('import type { WasmSchema, QueryBuilder } from "jazz-tools";');
 
     // Base interface
     expect(output).toContain("export interface Todo {");
