@@ -864,4 +864,98 @@ describe("concurrent load", () => {
 
     expect(groupOnClient.core.isAvailable()).toBe(true);
   });
+
+  test("should process queued loads when CoValue instance changes while in-flight", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { storage } = client.addStorage({ ourName: "client" });
+
+    const { peerOnServer } = client.connectToSyncServer();
+
+    const group = jazzCloud.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    // Prime map1 locally so GC leaves a shell with knownState.
+    await loadCoValueOrFail(client.node, map1.id);
+
+    // Force load attempts to go through peers instead of satisfying from storage.
+    vi.spyOn(storage, "load").mockImplementation(
+      async (_id: unknown, _cb: unknown, done: (result: boolean) => void) =>
+        done(false),
+    );
+
+    const unmounted = client.node.internalUnmountCoValue(map1.id);
+    expect(unmounted).toBe(true);
+    expect(client.node.getCoValue(map1.id).loadingState).toBe(
+      "garbageCollected",
+    );
+
+    const blockedKnown = blockMessageTypeOnOutgoingPeer(peerOnServer, "known", {
+      id: map1.id,
+    });
+
+    SyncMessagesLog.clear();
+
+    const map1LoadPromise = client.node.loadCoValueCore(map1.id);
+    const map2LoadPromise = client.node.loadCoValueCore(map2.id);
+
+    await waitFor(() => {
+      expect(
+        SyncMessagesLog.messages.some(
+          (m) => m.msg.action === "load" && m.msg.id === map1.id,
+        ),
+      ).toBe(true);
+      return true;
+    });
+
+    // Queue is saturated by map1 while KNOWN(Map1) is blocked.
+    expect(
+      SyncMessagesLog.messages.some(
+        (m) => m.msg.action === "load" && m.msg.id === map2.id,
+      ),
+    ).toBe(false);
+
+    // Replace the in-flight CoValue instance with a new one (same id).
+    const oldMap1Core = client.node.getCoValue(map1.id);
+    const oldMap1KnownState = oldMap1Core.knownState();
+    client.node.internalDeleteCoValue(map1.id);
+
+    const newMap1Core = client.node.getCoValue(map1.id);
+    expect(newMap1Core).not.toBe(oldMap1Core);
+    newMap1Core.setGarbageCollectedState(oldMap1KnownState);
+    expect(newMap1Core.loadingState).toBe("garbageCollected");
+
+    // Deliver KNOWN(Map1). With ID-based tracking, this should free the slot and send LOAD(Map2).
+    blockedKnown.unblock();
+    blockedKnown.sendBlockedMessages();
+
+    await waitFor(() => {
+      expect(
+        SyncMessagesLog.messages.some(
+          (m) => m.msg.action === "known" && m.msg.id === map1.id,
+        ),
+      ).toBe(true);
+      expect(
+        SyncMessagesLog.messages.some(
+          (m) => m.msg.action === "load" && m.msg.id === map2.id,
+        ),
+      ).toBe(true);
+      return true;
+    });
+
+    // The critical behavior is that map2 starts loading after KNOWN(map1).
+    const map2OnClient = await loadCoValueOrFail(client.node, map2.id);
+    expect(map2OnClient.get("key")).toBe("value2");
+
+    // Avoid unhandled promise rejection in case these earlier promises resolve later.
+    void map1LoadPromise;
+    void map2LoadPromise;
+  });
 });

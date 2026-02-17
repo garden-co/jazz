@@ -203,6 +203,26 @@ describe("OutgoingLoadQueue", () => {
       expect(duplicateCallbackCount).toBe(0);
     });
 
+    test("should skip duplicate enqueue for same CoValue ID while in-flight", () => {
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const otherNode = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      const sameIdCoValue = otherNode.getCoValue(map.id);
+
+      let duplicateCallbackCount = 0;
+
+      queue.enqueue(map.core, () => {});
+      queue.enqueue(sameIdCoValue, () => {
+        duplicateCallbackCount += 1;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(duplicateCallbackCount).toBe(0);
+    });
+
     test("should skip duplicate enqueue for same CoValue ID", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
@@ -422,6 +442,34 @@ describe("OutgoingLoadQueue", () => {
       // trackComplete on unknown CoValue should be a no-op
       queue.trackComplete(unknownCoValue);
 
+      expect(queue.inFlightCount).toBe(1);
+    });
+
+    test("should complete in-flight request by CoValue ID even with different instance", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const otherNode = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      const nextMap = group.createMap();
+      const sameIdCoValue = otherNode.getCoValue(map.id);
+
+      let nextCallbackCalled = false;
+
+      queue.enqueue(map.core, () => {});
+      queue.enqueue(nextMap.core, () => {
+        nextCallbackCalled = true;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(nextCallbackCalled).toBe(false);
+
+      // Complete using a different CoValue instance with the same ID.
+      queue.trackComplete(sameIdCoValue);
+
+      expect(nextCallbackCalled).toBe(true);
       expect(queue.inFlightCount).toBe(1);
     });
 
