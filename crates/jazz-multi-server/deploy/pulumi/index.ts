@@ -25,6 +25,8 @@ const workerThreads = cfg.getNumber("workerThreads");
 const dataRoot = cfg.get("dataRoot") ?? "/mnt/data";
 const healthCheckPath = cfg.get("healthCheckPath") ?? "/health";
 const rustLog = cfg.get("rustLog") ?? "info";
+const containerMemoryReservationMiB = cfg.getNumber("containerMemoryReservationMiB") ?? 512;
+const containerMemoryMiB = cfg.getNumber("containerMemoryMiB");
 
 const allowedAccountId = cfg.get("allowedAccountId");
 const route53DelegationRoleArn = cfg.get("route53DelegationRoleArn");
@@ -551,6 +553,8 @@ const taskDefinition = new aws.ecs.TaskDefinition(
             name: "app",
             image: resolvedContainerImage,
             essential: true,
+            memoryReservation: containerMemoryReservationMiB,
+            memory: containerMemoryMiB,
             command: commandArgs,
             portMappings: [
               {
