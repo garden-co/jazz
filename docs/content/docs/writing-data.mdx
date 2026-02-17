@@ -3,6 +3,14 @@ title: Writing Data
 description: Insert, update, and delete APIs with write acknowledgement semantics.
 ---
 
+## Local-First Writes
+
+`insert`, `update`, and `deleteFrom` apply immediately in the local runtime.
+That keeps UI latency low because your app does not wait for any network hop.
+
+Use this mode when you want the fastest local response and can tolerate async sync
+to higher durability tiers.
+
 ## Insert, Update, Delete
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
@@ -18,7 +26,30 @@ description: Insert, update, and delete APIs with write acknowledgement semantic
   </Tab>
 </Tabs>
 
-## Write Ack Tier
+## Write Ack Tiers
+
+### API Reference
+
+- `insertWithAck(table, data, tier)`
+- `updateWithAck(table, id, data, tier)`
+- `deleteFromWithAck(table, id, tier)`
+- `tier`: `"worker" | "edge" | "core"`
+
+Ack tiers control when the returned promise resolves:
+
+- `worker`: waits until the local worker/storage tier acknowledges the write.
+- `edge`: waits until the edge server acknowledges the write.
+- `core`: waits until the core server acknowledges the write.
+
+Tradeoff summary:
+
+- Lower tier: lower latency, lower durability scope.
+- Higher tier: higher latency, wider durability scope.
+
+In practical terms:
+
+- Local-first writes (`insert`/`update`/`deleteFrom`) optimize for immediate UX.
+- Acked writes (`*WithAck`) optimize for explicit durability checkpoints.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
@@ -32,6 +63,15 @@ description: Insert, update, and delete APIs with write acknowledgement semantic
     </include>
   </Tab>
 </Tabs>
+
+## Combining Write Acks with Settled Reads
+
+Write ack tiers and read settled tiers are complementary knobs:
+
+- Write acks define when a mutation is considered durably acknowledged.
+- Settled reads define when a query result is considered sufficiently confirmed.
+
+See [Read Settled Tiers](/docs/reading-data#read-settled-tiers) for read-side semantics.
 
 ## Backend Request Context Reminder
 

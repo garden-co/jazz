@@ -64,7 +64,7 @@ export function writeTodoCrud(db: Db, todoId: string) {
 
 // #region writing-ack-tier-ts
 export async function writeTodoWithAckTiers(db: Db) {
-  const id = await db.insertPersisted(
+  const id = await db.insertWithAck(
     app.todos,
     {
       title: "Write docs with ack",
@@ -74,7 +74,7 @@ export async function writeTodoWithAckTiers(db: Db) {
     "edge",
   );
 
-  await db.updatePersisted(app.todos, id, { done: true }, "core");
-  await db.deleteFromPersisted(app.todos, id, "core");
+  await db.updateWithAck(app.todos, id, { done: true }, "core");
+  await db.deleteFromWithAck(app.todos, id, "core");
 }
 // #endregion writing-ack-tier-ts
