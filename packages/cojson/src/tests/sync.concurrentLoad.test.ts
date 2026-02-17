@@ -780,4 +780,88 @@ describe("concurrent load", () => {
 
     expect(groupOnClient.core.isAvailable()).toBe(true);
   });
+
+  test("should consider onlyKnownState load requests processed when server replies with KNOWN", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { storage } = client.addStorage({ ourName: "client" });
+
+    const group = client.node.createGroup();
+    const map1 = group.createMap();
+    const map2 = group.createMap();
+
+    map1.set("key", "value1", "trusting");
+    map2.set("key", "value2", "trusting");
+
+    const { peerState } = client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+    peerState.gracefulShutdown();
+
+    await client.restart();
+    client.addStorage({ storage });
+
+    const onlyKnownGroup = client.node.getCoValue(group.id);
+    const onlyKnownMap1 = client.node.getCoValue(map1.id);
+    const onlyKnownMap2 = client.node.getCoValue(map2.id);
+
+    await Promise.all([
+      new Promise<void>((resolve) =>
+        onlyKnownGroup.getKnownStateFromStorage(() => resolve()),
+      ),
+      new Promise<void>((resolve) =>
+        onlyKnownMap1.getKnownStateFromStorage(() => resolve()),
+      ),
+      new Promise<void>((resolve) =>
+        onlyKnownMap2.getKnownStateFromStorage(() => resolve()),
+      ),
+    ]);
+
+    expect(onlyKnownGroup.loadingState).toBe("onlyKnownState");
+    expect(onlyKnownMap1.loadingState).toBe("onlyKnownState");
+    expect(onlyKnownMap2.loadingState).toBe("onlyKnownState");
+
+    SyncMessagesLog.clear();
+
+    client.connectToSyncServer();
+
+    await waitFor(() => {
+      const messages = SyncMessagesLog.getMessages({
+        Group: onlyKnownGroup,
+        Map1: onlyKnownMap1,
+        Map2: onlyKnownMap2,
+      });
+
+      expect(messages).toContain(
+        "client -> server | LOAD Group sessions: header/4",
+      );
+      expect(messages).toContain(
+        "server -> client | KNOWN Group sessions: header/4",
+      );
+      expect(messages).toContain(
+        "client -> server | LOAD Map1 sessions: header/1",
+      );
+      expect(messages).toContain(
+        "server -> client | KNOWN Map1 sessions: header/1",
+      );
+      expect(messages).toContain(
+        "client -> server | LOAD Map2 sessions: header/1",
+      );
+      expect(messages).toContain(
+        "server -> client | KNOWN Map2 sessions: header/1",
+      );
+
+      return true;
+    });
+
+    const groupOnServer = jazzCloud.node.createGroup();
+    const groupOnClient = await loadCoValueOrFail(
+      client.node,
+      groupOnServer.id,
+    );
+
+    expect(groupOnClient.core.isAvailable()).toBe(true);
+  });
 });
