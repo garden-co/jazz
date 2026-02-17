@@ -12,7 +12,7 @@ export interface Todo {
   done: boolean;
   description?: string;
   parent?: string;
-  project: string;
+  project?: string;
 }
 
 export interface ProjectInit {
@@ -24,7 +24,7 @@ export interface TodoInit {
   done: boolean;
   description?: string;
   parent?: string;
-  project: string;
+  project?: string;
 }
 
 export interface ProjectWhereInput {
@@ -38,7 +38,7 @@ export interface TodoWhereInput {
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
   parent?: string | { eq?: string; ne?: string; isNull?: boolean };
-  project?: string | { eq?: string; ne?: string };
+  project?: string | { eq?: string; ne?: string; isNull?: boolean };
 }
 
 export interface ProjectInclude {
@@ -139,7 +139,7 @@ export const wasmSchema: WasmSchema = {
           column_type: {
             type: "Uuid",
           },
-          nullable: false,
+          nullable: true,
           references: "projects",
         },
       ],

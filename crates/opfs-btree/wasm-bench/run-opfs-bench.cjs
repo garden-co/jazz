@@ -19,6 +19,10 @@ const DEFAULT_COUNT = 5000;
 const DEFAULT_VALUE_SIZES = [32, 256, 4096];
 const DEFAULT_PROFILE = "basic";
 const DEFAULT_SEED = "0xA5A5A5A501234567";
+const DEFAULT_CACHE_MB = 32;
+const DEFAULT_OVERFLOW_THRESHOLD_BYTES = 4 * 1024;
+const DEFAULT_PIN_INTERNAL_PAGES = true;
+const DEFAULT_READ_COALESCE_PAGES = 4;
 
 function parseSeed(raw) {
   const text = String(raw || "").trim();
@@ -37,12 +41,25 @@ function parseSeed(raw) {
   }
 }
 
+function parseBool(raw, flagName) {
+  const value = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`\`${flagName}\` must be a boolean (true/false)`);
+}
+
 function parseArgs(argv) {
   const out = {
     count: DEFAULT_COUNT,
     valueSizes: DEFAULT_VALUE_SIZES,
     profile: DEFAULT_PROFILE,
     seed: DEFAULT_SEED,
+    cacheMb: DEFAULT_CACHE_MB,
+    overflowThresholdBytes: DEFAULT_OVERFLOW_THRESHOLD_BYTES,
+    pinInternalPages: DEFAULT_PIN_INTERNAL_PAGES,
+    readCoalescePages: DEFAULT_READ_COALESCE_PAGES,
     includeColdRead: false,
     json: false,
     progress: false,
@@ -93,8 +110,8 @@ function parseArgs(argv) {
 
     if (arg === "--profile") {
       const next = String(argv[i + 1] || "").trim();
-      if (!["basic", "mixed", "all"].includes(next)) {
-        throw new Error("`--profile` must be one of: basic, mixed, all");
+      if (!["basic", "mixed", "range", "all"].includes(next)) {
+        throw new Error("`--profile` must be one of: basic, mixed, range, all");
       }
       out.profile = next;
       i += 1;
@@ -107,6 +124,42 @@ function parseArgs(argv) {
         throw new Error("`--seed` requires a value");
       }
       out.seed = parseSeed(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--cache-mb") {
+      const next = Number(argv[i + 1]);
+      if (!Number.isFinite(next) || next <= 0) {
+        throw new Error("`--cache-mb` must be a positive number");
+      }
+      out.cacheMb = next;
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--overflow-threshold-bytes") {
+      const next = Number(argv[i + 1]);
+      if (!Number.isFinite(next) || next <= 0) {
+        throw new Error("`--overflow-threshold-bytes` must be a positive integer");
+      }
+      out.overflowThresholdBytes = Math.floor(next);
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--pin-internal-pages") {
+      out.pinInternalPages = parseBool(argv[i + 1], "--pin-internal-pages");
+      i += 1;
+      continue;
+    }
+
+    if (arg === "--read-coalesce-pages") {
+      const next = Number(argv[i + 1]);
+      if (!Number.isFinite(next) || next <= 0) {
+        throw new Error("`--read-coalesce-pages` must be a positive integer");
+      }
+      out.readCoalescePages = Math.floor(next);
       i += 1;
       continue;
     }
@@ -189,7 +242,13 @@ import init, {
   bench_opfs_random_read,
   bench_opfs_cold_sequential_read,
   bench_opfs_cold_random_read,
-  bench_opfs_mixed_scenario
+  bench_opfs_mixed_scenario,
+  bench_opfs_range_seq_window,
+  bench_opfs_range_random_window,
+  bench_set_cache_bytes,
+  bench_set_overflow_threshold_bytes,
+  bench_set_pin_internal_pages,
+  bench_set_read_coalesce_pages
 } from "/pkg/opfs_btree.js";
 
 const pendingRequests = [];
@@ -211,6 +270,10 @@ const mixedScenarios = [
   "mixed_random_50r_50w_with_updates",
   "mixed_random_60r_20w_20d"
 ];
+const rangeRuns = [
+  ["range_seq_window_64", bench_opfs_range_seq_window],
+  ["range_random_window_64", bench_opfs_range_random_window]
+];
 
 async function runRequest(payload) {
   const count = Number(payload?.count ?? 5000);
@@ -218,7 +281,16 @@ async function runRequest(payload) {
   const profile = String(payload?.profile ?? "basic");
   const seedRaw = String(payload?.seed ?? "${DEFAULT_SEED}");
   const includeColdRead = Boolean(payload?.includeColdRead ?? false);
+  const cacheMb = Number(payload?.cacheMb ?? ${DEFAULT_CACHE_MB});
+  const overflowThresholdBytes = Number(payload?.overflowThresholdBytes ?? ${DEFAULT_OVERFLOW_THRESHOLD_BYTES});
+  const pinInternalPages = Boolean(payload?.pinInternalPages ?? ${DEFAULT_PIN_INTERNAL_PAGES ? "true" : "false"});
+  const readCoalescePages = Number(payload?.readCoalescePages ?? ${DEFAULT_READ_COALESCE_PAGES});
   const seed = BigInt(seedRaw);
+  const cacheBytes = Math.max(1, Math.round(cacheMb * 1024 * 1024));
+  await bench_set_cache_bytes(cacheBytes);
+  await bench_set_overflow_threshold_bytes(overflowThresholdBytes);
+  bench_set_pin_internal_pages(pinInternalPages);
+  await bench_set_read_coalesce_pages(readCoalescePages);
 
   try {
     const out = [];
@@ -257,6 +329,25 @@ async function runRequest(payload) {
             phase_times_ms: result.phase_times_ms || []
           });
           self.postMessage({ type: "result", result });
+        }
+      }
+
+      if (profile === "range" || profile === "all") {
+        for (const [name, fn] of rangeRuns) {
+          const startedAt = performance.now();
+          self.postMessage({ type: "progress", event: "start", operation: name, value_size: valueSize });
+          const result = await fn(count, valueSize);
+          const withName = { ...result, operation: result.operation || name };
+          out.push(withName);
+          self.postMessage({
+            type: "progress",
+            event: "end",
+            operation: withName.operation,
+            value_size: valueSize,
+            elapsed_ms: performance.now() - startedAt,
+            phase_times_ms: withName.phase_times_ms || []
+          });
+          self.postMessage({ type: "result", result: withName });
         }
       }
 
@@ -317,7 +408,18 @@ self.onmessage = (e) => {
 `;
 }
 
-function createHtml(count, valueSizes, profile, seed, progress, includeColdRead) {
+function createHtml(
+  count,
+  valueSizes,
+  profile,
+  seed,
+  cacheMb,
+  overflowThresholdBytes,
+  pinInternalPages,
+  readCoalescePages,
+  progress,
+  includeColdRead,
+) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>opfs-btree wasm opfs bench</title>
@@ -372,6 +474,10 @@ worker.postMessage({
   valueSizes: [${valueSizes.join(",")}],
   profile: "${profile}",
   seed: "${seed}",
+  cacheMb: ${cacheMb},
+  overflowThresholdBytes: ${overflowThresholdBytes},
+  pinInternalPages: ${pinInternalPages ? "true" : "false"},
+  readCoalescePages: ${readCoalescePages},
   includeColdRead: ${includeColdRead ? "true" : "false"}
 });
 </script>`;
@@ -389,6 +495,10 @@ async function run() {
     args.valueSizes,
     args.profile,
     args.seed,
+    args.cacheMb,
+    args.overflowThresholdBytes,
+    args.pinInternalPages,
+    args.readCoalescePages,
     args.progress,
     args.includeColdRead,
   );

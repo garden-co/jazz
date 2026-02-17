@@ -1,0 +1,89 @@
+---
+title: Reading Data
+description: Query APIs across one-shot reads, subscriptions, reactive hooks, and local-first query semantics.
+---
+
+## One-shot Queries
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-oneshot-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Subscriptions
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-subscriptions-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Filters, Sorting, and Pagination
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-query-shaping-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-query-shaping-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Resolving References via Includes
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Settled Tier Semantics and Local-First Behavior
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="examples/todo-client-localfirst-ts/src/docs-snippets.ts"'>
+      ../examples/todo-client-localfirst-ts/src/docs-snippets.ts#reading-settled-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="examples/todo-server-rs/src/docs_snippets.rs"'>
+      ../examples/todo-server-rs/src/docs_snippets.rs#reading-settled-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Reactive Hooks (React)
+
+<Callout title="React-only section">
+  Reactive hook APIs currently map to React usage. Rust does not have a direct hooks equivalent.
+</Callout>
+
+<include cwd lang="tsx" meta='title="examples/todo-client-localfirst-react/src/TodoList.tsx"'>
+  ../examples/todo-client-localfirst-react/src/TodoList.tsx#reading-reactive-hooks-react
+</include>
