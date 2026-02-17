@@ -1,6 +1,11 @@
 import { createDb, type DbConfig, type Db } from "jazz-ts";
 import { app, Todo } from "../schema/app.js";
 
+function readEnvAppId(): string | undefined {
+  return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+    ?.JAZZ_APP_ID;
+}
+
 function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
   const todoIds = new Set(todos.map((todo) => todo.id));
   const childrenByParent = new Map<string, Todo[]>();
@@ -46,12 +51,14 @@ export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
+  // #region context-setup-ts-client
   const db = await createDb({
-    appId: "todo-client-example",
+    appId: readEnvAppId() ?? "todo-client-example",
     env: "dev",
     userBranch: "main",
     ...config,
   });
+  // #endregion context-setup-ts-client
 
   // Build DOM
   const h1 = document.createElement("h1");
