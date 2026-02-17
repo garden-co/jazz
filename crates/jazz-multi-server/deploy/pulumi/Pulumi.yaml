@@ -1,0 +1,6 @@
+name: jazz-multi-server-cloud2
+runtime:
+  name: nodejs
+  options:
+    typescript: true
+description: MVP single-instance cloud2 deployment for jazz-multi-server (ECS + ALB + Route53)

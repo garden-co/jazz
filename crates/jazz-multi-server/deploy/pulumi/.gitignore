@@ -1,0 +1,7 @@
+node_modules/
+bin/
+.pulumi/
+Pulumi.*.yaml
+!Pulumi.yaml
+!Pulumi.cloud2.yaml
+.deploy-secrets-*.env
