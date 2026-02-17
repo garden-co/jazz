@@ -5,13 +5,32 @@ export * from "./PasskeyAuth.js";
 export * from "./usePasskeyAuth.js";
 export * from "./PasskeyAuthBasicUI.js";
 
-export function clearUserCredentials() {
+export async function clearUserCredentials() {
   const kvStore = KvStoreContext.getInstance().getStorage();
 
-  // TODO: Migrate the Auth methods to use the same storage key/interface
-  return Promise.all([
-    kvStore.delete("demo-auth-logged-in-secret"),
-    kvStore.delete("jazz-clerk-auth"),
-    kvStore.delete("jazz-logged-in-secret"),
-  ]);
+  // Read credentials to find the account ID used as the session storage key
+  const credentialKeys = [
+    "jazz-logged-in-secret",
+    "jazz-clerk-auth",
+    "demo-auth-logged-in-secret",
+  ];
+
+  const deletions: Promise<void>[] = [];
+
+  for (const key of credentialKeys) {
+    const value = await kvStore.get(key);
+    if (value) {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed.accountID) {
+          deletions.push(kvStore.delete(parsed.accountID));
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    }
+    deletions.push(kvStore.delete(key));
+  }
+
+  await Promise.all(deletions);
 }
