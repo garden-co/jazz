@@ -459,16 +459,21 @@ export function useGameEngine(
         s.y += (rp.positionY - s.y) * lerpT;
 
         const rpSX = wrapScreenX(s.x, cameraX);
-        if (rpSX < -60 || rpSX > w + 60) continue;
+        const rpOnScreen = rpSX >= -60 && rpSX <= w + 60;
 
         if (rp.mode === "walking") {
-          drawAstronaut(ctx, rpSX, groundScreenY, rp.color, rp.name);
+          if (rpOnScreen) {
+            drawAstronaut(ctx, rpSX, groundScreenY, rp.color, rp.name);
+          }
+          // Lander is at the landing site, not the astronaut — cull independently
           if (rp.landerX != null) {
             const rpLanderSX = wrapScreenX(rp.landerX, cameraX);
             if (rpLanderSX > -40 && rpLanderSX < w + 40) {
               drawLander(ctx, rpLanderSX, groundScreenY, false, rp.color);
             }
           }
+        } else if (!rpOnScreen) {
+          continue;
         } else if (rp.mode === "descending") {
           const rpSY = s.y - cameraY;
           if (rpSY > -60 && rpSY < h + 60) {
