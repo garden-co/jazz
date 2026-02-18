@@ -960,7 +960,7 @@ export class SyncManager {
       }
     }
 
-    peer.trackLoadRequestComplete(coValue);
+    peer.trackLoadRequestComplete(coValue, "known");
   }
 
   handleReconcile(msg: ReconcileMessage, peer: PeerState): void {
@@ -1337,7 +1337,7 @@ export class SyncManager {
       }
     }
 
-    peer?.trackLoadRequestComplete(coValue);
+    peer?.trackLoadRequestComplete(coValue, "content");
 
     for (const peer of this.getPeers(coValue.id)) {
       /**

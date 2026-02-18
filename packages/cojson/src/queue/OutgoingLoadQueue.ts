@@ -23,6 +23,7 @@ interface InFlightLoad {
  * - "immediate": bypasses the queue entirely, executes immediately
  */
 export type LoadMode = "low-priority" | "immediate" | "high-priority";
+export type LoadCompletionSource = "content" | "known";
 
 /**
  * A queue that manages outgoing load requests with throttling.
@@ -174,12 +175,15 @@ export class OutgoingLoadQueue {
    * Track that a load request has completed.
    * Triggers processing of pending requests.
    */
-  trackComplete(coValue: CoValueCore): void {
+  trackComplete(
+    coValue: CoValueCore,
+    source: LoadCompletionSource = "content",
+  ): void {
     if (!this.inFlightLoads.has(coValue.id)) {
       return;
     }
 
-    if (coValue.isStreaming()) {
+    if (source === "content" && coValue.isStreaming()) {
       // wait for the next chunk
       return;
     }

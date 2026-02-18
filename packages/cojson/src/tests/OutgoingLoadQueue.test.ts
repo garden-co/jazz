@@ -501,7 +501,7 @@ describe("OutgoingLoadQueue", () => {
       expect(secondCallbackCount).toBe(1);
     });
 
-    test("should not complete if CoValue is streaming", () => {
+    test("should not complete if CoValue is streaming for content updates", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -524,7 +524,7 @@ describe("OutgoingLoadQueue", () => {
       expect(callback2Called).toBe(false);
 
       // trackComplete should not complete because map1 is streaming
-      queue.trackComplete(map1.core);
+      queue.trackComplete(map1.core, "content");
 
       // Should still be in-flight and pending should not be processed
       expect(queue.inFlightCount).toBe(1);
@@ -535,7 +535,35 @@ describe("OutgoingLoadQueue", () => {
       vi.spyOn(map1.core, "isStreaming").mockReturnValue(false);
 
       // Now trackComplete should work
-      queue.trackComplete(map1.core);
+      queue.trackComplete(map1.core, "content");
+
+      expect(queue.inFlightCount).toBe(1); // map2 is now in-flight
+      expect(callback2Called).toBe(true);
+      expect(queue.pendingCount).toBe(0);
+    });
+
+    test("should complete if CoValue is streaming for known-state updates", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+
+      vi.spyOn(map1.core, "isStreaming").mockReturnValue(true);
+
+      let callback2Called = false;
+
+      queue.enqueue(map1.core, () => {});
+      queue.enqueue(map2.core, () => {
+        callback2Called = true;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(callback2Called).toBe(false);
+
+      queue.trackComplete(map1.core, "known");
 
       expect(queue.inFlightCount).toBe(1); // map2 is now in-flight
       expect(callback2Called).toBe(true);

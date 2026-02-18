@@ -3,7 +3,11 @@ import { CoValueCore } from "./exports.js";
 import { RawCoID } from "./ids.js";
 import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
-import { type LoadMode, OutgoingLoadQueue } from "./queue/OutgoingLoadQueue.js";
+import {
+  type LoadCompletionSource,
+  type LoadMode,
+  OutgoingLoadQueue,
+} from "./queue/OutgoingLoadQueue.js";
 import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
@@ -78,8 +82,11 @@ export class PeerState {
     this.loadQueue.trackUpdate(coValue);
   }
 
-  trackLoadRequestComplete(coValue: CoValueCore) {
-    this.loadQueue.trackComplete(coValue);
+  trackLoadRequestComplete(
+    coValue: CoValueCore,
+    source: LoadCompletionSource = "content",
+  ) {
+    this.loadQueue.trackComplete(coValue, source);
   }
 
   trackToldKnownState(id: RawCoID) {
