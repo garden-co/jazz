@@ -961,6 +961,81 @@ describe("concurrent load", () => {
     expect(onlyKnownMap.loadingState).toBe("onlyKnownState");
   });
 
+  /**
+   * This test covers the case where the client is streaming a value from storage and since the value is already on the server
+   * the server sends only a KNOWN message.
+   *
+   * Without a specialized logic the value results inStreaming and the "load" would be considered in-flight indefinitely.
+   */
+  test("should process queued loads when KNOWN arrives while first CoValue is streaming from storage", async () => {
+    setMaxInFlightLoadsPerPeer(1);
+
+    const client = setupTestNode({
+      connected: true,
+    });
+    const { storage } = await client.addAsyncStorage({ ourName: "client" });
+
+    const group = jazzCloud.node.createGroup();
+    const streamingMap = group.createMap();
+    fillCoMapWithLargeData(streamingMap);
+
+    const queuedMap = group.createMap();
+    queuedMap.set("key", "value", "trusting");
+
+    const mapOnClient = await loadCoValueOrFail(client.node, streamingMap.id);
+    await mapOnClient.core.waitForFullStreaming();
+
+    await client.restart();
+    client.addStorage({ storage });
+    client.connectToSyncServer();
+
+    SyncMessagesLog.clear();
+
+    const originalLoad = storage.load.bind(storage);
+    let firstChunk = true;
+    const pausedOps: (() => void)[] = [];
+
+    vi.spyOn(storage, "load").mockImplementation(async (id, callback, done) => {
+      if (id !== streamingMap.id) {
+        return originalLoad(id, callback, done);
+      }
+
+      return originalLoad(
+        id,
+        (chunk) => {
+          if (firstChunk) {
+            firstChunk = false;
+            callback(chunk);
+          } else {
+            pausedOps.push(() => callback(chunk));
+          }
+        },
+        (found) => {
+          pausedOps.push(() => done(found));
+        },
+      );
+    });
+
+    const streamingMapOnClientPromise = client.node.loadCoValueCore(
+      streamingMap.id,
+    );
+
+    await waitFor(() => {
+      expect(firstChunk).toBe(false);
+    });
+
+    const queuedMapOnClient = await client.node.loadCoValueCore(queuedMap.id);
+
+    expect(queuedMapOnClient.isAvailable()).toBe(true);
+
+    for (const op of pausedOps) {
+      op();
+    }
+
+    const streamingMapOnClient = await streamingMapOnClientPromise;
+    expect(streamingMapOnClient.isStreaming()).toBe(false);
+  });
+
   test("should process queued loads when CoValue instance changes while in-flight", async () => {
     setMaxInFlightLoadsPerPeer(1);
 
