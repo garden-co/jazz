@@ -326,72 +326,59 @@ The Nitro boundary has *two* hops for Rust: Rust → (extern "C") → C++ → (J
 
 ---
 
-## Q2: What Your Fork Needs
+## Q2: What Your Fork Needs — Status After `6e222071`
 
-After reading the generated code thoroughly, here's my assessment:
+All 6 originally-identified gaps have been addressed in commit `6e222071` on `feat/rust`. Here's the updated assessment:
 
-### What's solid
+### What was already solid (unchanged)
 - **Type codegen** — comprehensive. All Nitro types map to Rust correctly.
 - **FFI shim generation** — `#[no_mangle] pub unsafe extern "C" fn` pattern is correct.
 - **C++ bridge header** — `HybridTSpecRust.hpp` with inline method overrides calling extern "C" functions works.
-- **Callback wrapping** — `Func_*` structs with fn_ptr + userdata is the right pattern.
-- **Struct/Enum/Variant** generation — all look correct.
+- **Struct/Enum/Variant** generation — all correct.
 - **Test coverage** in Nitrogen — rust-bridged-type.test.ts, rust-hybrid-object.test.ts, etc.
 
-### What's missing or needs work
+### What was fixed in `6e222071`
 
-1. **Promise is a phantom stub**
+1. **Build system** — DONE
+   - **Android**: CMake extension (`createCMakeExtension.ts`) now maps `ANDROID_ABI` to Rust target triple, invokes `cargo build --release --target`, copies the `.a`, and links it via `add_library(IMPORTED)`.
+   - **iOS**: Podspec extension (`createPodspecRubyExtension.ts`) adds a `script_phase` that detects `PLATFORM_NAME`/`ARCHS`, maps to Rust target (including `aarch64-apple-ios-sim` for simulator), runs `cargo build`, and vendors the resulting `.a`.
+
+2. **Promise** — DONE (elegant approach)
+   Rust trait methods that return `Promise<T>` in the TS spec just return `T` synchronously in the Rust trait. The C++ bridge wraps the call in `Promise<T>::async([=]() { return rust_fn(); })`. Example:
+   - TS spec: `calculateFibonacciAsync(value: number): Promise<bigint>`
+   - Rust trait: `fn calculate_fibonacci_async(&mut self, value: f64) -> i64`
+   - C++ bridge: `Promise<int64_t>::async([=]() { return ..._calculate_fibonacci_async(_rustPtr, value); })`
+   
+   No Promise type needed on the Rust side at all. For Jazz: `query()` returns `Promise<ArrayBuffer>` → Rust just returns a `NitroBuffer`.
+
+3. **Callback lifecycle** — DONE
+   `Func_*` structs now have 3 fields: `fn_ptr`, `userdata`, `destroy_fn`. The C++ side creates a trampoline that casts userdata back to `std::function`. The `destroy_fn` is called on `Drop`, preventing leaks. C++ owns the `std::function` and handles thread dispatch via CallInvoker as usual — Rust doesn't need to know about thread safety.
+
+4. **ArrayBuffer zero-copy** — DONE
+   New `NitroBuffer` type (`#[repr(C)]` struct: `data: *mut u8, len: usize, handle: *mut c_void, release_fn`):
+   - **C++ → Rust**: C++ extracts `data()` and `size()` from `shared_ptr<ArrayBuffer>`, boxes the shared_ptr as the handle. Rust gets a `NitroBuffer` and reads `as_slice()` — zero-copy.
+   - **Rust → C++**: Rust boxes the `NitroBuffer`, C++ reads data/len and creates `ArrayBuffer::wrap()` with a destructor that calls `release_fn` — zero-copy.
+   - `NitroBuffer::from_vec()` lets Rust create buffers from owned data.
+
+5. **Factory function docs** — DONE
+   Generated trait now includes a doc comment with the exact factory function signature:
    ```rust
-   pub mod Promise { pub struct Promise<T>(pub std::marker::PhantomData<T>); }
+   /// #[no_mangle]
+   /// pub extern "C" fn create_HybridFooSpec() -> *mut std::ffi::c_void {
+   ///     let obj: Box<dyn HybridFooSpec> = Box::new(MyFoo::new());
+   ///     Box::into_raw(Box::new(obj)) as *mut std::ffi::c_void
+   /// }
    ```
-   This doesn't work. The C++ `shared_ptr<Promise<T>>` crosses as `void*` into Rust, where it becomes `Promise<T>` — but there's no way for Rust to resolve or await it. Need:
-   - A real `RustPromise<T>` type that wraps the C++ Promise pointer
-   - An FFI function to resolve/reject from Rust
-   - An FFI function to `.then()` / await from Rust
-   - For Jazz: `query()` returns `Promise<string>` or `Promise<ArrayBuffer>`, so this is needed.
 
-2. **Callback invocation across threads**
-   The generated `Func_*` structs wrap a C fn pointer + userdata, and mark them `Send + Sync`. But Nitro callbacks (JS functions) can **only be called on the JS thread**. The C++ side handles thread-switching via `CallInvoker`, but the Rust side doesn't know about this. For Jazz:
-   - `NitroScheduler` needs to call a JS callback from any thread → needs `CallInvoker` integration
-   - `NitroSyncSender` needs to invoke a callback when sync messages are ready
-   - The fork should either: (a) document that Rust must dispatch to JS thread before calling callbacks, or (b) wrap callbacks in a thread-safe invoker on the C++ side before passing to Rust.
+6. **memorySize** — DONE
+   Trait includes `fn memory_size(&self) -> usize { 0 }` (default impl). C++ bridge calls it from `getExternalMemorySize()`. Jazz can override to report RuntimeCore's storage/cache size.
 
-3. **Build system integration (the biggest gap)**
-   - No `cargo` invocation in the iOS or Android build pipeline
-   - The generated `Cargo.toml` creates a `staticlib`, but nothing links it
-   - iOS needs: `cargo build --target aarch64-apple-ios` → `.a` → linked in Xcode/CocoaPods
-   - Android needs: `cargo ndk --target aarch64-linux-android` → `.so` or `.a` → linked in CMakeLists.txt
-   - This is non-trivial. Jazz1's uniffi-bindgen-react-native handles this; your fork doesn't yet.
+### Remaining concerns (minor)
 
-4. **Factory function pattern is undocumented**
-   The registration code expects:
-   ```rust
-   #[no_mangle]
-   pub extern "C" fn create_HybridGrooveRuntimeSpec() -> *mut c_void
-   ```
-   This is the user's responsibility, but there's no documentation, example, or even a comment in the generated trait file pointing to this requirement.
-
-5. **Memory management for complex types**
-   Every non-primitive crosses as `void*` via `Box::into_raw` / `Box::from_raw`. This means:
-   - Each complex parameter allocates on both sides (C++ `new` + Rust `Box`)
-   - Ownership transfer is implicit and easy to get wrong
-   - For ArrayBuffer specifically: the fork converts to `Vec<u8>` which **copies** the data. It should pass the raw pointer + length instead, to enable zero-copy. The C++ `ArrayBuffer::wrap()` API supports this.
-
-6. **No `memorySize` reporting**
-   Nitro HybridObjects report `getExternalMemorySize()` to help the JS GC understand how much native memory is held. The generated Rust trait doesn't include this. For Jazz, the RuntimeCore holds significant native memory (storage, caches, subscriptions), so GC pressure hints matter on mobile.
-
-7. **Error propagation is string-only**
-   Rust errors become `*const c_char` → C++ `std::runtime_error`. Works, but loses error types. For Jazz this is probably fine.
-
-### Priority order for Jazz specifically
-
-For groove-nitro to work, the fork needs (in order):
-1. **Build system** — cargo invocation for iOS/Android targets, linking into CMake/Xcode
-2. **Promise** — real implementation, not a phantom. Jazz needs `query()` → `Promise<ArrayBuffer>`
-3. **Thread-safe callbacks** — CallInvoker integration for scheduler/sync sender
-4. **ArrayBuffer zero-copy** — pass pointer+len not `Vec<u8>` copy
-5. **Factory function docs/example** — so the groove-nitro implementer knows what to write
-6. **memorySize** — nice to have, not blocking
+- **Error propagation** is still string-only (`*const c_char` → `std::runtime_error`). Fine for Jazz.
+- **Promise as a parameter** (not return type) still uses the phantom stub. If a Rust method receives a `Promise<T>` from JS (e.g., `awaitAndGetPromise`), the Rust side gets the unwrapped `T` value. This works for the common case but doesn't support awaiting arbitrary JS promises from Rust. Not needed for Jazz.
+- **Thread safety of callbacks**: The C++ trampoline and `std::function` capture handle thread dispatch, but Rust calling the callback still invokes the trampoline synchronously. For Jazz's `NitroScheduler`, the callback should be safe to call from any thread since the C++ `std::function` would use CallInvoker internally — but this is untested.
+- **Build system is untested** on actual iOS/Android builds. The CMake and Podspec logic looks correct but hasn't been validated end-to-end with a real React Native app.
 
 ---
 
