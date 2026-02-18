@@ -36,12 +36,7 @@ import {
   getDependenciesFromGroupRawTransactions,
   getDependenciesFromHeader,
 } from "./utils.js";
-import {
-  CoValueHeader,
-  Transaction,
-  Uniqueness,
-  VerifiedState,
-} from "./verifiedState.js";
+import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
 import {
   MergeCommit,
   BranchPointerCommit,

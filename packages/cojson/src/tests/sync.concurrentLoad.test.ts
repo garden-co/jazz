@@ -865,6 +865,62 @@ describe("concurrent load", () => {
     expect(groupOnClient.core.isAvailable()).toBe(true);
   });
 
+  test("should keep onlyKnownState while peer load is pending and KNOWN replies arrive", async () => {
+    const client = setupTestNode({
+      connected: false,
+    });
+    const { storage } = client.addStorage({ ourName: "client" });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value", "trusting");
+
+    const initialConnection = client.connectToSyncServer();
+    await client.node.syncManager.waitForAllCoValuesSync();
+    initialConnection.peerState.gracefulShutdown();
+
+    await client.restart();
+    client.addStorage({ storage });
+
+    const onlyKnownMap = client.node.getCoValue(map.id);
+    await new Promise<void>((resolve) =>
+      onlyKnownMap.getKnownStateFromStorage(() => resolve()),
+    );
+    expect(onlyKnownMap.loadingState).toBe("onlyKnownState");
+
+    // Force explicit loads to use peers (not local full-content storage).
+    vi.spyOn(storage, "load").mockImplementation(
+      async (_id: unknown, _cb: unknown, done: (result: boolean) => void) =>
+        done(false),
+    );
+
+    const { peerState } = client.connectToSyncServer({
+      skipReconciliation: true,
+    });
+
+    SyncMessagesLog.clear();
+
+    onlyKnownMap.load([peerState]);
+
+    await waitFor(() => {
+      const messages = SyncMessagesLog.getMessages({
+        Group: client.node.getCoValue(group.id),
+        Map: onlyKnownMap,
+      });
+
+      expect(messages).toContain(
+        "client -> server | LOAD Map sessions: header/1",
+      );
+      expect(messages).toContain(
+        "server -> client | KNOWN Map sessions: header/1",
+      );
+      return true;
+    });
+
+    expect(onlyKnownMap.getLoadingStateForPeer(peerState.id)).toBe("pending");
+    expect(onlyKnownMap.loadingState).toBe("onlyKnownState");
+  });
+
   test("should process queued loads when CoValue instance changes while in-flight", async () => {
     setMaxInFlightLoadsPerPeer(1);
 
