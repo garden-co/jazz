@@ -2,12 +2,12 @@
 //!
 //! Provides `TokioRuntime<S>` - a thin wrapper around
 //! `RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>`
-//! that handles async scheduling via a dedicated tick thread.
+//! that handles async scheduling via `tokio::spawn`.
 //!
 //! # Architecture
 //!
 //! - `S: Storage + Send + 'static` provides synchronous storage
-//! - `TokioScheduler<S>` implements `Scheduler` using a dedicated OS thread
+//! - `TokioScheduler<S>` implements `Scheduler` using tokio::spawn for batched ticks
 //! - `CallbackSyncSender` implements `SyncSender` with a user-provided callback
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
@@ -35,64 +35,31 @@ use groove::sync_manager::{ClientId, InboxEntry, OutboxEntry, PersistenceTier, S
 /// Type alias for the concrete RuntimeCore used by TokioRuntime.
 type TokioCoreType<S> = RuntimeCore<S, TokioScheduler<S>, CallbackSyncSender>;
 
-/// Scheduler implementation using a dedicated OS thread.
+/// Scheduler implementation for Tokio.
 ///
-/// A single background thread parks waiting for a channel signal. When
-/// `schedule_batched_tick()` is called it sends a wake-up; the thread
-/// acquires the core Mutex, runs `batched_tick()`, then parks again.
-///
-/// This avoids both:
-/// - blocking tokio worker threads (`tokio::spawn` + `std::sync::Mutex`)
-/// - thread-pool scheduling overhead (`spawn_blocking`)
+/// Spawns a tokio task to call `batched_tick()` on the RuntimeCore.
+/// Debounced: only one task is scheduled at a time.
 pub struct TokioScheduler<S: Storage + Send + 'static> {
-    /// Channel to wake the dedicated tick thread.
-    notify: std::sync::mpsc::Sender<()>,
-    /// Flag for checking if a tick is in flight (used by flush).
+    /// Debounce flag for scheduled ticks.
     scheduled: Arc<AtomicBool>,
-    /// Receiver held until `set_core_ref` spawns the thread.
-    receiver: Option<std::sync::mpsc::Receiver<()>>,
-    _phantom: std::marker::PhantomData<S>,
+    /// Weak reference back to RuntimeCore for spawned tasks.
+    core_ref: Weak<Mutex<TokioCoreType<S>>>,
 }
 
 impl<S: Storage + Send + 'static> TokioScheduler<S> {
     /// Create a new TokioScheduler.
     ///
-    /// The dedicated thread is spawned later in `set_core_ref` once
-    /// the RuntimeCore reference is available.
+    /// Note: `core_ref` starts as empty and is set after RuntimeCore is created.
     fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
         Self {
-            notify: tx,
             scheduled: Arc::new(AtomicBool::new(false)),
-            receiver: Some(rx),
-            _phantom: std::marker::PhantomData,
+            core_ref: Weak::new(),
         }
     }
 
-    /// Set the core reference and spawn the dedicated tick thread.
+    /// Set the core reference (called after RuntimeCore is wrapped in Arc<Mutex>).
     fn set_core_ref(&mut self, core_ref: Weak<Mutex<TokioCoreType<S>>>) {
-        if let Some(rx) = self.receiver.take() {
-            let scheduled = self.scheduled.clone();
-            std::thread::Builder::new()
-                .name("groove-tick".into())
-                .spawn(move || {
-                    // Park until woken. Exits when the Sender is dropped
-                    // (i.e. when the TokioScheduler/RuntimeCore is dropped).
-                    while rx.recv().is_ok() {
-                        // Drain any extra notifications (debounce)
-                        while rx.try_recv().is_ok() {}
-
-                        if let Some(core_arc) = core_ref.upgrade()
-                            && let Ok(mut core) = core_arc.lock()
-                        {
-                            core.batched_tick();
-                        }
-
-                        scheduled.store(false, Ordering::SeqCst);
-                    }
-                })
-                .expect("failed to spawn groove-tick thread");
-        }
+        self.core_ref = core_ref;
     }
 
     /// Check if a batched_tick is currently scheduled.
@@ -103,10 +70,22 @@ impl<S: Storage + Send + 'static> TokioScheduler<S> {
 
 impl<S: Storage + Send + 'static> Scheduler for TokioScheduler<S> {
     fn schedule_batched_tick(&self) {
+        // Debounce: only schedule if not already scheduled
         if !self.scheduled.swap(true, Ordering::SeqCst) {
-            // Wake the dedicated thread — non-blocking, can't fail
-            // unless the thread has exited (receiver dropped).
-            let _ = self.notify.send(());
+            let core_ref = self.core_ref.clone();
+            let flag = self.scheduled.clone();
+
+            tokio::spawn(async move {
+                // Call batched_tick on the core
+                if let Some(core_arc) = core_ref.upgrade()
+                    && let Ok(mut core) = core_arc.lock()
+                {
+                    core.batched_tick();
+                }
+
+                // Clear the scheduled flag AFTER tick completes
+                flag.store(false, Ordering::SeqCst);
+            });
         }
     }
 }
@@ -200,7 +179,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ///
     /// # Arguments
     /// - `schema_manager` - The SchemaManager to wrap
-    /// - `storage` - The storage backend (e.g., MemoryStorage, SurrealKvStorage)
+    /// - `storage` - The storage backend (e.g., MemoryStorage, BfTreeStorage)
     /// - `sync_callback` - Called when sync messages need to be sent
     pub fn new<F>(schema_manager: SchemaManager, storage: S, sync_callback: F) -> Self
     where
