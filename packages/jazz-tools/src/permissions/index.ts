@@ -25,6 +25,8 @@ type WhereFor<QB> = QB extends { where(input: infer W): unknown } ? W : never;
 
 type PolicyAction = "read" | "insert" | "update" | "delete";
 
+const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
+
 interface SessionRefValue {
   readonly __jazzPermissionKind: "session-ref";
   readonly path: string[];
@@ -294,33 +296,41 @@ function resolveWhereInput(input: unknown): Condition {
     return input;
   }
   if (isPlainObject(input)) {
-    return whereObjectToCondition(input);
+    return whereObjectToCondition(input, { allowRowRefs: false });
   }
   throw new Error("Unsupported permission condition input.");
 }
 
-function whereObjectToCondition(where: Record<string, unknown>): Condition {
+function whereObjectToCondition(
+  where: Record<string, unknown>,
+  options: { allowRowRefs: boolean },
+): PolicyExpr {
   const exprs: PolicyExpr[] = [];
   for (const [column, raw] of Object.entries(where)) {
     if (raw === undefined) {
       continue;
     }
-    exprs.push(...columnFilterToExprs(column, raw));
+    exprs.push(...columnFilterToExprs(column, raw, options));
   }
   return andExpr(exprs);
 }
 
-function columnFilterToExprs(column: string, raw: unknown): PolicyExpr[] {
+function columnFilterToExprs(
+  column: string,
+  raw: unknown,
+  options: { allowRowRefs: boolean },
+): PolicyExpr[] {
   if (raw === null) {
     return [{ type: "IsNull", column }];
   }
   if (isSessionRefValue(raw)) {
-    return [cmpExpr(column, "Eq", raw)];
+    return [cmpExpr(column, "Eq", raw, options)];
   }
   if (isRowRefValue(raw)) {
-    throw new Error(
-      `Correlated row references in exists(...) are not yet supported ("${column}").`,
-    );
+    if (!options.allowRowRefs) {
+      throw new Error("Row references are only valid inside exists() clauses.");
+    }
+    return [cmpExpr(column, "Eq", raw, options)];
   }
   if (isPlainObject(raw)) {
     const exprs: PolicyExpr[] = [];
@@ -333,27 +343,27 @@ function columnFilterToExprs(column: string, raw: unknown): PolicyExpr[] {
           if (value === null) {
             exprs.push({ type: "IsNull", column });
           } else {
-            exprs.push(cmpExpr(column, "Eq", value));
+            exprs.push(cmpExpr(column, "Eq", value, options));
           }
           break;
         case "ne":
           if (value === null) {
             exprs.push({ type: "IsNotNull", column });
           } else {
-            exprs.push(cmpExpr(column, "Ne", value));
+            exprs.push(cmpExpr(column, "Ne", value, options));
           }
           break;
         case "gt":
-          exprs.push(cmpExpr(column, "Gt", value));
+          exprs.push(cmpExpr(column, "Gt", value, options));
           break;
         case "gte":
-          exprs.push(cmpExpr(column, "Ge", value));
+          exprs.push(cmpExpr(column, "Ge", value, options));
           break;
         case "lt":
-          exprs.push(cmpExpr(column, "Lt", value));
+          exprs.push(cmpExpr(column, "Lt", value, options));
           break;
         case "lte":
-          exprs.push(cmpExpr(column, "Le", value));
+          exprs.push(cmpExpr(column, "Le", value, options));
           break;
         case "isNull":
           if (typeof value !== "boolean") {
@@ -372,24 +382,35 @@ function columnFilterToExprs(column: string, raw: unknown): PolicyExpr[] {
     }
     return exprs.length === 0 ? [{ type: "True" }] : exprs;
   }
-  return [cmpExpr(column, "Eq", raw)];
+  return [cmpExpr(column, "Eq", raw, options)];
 }
 
-function cmpExpr(column: string, op: PolicyCmpOp, value: unknown): PolicyExpr {
+function cmpExpr(
+  column: string,
+  op: PolicyCmpOp,
+  value: unknown,
+  options: { allowRowRefs: boolean },
+): PolicyExpr {
   return {
     type: "Cmp",
     column,
     op,
-    value: toPolicyValue(value),
+    value: toPolicyValue(value, options),
   };
 }
 
-function toPolicyValue(value: unknown): PolicyValue {
+function toPolicyValue(value: unknown, options: { allowRowRefs: boolean }): PolicyValue {
   if (isSessionRefValue(value)) {
     return { type: "SessionRef", path: value.path };
   }
   if (isRowRefValue(value)) {
-    throw new Error("Row references are only valid inside exists() clauses.");
+    if (!options.allowRowRefs) {
+      throw new Error("Row references are only valid inside exists() clauses.");
+    }
+    return {
+      type: "SessionRef",
+      path: [OUTER_ROW_SESSION_PREFIX, value.column],
+    };
   }
   return { type: "Literal", value };
 }
@@ -515,7 +536,7 @@ function compileCondition(condition: Condition | undefined): PolicyExpr | undefi
     return condition;
   }
   if (isExistsCondition(condition)) {
-    const compiledCondition = compileCondition(resolveWhereInput(condition.where));
+    const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
     if (!compiledCondition) {
       throw new Error(
         `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
