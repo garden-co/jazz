@@ -52,6 +52,8 @@ function policyExprToSql(expr: PolicyExpr): string {
       return `${expr.column} IS NOT NULL`;
     case "In":
       return `${expr.column} IN @session.${expr.session_path.join(".")}`;
+    case "Exists":
+      return `EXISTS (SELECT FROM ${expr.table} WHERE ${policyExprToSql(expr.condition)})`;
     case "Inherits":
       return `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`;
     case "And":

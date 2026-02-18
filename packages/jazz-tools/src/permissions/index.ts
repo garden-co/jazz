@@ -81,6 +81,7 @@ interface ExistsBuilder<WhereInput> {
 interface ActionBuilder<WhereInput, Row> {
   where(
     input:
+      | Condition
       | PermissionWhereInput<WhereInput>
       | ((row: RowContext<Row>) => unknown)
       | ConditionBuilder,
@@ -128,6 +129,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
   where(
     input:
+      | Condition
       | PermissionWhereInput<WhereInput>
       | ((row: RowContext<Row>) => unknown)
       | ConditionBuilder,
@@ -143,6 +145,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
   whereOld(
     input:
+      | Condition
       | PermissionWhereInput<WhereInput>
       | ((row: RowContext<Row>) => unknown)
       | ConditionBuilder,
@@ -153,6 +156,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
   whereNew(
     input:
+      | Condition
       | PermissionWhereInput<WhereInput>
       | ((row: RowContext<Row>) => unknown)
       | ConditionBuilder,
@@ -315,7 +319,7 @@ function columnFilterToExprs(column: string, raw: unknown): PolicyExpr[] {
   }
   if (isRowRefValue(raw)) {
     throw new Error(
-      `Row references (for column "${column}") are only valid inside exists() clauses, which are not yet compiled.`,
+      `Correlated row references in exists(...) are not yet supported ("${column}").`,
     );
   }
   if (isPlainObject(raw)) {
@@ -511,9 +515,17 @@ function compileCondition(condition: Condition | undefined): PolicyExpr | undefi
     return condition;
   }
   if (isExistsCondition(condition)) {
-    throw new Error(
-      `exists(...) clauses are not compiled yet for permissions.ts (table "${condition.table}").`,
-    );
+    const compiledCondition = compileCondition(resolveWhereInput(condition.where));
+    if (!compiledCondition) {
+      throw new Error(
+        `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
+      );
+    }
+    return {
+      type: "Exists",
+      table: condition.table,
+      condition: compiledCondition,
+    };
   }
   if (isCompoundCondition(condition)) {
     const compiledChildren = condition.conditions.map((child) => compileCondition(child));

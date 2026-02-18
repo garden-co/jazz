@@ -30,6 +30,10 @@
       "types": "./dist/permissions/index.d.ts",
       "default": "./dist/permissions/index.js"
     },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {

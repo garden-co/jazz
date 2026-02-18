@@ -171,7 +171,46 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("throws for exists clauses until compiler support lands", () => {
+  it("compiles non-correlated exists clauses", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where(
+        policy.todoShares.exists.where({
+          userId: session.userId,
+          canRead: true,
+        }),
+      ),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({
+      type: "Exists",
+      table: "todoShares",
+      condition: {
+        type: "And",
+        exprs: [
+          {
+            type: "Cmp",
+            column: "userId",
+            op: "Eq",
+            value: {
+              type: "SessionRef",
+              path: ["userId"],
+            },
+          },
+          {
+            type: "Cmp",
+            column: "canRead",
+            op: "Eq",
+            value: {
+              type: "Literal",
+              value: true,
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("throws for correlated row references inside exists clauses", () => {
     expect(() =>
       definePermissions(app, ({ policy, either, session }) => [
         policy.todos.allowRead.where((todo) =>
@@ -184,6 +223,6 @@ describe("permissions DSL", () => {
           ),
         ),
       ]),
-    ).toThrow(/exists\(\.\.\.\) clauses are not compiled yet/);
+    ).toThrow(/Correlated row references in exists/);
   });
 });
