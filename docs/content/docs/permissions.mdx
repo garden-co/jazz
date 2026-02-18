@@ -3,6 +3,25 @@ title: Permissions
 description: Fast RLS (ReBAC), simple policies, and INHERITS policies.
 ---
 
+## Schema Policy Syntax
+
+Define policies directly in your schema, in either TypeScript DSL or SQL.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/schema/current.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/schema/current.sql
+    </include>
+  </Tab>
+</Tabs>
+
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.allow()` / `USING (TRUE)`).
+
 ## Fast RLS (ReBAC)
 
 Jazz permissions use relationship-based policy evaluation with requester session context.
