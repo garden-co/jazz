@@ -143,6 +143,31 @@ export const wasmSchema: WasmSchema = {
           references: "projects",
         },
       ],
+      policies: {
+        select: {
+          using: {
+            type: "True",
+          },
+        },
+        insert: {
+          with_check: {
+            type: "True",
+          },
+        },
+        update: {
+          using: {
+            type: "True",
+          },
+          with_check: {
+            type: "True",
+          },
+        },
+        delete: {
+          using: {
+            type: "True",
+          },
+        },
+      },
     },
   },
 };
