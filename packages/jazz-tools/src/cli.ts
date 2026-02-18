@@ -10,7 +10,7 @@ import { register } from "tsx/esm/api";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
-import type { Lens } from "./schema.js";
+import type { Lens, Schema, TablePolicies } from "./schema.js";
 
 // Allow loading `.ts` schema files when invoked via `node dist/cli.js`.
 register();
@@ -47,6 +47,11 @@ async function loadSchemaModule(filePath: string): Promise<void> {
   await import(url);
 }
 
+async function loadSchema(filePath: string): Promise<Schema> {
+  await loadSchemaModule(filePath);
+  return getCollectedSchema();
+}
+
 async function loadMigrationModule(filePath: string): Promise<Lens | null> {
   resetCollectedState();
   // Add cache-busting query param since Node.js caches dynamic imports
@@ -55,20 +60,14 @@ async function loadMigrationModule(filePath: string): Promise<Lens | null> {
   return getCollectedMigration();
 }
 
-async function generateSqlForSchemaFile(tsFile: string): Promise<void> {
-  await loadSchemaModule(tsFile);
-  const schema = getCollectedSchema();
+async function generateSqlForSchemaFile(tsFile: string, schema: Schema): Promise<void> {
   const sql = schemaToSql(schema);
   const sqlFile = tsFile.replace(/\.ts$/, ".sql");
   await writeFile(sqlFile, sql);
   console.log(`Generated: ${basename(sqlFile)}`);
 }
 
-async function generateAppTs(schemaDir: string): Promise<void> {
-  // Reload the schema since SQL generation consumed the collected state
-  const schemaFile = join(schemaDir, "current.ts");
-  await loadSchemaModule(schemaFile);
-  const schema = getCollectedSchema();
+async function generateAppTs(schemaDir: string, schema: Schema): Promise<void> {
   const output = generateClient(schema);
   const appTsPath = join(schemaDir, "app.ts");
   await writeFile(appTsPath, output);
@@ -125,6 +124,57 @@ async function generateSqlForMigrationFile(tsFile: string): Promise<void> {
   console.log(`Generated: ${basename(bwdFile)}`);
 }
 
+function isTablePoliciesLike(input: unknown): input is TablePolicies {
+  return typeof input === "object" && input !== null;
+}
+
+function isPermissionsMap(input: unknown): input is Record<string, TablePolicies> {
+  if (typeof input !== "object" || input === null) {
+    return false;
+  }
+  return Object.values(input).every((value) => isTablePoliciesLike(value));
+}
+
+async function loadPermissionsModule(
+  filePath: string,
+): Promise<Record<string, TablePolicies> | null> {
+  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
+  const module = await import(url);
+  const candidate = module.default ?? module.permissions ?? null;
+  if (!candidate) {
+    return null;
+  }
+  if (!isPermissionsMap(candidate)) {
+    throw new Error(
+      `Invalid permissions export in ${basename(filePath)}. Expected default export from definePermissions(...).`,
+    );
+  }
+  return candidate;
+}
+
+function mergePermissionsIntoSchema(
+  schema: Schema,
+  compiledPermissions: Record<string, TablePolicies>,
+): Schema {
+  return {
+    tables: schema.tables.map((table) => {
+      const external = compiledPermissions[table.name];
+      if (!external) {
+        return table;
+      }
+      if (table.policies) {
+        throw new Error(
+          `Table "${table.name}" defines permissions in both current.ts and permissions.ts. Keep only one source.`,
+        );
+      }
+      return {
+        ...table,
+        policies: external,
+      };
+    }),
+  };
+}
+
 /**
  * Check if a path exists
  */
@@ -160,6 +210,33 @@ const findMonorepoJazzBinary = async (): Promise<string | null> => {
     currentDir = parentDir;
   }
 };
+
+async function ensurePermissionsTestStub(schemaDir: string): Promise<void> {
+  const permissionsFile = join(schemaDir, "permissions.ts");
+  if (!(await pathExists(permissionsFile))) {
+    return;
+  }
+
+  const testFile = join(schemaDir, "permissions.test.ts");
+  if (await pathExists(testFile)) {
+    return;
+  }
+
+  const template = `/**
+ * Permissions test starter.
+ *
+ * Suggested shape:
+ * - boot a disposable Jazz server/runtime for the test
+ * - seed synthetic rows for policy edge-cases
+ * - mint scoped clients with representative JWT claims
+ * - assert allow/deny behavior for queries and mutations
+ */
+export {};
+`;
+
+  await writeFile(testFile, template);
+  console.log(`Generated: permissions.test.ts`);
+}
 
 type JazzBuildResult = { type: "close"; code: number | null } | { type: "error"; error: Error };
 
@@ -221,16 +298,32 @@ async function build(options: BuildOptions): Promise<void> {
 
   const tsFiles = files.filter((f) => f.endsWith(".ts"));
 
-  for (const file of tsFiles) {
-    const filePath = join(schemaDir, file);
+  for (const file of tsFiles.filter((name) => isMigrationTsStub(name))) {
+    await generateSqlForMigrationFile(join(schemaDir, file));
+  }
 
-    if (isMigrationTsStub(file)) {
-      await generateSqlForMigrationFile(filePath);
-    } else if (file === "current.ts") {
-      await generateSqlForSchemaFile(filePath);
-      await generateAppTs(schemaDir);
+  const schemaFile = join(schemaDir, "current.ts");
+  if (!(await pathExists(schemaFile))) {
+    console.error(`Schema file not found: ${schemaFile}`);
+    process.exit(1);
+  }
+
+  let schema = await loadSchema(schemaFile);
+
+  // Generate app.ts before loading permissions.ts so permissions can import it for typing.
+  await generateAppTs(schemaDir, schema);
+
+  const permissionsFile = join(schemaDir, "permissions.ts");
+  if (await pathExists(permissionsFile)) {
+    const permissions = await loadPermissionsModule(permissionsFile);
+    if (permissions) {
+      schema = mergePermissionsIntoSchema(schema, permissions);
     }
   }
+
+  await generateSqlForSchemaFile(schemaFile, schema);
+  await generateAppTs(schemaDir, schema);
+  await ensurePermissionsTestStub(schemaDir);
 
   await runJazzBuild(jazzBin, schemaDir);
 }
