@@ -39,3 +39,6 @@ export * from "./drivers/index.js";
 
 // Runtime client
 export * from "./runtime/index.js";
+
+// Permissions DSL
+export * from "./permissions/index.js";
