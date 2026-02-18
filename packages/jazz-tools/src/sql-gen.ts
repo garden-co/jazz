@@ -1,6 +1,17 @@
 // SQL generation from schema AST
 
-import type { Schema, Table, Column, Lens, LensOp } from "./schema.js";
+import type {
+  Schema,
+  Table,
+  Column,
+  Lens,
+  LensOp,
+  PolicyExpr,
+  PolicyValue,
+  PolicyCmpOp,
+  OperationPolicy,
+  TablePolicies,
+} from "./schema.js";
 
 function columnToSql(column: Column): string {
   const ref = column.references ? ` REFERENCES ${column.references}` : "";
@@ -10,11 +21,110 @@ function columnToSql(column: Column): string {
 
 function tableToSql(table: Table): string {
   const columnDefs = table.columns.map(columnToSql);
-  return `CREATE TABLE ${table.name} (\n${columnDefs.join(",\n")}\n);`;
+  const createTable = `CREATE TABLE ${table.name} (\n${columnDefs.join(",\n")}\n);`;
+  const policyStatements = tablePoliciesToSql(table.name, table.policies);
+
+  if (policyStatements.length === 0) {
+    return createTable;
+  }
+
+  return `${createTable}\n${policyStatements.join("\n")}`;
 }
 
 export function schemaToSql(schema: Schema): string {
   return schema.tables.map(tableToSql).join("\n\n") + "\n";
+}
+
+function policyValueToSql(value: PolicyValue): string {
+  if (value.type === "SessionRef") {
+    return `@session.${value.path.join(".")}`;
+  }
+  return formatDefaultValue(value.value);
+}
+
+function policyExprToSql(expr: PolicyExpr): string {
+  switch (expr.type) {
+    case "Cmp":
+      return `${expr.column} ${cmpOpToSql(expr.op)} ${policyValueToSql(expr.value)}`;
+    case "IsNull":
+      return `${expr.column} IS NULL`;
+    case "IsNotNull":
+      return `${expr.column} IS NOT NULL`;
+    case "In":
+      return `${expr.column} IN @session.${expr.session_path.join(".")}`;
+    case "Inherits":
+      return `INHERITS ${expr.operation.toUpperCase()} VIA ${expr.via_column}`;
+    case "And":
+      return expr.exprs.map((inner) => `(${policyExprToSql(inner)})`).join(" AND ");
+    case "Or":
+      return expr.exprs.map((inner) => `(${policyExprToSql(inner)})`).join(" OR ");
+    case "Not":
+      return `NOT (${policyExprToSql(expr.expr)})`;
+    case "True":
+      return "TRUE";
+    case "False":
+      return "FALSE";
+  }
+}
+
+function cmpOpToSql(op: PolicyCmpOp): string {
+  switch (op) {
+    case "Eq":
+      return "=";
+    case "Ne":
+      return "!=";
+    case "Lt":
+      return "<";
+    case "Le":
+      return "<=";
+    case "Gt":
+      return ">";
+    case "Ge":
+      return ">=";
+  }
+}
+
+function operationPolicyClauses(policy: OperationPolicy): string[] {
+  const clauses: string[] = [];
+  if (policy.using) {
+    clauses.push(`USING (${policyExprToSql(policy.using)})`);
+  }
+  if (policy.with_check) {
+    clauses.push(`WITH CHECK (${policyExprToSql(policy.with_check)})`);
+  }
+  return clauses;
+}
+
+function tablePoliciesToSql(tableName: string, policies: TablePolicies | undefined): string[] {
+  if (!policies) {
+    return [];
+  }
+
+  const statements: string[] = [];
+  const ops: Array<{ key: keyof TablePolicies; sqlOp: string }> = [
+    { key: "select", sqlOp: "SELECT" },
+    { key: "insert", sqlOp: "INSERT" },
+    { key: "update", sqlOp: "UPDATE" },
+    { key: "delete", sqlOp: "DELETE" },
+  ];
+
+  for (const { key, sqlOp } of ops) {
+    const opPolicy = policies[key];
+    if (!opPolicy) {
+      continue;
+    }
+
+    const clauses = operationPolicyClauses(opPolicy);
+    if (clauses.length === 0) {
+      continue;
+    }
+
+    statements.push(
+      `CREATE POLICY ${tableName}_${key}_policy ON ${tableName} FOR ${sqlOp} ${clauses.join(" ")};`,
+    );
+  }
+
+  return statements;
 }
 
 function formatDefaultValue(value: unknown): string {

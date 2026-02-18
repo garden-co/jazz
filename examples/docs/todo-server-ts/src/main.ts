@@ -11,8 +11,9 @@ import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { JazzClient } from "jazz-tools";
-import type { Value, WasmSchema } from "jazz-tools";
+import type { Value } from "jazz-tools";
 import { NapiRuntime } from "jazz-napi";
+import { wasmSchema as schema } from "../schema/app.js";
 
 // ============================================================================
 // Types
@@ -28,6 +29,7 @@ export interface Todo {
 interface CreateTodoRequest {
   title: string;
   description?: string;
+  owner_id?: string;
 }
 
 interface UpdateTodoRequest {
@@ -48,32 +50,6 @@ export interface RunningServer extends TodoServer {
   port: number;
   baseUrl: string;
 }
-
-// ============================================================================
-// Schema
-// ============================================================================
-
-export const schema: WasmSchema = {
-  tables: {
-    projects: {
-      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-    },
-    todos: {
-      columns: [
-        { name: "title", column_type: { type: "Text" }, nullable: false },
-        { name: "done", column_type: { type: "Boolean" }, nullable: false },
-        { name: "description", column_type: { type: "Text" }, nullable: true },
-        { name: "parent", column_type: { type: "Uuid" }, nullable: true, references: "todos" },
-        {
-          name: "project",
-          column_type: { type: "Uuid" },
-          nullable: true,
-          references: "projects",
-        },
-      ],
-    },
-  },
-};
 
 // ============================================================================
 // Helpers
@@ -190,12 +166,14 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
+      const ownerId = body.owner_id ?? "anonymous";
       const values: Value[] = [
         { type: "Text", value: body.title },
         { type: "Boolean", value: false },
         { type: "Text", value: body.description ?? "" },
         { type: "Null" },
         { type: "Null" },
+        { type: "Text", value: ownerId },
       ];
 
       const id = await client.create("todos", values);
@@ -211,6 +189,20 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
       // Notify SSE connections
       broadcastTodos();
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // List todos as a specific session user (for policy verification/testing)
+  app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const sessionJson = JSON.stringify({ user_id: req.params.userId, claims: {} });
+      const rows = await runtime.query(buildQuery("todos"), sessionJson, null);
+      const todos = (rows as Array<{ id: string; values: Value[] }>)
+        .map((row) => rowToTodo(row.id, row.values))
+        .filter((t): t is Todo => t !== null);
+      res.json(todos);
     } catch (e) {
       next(e);
     }

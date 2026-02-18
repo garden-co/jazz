@@ -132,6 +132,48 @@ describe("Todo Server Integration", () => {
     });
   });
 
+  describe("Policy-Aware Session Reads", () => {
+    it("filters rows by owner_id when querying with session context", async () => {
+      const aliceTitle = `Alice private ${Date.now()}`;
+      const bobTitle = `Bob private ${Date.now()}`;
+
+      const createAlice = await fetch(`${baseUrl}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: aliceTitle, owner_id: "alice" }),
+      });
+      expect(createAlice.status).toBe(201);
+      const aliceTodo: Todo = await createAlice.json();
+
+      const createBob = await fetch(`${baseUrl}/todos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: bobTitle, owner_id: "bob" }),
+      });
+      expect(createBob.status).toBe(201);
+      const bobTodo: Todo = await createBob.json();
+
+      const aliceViewRes = await fetch(`${baseUrl}/todos/as/alice`);
+      expect(aliceViewRes.status).toBe(200);
+      const aliceView: Todo[] = await aliceViewRes.json();
+      const aliceTitles = new Set(aliceView.map((todo) => todo.title));
+      expect(aliceTitles.has(aliceTitle)).toBe(true);
+      expect(aliceTitles.has(bobTitle)).toBe(false);
+
+      const bobViewRes = await fetch(`${baseUrl}/todos/as/bob`);
+      expect(bobViewRes.status).toBe(200);
+      const bobView: Todo[] = await bobViewRes.json();
+      const bobTitles = new Set(bobView.map((todo) => todo.title));
+      expect(bobTitles.has(bobTitle)).toBe(true);
+      expect(bobTitles.has(aliceTitle)).toBe(false);
+
+      const deleteAlice = await fetch(`${baseUrl}/todos/${aliceTodo.id}`, { method: "DELETE" });
+      expect(deleteAlice.status).toBe(204);
+      const deleteBob = await fetch(`${baseUrl}/todos/${bobTodo.id}`, { method: "DELETE" });
+      expect(deleteBob.status).toBe(204);
+    });
+  });
+
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
       // Use a shared data path so both server instances see the same SurrealKV file
