@@ -5,6 +5,7 @@ import type {
   PolicyValue,
   TablePolicies,
 } from "../schema.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 type QueryBuilderLike = {
   _rowType: unknown;
@@ -76,6 +77,13 @@ export interface ConditionBuilder {
 
 export type SessionContext = Record<string, SessionRefValue>;
 
+export interface AllowedToContext {
+  read(fkColumn: string): PolicyExpr;
+  insert(fkColumn: string): PolicyExpr;
+  update(fkColumn: string): PolicyExpr;
+  delete(fkColumn: string): PolicyExpr;
+}
+
 interface ExistsBuilder<WhereInput> {
   where(input: PermissionWhereInput<WhereInput>): ExistsCondition;
 }
@@ -111,6 +119,7 @@ export type PolicyContext<TApp extends AppLike> = {
   };
   either: (input: unknown) => ConditionBuilder;
   both: (input: unknown) => ConditionBuilder;
+  allowedTo: AllowedToContext;
   session: SessionContext;
 };
 
@@ -184,16 +193,43 @@ export function definePermissions<TApp extends AppLike>(
   app: TApp,
   factory: (ctx: PolicyContext<TApp>) => RuleLike[] | RuleLike,
 ): CompiledPermissions {
+  const fkColumnsByTable = collectFkColumnsByTable(app);
   const tableNames = Object.keys(app).filter((key) => key !== "wasmSchema");
   const ctx = {
     policy: buildPolicyContext(tableNames),
     either,
     both,
+    allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
   const output = factory(ctx);
   const rules = Array.isArray(output) ? output : [output];
-  return compileRules(rules);
+  return compileRules(rules, fkColumnsByTable);
+}
+
+function collectFkColumnsByTable(app: AppLike): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  const schema = (app as { wasmSchema?: unknown }).wasmSchema;
+  if (!schema || typeof schema !== "object") {
+    return result;
+  }
+
+  const typedSchema = schema as WasmSchema;
+  if (!typedSchema.tables || typeof typedSchema.tables !== "object") {
+    return result;
+  }
+
+  for (const [tableName, table] of Object.entries(typedSchema.tables)) {
+    const fkColumns = new Set<string>();
+    for (const column of table.columns ?? []) {
+      if (column.references) {
+        fkColumns.add(column.name);
+      }
+    }
+    result.set(tableName, fkColumns);
+  }
+
+  return result;
 }
 
 function buildPolicyContext(tableNames: string[]): Record<string, unknown> {
@@ -253,6 +289,39 @@ function createSessionContext(): SessionContext {
       return undefined;
     },
   });
+}
+
+function createAllowedToContext(): AllowedToContext {
+  return {
+    read(fkColumn: string): PolicyExpr {
+      return {
+        type: "Inherits",
+        operation: "Select",
+        via_column: fkColumn,
+      };
+    },
+    insert(fkColumn: string): PolicyExpr {
+      return {
+        type: "Inherits",
+        operation: "Insert",
+        via_column: fkColumn,
+      };
+    },
+    update(fkColumn: string): PolicyExpr {
+      return {
+        type: "Inherits",
+        operation: "Update",
+        via_column: fkColumn,
+      };
+    },
+    delete(fkColumn: string): PolicyExpr {
+      return {
+        type: "Inherits",
+        operation: "Delete",
+        via_column: fkColumn,
+      };
+    },
+  };
 }
 
 function normalizeSessionPath(path: string | string[]): string[] {
@@ -460,7 +529,10 @@ function compoundBuilder(op: "And" | "Or", input: unknown): ConditionBuilder {
   };
 }
 
-function compileRules(rules: RuleLike[]): CompiledPermissions {
+function compileRules(
+  rules: RuleLike[],
+  fkColumnsByTable: Map<string, Set<string>>,
+): CompiledPermissions {
   const compiled: CompiledPermissions = {};
   for (const ruleLike of rules) {
     const rule = isUpdateRuleBuilder(ruleLike) ? ruleLike.toRule() : ruleLike;
@@ -471,23 +543,23 @@ function compileRules(rules: RuleLike[]): CompiledPermissions {
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
-          using: compileCondition(rule.using),
+          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
         });
         break;
       case "insert":
         tablePolicies.insert = mergeOperationPolicy(tablePolicies.insert, {
-          with_check: compileCondition(rule.withCheck),
+          with_check: compileCondition(rule.withCheck, rule.table, fkColumnsByTable),
         });
         break;
       case "update":
         tablePolicies.update = mergeOperationPolicy(tablePolicies.update, {
-          using: compileCondition(rule.using),
-          with_check: compileCondition(rule.withCheck),
+          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
+          with_check: compileCondition(rule.withCheck, rule.table, fkColumnsByTable),
         });
         break;
       case "delete":
         tablePolicies.delete = mergeOperationPolicy(tablePolicies.delete, {
-          using: compileCondition(rule.using),
+          using: compileCondition(rule.using, rule.table, fkColumnsByTable),
         });
         break;
       default:
@@ -528,15 +600,21 @@ function mergeExprWithOr(left?: PolicyExpr, right?: PolicyExpr): PolicyExpr | un
   return { type: "Or", exprs };
 }
 
-function compileCondition(condition: Condition | undefined): PolicyExpr | undefined {
+function compileCondition(
+  condition: Condition | undefined,
+  table: string,
+  fkColumnsByTable: Map<string, Set<string>>,
+): PolicyExpr | undefined {
   if (!condition) {
     return undefined;
   }
   if (isPolicyExpr(condition)) {
+    assertInheritsColumns(condition, table, fkColumnsByTable);
     return condition;
   }
   if (isExistsCondition(condition)) {
     const compiledCondition = whereObjectToCondition(condition.where, { allowRowRefs: true });
+    assertInheritsColumns(compiledCondition, table, fkColumnsByTable);
     if (!compiledCondition) {
       throw new Error(
         `Failed to compile exists(...) condition for table "${condition.table}" in permissions.ts`,
@@ -549,7 +627,9 @@ function compileCondition(condition: Condition | undefined): PolicyExpr | undefi
     };
   }
   if (isCompoundCondition(condition)) {
-    const compiledChildren = condition.conditions.map((child) => compileCondition(child));
+    const compiledChildren = condition.conditions.map((child) =>
+      compileCondition(child, table, fkColumnsByTable),
+    );
     const exprs = compiledChildren.filter((expr): expr is PolicyExpr => Boolean(expr));
     if (exprs.length === 0) {
       return condition.op === "And" ? { type: "True" } : { type: "False" };
@@ -560,6 +640,42 @@ function compileCondition(condition: Condition | undefined): PolicyExpr | undefi
     return condition.op === "And" ? { type: "And", exprs } : { type: "Or", exprs };
   }
   throw new Error("Unsupported condition in permissions compiler.");
+}
+
+function assertInheritsColumns(
+  expr: PolicyExpr,
+  table: string,
+  fkColumnsByTable: Map<string, Set<string>>,
+): void {
+  const check = (node: PolicyExpr): void => {
+    switch (node.type) {
+      case "Inherits": {
+        const fkColumns = fkColumnsByTable.get(table);
+        if (!fkColumns || !fkColumns.has(node.via_column)) {
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${table}": column is not a foreign key reference.`,
+          );
+        }
+        break;
+      }
+      case "And":
+      case "Or":
+        for (const child of node.exprs) {
+          check(child);
+        }
+        break;
+      case "Not":
+        check(node.expr);
+        break;
+      case "Exists":
+        check(node.condition);
+        break;
+      default:
+        break;
+    }
+  };
+
+  check(expr);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

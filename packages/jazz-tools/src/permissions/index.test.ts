@@ -6,6 +6,7 @@ interface Todo {
   ownerId: string;
   archived: boolean;
   done: boolean;
+  projectId?: string;
 }
 
 interface TodoWhere {
@@ -13,6 +14,7 @@ interface TodoWhere {
   ownerId?: string;
   archived?: boolean;
   done?: boolean;
+  projectId?: string;
 }
 
 interface TodoShare {
@@ -46,17 +48,47 @@ class TodoShareQueryBuilder {
 const app = {
   todos: new TodoQueryBuilder(),
   todoShares: new TodoShareQueryBuilder(),
-  wasmSchema: {},
+  wasmSchema: {
+    tables: {
+      todos: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+          { name: "archived", column_type: { type: "Boolean" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+          {
+            name: "projectId",
+            column_type: { type: "Uuid" },
+            nullable: true,
+            references: "projects",
+          },
+        ],
+      },
+      todoShares: {
+        columns: [
+          { name: "id", column_type: { type: "Uuid" }, nullable: false },
+          {
+            name: "todoId",
+            column_type: { type: "Uuid" },
+            nullable: false,
+            references: "todos",
+          },
+          { name: "userId", column_type: { type: "Text" }, nullable: false },
+          { name: "canRead", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    },
+  },
 };
 
 describe("permissions DSL", () => {
   it("compiles read/insert/update/delete policies", () => {
-    const compiled = definePermissions(app, ({ policy, both, session }) => [
+    const compiled = definePermissions(app, ({ policy, both, allowedTo, session }) => [
       policy.todos.allowRead.where({ ownerId: session.userId }),
       policy.todos.allowInsert.where({ ownerId: session.userId }),
       policy.todos.allowUpdate
-        .whereOld(both({ ownerId: session.userId }).and({ archived: false }))
-        .whereNew({ ownerId: session.userId }),
+        .whereOld(both(allowedTo.update("projectId")).and({ archived: false }))
+        .whereNew(allowedTo.update("projectId")),
       policy.todos.allowDelete.where({ ownerId: session.userId }),
     ]);
 
@@ -82,13 +114,9 @@ describe("permissions DSL", () => {
       type: "And",
       exprs: [
         {
-          type: "Cmp",
-          column: "ownerId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["userId"],
-          },
+          type: "Inherits",
+          operation: "Update",
+          via_column: "projectId",
         },
         {
           type: "Cmp",
@@ -102,13 +130,9 @@ describe("permissions DSL", () => {
       ],
     });
     expect(compiled.todos.update?.with_check).toEqual({
-      type: "Cmp",
-      column: "ownerId",
-      op: "Eq",
-      value: {
-        type: "SessionRef",
-        path: ["userId"],
-      },
+      type: "Inherits",
+      operation: "Update",
+      via_column: "projectId",
     });
     expect(compiled.todos.delete?.using).toEqual({
       type: "Cmp",
@@ -122,9 +146,9 @@ describe("permissions DSL", () => {
   });
 
   it("supports plural action aliases and OR-merges repeated rules", () => {
-    const compiled = definePermissions(app, ({ policy, either, session }) => [
+    const compiled = definePermissions(app, ({ policy, either, allowedTo, session }) => [
       policy.todos.allowReads.where({ ownerId: session.userId }),
-      policy.todos.allowReads.where(either({ done: true }).or({ archived: false })),
+      policy.todos.allowReads.where(either({ done: true }).or(allowedTo.read("projectId"))),
       policy.todos.allowInserts.where({ ownerId: session.userId }),
     ]);
 
@@ -150,13 +174,9 @@ describe("permissions DSL", () => {
           },
         },
         {
-          type: "Cmp",
-          column: "archived",
-          op: "Eq",
-          value: {
-            type: "Literal",
-            value: false,
-          },
+          type: "Inherits",
+          operation: "Select",
+          via_column: "projectId",
         },
       ],
     });
@@ -210,10 +230,36 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("supports allowedTo.insert and allowedTo.delete helpers", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowInsert.where(allowedTo.insert("projectId")),
+      policy.todos.allowDelete.where(allowedTo.delete("projectId")),
+    ]);
+
+    expect(compiled.todos.insert?.with_check).toEqual({
+      type: "Inherits",
+      operation: "Insert",
+      via_column: "projectId",
+    });
+    expect(compiled.todos.delete?.using).toEqual({
+      type: "Inherits",
+      operation: "Delete",
+      via_column: "projectId",
+    });
+  });
+
+  it("rejects allowedTo when column is not a foreign key", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.todos.allowRead.where(allowedTo.read("ownerId")),
+      ]),
+    ).toThrow(/column is not a foreign key reference/i);
+  });
+
   it("compiles correlated exists row references", () => {
-    const compiled = definePermissions(app, ({ policy, either, session }) => [
+    const compiled = definePermissions(app, ({ policy, either, allowedTo, session }) => [
       policy.todos.allowRead.where((todo) =>
-        either({ ownerId: session.userId }).or(
+        either(allowedTo.read("projectId")).or(
           policy.todoShares.exists.where({
             todoId: todo.id,
             userId: session.userId,
@@ -227,13 +273,9 @@ describe("permissions DSL", () => {
       type: "Or",
       exprs: [
         {
-          type: "Cmp",
-          column: "ownerId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["userId"],
-          },
+          type: "Inherits",
+          operation: "Select",
+          via_column: "projectId",
         },
         {
           type: "Exists",
