@@ -3,6 +3,7 @@
 ## Context
 
 Jazz2 has a Rust core (`groove`) with two existing binding crates:
+
 - **groove-wasm** — browser via wasm-bindgen (`Rc<RefCell<RuntimeCore<OpfsBTreeStorage, WasmScheduler, JsSyncSender>>>`)
 - **groove-napi** — Node.js server via napi-rs (`Arc<Mutex<RuntimeCore<SurrealKvStorage, NapiScheduler, NapiSyncSender>>>`)
 
@@ -17,6 +18,7 @@ Brad is adding Rust support to Nitro in a fork (`boorad/nitro feat/rust`), which
 ## Where Nitro Fits in Jazz2
 
 ### What it replaces
+
 Nitro would **not** replace groove-wasm (browser) or groove-napi (Node.js server). It creates a **third binding crate** — `groove-nitro` — specifically for React Native on iOS and Android.
 
 ### Architecture diagram
@@ -42,9 +44,11 @@ Nitro would **not** replace groove-wasm (browser) or groove-napi (Node.js server
 ```
 
 ### What groove-nitro wraps
+
 ```
 RuntimeCore<SurrealKvStorage, NitroScheduler, NitroSyncSender>
 ```
+
 - **SurrealKvStorage** — same persistent storage as groove-napi (Documents dir on iOS, internal storage on Android)
 - **NitroScheduler** — schedules `batched_tick()` on the RN JS thread via Nitro callback
 - **NitroSyncSender** — sends sync messages back to JS via Nitro callback
@@ -57,75 +61,72 @@ This is the `.nitro.ts` spec that Nitrogen would consume. It mirrors the API sur
 
 ```typescript
 // groove-nitro.nitro.ts
-import { HybridObject } from 'react-native-nitro-modules'
+import { HybridObject } from "react-native-nitro-modules";
 
 // --- Struct types (Nitrogen generates C++ structs + Rust #[repr(C)] structs) ---
 
 interface RowData {
-  id: string
-  index: number
-  columns: ArrayBuffer  // binary-encoded row data (zero-copy)
+  id: string;
+  index: number;
+  columns: ArrayBuffer; // binary-encoded row data (zero-copy)
 }
 
 interface UpdatedRowData {
-  id: string
-  index: number
-  oldIndex: number
-  columns: ArrayBuffer
+  id: string;
+  index: number;
+  oldIndex: number;
+  columns: ArrayBuffer;
 }
 
 interface SubscriptionDelta {
-  added: RowData[]
-  removed: string[]         // removed object IDs
-  updated: UpdatedRowData[]
+  added: RowData[];
+  removed: string[]; // removed object IDs
+  updated: UpdatedRowData[];
 }
 
 /**
  * Core Jazz runtime for React Native.
  * Wraps Rust RuntimeCore with SurrealKV storage.
  */
-export interface GrooveRuntime
-  extends HybridObject<{ ios: 'rust', android: 'rust' }> {
-
+export interface GrooveRuntime extends HybridObject<{ ios: "rust"; android: "rust" }> {
   // --- CRUD (small payloads — JSON strings are fine) ---
-  insert(table: string, valuesJson: string): string              // returns object ID
-  update(objectId: string, valuesJson: string): void
-  delete(objectId: string): void
+  insert(table: string, valuesJson: string): string; // returns object ID
+  update(objectId: string, valuesJson: string): void;
+  delete(objectId: string): void;
 
   // --- Queries (hot path — binary results via ArrayBuffer) ---
-  query(queryJson: string, sessionJson?: string): Promise<ArrayBuffer>
+  query(queryJson: string, sessionJson?: string): Promise<ArrayBuffer>;
 
   // --- Subscriptions (hot path — typed delta structs with binary row data) ---
-  subscribe(queryJson: string, callback: (delta: SubscriptionDelta) => void): number
-  unsubscribe(handle: number): void
+  subscribe(queryJson: string, callback: (delta: SubscriptionDelta) => void): number;
+  unsubscribe(handle: number): void;
 
   // --- Sync (already binary — zero-copy ArrayBuffer) ---
-  onSyncMessageReceived(payload: ArrayBuffer): void
-  onSyncMessageToSend(callback: (payload: ArrayBuffer) => void): void
+  onSyncMessageReceived(payload: ArrayBuffer): void;
+  onSyncMessageToSend(callback: (payload: ArrayBuffer) => void): void;
 
   // --- Server/client management ---
-  addServer(serverId: string): void
-  removeServer(serverId: string): void
-  addClient(clientId: string, sessionJson?: string): void
-  removeClient(clientId: string): void
-  setClientRole(clientId: string, role: string): void
+  addServer(serverId: string): void;
+  removeServer(serverId: string): void;
+  addClient(clientId: string, sessionJson?: string): void;
+  removeClient(clientId: string): void;
+  setClientRole(clientId: string, role: string): void;
 
   // --- Storage ---
-  flushStorage(): void
-  flushWal(): void
+  flushStorage(): void;
+  flushWal(): void;
 
   // --- Schema ---
-  readonly currentSchemaJson: string
+  readonly currentSchemaJson: string;
 }
 
 /**
  * Standalone utility functions (not on the runtime object).
  */
-export interface GrooveUtils
-  extends HybridObject<{ ios: 'rust', android: 'rust' }> {
-  generateId(): string
-  currentTimestamp(): number
-  parseSchema(json: string): string
+export interface GrooveUtils extends HybridObject<{ ios: "rust"; android: "rust" }> {
+  generateId(): string;
+  currentTimestamp(): number;
+  parseSchema(json: string): string;
 }
 ```
 
@@ -156,11 +157,13 @@ crates/groove-nitro/
 ```
 
 The structure mirrors groove-napi almost exactly. Key differences:
+
 - groove-napi uses `napi::ThreadsafeFunction` for callbacks → groove-nitro uses Nitro's callback mechanism
 - groove-napi uses `#[napi]` macros → groove-nitro uses whatever the `feat/rust` Nitro integration provides (likely `#[nitro]` or similar proc macros from Brad's fork)
 - Both use `Arc<Mutex<RuntimeCore<SurrealKvStorage, ...>>>` since they're multi-threaded native
 
 ### NitroScheduler
+
 ```rust
 // Analogous to NapiScheduler
 struct NitroScheduler {
@@ -179,6 +182,7 @@ impl Scheduler for NitroScheduler {
 ```
 
 ### NitroSyncSender
+
 ```rust
 // Analogous to NapiSyncSender
 struct NitroSyncSender {
@@ -217,16 +221,16 @@ CRUD inputs (`insert` values, `update` values) and schema/query definitions use 
 
 ## Why Nitro over UniFFI
 
-| Concern | UniFFI (Jazz1) | Nitro (proposed) |
-|---|---|---|
-| **Performance** | TurboModule / `jsi::HostObject` | `jsi::NativeState` — 16x faster method calls |
-| **Codegen direction** | Rust-first (Rust macros → generate TS) | TS-first (TS spec → generate native interfaces) |
-| **Type safety** | Runtime type checking at FFI boundary | Compile-time — Nitrogen fails build if spec ≠ impl |
-| **Generated code** | ~3000 LOC TS + ~500 LOC C++ per crate | Minimal generated glue; HybridObject is the API |
-| **Maintenance** | uniffi-bindgen-react-native has small community | Margelo actively maintains; growing RN ecosystem adoption |
-| **Rust support** | Native via `#[uniffi::export]` | Brad's fork (`feat/rust`) adds native Rust HybridObjects |
-| **Callback model** | Limited (no callbacks with return values) | First-class callbacks, Promises, async |
-| **Ecosystem** | Mozilla-backed, cross-platform (Swift/Kotlin/Python) | RN-specific, optimized for that use case |
+| Concern               | UniFFI (Jazz1)                                       | Nitro (proposed)                                          |
+| --------------------- | ---------------------------------------------------- | --------------------------------------------------------- |
+| **Performance**       | TurboModule / `jsi::HostObject`                      | `jsi::NativeState` — 16x faster method calls              |
+| **Codegen direction** | Rust-first (Rust macros → generate TS)               | TS-first (TS spec → generate native interfaces)           |
+| **Type safety**       | Runtime type checking at FFI boundary                | Compile-time — Nitrogen fails build if spec ≠ impl        |
+| **Generated code**    | ~3000 LOC TS + ~500 LOC C++ per crate                | Minimal generated glue; HybridObject is the API           |
+| **Maintenance**       | uniffi-bindgen-react-native has small community      | Margelo actively maintains; growing RN ecosystem adoption |
+| **Rust support**      | Native via `#[uniffi::export]`                       | Brad's fork (`feat/rust`) adds native Rust HybridObjects  |
+| **Callback model**    | Limited (no callbacks with return values)            | First-class callbacks, Promises, async                    |
+| **Ecosystem**         | Mozilla-backed, cross-platform (Swift/Kotlin/Python) | RN-specific, optimized for that use case                  |
 
 The biggest wins: **performance** (NativeState vs HostObject) and **TS-first spec** (the spec IS the TypeScript interface, not a separate UDL or Rust annotation).
 
@@ -263,19 +267,19 @@ You're right to push back on JSON. The whole point of Nitro is that the C++ JSIC
 
 The C++ JSIConverter layer handles these conversions directly to/from JSI values:
 
-| Nitro TS type | C++ type | Rust type (your fork) | Zero-copy? |
-|---|---|---|---|
-| `number` | `double` | `f64` | yes (value) |
-| `bigint` | `int64_t` | `i64` | yes (value) |
-| `boolean` | `bool` | `bool` | yes (value) |
-| `string` | `std::string` | `String` (via CStr) | no (copy) |
-| `ArrayBuffer` | `shared_ptr<ArrayBuffer>` | `Vec<u8>` | **yes** (zero-copy from JS→native via NativeState, native→JS wraps pointer) |
-| `T[]` | `std::vector<T>` | `Vec<T>` | no (per-element conversion) |
-| `interface Foo` | struct | struct (Nitrogen-generated `#[repr(C)]`) | no (field-by-field conversion) |
-| `enum` | `int32_t` | `i32` discriminant | yes (value) |
-| `A \| B` (variant) | `std::variant<A,B>` | Rust enum | no (tag + conversion) |
-| `(callback) => void` | `std::function` | `Box<dyn Fn>` (via fn ptr + userdata) | n/a |
-| `Promise<T>` | `shared_ptr<Promise<T>>` | `Promise<T>` (stub in fork) | n/a |
+| Nitro TS type        | C++ type                  | Rust type (your fork)                    | Zero-copy?                                                                  |
+| -------------------- | ------------------------- | ---------------------------------------- | --------------------------------------------------------------------------- |
+| `number`             | `double`                  | `f64`                                    | yes (value)                                                                 |
+| `bigint`             | `int64_t`                 | `i64`                                    | yes (value)                                                                 |
+| `boolean`            | `bool`                    | `bool`                                   | yes (value)                                                                 |
+| `string`             | `std::string`             | `String` (via CStr)                      | no (copy)                                                                   |
+| `ArrayBuffer`        | `shared_ptr<ArrayBuffer>` | `Vec<u8>`                                | **yes** (zero-copy from JS→native via NativeState, native→JS wraps pointer) |
+| `T[]`                | `std::vector<T>`          | `Vec<T>`                                 | no (per-element conversion)                                                 |
+| `interface Foo`      | struct                    | struct (Nitrogen-generated `#[repr(C)]`) | no (field-by-field conversion)                                              |
+| `enum`               | `int32_t`                 | `i32` discriminant                       | yes (value)                                                                 |
+| `A \| B` (variant)   | `std::variant<A,B>`       | Rust enum                                | no (tag + conversion)                                                       |
+| `(callback) => void` | `std::function`           | `Box<dyn Fn>` (via fn ptr + userdata)    | n/a                                                                         |
+| `Promise<T>`         | `shared_ptr<Promise<T>>`  | `Promise<T>` (stub in fork)              | n/a                                                                         |
 
 ### Recommended approach for Jazz's Value type
 
@@ -284,7 +288,7 @@ The C++ JSIConverter layer handles these conversions directly to/from JSI values
 ```typescript
 // In the .nitro.ts spec
 interface JazzValue {
-  type: 'integer' | 'bigint' | 'boolean' | 'text' | 'timestamp' | 'uuid' | 'null'
+  type: "integer" | "bigint" | "boolean" | "text" | "timestamp" | "uuid" | "null";
   // Can't cleanly do tagged union as Nitro variant...
 }
 ```
@@ -298,19 +302,19 @@ Instead of passing `Value[]` as a generic array, make the Nitro spec method-spec
 ```typescript
 // Subscription delta as a Nitro struct
 interface RowDelta {
-  added: RowData[]
-  removed: string[]   // object IDs
-  updated: UpdatedRowData[]
+  added: RowData[];
+  removed: string[]; // object IDs
+  updated: UpdatedRowData[];
 }
 
 interface RowData {
-  id: string
-  index: number
-  columns: ArrayBuffer  // binary-encoded row, decoded on TS side
+  id: string;
+  index: number;
+  columns: ArrayBuffer; // binary-encoded row, decoded on TS side
 }
 ```
 
-For query results and subscription deltas (the hot path), use `ArrayBuffer` to pass binary-encoded row data. The Rust side already has `groove::query_manager::encoding::decode_row` — encode on Rust side, pass the bytes zero-copy, decode on TS side. This is faster than JSON *and* faster than per-value JSI conversion for large result sets.
+For query results and subscription deltas (the hot path), use `ArrayBuffer` to pass binary-encoded row data. The Rust side already has `groove::query_manager::encoding::decode_row` — encode on Rust side, pass the bytes zero-copy, decode on TS side. This is faster than JSON _and_ faster than per-value JSI conversion for large result sets.
 
 **Option B: Hybrid approach**
 
@@ -322,7 +326,7 @@ This matches what groove-wasm/groove-napi already do for sync messages (binary f
 
 ### The key insight
 
-The Nitro boundary has *two* hops for Rust: Rust → (extern "C") → C++ → (JSIConverter) → JS. The first hop (Rust↔C++) is where your fork operates. The second hop (C++↔JS) is Nitro's existing JSIConverter layer. For `ArrayBuffer`, *both* hops are zero-copy: Rust passes a pointer to C++, C++ wraps it in `jsi::ArrayBuffer` with `NativeState`, JS reads the memory directly. That's as good as it gets.
+The Nitro boundary has _two_ hops for Rust: Rust → (extern "C") → C++ → (JSIConverter) → JS. The first hop (Rust↔C++) is where your fork operates. The second hop (C++↔JS) is Nitro's existing JSIConverter layer. For `ArrayBuffer`, _both_ hops are zero-copy: Rust passes a pointer to C++, C++ wraps it in `jsi::ArrayBuffer` with `NativeState`, JS reads the memory directly. That's as good as it gets.
 
 ---
 
@@ -331,6 +335,7 @@ The Nitro boundary has *two* hops for Rust: Rust → (extern "C") → C++ → (J
 All 6 originally-identified gaps have been addressed in commit `6e222071` on `feat/rust`. Here's the updated assessment:
 
 ### What was already solid (unchanged)
+
 - **Type codegen** — comprehensive. All Nitro types map to Rust correctly.
 - **FFI shim generation** — `#[no_mangle] pub unsafe extern "C" fn` pattern is correct.
 - **C++ bridge header** — `HybridTSpecRust.hpp` with inline method overrides calling extern "C" functions works.
@@ -348,7 +353,7 @@ All 6 originally-identified gaps have been addressed in commit `6e222071` on `fe
    - TS spec: `calculateFibonacciAsync(value: number): Promise<bigint>`
    - Rust trait: `fn calculate_fibonacci_async(&mut self, value: f64) -> i64`
    - C++ bridge: `Promise<int64_t>::async([=]() { return ..._calculate_fibonacci_async(_rustPtr, value); })`
-   
+
    No Promise type needed on the Rust side at all. For Jazz: `query()` returns `Promise<ArrayBuffer>` → Rust just returns a `NitroBuffer`.
 
 3. **Callback lifecycle** — DONE
@@ -362,6 +367,7 @@ All 6 originally-identified gaps have been addressed in commit `6e222071` on `fe
 
 5. **Factory function docs** — DONE
    Generated trait now includes a doc comment with the exact factory function signature:
+
    ```rust
    /// #[no_mangle]
    /// pub extern "C" fn create_HybridFooSpec() -> *mut std::ffi::c_void {
@@ -384,15 +390,15 @@ All 6 originally-identified gaps have been addressed in commit `6e222071` on `fe
 
 ## Files to Create/Modify
 
-| Action | Path | Purpose |
-|---|---|---|
-| Create | `crates/groove-nitro/` | New Nitro binding crate |
-| Create | `crates/groove-nitro/src/lib.rs` | HybridObject impl |
-| Create | `crates/groove-nitro/src/scheduler.rs` | NitroScheduler |
-| Create | `crates/groove-nitro/src/sync_sender.rs` | NitroSyncSender |
-| Create | `crates/groove-nitro/src/types.rs` | Value conversion (likely copy from groove-napi) |
-| Create | `crates/groove-nitro/Cargo.toml` | Crate config |
-| Create | `crates/groove-nitro/groove-nitro.nitro.ts` | Nitro TypeScript spec |
-| Modify | `packages/jazz-tools/src/runtime/client.ts` | Add NitroRuntime as a third Runtime backend |
-| Modify | `packages/jazz-tools/src/drivers/types.ts` | Potentially extend Runtime interface |
-| Update | `specs/todo/b_launch/react_native_packaging.md` | Record Nitro as the chosen approach |
+| Action | Path                                            | Purpose                                         |
+| ------ | ----------------------------------------------- | ----------------------------------------------- |
+| Create | `crates/groove-nitro/`                          | New Nitro binding crate                         |
+| Create | `crates/groove-nitro/src/lib.rs`                | HybridObject impl                               |
+| Create | `crates/groove-nitro/src/scheduler.rs`          | NitroScheduler                                  |
+| Create | `crates/groove-nitro/src/sync_sender.rs`        | NitroSyncSender                                 |
+| Create | `crates/groove-nitro/src/types.rs`              | Value conversion (likely copy from groove-napi) |
+| Create | `crates/groove-nitro/Cargo.toml`                | Crate config                                    |
+| Create | `crates/groove-nitro/groove-nitro.nitro.ts`     | Nitro TypeScript spec                           |
+| Modify | `packages/jazz-tools/src/runtime/client.ts`     | Add NitroRuntime as a third Runtime backend     |
+| Modify | `packages/jazz-tools/src/drivers/types.ts`      | Potentially extend Runtime interface            |
+| Update | `specs/todo/b_launch/react_native_packaging.md` | Record Nitro as the chosen approach             |
