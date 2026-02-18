@@ -772,13 +772,32 @@ describe("concurrent load", () => {
 
     client.connectToSyncServer();
 
-    const groupOnServer = jazzCloud.node.createGroup();
-    const groupOnClient = await loadCoValueOrFail(
-      client.node,
-      groupOnServer.id,
-    );
+    await waitFor(() => {
+      const messages = SyncMessagesLog.getMessages({
+        Group: gcGroup,
+        Map1: gcMap1,
+        Map2: gcMap2,
+      });
 
-    expect(groupOnClient.core.isAvailable()).toBe(true);
+      expect(messages).toMatchInlineSnapshot(`
+        [
+          "client -> server | LOAD Group sessions: header/4",
+          "server -> client | KNOWN Group sessions: header/4",
+          "client -> server | LOAD Map1 sessions: header/1",
+          "server -> client | KNOWN Map1 sessions: header/1",
+          "client -> server | LOAD Map2 sessions: header/1",
+          "server -> client | KNOWN Map2 sessions: header/1",
+        ]
+      `);
+      return true;
+    });
+
+    // Create a new group to test that the load queue is now empty
+    const groupToTestTheLoadQueue = await loadCoValueOrFail(
+      client.node,
+      jazzCloud.node.createGroup().id,
+    );
+    expect(groupToTestTheLoadQueue.core.isAvailable()).toBe(true);
   });
 
   test("should load garbageCollected CoValues when receiving KNOWN from a peer", async () => {
@@ -874,35 +893,25 @@ describe("concurrent load", () => {
         Map2: onlyKnownMap2,
       });
 
-      expect(messages).toContain(
-        "client -> server | LOAD Group sessions: header/4",
-      );
-      expect(messages).toContain(
-        "server -> client | KNOWN Group sessions: header/4",
-      );
-      expect(messages).toContain(
-        "client -> server | LOAD Map1 sessions: header/1",
-      );
-      expect(messages).toContain(
-        "server -> client | KNOWN Map1 sessions: header/1",
-      );
-      expect(messages).toContain(
-        "client -> server | LOAD Map2 sessions: header/1",
-      );
-      expect(messages).toContain(
-        "server -> client | KNOWN Map2 sessions: header/1",
-      );
-
+      expect(messages).toMatchInlineSnapshot(`
+        [
+          "client -> server | LOAD Group sessions: header/4",
+          "server -> client | KNOWN Group sessions: header/4",
+          "client -> server | LOAD Map1 sessions: header/1",
+          "server -> client | KNOWN Map1 sessions: header/1",
+          "client -> server | LOAD Map2 sessions: header/1",
+          "server -> client | KNOWN Map2 sessions: header/1",
+        ]
+      `);
       return true;
     });
 
-    const groupOnServer = jazzCloud.node.createGroup();
-    const groupOnClient = await loadCoValueOrFail(
+    // Create a new group to test that the load queue is now empty
+    const groupToTestTheLoadQueue = await loadCoValueOrFail(
       client.node,
-      groupOnServer.id,
+      jazzCloud.node.createGroup().id,
     );
-
-    expect(groupOnClient.core.isAvailable()).toBe(true);
+    expect(groupToTestTheLoadQueue.core.isAvailable()).toBe(true);
   });
 
   test("should keep onlyKnownState while peer load is pending and KNOWN replies arrive", async () => {
