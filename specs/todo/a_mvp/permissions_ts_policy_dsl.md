@@ -28,7 +28,7 @@ Move policy authoring out of `schema/current.ts` into a dedicated `schema/permis
 import { app } from "./app";
 import { definePermissions } from "jazz-tools/permissions";
 
-export default definePermissions(app, ({ policy, either, both, session }) => [
+export default definePermissions(app, ({ policy, either, both, allowedTo, session }) => [
   policy.todos.allowRead.where((todo) =>
     either({ ownerId: session.userId }).or(
       policy.todoShares.exists.where({
@@ -39,11 +39,13 @@ export default definePermissions(app, ({ policy, either, both, session }) => [
     ),
   ),
 
+  policy.todos.allowRead.where(allowedTo.read("projectId")),
+
   policy.todos.allowInsert.where({ ownerId: session.userId }),
 
   policy.todos.allowUpdate
-    .whereOld(both({ ownerId: session.userId }).and({ archived: false }))
-    .whereNew({ ownerId: session.userId }), // prevent owner reassignment
+    .whereOld(both(allowedTo.update("projectId")).and({ ownerId: session.userId }))
+    .whereNew(allowedTo.update("projectId")), // parent update permission required
 
   policy.todos.allowDelete.where({ ownerId: session.userId }),
 ]);
@@ -61,6 +63,18 @@ export default definePermissions(app, ({ policy, either, both, session }) => [
 - `either(a).or(b).or(c)` => OR chain.
 - `both(a).and(b).and(c)` => AND chain.
 
+`allowedTo.<operation>(fkColumn)` creates INHERITS conditions:
+
+- `allowedTo.read("projectId")` -> `INHERITS SELECT VIA projectId`
+- `allowedTo.insert("projectId")` -> `INHERITS INSERT VIA projectId`
+- `allowedTo.update("projectId")` -> `INHERITS UPDATE VIA projectId`
+- `allowedTo.delete("projectId")` -> `INHERITS DELETE VIA projectId`
+
+Design notes:
+
+- `fkColumn` is typed to FK columns of the current table only.
+- No compatibility alias for `inherits(...)` in this prototype.
+
 `policy.<table>.exists.where(...)` expresses existence checks against related tables.
 
 `session.*` resolves JWT claims in policy expressions (`session.userId` maps to claim key configured by auth mapping; default: `sub`).
@@ -70,6 +84,7 @@ export default definePermissions(app, ({ policy, either, both, session }) => [
 - `allowUpdate.whereOld(...)` compiles to `USING`.
 - `allowUpdate.whereNew(...)` compiles to `WITH CHECK`.
 - If `whereNew` is omitted, default behavior matches current semantics (fallback to old/update USING rule).
+- `allowedTo.update(fk)` follows parent `UPDATE USING` semantics for inherited checks.
 
 ## Compilation Strategy
 
