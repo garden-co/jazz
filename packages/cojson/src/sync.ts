@@ -951,7 +951,7 @@ export class SyncManager {
 
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
-    } else if (coValue.loadingState === "onlyKnownState") {
+    } else if (coValue.isKnownStateAvailable()) {
       // Validate if content is missing before loading it from storage
       if (!this.syncState.isSynced(peer, msg.id)) {
         this.local.loadCoValueCore(msg.id).then(() => {

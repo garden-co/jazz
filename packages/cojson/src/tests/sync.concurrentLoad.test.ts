@@ -781,6 +781,46 @@ describe("concurrent load", () => {
     expect(groupOnClient.core.isAvailable()).toBe(true);
   });
 
+  test("should load garbageCollected CoValues when receiving KNOWN from a peer", async () => {
+    setGarbageCollectorMaxAge(-1);
+
+    const client = setupTestNode({
+      connected: false,
+    });
+    client.addStorage({ ourName: "client" });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value", "trusting");
+
+    client.node.garbageCollector?.collect();
+    client.node.garbageCollector?.collect();
+
+    const gcMap = client.node.getCoValue(map.id);
+    expect(gcMap.loadingState).toBe("garbageCollected");
+
+    const { peerState } = client.connectToSyncServer({
+      skipReconciliation: true,
+    });
+
+    const loadSpy = vi.spyOn(client.node, "loadCoValueCore");
+
+    client.node.syncManager.handleKnownState(
+      {
+        action: "known",
+        id: map.id,
+        header: false,
+        sessions: {},
+      },
+      peerState,
+    );
+
+    expect(loadSpy).toHaveBeenCalledWith(map.id);
+
+    loadSpy.mockRestore();
+  });
+
   test("should consider onlyKnownState load requests processed when server replies with KNOWN", async () => {
     setMaxInFlightLoadsPerPeer(1);
 
