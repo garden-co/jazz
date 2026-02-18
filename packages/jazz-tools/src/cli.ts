@@ -15,7 +15,7 @@ import type { Lens, Schema, TablePolicies } from "./schema.js";
 // Allow loading `.ts` schema files when invoked via `node dist/cli.js`.
 register();
 
-interface BuildOptions {
+export interface BuildOptions {
   jazzBin: string;
   schemaDir: string;
 }
@@ -225,11 +225,11 @@ async function ensurePermissionsTestStub(schemaDir: string): Promise<void> {
   const template = `/**
  * Permissions test starter.
  *
- * Suggested shape:
- * - boot a disposable Jazz server/runtime for the test
- * - seed synthetic rows for policy edge-cases
- * - mint scoped clients with representative JWT claims
- * - assert allow/deny behavior for queries and mutations
+ * Suggested shape (jazz-tools/testing):
+ * - startLocalJazzServer(...) for an isolated server
+ * - seedRows(...) to set up synthetic fixtures
+ * - scopedClientForClaims(...) for request-scoped user clients
+ * - expectAllowed(...) / expectDenied(...) assertions
  */
 export {};
 `;
@@ -285,7 +285,7 @@ async function runJazzBuild(
   console.warn(`jazz-tools build failed: ${error.message}`);
 }
 
-async function build(options: BuildOptions): Promise<void> {
+export async function build(options: BuildOptions): Promise<void> {
   const { jazzBin, schemaDir } = options;
 
   let files: string[];
@@ -328,21 +328,31 @@ async function build(options: BuildOptions): Promise<void> {
   await runJazzBuild(jazzBin, schemaDir);
 }
 
-const { command, options } = parseArgs();
+function isMainModule(): boolean {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+  return pathToFileURL(entry).href === import.meta.url;
+}
 
-switch (command) {
-  case "build":
-    build(options).catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
-    break;
-  default:
-    console.log("Usage: node <path-to-jazz-tools>/dist/cli.js build [options]");
-    console.log("\nCommands:");
-    console.log("  build    Generate SQL from TypeScript schemas and run jazz-tools build");
-    console.log("\nOptions:");
-    console.log("  --jazz-bin <path>    Path to jazz binary (default: jazz-tools)");
-    console.log("  --schema-dir <path>  Path to schema directory (default: ./schema)");
-    process.exit(command ? 1 : 0);
+if (isMainModule()) {
+  const { command, options } = parseArgs();
+
+  switch (command) {
+    case "build":
+      build(options).catch((err) => {
+        console.error(err.message);
+        process.exit(1);
+      });
+      break;
+    default:
+      console.log("Usage: node <path-to-jazz-tools>/dist/cli.js build [options]");
+      console.log("\nCommands:");
+      console.log("  build    Generate SQL from TypeScript schemas and run jazz-tools build");
+      console.log("\nOptions:");
+      console.log("  --jazz-bin <path>    Path to jazz binary (default: jazz-tools)");
+      console.log("  --schema-dir <path>  Path to schema directory (default: ./schema)");
+      process.exit(command ? 1 : 0);
+  }
 }
