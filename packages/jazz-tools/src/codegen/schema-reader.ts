@@ -89,6 +89,12 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         column: expr.column,
         session_path: [...expr.session_path],
       };
+    case "Exists":
+      return {
+        type: "Exists",
+        table: expr.table,
+        condition: clonePolicyExpr(expr.condition),
+      };
     case "Inherits":
       return {
         type: "Inherits",
