@@ -11,6 +11,25 @@ import type { WasmSchema, ColumnType } from "../drivers/types.js";
 import { tableNameToInterface } from "./type-generator.js";
 import type { Relation } from "./relation-analyzer.js";
 
+function columnTypeToTs(type: ColumnType): string {
+  switch (type.type) {
+    case "Text":
+      return "string";
+    case "Boolean":
+      return "boolean";
+    case "Integer":
+    case "BigInt":
+    case "Timestamp":
+      return "number";
+    case "Uuid":
+      return "string";
+    case "Array":
+      return `${columnTypeToTs(type.element)}[]`;
+    default:
+      return "unknown";
+  }
+}
+
 /**
  * Generate WhereInput type for a column based on its type.
  */
@@ -40,6 +59,11 @@ function columnToWhereInputType(col: {
           : "string | { eq?: string; ne?: string }";
       }
       return "string | { eq?: string; ne?: string; in?: string[] }";
+    case "Array": {
+      const elementTs = columnTypeToTs(col.column_type.element);
+      const arrayTs = `${elementTs}[]`;
+      return `${arrayTs} | { eq?: ${arrayTs}; contains?: ${elementTs} }`;
+    }
     default:
       return "unknown";
   }

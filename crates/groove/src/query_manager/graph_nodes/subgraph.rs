@@ -99,6 +99,9 @@ impl SubgraphTemplate {
                     crate::query_manager::query::Condition::Between { column, min, max } => {
                         query_builder.filter_between(column, min.clone(), max.clone())
                     }
+                    crate::query_manager::query::Condition::Contains { column, value } => {
+                        query_builder.filter_contains(column, value.clone())
+                    }
                     crate::query_manager::query::Condition::IsNull { column } => {
                         query_builder.filter_is_null(column)
                     }
