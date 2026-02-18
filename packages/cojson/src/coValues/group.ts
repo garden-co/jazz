@@ -1559,6 +1559,7 @@ export class RawGroup<
     initPrivacy: "trusting" | "private" = "private",
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
     initMeta?: JsonObject,
+    options?: { restrictDeletion?: boolean },
   ): L {
     this.assertCanWrite();
     const list = this.core.node
@@ -1567,6 +1568,9 @@ export class RawGroup<
         ruleset: {
           type: "ownedByGroup",
           group: this.id,
+          ...(options?.restrictDeletion === true
+            ? { restrictDeletion: true }
+            : {}),
         },
         meta: meta || null,
         ...(uniqueness.createdAt !== undefined

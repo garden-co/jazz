@@ -71,6 +71,10 @@ export type SchemaPermissions = {
    * Runs both when creating CoValues with `.create()` and when creating CoValues from JSON.
    */
   onCreate?: OnCreateCallback;
+  /**
+   * Restrict deletion operations on CoList values to manager/admin roles.
+   */
+  restrictDeletion?: boolean;
 };
 
 export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
@@ -176,20 +180,33 @@ export function withSchemaPermissions<T extends { owner?: Account | Group }>(
   schemaPermissions?: SchemaPermissions,
 ): T & { onCreate?: OnCreateCallback } {
   const onCreate = schemaPermissions?.onCreate;
+  const schemaRestrictDeletion = schemaPermissions?.restrictDeletion === true;
   if (!options) {
     const owner = schemaPermissions?.default?.() ?? Group.create();
-    return { owner, onCreate } as T & { onCreate?: OnCreateCallback };
+    return {
+      owner,
+      onCreate,
+      ...(schemaRestrictDeletion ? { restrictDeletion: true } : {}),
+    } as T & { onCreate?: OnCreateCallback };
   }
   if (TypeSym in options) {
-    return { owner: options, onCreate } as T & {
+    return {
+      owner: options,
+      onCreate,
+      ...(schemaRestrictDeletion ? { restrictDeletion: true } : {}),
+    } as T & {
       onCreate?: OnCreateCallback;
     };
   }
   const owner =
     options.owner ?? schemaPermissions?.default?.() ?? Group.create();
+  const optionRestrictDeletion = schemaPermissions?.restrictDeletion === true;
   return {
     ...options,
     owner,
     onCreate,
+    ...(schemaRestrictDeletion || optionRestrictDeletion
+      ? { restrictDeletion: true }
+      : {}),
   } as T & { onCreate?: OnCreateCallback };
 }
