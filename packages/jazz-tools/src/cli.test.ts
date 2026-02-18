@@ -72,6 +72,43 @@ export default definePermissions(app, ({ policy, session }) => [
 `;
 }
 
+function permissionsSchemaUnknownTable(): string {
+  return `
+export default {
+  ghosts: {
+    select: {
+      using: { type: "True" },
+    },
+  },
+};
+`;
+}
+
+function permissionsSchemaMissingExport(): string {
+  return `
+export const nope = 42;
+`;
+}
+
+function permissionsSchemaNamedExport(): string {
+  return `
+import { definePermissions } from ${JSON.stringify(permissionsDslPath)};
+import { app } from "./app";
+
+export const permissions = definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ owner_id: session.user_id }),
+]);
+`;
+}
+
+function permissionsSchemaInvalidShape(): string {
+  return `
+export default {
+  todos: 123,
+};
+`;
+}
+
 describe("cli build permissions generation", () => {
   it("loads permissions.ts, merges policies, and creates permissions.test.ts stub", async () => {
     const { schemaDir, jazzBin } = await createWorkspace();
@@ -113,5 +150,44 @@ describe("cli build permissions generation", () => {
 
     const permissionsTest = await readFile(join(schemaDir, "permissions.test.ts"), "utf8");
     expect(permissionsTest).toBe("// keep-existing-test\n");
+  });
+
+  it("fails when permissions.ts has no default/permissions export", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchemaMissingExport());
+
+    await expect(build({ schemaDir, jazzBin })).rejects.toThrow(/missing permissions export/i);
+  });
+
+  it("fails when permissions.ts references unknown tables", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchemaUnknownTable());
+
+    await expect(build({ schemaDir, jazzBin })).rejects.toThrow(
+      /permissions\.ts defines permissions for unknown table\(s\): ghosts/i,
+    );
+  });
+
+  it("accepts named permissions export for transitional ergonomics", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchemaNamedExport());
+
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
+  });
+
+  it("fails when permissions.ts export shape is invalid", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchemaInvalidShape());
+
+    await expect(build({ schemaDir, jazzBin })).rejects.toThrow(/invalid permissions export/i);
   });
 });

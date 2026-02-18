@@ -65,6 +65,51 @@ setInterval(() => {}, 1000);
   return scriptPath;
 }
 
+async function createFailingJazzBin(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "jazz-tools-fake-bin-fail-"));
+  tempRoots.push(root);
+  const scriptPath = join(root, "fake-jazz-fail");
+
+  const script = `#!/bin/sh
+exit 13
+`;
+
+  await writeFile(scriptPath, script);
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function createIgnoreTermJazzBin(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "jazz-tools-fake-bin-ignore-term-"));
+  tempRoots.push(root);
+  const scriptPath = join(root, "fake-jazz-ignore-term");
+
+  const script = `#!/bin/sh
+PORT="$4"
+node -e '
+const http = require("http");
+process.on("SIGTERM", () => {
+  // Intentionally ignore SIGTERM to force SIGKILL fallback paths.
+});
+const server = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.statusCode = 200;
+    res.end("ok");
+    return;
+  }
+  res.statusCode = 404;
+  res.end("missing");
+});
+server.listen(Number(process.argv[1]), "127.0.0.1");
+setInterval(() => {}, 1000);
+' "$PORT"
+`;
+
+  await writeFile(scriptPath, script);
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 describe("testing helpers", () => {
   it("creates a request with bearer token claims", () => {
     const request = requestForClaims({
@@ -206,5 +251,39 @@ describe("testing helpers", () => {
 
     await server.stop();
     managedServers.pop();
+  });
+
+  it("fails fast when the server process exits before health checks pass", async () => {
+    const failingJazzBin = await createFailingJazzBin();
+    const startedAt = Date.now();
+
+    await expect(
+      startLocalJazzServer({
+        appId: "test-app-fail-fast",
+        jazzBin: failingJazzBin,
+        startupTimeoutMs: 5_000,
+      }),
+    ).rejects.toThrow(/exited before becoming healthy/i);
+
+    const elapsedMs = Date.now() - startedAt;
+    expect(elapsedMs).toBeLessThan(1_500);
+  });
+
+  it("force-stops stubborn server processes that ignore SIGTERM", async () => {
+    const stubbornJazzBin = await createIgnoreTermJazzBin();
+    const server = await startLocalJazzServer({
+      appId: "test-app-ignore-term",
+      jazzBin: stubbornJazzBin,
+      startupTimeoutMs: 3_000,
+    });
+
+    const pid = server.process.pid;
+    expect(pid).toBeTypeOf("number");
+
+    await server.stop();
+
+    if (typeof pid === "number") {
+      expect(() => process.kill(pid, 0)).toThrow();
+    }
   });
 });

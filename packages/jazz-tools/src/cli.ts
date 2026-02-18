@@ -10,7 +10,7 @@ import { register } from "tsx/esm/api";
 import { schemaToSql, lensToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigration, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
-import type { Lens, Schema, TablePolicies } from "./schema.js";
+import type { Lens, Schema, TablePolicies, OperationPolicy } from "./schema.js";
 
 // Allow loading `.ts` schema files when invoked via `node dist/cli.js`.
 register();
@@ -124,8 +124,26 @@ async function generateSqlForMigrationFile(tsFile: string): Promise<void> {
   console.log(`Generated: ${basename(bwdFile)}`);
 }
 
+function isOperationPolicyLike(input: unknown): input is OperationPolicy {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return false;
+  }
+  const opPolicy = input as Record<string, unknown>;
+  return Object.keys(opPolicy).every((key) => key === "using" || key === "with_check");
+}
+
 function isTablePoliciesLike(input: unknown): input is TablePolicies {
-  return typeof input === "object" && input !== null;
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return false;
+  }
+  const tablePolicy = input as Record<string, unknown>;
+  const validOperationKeys = ["select", "insert", "update", "delete"];
+  return Object.entries(tablePolicy).every(([key, value]) => {
+    if (!validOperationKeys.includes(key)) {
+      return false;
+    }
+    return isOperationPolicyLike(value);
+  });
 }
 
 function isPermissionsMap(input: unknown): input is Record<string, TablePolicies> {
@@ -135,14 +153,15 @@ function isPermissionsMap(input: unknown): input is Record<string, TablePolicies
   return Object.values(input).every((value) => isTablePoliciesLike(value));
 }
 
-async function loadPermissionsModule(
-  filePath: string,
-): Promise<Record<string, TablePolicies> | null> {
+async function loadPermissionsModule(filePath: string): Promise<Record<string, TablePolicies>> {
   const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
   const module = await import(url);
   const candidate = module.default ?? module.permissions ?? null;
   if (!candidate) {
-    return null;
+    throw new Error(
+      `Missing permissions export in ${basename(filePath)}. ` +
+        `Export default definePermissions(...) (or export const permissions = definePermissions(...)).`,
+    );
   }
   if (!isPermissionsMap(candidate)) {
     throw new Error(
@@ -156,6 +175,16 @@ function mergePermissionsIntoSchema(
   schema: Schema,
   compiledPermissions: Record<string, TablePolicies>,
 ): Schema {
+  const schemaTableNames = new Set(schema.tables.map((table) => table.name));
+  const unknownTables = Object.keys(compiledPermissions).filter(
+    (tableName) => !schemaTableNames.has(tableName),
+  );
+  if (unknownTables.length > 0) {
+    throw new Error(
+      `permissions.ts defines permissions for unknown table(s): ${unknownTables.join(", ")}.`,
+    );
+  }
+
   return {
     tables: schema.tables.map((table) => {
       const external = compiledPermissions[table.name];
@@ -316,9 +345,7 @@ export async function build(options: BuildOptions): Promise<void> {
   const permissionsFile = join(schemaDir, "permissions.ts");
   if (await pathExists(permissionsFile)) {
     const permissions = await loadPermissionsModule(permissionsFile);
-    if (permissions) {
-      schema = mergePermissionsIntoSchema(schema, permissions);
-    }
+    schema = mergePermissionsIntoSchema(schema, permissions);
   }
 
   await generateSqlForSchemaFile(schemaFile, schema);
