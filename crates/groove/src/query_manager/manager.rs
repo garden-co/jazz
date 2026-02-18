@@ -525,6 +525,18 @@ impl QueryManager {
 
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure
+        let dirty_count = self
+            .subscriptions
+            .values()
+            .filter(|s| s.graph.has_dirty_nodes())
+            .count();
+        if dirty_count > 0 {
+            tracing::debug!(
+                dirty_count,
+                total = self.subscriptions.len(),
+                "settling subscriptions"
+            );
+        }
         let om = &mut self.sync_manager.object_manager;
         let storage_ref: &dyn Storage = storage;
         let schema_context = &self.schema_context;

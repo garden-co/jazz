@@ -163,6 +163,14 @@ impl MaterializeNode {
             }
         }
 
+        tracing::trace!(
+            added = result.added.len(),
+            removed = result.removed.len(),
+            updated = result.updated.len(),
+            total = self.current_tuples.len(),
+            "materialize node processed"
+        );
+
         self.dirty = false;
         result
     }
