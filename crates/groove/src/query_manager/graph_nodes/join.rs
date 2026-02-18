@@ -318,6 +318,7 @@ impl JoinNode {
 
     /// Process left side delta.
     pub fn process_left(&mut self, delta: TupleDelta) -> TupleDelta {
+        let input_size = delta.added.len() + delta.removed.len() + delta.updated.len();
         let mut result = TupleDelta::new();
 
         // Handle removals first
@@ -336,12 +337,21 @@ impl JoinNode {
             result.added.extend(self.add_left_tuple(new_tuple));
         }
 
+        let output_size = result.added.len() + result.removed.len() + result.updated.len();
+        tracing::trace!(
+            input_size,
+            output_size,
+            side = "left",
+            "join node processed"
+        );
+
         self.dirty = false;
         result
     }
 
     /// Process right side delta.
     pub fn process_right(&mut self, delta: TupleDelta) -> TupleDelta {
+        let input_size = delta.added.len() + delta.removed.len() + delta.updated.len();
         let mut result = TupleDelta::new();
 
         // Handle removals first
@@ -359,6 +369,14 @@ impl JoinNode {
             result.removed.extend(self.remove_right_tuple(&old_tuple));
             result.added.extend(self.add_right_tuple(new_tuple));
         }
+
+        let output_size = result.added.len() + result.removed.len() + result.updated.len();
+        tracing::trace!(
+            input_size,
+            output_size,
+            side = "right",
+            "join node processed"
+        );
 
         self.dirty = false;
         result

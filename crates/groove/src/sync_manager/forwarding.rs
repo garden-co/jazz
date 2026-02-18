@@ -57,6 +57,8 @@ impl SyncManager {
             .map(|(id, _)| *id)
             .collect();
 
+        let _span = tracing::debug_span!("forward_update_to_clients", %object_id, %branch_name, client_count = client_ids.len()).entered();
+
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
@@ -66,9 +68,10 @@ impl SyncManager {
         let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
         let metadata = object.metadata.clone();
 
-        for client_id in client_ids {
+        for client_id in &client_ids {
+            tracing::trace!(%client_id, "queuing tips to client");
             self.queue_tips_to_client(
-                client_id,
+                *client_id,
                 object_id,
                 metadata.clone(),
                 branch_name,
