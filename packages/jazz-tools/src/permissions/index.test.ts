@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { definePermissions } from "./index.js";
+import type { PolicyExpr } from "../schema.js";
 
 interface Todo {
   id: string;
@@ -79,6 +80,11 @@ const app = {
       },
     },
   },
+};
+
+const appWithoutSchema = {
+  todos: new TodoQueryBuilder(),
+  todoShares: new TodoShareQueryBuilder(),
 };
 
 describe("permissions DSL", () => {
@@ -253,7 +259,73 @@ describe("permissions DSL", () => {
       definePermissions(app, ({ policy, allowedTo }) => [
         policy.todos.allowRead.where(allowedTo.read("ownerId")),
       ]),
-    ).toThrow(/column is not a foreign key reference/i);
+    ).toThrow(/available fk columns: projectId/i);
+  });
+
+  it("rejects allowedTo when app.wasmSchema metadata is missing", () => {
+    expect(() =>
+      definePermissions(appWithoutSchema, ({ policy, allowedTo }) => [
+        policy.todos.allowRead.where(allowedTo.read("projectId")),
+      ]),
+    ).toThrow(/table metadata is missing in app\.wasmSchema/i);
+  });
+
+  it("rejects row references outside exists clauses", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where((todo) => ({ ownerId: todo.id })),
+      ]),
+    ).toThrow(/row references are only valid inside exists\(\) clauses/i);
+  });
+
+  it("supports update rules with only whereOld or whereNew", () => {
+    const oldOnly = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowUpdate.whereOld({ ownerId: session.userId }),
+    ]);
+    expect(oldOnly.todos.update?.using).toEqual({
+      type: "Cmp",
+      column: "ownerId",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+    expect(oldOnly.todos.update?.with_check).toEqual(oldOnly.todos.update?.using);
+
+    const newOnly = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowUpdate.whereNew({ ownerId: session.userId }),
+    ]);
+    expect(newOnly.todos.update?.with_check).toEqual({
+      type: "Cmp",
+      column: "ownerId",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+    expect(newOnly.todos.update?.using).toEqual(newOnly.todos.update?.with_check);
+  });
+
+  it("rejects unsupported where operators and invalid compound chains", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where({ done: { contains: true } } as unknown as TodoWhere),
+      ]),
+    ).toThrow(/where operator "contains" is not yet supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, both }) => [
+        policy.todos.allowRead.where(both({ done: true }).or({ archived: false })),
+      ]),
+    ).toThrow(/use "either\(\.\.\.\)" for OR chains/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, either }) => [
+        policy.todos.allowRead.where(either({ done: true }).and({ archived: false })),
+      ]),
+    ).toThrow(/use "both\(\.\.\.\)" for AND chains/i);
   });
 
   it("compiles correlated exists row references", () => {
@@ -315,5 +387,41 @@ describe("permissions DSL", () => {
         },
       ],
     });
+  });
+
+  it("validates inherits against the exists table when nested in raw PolicyExpr", () => {
+    const manualExistsExpr: PolicyExpr = {
+      type: "Exists",
+      table: "todoShares",
+      condition: {
+        type: "Inherits",
+        operation: "Select",
+        via_column: "todoId",
+      },
+    };
+
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.where(manualExistsExpr),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual(manualExistsExpr);
+  });
+
+  it("rejects invalid nested inherits columns against exists table metadata", () => {
+    const invalidManualExistsExpr: PolicyExpr = {
+      type: "Exists",
+      table: "todoShares",
+      condition: {
+        type: "Inherits",
+        operation: "Select",
+        via_column: "projectId",
+      },
+    };
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => [
+        policy.todos.allowRead.where(invalidManualExistsExpr),
+      ]),
+    ).toThrow(/available fk columns: todoId/i);
   });
 });

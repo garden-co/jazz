@@ -647,13 +647,22 @@ function assertInheritsColumns(
   table: string,
   fkColumnsByTable: Map<string, Set<string>>,
 ): void {
-  const check = (node: PolicyExpr): void => {
+  const check = (node: PolicyExpr, currentTable: string): void => {
     switch (node.type) {
       case "Inherits": {
-        const fkColumns = fkColumnsByTable.get(table);
-        if (!fkColumns || !fkColumns.has(node.via_column)) {
+        const fkColumns = fkColumnsByTable.get(currentTable);
+        if (!fkColumns) {
           throw new Error(
-            `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${table}": column is not a foreign key reference.`,
+            `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${currentTable}": ` +
+              `table metadata is missing in app.wasmSchema.`,
+          );
+        }
+        if (!fkColumns.has(node.via_column)) {
+          const fkList = [...fkColumns].sort();
+          const available = fkList.length > 0 ? fkList.join(", ") : "(none)";
+          throw new Error(
+            `allowedTo.${node.operation.toLowerCase()}("${node.via_column}") is invalid for table "${currentTable}": ` +
+              `column is not a foreign key reference. Available FK columns: ${available}.`,
           );
         }
         break;
@@ -661,21 +670,21 @@ function assertInheritsColumns(
       case "And":
       case "Or":
         for (const child of node.exprs) {
-          check(child);
+          check(child, currentTable);
         }
         break;
       case "Not":
-        check(node.expr);
+        check(node.expr, currentTable);
         break;
       case "Exists":
-        check(node.condition);
+        check(node.condition, node.table);
         break;
       default:
         break;
     }
   };
 
-  check(expr);
+  check(expr, table);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

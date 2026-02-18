@@ -34,6 +34,42 @@ export interface LocalJazzServer {
   stop(): Promise<void>;
 }
 
+async function terminateProcess(child: ChildProcess, timeoutMs: number): Promise<void> {
+  const exited = await new Promise<boolean>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(true);
+      return;
+    }
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once("exit", onExit);
+    child.kill("SIGTERM");
+  });
+
+  if (exited) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve();
+    }, timeoutMs);
+    child.once("exit", onExit);
+    child.kill("SIGKILL");
+  });
+}
+
 function toBase64Url(value: unknown): string {
   const encoded = Buffer.from(JSON.stringify(value), "utf8").toString("base64");
   return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -128,20 +164,79 @@ async function pickOpenPort(): Promise<number> {
   });
 }
 
-async function waitForHealth(url: string, timeoutMs: number): Promise<void> {
+async function waitForHealth(child: ChildProcess, url: string, timeoutMs: number): Promise<void> {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      const resp = await fetch(url);
-      if (resp.ok) {
+  let lastHealthError: unknown;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const cleanup = (): void => {
+      child.off("exit", onExit);
+      child.off("error", onError);
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+
+    const finish = (error?: Error): void => {
+      if (settled) {
         return;
       }
-    } catch {
-      // Server not ready yet.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`Jazz server did not become healthy within ${timeoutMs}ms (${url}).`);
+      settled = true;
+      cleanup();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      finish(
+        new Error(
+          `Jazz server exited before becoming healthy (code: ${code ?? "null"}, signal: ${signal ?? "none"}).`,
+        ),
+      );
+    };
+
+    const onError = (error: Error): void => {
+      finish(new Error(`Failed to start Jazz server process: ${error.message}`));
+    };
+
+    const poll = async (): Promise<void> => {
+      if (settled) {
+        return;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        const detail =
+          lastHealthError instanceof Error ? ` Last health error: ${lastHealthError.message}` : "";
+        finish(
+          new Error(`Jazz server did not become healthy within ${timeoutMs}ms (${url}).${detail}`),
+        );
+        return;
+      }
+
+      try {
+        const resp = await fetch(url);
+        if (resp.ok) {
+          finish();
+          return;
+        }
+      } catch (error) {
+        lastHealthError = error;
+      }
+
+      timer = setTimeout(() => {
+        void poll();
+      }, 100);
+    };
+
+    child.once("exit", onExit);
+    child.once("error", onError);
+    void poll();
+  });
 }
 
 export async function startLocalJazzServer(
@@ -167,13 +262,16 @@ export async function startLocalJazzServer(
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  // Prevent child stdio backpressure from stalling long-lived test servers.
+  child.stdout?.on("data", () => {});
+  child.stderr?.on("data", () => {});
 
   const healthUrl = `http://127.0.0.1:${port}/health`;
 
   try {
-    await waitForHealth(healthUrl, options.startupTimeoutMs ?? 10_000);
+    await waitForHealth(child, healthUrl, options.startupTimeoutMs ?? 10_000);
   } catch (error) {
-    child.kill("SIGTERM");
+    await terminateProcess(child, 1_000);
     if (ownsDataDir) {
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -189,11 +287,7 @@ export async function startLocalJazzServer(
     adminSecret,
     process: child,
     async stop() {
-      child.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        child.once("exit", () => resolve());
-        setTimeout(resolve, 2_000);
-      });
+      await terminateProcess(child, 2_000);
       if (ownsDataDir) {
         await rm(dataDir, { recursive: true, force: true });
       }
