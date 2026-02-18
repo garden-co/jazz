@@ -106,6 +106,56 @@ description: Query APIs across one-shot reads, subscriptions, reactive hooks, an
 - **Nested includes:** pass nested objects to load multi-hop relations.
 - **Junction tables:** codegen does not currently synthesize implicit many-to-many shortcuts; model and query the junction table explicitly.
 
+Schema reference used by the include examples:
+
+```ts
+import { table, col } from "jazz-tools";
+
+table("projects", {
+  name: col.string(),
+});
+
+table("users", {
+  email: col.string(),
+});
+
+table("project_members", {
+  project: col.ref("projects"),
+  user: col.ref("users"),
+  role: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  done: col.boolean(),
+  project: col.ref("projects").optional(),
+  parent: col.ref("todos").optional(),
+});
+```
+
+```sql
+CREATE TABLE projects (
+    name TEXT NOT NULL
+);
+
+CREATE TABLE users (
+    email TEXT NOT NULL
+);
+
+CREATE TABLE project_members (
+    project UUID REFERENCES projects NOT NULL,
+    user UUID REFERENCES users NOT NULL,
+    role TEXT NOT NULL
+);
+
+CREATE TABLE todos (
+    title TEXT NOT NULL,
+    done BOOLEAN NOT NULL,
+    project UUID REFERENCES projects,
+    parent UUID REFERENCES todos
+);
+```
+
 ```ts
 // Example schema shape:
 // project_members(project -> projects.id, user -> users.id)

@@ -6,16 +6,97 @@
  * type safety across the Rust/TypeScript boundary.
  */
 
-// Re-export generated types from WASM with friendlier names
-export type {
-  WasmValue as Value,
-  WasmRow,
-  WasmRowDelta as RowDelta,
-  WasmColumnType as ColumnType,
-  WasmColumnDescriptor as ColumnDescriptor,
-  WasmTableSchema as TableSchema,
-  WasmSchema,
+import type {
+  WasmColumnDescriptor as GrooveWasmColumnDescriptor,
+  WasmColumnType as GrooveWasmColumnType,
+  WasmRow as GrooveWasmRow,
+  WasmRowDelta as GrooveWasmRowDelta,
+  WasmTableSchema as GrooveWasmTableSchema,
+  WasmValue as GrooveWasmValue,
 } from "groove-wasm";
+
+export type Value = GrooveWasmValue;
+export type WasmRow = GrooveWasmRow;
+export type RowDelta = GrooveWasmRowDelta;
+export type ColumnType = GrooveWasmColumnType;
+export type ColumnDescriptor = GrooveWasmColumnDescriptor;
+
+export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";
+export type PolicyCmpOp = "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge";
+
+export type PolicyValue =
+  | {
+      type: "Literal";
+      value: Value;
+    }
+  | {
+      type: "SessionRef";
+      path: string[];
+    };
+
+export type PolicyExpr =
+  | {
+      type: "Cmp";
+      column: string;
+      op: PolicyCmpOp;
+      value: PolicyValue;
+    }
+  | {
+      type: "IsNull";
+      column: string;
+    }
+  | {
+      type: "IsNotNull";
+      column: string;
+    }
+  | {
+      type: "In";
+      column: string;
+      session_path: string[];
+    }
+  | {
+      type: "Inherits";
+      operation: PolicyOperation;
+      via_column: string;
+    }
+  | {
+      type: "And";
+      exprs: PolicyExpr[];
+    }
+  | {
+      type: "Or";
+      exprs: PolicyExpr[];
+    }
+  | {
+      type: "Not";
+      expr: PolicyExpr;
+    }
+  | {
+      type: "True";
+    }
+  | {
+      type: "False";
+    };
+
+export interface OperationPolicy {
+  using?: PolicyExpr;
+  with_check?: PolicyExpr;
+}
+
+export interface TablePolicies {
+  select?: OperationPolicy;
+  insert?: OperationPolicy;
+  update?: OperationPolicy;
+  delete?: OperationPolicy;
+}
+
+export interface TableSchema extends GrooveWasmTableSchema {
+  policies?: TablePolicies;
+}
+
+export interface WasmSchema {
+  tables: Record<string, TableSchema>;
+}
 
 // ============================================================================
 // Storage Driver Interface

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { table, col, resetCollectedState, getCollectedSchema } from "../dsl.js";
+import { table, col, policy, resetCollectedState, getCollectedSchema } from "../dsl.js";
 import { schemaToWasm } from "./schema-reader.js";
 import { generateTypes } from "./type-generator.js";
 import { generateClient, analyzeRelations } from "./index.js";
@@ -105,6 +105,68 @@ describe("schemaToWasm", () => {
     expect(Object.keys(wasm.tables)).toEqual(["users", "todos"]);
     expect(wasm.tables.users.columns).toHaveLength(1);
     expect(wasm.tables.todos.columns).toHaveLength(2);
+  });
+
+  it("carries table permissions into wasm schema", () => {
+    table(
+      "todos",
+      { owner_id: col.string(), title: col.string() },
+      {
+        permissions: {
+          select: policy.eqSession("owner_id", "user_id"),
+          insert: policy.eqSession("owner_id", "user_id"),
+          update: {
+            using: policy.eqSession("owner_id", "user_id"),
+            withCheck: policy.eqSession("owner_id", "user_id"),
+          },
+          delete: policy.eqSession("owner_id", "user_id"),
+        },
+      },
+    );
+
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.tables.todos.policies).toEqual({
+      select: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      insert: {
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+        with_check: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "owner_id",
+          op: "Eq",
+          value: { type: "SessionRef", path: ["user_id"] },
+        },
+      },
+    });
   });
 });
 
