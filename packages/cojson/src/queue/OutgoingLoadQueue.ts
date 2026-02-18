@@ -130,6 +130,7 @@ export class OutgoingLoadQueue {
             id: coValue.id,
             peerId: this.peerId,
           });
+          // Re-resolve by ID to avoid mutating a stale CoValue instance.
           coValue.node.getCoValue(coValue.id).markNotFoundInPeer(this.peerId);
         } else if (coValue.isStreaming()) {
           logger.warn(
