@@ -314,6 +314,7 @@ export class StorageApiAsync implements StorageAPI {
   private async handleCorrection(
     knownState: CoValueKnownState,
     correctionCallback: CorrectionCallback,
+    tx: DBTransactionInterfaceAsync | undefined,
   ) {
     const correction = correctionCallback(knownState);
 
@@ -326,13 +327,17 @@ export class StorageApiAsync implements StorageAPI {
     }
 
     for (const msg of correction) {
-      const success = await this.storeSingle(msg, (knownState) => {
-        logger.error("Double correction requested", {
-          msg,
-          knownState,
-        });
-        return undefined;
-      });
+      const success = await this.storeSingle(
+        msg,
+        (knownState) => {
+          logger.error("Double correction requested", {
+            msg,
+            knownState,
+          });
+          return undefined;
+        },
+        tx,
+      );
 
       if (!success) {
         return false;
@@ -345,23 +350,39 @@ export class StorageApiAsync implements StorageAPI {
   private async storeSingle(
     msg: NewContentMessage,
     correctionCallback: CorrectionCallback,
+    tx?: DBTransactionInterfaceAsync,
   ): Promise<boolean> {
+    // utility to run a callback in an existing transaction
+    // or create a new one on every call
+    const runInTransaction = <T>(
+      callback: (tx: DBTransactionInterfaceAsync) => Promise<T>,
+    ): Promise<T> => {
+      if (tx) {
+        return callback(tx);
+      }
+
+      return new Promise((resolve, reject) => {
+        this.dbClient.transaction((tx) => {
+          return callback(tx).then(resolve, reject);
+        });
+      });
+    };
+
     this.interruptEraser("store");
     if (this.storeQueue.closed) {
       return false;
     }
 
     const id = msg.id;
-    const storedCoValueRowID = await this.dbClient.upsertCoValue(
-      id,
-      msg.header,
+    const storedCoValueRowID = await runInTransaction((tx) =>
+      tx.upsertCoValue(id, msg.header),
     );
 
     if (!storedCoValueRowID) {
-      const knownState = emptyKnownState(id as RawCoID);
+      const knownState = emptyKnownState(id);
       this.knownStates.setKnownState(id, knownState);
 
-      return this.handleCorrection(knownState, correctionCallback);
+      return this.handleCorrection(knownState, correctionCallback, tx);
     }
 
     const knownState = this.knownStates.getKnownState(id);
@@ -370,7 +391,7 @@ export class StorageApiAsync implements StorageAPI {
     let invalidAssumptions = false;
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      await this.dbClient.transaction(async (tx) => {
+      await runInTransaction(async (tx) => {
         const sessionRow = await tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
@@ -411,7 +432,7 @@ export class StorageApiAsync implements StorageAPI {
     this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
-      return this.handleCorrection(knownState, correctionCallback);
+      return this.handleCorrection(knownState, correctionCallback, tx);
     }
 
     return true;
@@ -565,6 +586,27 @@ export class StorageApiAsync implements StorageAPI {
   onCoValueUnmounted(id: RawCoID): void {
     this.inMemoryCoValues.delete(id);
     this.knownStates.deleteKnownState(id);
+  }
+
+  /**
+   * Store multiple messages atomically in a single transaction.
+   * All messages are committed together, or none are committed if an error occurs.
+   *
+   * Used by atomic transactions to ensure all mutations are persisted together.
+   */
+  async storeAtomicBatch(messages: NewContentMessage[]): Promise<void> {
+    if (messages.length === 0) {
+      return; // No-op for empty batches
+    }
+
+    this.interruptEraser("storeAtomicBatch");
+
+    await this.dbClient.transaction(async (tx) => {
+      for (const msg of messages) {
+        await this.storeSingle(msg, () => undefined, tx);
+      }
+    });
+
   }
 
   close() {

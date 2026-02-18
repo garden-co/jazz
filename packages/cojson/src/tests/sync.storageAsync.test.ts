@@ -219,6 +219,51 @@ describe("client with storage syncs with server", () => {
   });
 });
 
+describe("atomic batching transactions", () => {
+  let jazzCloud: ReturnType<typeof setupTestNode>;
+
+  beforeEach(async () => {
+    jazzCloud = setupTestNode({
+      isSyncServer: true,
+    });
+    SyncMessagesLog.clear();
+  });
+
+  test("atomic batch transactions should send a single message and transaction", async () => {
+    const client = setupTestNode();
+
+    const storage = await client.addAsyncStorage({
+      ourName: "client",
+    });
+
+    const transactionSpy = vi.spyOn(storage.dbClient, "transaction");
+
+    const [group, largeMap] = await client.node.unstable_withTransaction(() => {
+      const group = client.node.createGroup();
+      group.addMember("everyone", "writer");
+
+      const largeMap = group.createMap();
+
+      fillCoMapWithLargeData(largeMap);
+
+      return [group, largeMap];
+    });
+
+    expect(transactionSpy).toHaveBeenCalledOnce();
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: largeMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> storage | BATCH [Group, Map, Map, Map]",
+      ]
+    `);
+  });
+});
+
 describe("client syncs with a server with storage", () => {
   let jazzCloud: ReturnType<typeof setupTestNode>;
 

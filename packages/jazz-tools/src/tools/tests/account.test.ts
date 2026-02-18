@@ -527,3 +527,193 @@ describe("createAs", () => {
     expect(createdAccount.account.$jazz.createdBy).toBe(undefined);
   });
 });
+
+describe("account.unstable_withTransaction", () => {
+  const TestMap = co.map({
+    name: z.string(),
+    value: z.number(),
+  });
+
+  test("executes synchronous callback and returns result", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const result = await account.$jazz.unstable_withTransaction(() => {
+      return "test-result";
+    });
+
+    expect(result).toBe("test-result");
+  });
+
+  test("mutations are applied to memory immediately", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map = TestMap.create({ name: "test", value: 0 }, { owner: account });
+
+    await account.$jazz.unstable_withTransaction(() => {
+      map.$jazz.set("name", "updated");
+      map.$jazz.set("value", 42);
+
+      // Values should be immediately visible in memory
+      expect(map.name).toBe("updated");
+      expect(map.value).toBe(42);
+    });
+
+    // Values should persist after transaction
+    expect(map.name).toBe("updated");
+    expect(map.value).toBe(42);
+  });
+
+  test("multiple CoValue mutations are persisted together", async () => {
+    const { clientAccount, serverAccount } = await setupTwoNodes();
+
+    const [map1, map2] = await clientAccount.$jazz.unstable_withTransaction(
+      () => {
+        const group = Group.create({ owner: clientAccount });
+        group.addMember(serverAccount, "reader");
+
+        const map1 = TestMap.create({ name: "map1", value: 1 }, group);
+        const map2 = TestMap.create({ name: "map2", value: 2 }, group);
+
+        map1.$jazz.set("name", "map1-updated");
+        map2.$jazz.set("name", "map2-updated");
+
+        return [map1, map2];
+      },
+    );
+
+    // Verify both mutations were synced to server
+    const loadedMap1 = await TestMap.load(map1.$jazz.raw.id, {
+      loadAs: serverAccount,
+    });
+    const loadedMap2 = await TestMap.load(map2.$jazz.raw.id, {
+      loadAs: serverAccount,
+    });
+
+    assertLoaded(loadedMap1);
+    assertLoaded(loadedMap2);
+
+    expect(loadedMap1.name).toBe("map1-updated");
+    expect(loadedMap1.value).toBe(1);
+
+    expect(loadedMap2.name).toBe("map2-updated");
+    expect(loadedMap2.value).toBe(2);
+  });
+
+  test("throws error for nested transactions (US-5)", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    await expect(
+      account.$jazz.unstable_withTransaction(() => {
+        return account.$jazz.unstable_withTransaction(() => {
+          return "nested";
+        });
+      }),
+    ).rejects.toThrow("Nested transactions are not supported");
+  });
+
+  test("empty transaction is a no-op (US-2)", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    // Should not throw and should complete quickly
+    await account.$jazz.unstable_withTransaction(() => {
+      // Empty transaction
+    });
+  });
+
+  test("mutations outside unstable_withTransaction work normally (US-5)", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map = TestMap.create({ name: "test", value: 0 }, { owner: account });
+
+    // Mutation outside transaction
+    map.$jazz.set("name", "outside");
+    expect(map.name).toBe("outside");
+
+    // Mutation inside transaction
+    await account.$jazz.unstable_withTransaction(() => {
+      map.$jazz.set("value", 42);
+    });
+    expect(map.value).toBe(42);
+
+    // Another mutation outside transaction
+    map.$jazz.set("name", "after");
+    expect(map.name).toBe("after");
+  });
+
+  test("multiple mutations across different CoValues in single transaction (US-1)", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map1 = TestMap.create({ name: "map1", value: 1 }, { owner: account });
+    const map2 = TestMap.create({ name: "map2", value: 2 }, { owner: account });
+    const map3 = TestMap.create({ name: "map3", value: 3 }, { owner: account });
+
+    await account.$jazz.unstable_withTransaction(() => {
+      map1.$jazz.set("name", "updated1");
+      map1.$jazz.set("value", 10);
+
+      map2.$jazz.set("name", "updated2");
+      map2.$jazz.set("value", 20);
+
+      map3.$jazz.set("name", "updated3");
+      map3.$jazz.set("value", 30);
+    });
+
+    // All mutations should be visible
+    expect(map1.name).toBe("updated1");
+    expect(map1.value).toBe(10);
+    expect(map2.name).toBe("updated2");
+    expect(map2.value).toBe(20);
+    expect(map3.name).toBe("updated3");
+    expect(map3.value).toBe(30);
+  });
+
+  test("per-CoValue mutation order is preserved (US-1)", async () => {
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map = TestMap.create({ name: "test", value: 0 }, { owner: account });
+
+    await account.$jazz.unstable_withTransaction(() => {
+      map.$jazz.set("value", 1);
+      map.$jazz.set("value", 2);
+      map.$jazz.set("value", 3);
+      map.$jazz.set("value", 4);
+      map.$jazz.set("value", 5);
+    });
+
+    // Final value should be 5, preserving the order
+    expect(map.value).toBe(5);
+  });
+
+  test("transaction promise resolves when persistence and sync complete (US-1)", async () => {
+    const { clientAccount, serverNode } = await setupTwoNodes();
+
+    const map = TestMap.create(
+      { name: "test", value: 0 },
+      { owner: clientAccount },
+    );
+
+    // withTransaction should wait for persistence and sync
+    await clientAccount.$jazz.unstable_withTransaction(() => {
+      map.$jazz.set("name", "synced");
+      map.$jazz.set("value", 100);
+    });
+
+    // After withTransaction resolves, data should be available on server
+    const loadedMap = await serverNode.load(map.$jazz.raw.id);
+    expect(loadedMap).not.toBe(CoValueLoadingState.UNAVAILABLE);
+  });
+});

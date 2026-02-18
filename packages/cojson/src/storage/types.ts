@@ -62,6 +62,14 @@ export interface StorageAPI {
   ): void;
   store(data: NewContentMessage, handleCorrection: CorrectionCallback): void;
 
+  /**
+   * Store multiple messages atomically in a single transaction.
+   * All messages are committed together, or none are committed if an error occurs.
+   *
+   * Used by atomic transactions to ensure all mutations are persisted together.
+   */
+  storeAtomicBatch(messages: NewContentMessage[]): Promise<void>;
+
   streamingQueue?: StorageStreamingQueue;
 
   getKnownState(id: string): CoValueKnownState;
@@ -201,6 +209,11 @@ export interface DBTransactionInterfaceAsync {
     sessionID: SessionID,
   ): Promise<StoredSessionRow | undefined>;
 
+  upsertCoValue(
+    id: RawCoID,
+    header?: CoValueHeader,
+  ): Promise<number | undefined>;
+
   /**
    * Persist a "deleted coValue" marker in storage (work queue entry).
    * This is an enqueue signal: implementations should set status to `Pending`.
@@ -322,6 +335,8 @@ export interface DBClientInterfaceAsync {
 }
 
 export interface DBTransactionInterfaceSync {
+  upsertCoValue(id: RawCoID, header?: CoValueHeader): number | undefined;
+
   getSingleCoValueSession(
     coValueRowId: number,
     sessionID: SessionID,
@@ -388,7 +403,7 @@ export interface DBClientInterfaceSync {
     firstNewTxIdx: number,
   ): Pick<SignatureAfterRow, "idx" | "signature">[];
 
-  transaction(callback: (tx: DBTransactionInterfaceSync) => unknown): unknown;
+  transaction<T>(callback: (tx: DBTransactionInterfaceSync) => T): T;
 
   trackCoValuesSyncState(
     updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],

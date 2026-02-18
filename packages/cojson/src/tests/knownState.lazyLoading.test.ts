@@ -62,6 +62,7 @@ function createMockStorage(
     eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
     load: opts.load || vi.fn(),
     store: opts.store || vi.fn(),
+    storeAtomicBatch: vi.fn().mockResolvedValue(undefined),
     getKnownState: opts.getKnownState || vi.fn(),
     loadKnownState:
       opts.loadKnownState || vi.fn((id, callback) => callback(undefined)),

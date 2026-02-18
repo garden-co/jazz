@@ -300,9 +300,13 @@ export class SQLiteClient
     );
   }
 
-  transaction(operationsCallback: (tx: DBTransactionInterfaceSync) => unknown) {
-    this.db.transaction(() => operationsCallback(this));
-    return undefined;
+  transaction<T>(operationsCallback: (tx: DBTransactionInterfaceSync) => T): T {
+    let result: T | undefined;
+    this.db.transaction(() => {
+      result = operationsCallback(this);
+    });
+
+    return result as T;
   }
 
   getCoValueIDs(limit: number, offset: number): { id: RawCoID }[] {

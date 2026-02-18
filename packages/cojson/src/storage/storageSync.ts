@@ -312,6 +312,7 @@ export class StorageApiSync implements StorageAPI {
   private handleCorrection(
     knownState: CoValueKnownState,
     correctionCallback: CorrectionCallback,
+    tx?: DBTransactionInterfaceSync,
   ) {
     const correction = correctionCallback(knownState);
 
@@ -323,13 +324,17 @@ export class StorageApiSync implements StorageAPI {
     }
 
     for (const msg of correction) {
-      const success = this.storeSingle(msg, (knownState) => {
-        logger.error("Double correction requested", {
-          msg,
-          knownState,
-        });
-        return undefined;
-      });
+      const success = this.storeSingle(
+        msg,
+        (knownState) => {
+          logger.error("Double correction requested", {
+            msg,
+            knownState,
+          });
+          return undefined;
+        },
+        tx,
+      );
 
       if (!success) {
         return false;
@@ -342,15 +347,30 @@ export class StorageApiSync implements StorageAPI {
   private storeSingle(
     msg: NewContentMessage,
     correctionCallback: CorrectionCallback,
+    tx?: DBTransactionInterfaceSync,
   ): boolean {
+    // utility to run a callback in an existing transaction
+    // or create a new one on every call
+    const runInTransaction = <T>(
+      callback: (tx: DBTransactionInterfaceSync) => T,
+    ): T => {
+      if (tx) {
+        return callback(tx);
+      }
+
+      return this.dbClient.transaction((tx) => callback(tx));
+    };
+
     const id = msg.id;
-    const storedCoValueRowID = this.dbClient.upsertCoValue(id, msg.header);
+    const storedCoValueRowID = runInTransaction((tx) =>
+      tx.upsertCoValue(id, msg.header),
+    );
 
     if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knownStates.setKnownState(id, knownState);
 
-      return this.handleCorrection(knownState, correctionCallback);
+      return this.handleCorrection(knownState, correctionCallback, tx);
     }
 
     const knownState = this.knownStates.getKnownState(id);
@@ -359,7 +379,7 @@ export class StorageApiSync implements StorageAPI {
     let invalidAssumptions = false;
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      this.dbClient.transaction((tx) => {
+      runInTransaction((tx) => {
         if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
           tx.markCoValueAsDeleted(id);
         }
@@ -397,7 +417,7 @@ export class StorageApiSync implements StorageAPI {
     this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
-      return this.handleCorrection(knownState, correctionCallback);
+      return this.handleCorrection(knownState, correctionCallback, tx);
     }
 
     return true;
@@ -539,6 +559,24 @@ export class StorageApiSync implements StorageAPI {
   onCoValueUnmounted(id: RawCoID): void {
     this.inMemoryCoValues.delete(id);
     this.knownStates.deleteKnownState(id);
+  }
+
+  /**
+   * Store multiple messages atomically in a single transaction.
+   * All messages are committed together, or none are committed if an error occurs.
+   *
+   * Used by atomic transactions to ensure all mutations are persisted together.
+   */
+  async storeAtomicBatch(messages: NewContentMessage[]): Promise<void> {
+    if (messages.length === 0) {
+      return; // No-op for empty batches
+    }
+
+    this.dbClient.transaction((tx) => {
+      for (const msg of messages) {
+        this.storeSingle(msg, () => undefined, tx);
+      }
+    });
   }
 
   close() {

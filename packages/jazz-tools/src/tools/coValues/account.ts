@@ -602,6 +602,34 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     return this.localNode.syncManager.waitForAllCoValuesSync(options?.timeout);
   }
 
+  /**
+   * Execute multiple mutations atomically.
+   *
+   * All mutations within the callback are applied immediately to memory (optimistic updates),
+   * but persisted to storage and synced to servers as a single batch.
+   *
+   * **Important:** The callback must be synchronous. Async callbacks are not supported
+   * because they would allow other code to run during the transaction, potentially
+   * causing read/write concurrency issues.
+   *
+   * @param callback - Synchronous function containing mutations (no async/await)
+   * @returns Promise that resolves when all mutations are persisted and synced
+   *
+   * @example
+   * ```typescript
+   * account.$jazz.unstable_withTransaction(() => {
+   *   map1.set("key1", "value1");
+   *   map2.set("key2", "value2");
+   *   list.push(item);
+   * });
+   * ```
+   *
+   * @category Content
+   */
+  async unstable_withTransaction<T>(callback: () => T): Promise<T> {
+    return this.localNode.unstable_withTransaction(callback);
+  }
+
   /** @internal */
   get schema(): {
     profile: RefEncoded<Profile>;

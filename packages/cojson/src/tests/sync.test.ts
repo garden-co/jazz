@@ -3,7 +3,7 @@ import { expectMap } from "../coValue.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
-import type { LoadMessage } from "../sync.js";
+import type { BatchMessage, LoadMessage } from "../sync.js";
 import {
   TEST_NODE_CONFIG,
   blockMessageTypeOnOutgoingPeer,
@@ -15,6 +15,7 @@ import {
   randomAgentAndSessionID,
   setupTestAccount,
   setupTestNode,
+  SyncMessagesLog,
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";
@@ -32,6 +33,10 @@ beforeEach(async () => {
   jazzCloud = setupTestNode({
     isSyncServer: true,
   });
+});
+
+afterEach(() => {
+  SyncMessagesLog.clear();
 });
 
 test("If we add a client peer, but it never subscribes to a coValue, it won't get any messages", async () => {
@@ -183,6 +188,38 @@ test("should not verify transactions when SyncManager has verification disabled"
 
   const loadedMap = await loadCoValueOrFail(jazzCloud.node, map.id);
   expect(loadedMap.get("hello")).toEqual("world");
+});
+
+test("transaction mutations are sent together in a single batch message", async () => {
+  setupTestNode({ isSyncServer: true });
+  const { node, connectToSyncServer } = setupTestNode();
+  connectToSyncServer();
+
+  const [group, map] = await node.unstable_withTransaction(() => {
+    const group = node.createGroup();
+    const map = group.createMap();
+    map.set("initial", "value", "trusting");
+
+    map.set("key1", "value1", "trusting");
+    map.set("key2", "value2", "trusting");
+
+    return [group, map];
+  });
+
+  await map.core.waitForSync();
+
+  const simplified = SyncMessagesLog.getMessages({
+    Group: group.core,
+    Map: map.core,
+  });
+
+  expect(simplified).toMatchInlineSnapshot(`
+    [
+      "client -> server | BATCH [Group, Map]",
+      "server -> client | KNOWN Group sessions: header/4",
+      "server -> client | KNOWN Map sessions: header/3",
+    ]
+  `);
 });
 
 describe("sync - extra tests", () => {

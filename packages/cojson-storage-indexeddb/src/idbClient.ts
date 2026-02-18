@@ -55,6 +55,39 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     );
   }
 
+  async upsertCoValue(
+    id: RawCoID,
+    header?: CojsonInternalTypes.CoValueHeader,
+  ): Promise<number | undefined> {
+    // If no header is provided, just look up the existing rowID within this transaction.
+    if (!header) {
+      const row: StoredCoValueRow | undefined = await this.run((tx) =>
+        tx.getObjectStore("coValues").index("coValuesById").get(id),
+      );
+
+      return row?.rowID;
+    }
+
+    try {
+      // Attempt to insert or update the coValue in the current transaction.
+      const row = await this.run<number>(
+        (tx) =>
+          tx
+            .getObjectStore("coValues")
+            .put({ id, header }) as IDBRequest<number>,
+      );
+
+      return row;
+    } catch (e) {
+      // On failure (e.g. uniqueness constraint), fall back to reading the existing row.
+      const row: StoredCoValueRow | undefined = await this.run((tx) =>
+        tx.getObjectStore("coValues").index("coValuesById").get(id),
+      );
+
+      return row?.rowID;
+    }
+  }
+
   async markCoValueAsDeleted(id: RawCoID): Promise<void> {
     await this.run((tx) =>
       tx.getObjectStore("deletedCoValues").put({
@@ -240,9 +273,6 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
 export class IDBClient implements DBClientInterfaceAsync {
   private db;
 
-  activeTransaction: CoJsonIDBTransaction | undefined;
-  autoBatchingTransaction: CoJsonIDBTransaction | undefined;
-
   constructor(db: IDBDatabase) {
     this.db = db;
   }
@@ -293,14 +323,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     id: RawCoID,
     header?: CojsonInternalTypes.CoValueHeader,
   ): Promise<number | undefined> {
-    if (!header) {
-      return this.getCoValueRowID(id);
-    }
-
-    return putIndexedDbStore<CoValueRow, number>(this.db, "coValues", {
-      id,
-      header,
-    }).catch(() => this.getCoValueRowID(id));
+    return this.transaction(async (tx) => tx.upsertCoValue(id, header));
   }
 
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
@@ -315,17 +338,19 @@ export class IDBClient implements DBClientInterfaceAsync {
     return entries.map((e) => e.coValueID);
   }
 
-  async transaction(
-    operationsCallback: (tx: IDBTransaction) => Promise<unknown>,
+  async transaction<T>(
+    operationsCallback: (tx: IDBTransaction) => Promise<T>,
     storeNames?: StoreName[],
-  ) {
+  ): Promise<T> {
     const tx = new CoJsonIDBTransaction(this.db, storeNames);
 
     try {
-      await operationsCallback(new IDBTransaction(tx));
+      const result = await operationsCallback(new IDBTransaction(tx));
       tx.commit(); // Tells the browser to not wait for another possible request and commit the transaction immediately
+      return result;
     } catch (error) {
       tx.rollback();
+      throw error;
     }
   }
 

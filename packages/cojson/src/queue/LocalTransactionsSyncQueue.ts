@@ -18,7 +18,7 @@ export class LocalTransactionsSyncQueue {
   private lastUpdatedValue: VerifiedState | undefined;
   private lastUpdatedValueKnownState: CoValueKnownState | undefined;
 
-  constructor(private readonly sync: (content: NewContentMessage) => void) {}
+  constructor(private readonly sync: (contents: NewContentMessage[]) => void) {}
 
   syncTransaction = (
     coValue: VerifiedState,
@@ -80,9 +80,7 @@ export class LocalTransactionsSyncQueue {
       this.batch = [];
       this.nextBatchScheduled = false;
 
-      for (const content of batch) {
-        this.sync(content);
-      }
+      this.sync(batch);
     });
   }
 

@@ -38,6 +38,7 @@ export type SyncMessage =
   | LoadMessage
   | KnownStateMessage
   | NewContentMessage
+  | BatchMessage
   | DoneMessage
   | ReconcileMessage
   | ReconcileAckMessage;
@@ -68,6 +69,15 @@ export type SessionNewContent = {
   after: number;
   newTransactions: Transaction[];
   lastSignature: Signature;
+};
+
+/**
+ * BatchMessage contains multiple NewContentMessages to be processed atomically.
+ * Used for atomic transactions where all mutations should be persisted and synced together.
+ */
+export type BatchMessage = {
+  action: "batch";
+  messages: NewContentMessage[];
 };
 
 export type DoneMessage = {
@@ -210,6 +220,12 @@ export class SyncManager {
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
+    // Handle batch messages first (they don't have an id field)
+    if (msg.action === "batch") {
+      this.handleBatch(msg, peer);
+      return;
+    }
+
     if (msg.action === "reconcile") {
       this.handleReconcile(msg, peer);
       return;
@@ -1369,40 +1385,90 @@ export class SyncManager {
     return this.sendNewContent(msg.id, peer);
   }
 
-  private syncQueue = new LocalTransactionsSyncQueue((content) =>
-    this.syncContent(content),
-  );
+  /**
+   * Handle a batch of content messages atomically.
+   * Unpacks the batch and processes each message individually while preserving order.
+   */
+  handleBatch(msg: BatchMessage, peer: PeerState) {
+    for (const message of msg.messages) {
+      this.handleSyncMessage(message, peer);
+    }
+  }
+
+  /**
+   * Sync multiple mutations atomically.
+   * Stores all in IndexedDB in one transaction and sends as one BatchMessage to servers.
+   */
+  async syncAtomicBatch(messages: NewContentMessage[]): Promise<void> {
+    if (messages.length === 0) {
+      return; // No-op for empty batches
+    }
+
+    // Start both operations in parallel (single attempt for storage and network)
+    const storagePromise = this.local.storage
+      ? this.local.storage.storeAtomicBatch(messages)
+      : Promise.resolve(undefined);
+
+    const syncPromise = this.syncContent({
+      action: "batch",
+      messages: messages,
+    });
+
+    // Wait for both to complete
+    await Promise.allSettled([storagePromise, syncPromise]).then((results) => {
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.error(result.reason);
+        }
+      }
+    });
+  }
+
+  private syncQueue = new LocalTransactionsSyncQueue((contents) => {
+    for (const content of contents) {
+      this.storeContent(content);
+      this.syncContent(content);
+    }
+  });
   syncLocalTransaction = this.syncQueue.syncTransaction;
   trackDirtyCoValues = this.syncQueue.trackDirtyCoValues;
 
-  syncContent(content: NewContentMessage) {
-    const coValue = this.local.getCoValue(content.id);
+  private syncContent(content: NewContentMessage | BatchMessage) {
+    const contents = content.action === "batch" ? content.messages : [content];
 
-    this.storeContent(content);
+    // Extract the peers to sync for each CoValue to avoid sending the same message to the same peer multiple times
+    const peersToSync = new Set<PeerState>();
+    for (const content of contents) {
+      const coValue = this.local.getCoValue(content.id);
+      this.trackSyncState(coValue.id);
 
-    this.trackSyncState(coValue.id);
+      for (const peer of this.getPeers(coValue.id)) {
+        // Only subscribed CoValues are synced to clients
+        if (
+          peer.role === "client" &&
+          !peer.isCoValueSubscribedToPeer(coValue.id)
+        ) {
+          continue;
+        }
 
-    const contentKnownState = knownStateFromContent(content);
+        if (peer.closed || coValue.isErroredInPeer(peer.id)) {
+          peer.emitCoValueChange(coValue.id);
+          continue;
+        }
 
-    for (const peer of this.getPeers(coValue.id)) {
-      // Only subscribed CoValues are synced to clients
-      if (
-        peer.role === "client" &&
-        !peer.isCoValueSubscribedToPeer(coValue.id)
-      ) {
-        continue;
+        peersToSync.add(peer);
       }
+    }
 
-      if (peer.closed || coValue.isErroredInPeer(peer.id)) {
-        peer.emitCoValueChange(content.id);
-        continue;
-      }
-
+    for (const peer of peersToSync) {
       // We assume that the peer already knows anything before this content
       // Any eventual reconciliation will be handled through the known state messages exchange
+
       this.trySendToPeer(peer, content);
-      peer.combineOptimisticWith(coValue.id, contentKnownState);
-      peer.trackToldKnownState(coValue.id);
+      for (const content of contents) {
+        peer.combineOptimisticWith(content.id, knownStateFromContent(content));
+        peer.trackToldKnownState(content.id);
+      }
     }
   }
 
