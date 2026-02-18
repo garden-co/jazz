@@ -23,6 +23,11 @@ const schema: WasmSchema = {
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "project", column_type: { type: "Uuid" }, nullable: true, references: "projects" },
+        {
+          name: "tags",
+          column_type: { type: "Array", element: { type: "Text" } },
+          nullable: true,
+        },
       ],
     },
     projects: {
@@ -36,12 +41,14 @@ interface Todo {
   title: string;
   done: boolean;
   project?: string;
+  tags?: string[];
 }
 
 interface TodoInit {
   title: string;
   done: boolean;
   project?: string;
+  tags?: string[];
 }
 
 interface Project {
@@ -210,6 +217,67 @@ describe("Worker Bridge with OPFS", () => {
 
     expect(results[0].id).toBe(id);
     expect(results[0].name).toBe("Project A");
+  });
+
+  it("queries by array column equality", async () => {
+    const db = track(
+      await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-array-column-equality") }),
+    );
+
+    const id1 = db.insert(todos, { title: "Todo 1", done: false, tags: ["tag1"] });
+    const _id2 = db.insert(todos, { title: "Todo 1", done: false, tags: ["tag2", "tag3"] });
+    const _id3 = db.insert(todos, { title: "Todo 1", done: false, tags: ["tag1", "tag3"] });
+
+    function todosWithTags(tag: string): QueryBuilder<Todo> {
+      return {
+        _table: "todos",
+        _schema: schema,
+        _rowType: {} as Todo,
+        _build() {
+          return JSON.stringify({
+            table: "todos",
+            conditions: [{ column: "tags", op: "eq", value: [tag] }],
+            includes: {},
+            orderBy: [],
+          });
+        },
+      };
+    }
+
+    const results = await db.all(todosWithTags("tag1"));
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe(id1);
+  });
+
+  it("queries by array column contains", async () => {
+    const db = track(
+      await createDb({ appId: "test-app", dbName: uniqueDbName("query-by-array-column-contains") }),
+    );
+
+    const id1 = db.insert(todos, { title: "Todo 1", done: false, tags: ["tag1"] });
+    const _id2 = db.insert(todos, { title: "Todo 1", done: false, tags: ["tag2", "tag3"] });
+    const id3 = db.insert(todos, { title: "Todo 1", done: false, tags: ["tag1", "tag3"] });
+
+    function todosWithTag(tag: string): QueryBuilder<Todo> {
+      return {
+        _table: "todos",
+        _schema: schema,
+        _rowType: {} as Todo,
+        _build() {
+          return JSON.stringify({
+            table: "todos",
+            conditions: [{ column: "tags", op: "contains", value: tag }],
+            includes: {},
+            orderBy: [],
+          });
+        },
+      };
+    }
+
+    const results = await db.all(todosWithTag("tag1"));
+    expect(results.length).toBe(2);
+    expect(results).toContainEqual(expect.objectContaining({ id: id1 }));
+    expect(results).toContainEqual(expect.objectContaining({ id: id3 }));
   });
 
   // -------------------------------------------------------------------------
