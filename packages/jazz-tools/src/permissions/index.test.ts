@@ -210,19 +210,68 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("throws for correlated row references inside exists clauses", () => {
-    expect(() =>
-      definePermissions(app, ({ policy, either, session }) => [
-        policy.todos.allowRead.where((todo) =>
-          either({ ownerId: session.userId }).or(
-            policy.todoShares.exists.where({
-              todoId: todo.id,
-              userId: session.userId,
-              canRead: true,
-            }),
-          ),
+  it("compiles correlated exists row references", () => {
+    const compiled = definePermissions(app, ({ policy, either, session }) => [
+      policy.todos.allowRead.where((todo) =>
+        either({ ownerId: session.userId }).or(
+          policy.todoShares.exists.where({
+            todoId: todo.id,
+            userId: session.userId,
+            canRead: true,
+          }),
         ),
-      ]),
-    ).toThrow(/Correlated row references in exists/);
+      ),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({
+      type: "Or",
+      exprs: [
+        {
+          type: "Cmp",
+          column: "ownerId",
+          op: "Eq",
+          value: {
+            type: "SessionRef",
+            path: ["userId"],
+          },
+        },
+        {
+          type: "Exists",
+          table: "todoShares",
+          condition: {
+            type: "And",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "todoId",
+                op: "Eq",
+                value: {
+                  type: "SessionRef",
+                  path: ["__jazz_outer_row", "id"],
+                },
+              },
+              {
+                type: "Cmp",
+                column: "userId",
+                op: "Eq",
+                value: {
+                  type: "SessionRef",
+                  path: ["userId"],
+                },
+              },
+              {
+                type: "Cmp",
+                column: "canRead",
+                op: "Eq",
+                value: {
+                  type: "Literal",
+                  value: true,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
   });
 });
