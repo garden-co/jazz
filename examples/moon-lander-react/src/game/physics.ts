@@ -41,7 +41,7 @@ export interface PhysicsContext {
   remotePlayers: RemotePlayerView[];
   arcs: ArcAnimation[];
   callbacks: PhysicsCallbacks;
-  collectEffects: Array<{ x: number; fuelType: FuelType; isRequired: boolean }>;
+  collectEffects: Array<{ x: number; fuelType: FuelType; isRequired: boolean; burst?: boolean }>;
 }
 
 export interface PhysicsResult {
@@ -101,7 +101,10 @@ export function updatePhysics(
     // Landing detection
     if (world.posY >= GROUND_LEVEL) {
       world.posY = GROUND_LEVEL;
-      if (Math.abs(world.velY) <= MAX_LANDING_VELOCITY) {
+      if (Math.abs(world.velY) > 50 || Math.abs(world.velX) > 30) {
+        world.mode = "crashed";
+        world.crashElapsed = 0;
+      } else if (Math.abs(world.velY) <= MAX_LANDING_VELOCITY) {
         world.mode = "landed";
       }
       world.velX = 0;
@@ -196,27 +199,14 @@ export function updatePhysics(
           callbacks.onRefuel?.(requiredFuelType);
         }
 
-        // Burst: eject all non-required fuel types back to the surface
-        const toBurst: FuelType[] = [];
-        for (const ft of inventory) {
-          if (ft !== requiredFuelType) toBurst.push(ft);
-        }
-        for (const ft of toBurst) {
+        // Burst: eject all non-required fuel types into space
+        for (const ft of [...inventory]) {
+          if (ft === requiredFuelType) continue;
           inventory.delete(ft);
           optimisticInventory.delete(ft);
           sharedOut.add(ft);
-          const newX = wrapX(world.posX + (Math.random() - 0.5) * 600);
-          arcs.push({
-            fuelType: ft,
-            startX: world.posX,
-            endX: newX,
-            peakHeight: 80 + Math.random() * 40,
-            duration: 0.6 + Math.random() * 0.3,
-            elapsed: 0,
-            rotation: 0,
-            glowPhase: Math.random() * Math.PI * 2,
-            onComplete: () => callbacks.onBurstDeposit?.(ft, newX),
-          });
+          collectEffects.push({ x: world.posX, fuelType: ft, isRequired: false, burst: true });
+          callbacks.onBurstDeposit?.(ft);
         }
       }
     }
@@ -229,6 +219,8 @@ export function updatePhysics(
       world.posY = -100000;
       world.velY = 0;
     }
+  } else if (world.mode === "crashed") {
+    world.crashElapsed += dt;
   }
 
   return { thrusting, thrustLeft, thrustRight };

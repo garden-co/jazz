@@ -1,12 +1,19 @@
-import { useRef, useCallback, useMemo } from "react";
-import { JazzProvider, useDb, useAll } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { JazzProvider, useAll, useDb } from "jazz-tools/react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { app } from "../schema/app.js";
 import { Game } from "./Game.js";
-import type { RemotePlayer, GameState, ChatMessage } from "./game/types.js";
-import { DB_SYNC_INTERVAL_MS, FUEL_TYPES, MOON_SURFACE_WIDTH } from "./game/constants.js";
 import type { FuelType } from "./game/constants.js";
-import { useEffect } from "react";
+import {
+  DB_SYNC_INTERVAL_MS,
+  FUEL_TYPES,
+  MOON_SURFACE_WIDTH,
+} from "./game/constants.js";
+import type {
+  ChatMessage,
+  GameState,
+  RemotePlayer,
+} from "./game/types.js";
 
 // ---------------------------------------------------------------------------
 // Jazz write helpers — each function is a self-contained DB write pattern
@@ -14,33 +21,58 @@ import { useEffect } from "react";
 
 const STALE_THRESHOLD_S = 180; // 3 minutes
 
-/** Seed fuel deposits into the DB if none exist (after a grace period). */
-function seedDepositsIfEmpty(
+/** Base number of uncollected deposits per fuel type. */
+const DEPOSITS_PER_TYPE = 3;
+/** Cooldown (ms) between top-up checks to avoid racing the subscription. */
+const TOP_UP_COOLDOWN_MS = 3000;
+
+/**
+ * Top up fuel deposits so each type has the correct number uncollected:
+ *   DEPOSITS_PER_TYPE base + 1 per player whose requiredFuelType matches.
+ *
+ * Runs on a cooldown to let the subscription reflect recent inserts before
+ * recounting.
+ */
+/**
+ * Insert deposits if any fuel type has fewer uncollected than target.
+ *
+ * Every client runs this — races are harmless because excess deposits
+ * exceed the subscription limit and become invisible. The cooldown
+ * prevents rapid duplicate creation.
+ */
+function topUpDeposits(
   db: ReturnType<typeof useDb>,
-  seededRef: React.MutableRefObject<boolean>,
-  deposits: Array<{ id: string }> | undefined,
+  perTypeCounts: number[],
+  perTypeLimits: number[],
   elapsed: number,
+  lastTopUpRef: React.MutableRefObject<number>,
 ) {
   const GRACE_MS = 2000;
-  if (seededRef.current || !deposits) return;
-  if (deposits.length > 0) {
-    seededRef.current = true;
-    return;
-  }
   if (elapsed <= GRACE_MS) return;
-  seededRef.current = true;
-  const nowS = Math.floor(Date.now() / 1000);
-  for (const fuelType of FUEL_TYPES) {
-    for (let i = 0; i < 3; i++) {
-      db.insert(app.fuel_deposits, {
-        fuelType,
-        positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
-        createdAt: nowS,
-        collected: false,
-        collectedBy: "",
-      });
+
+  const now = Date.now();
+  if (now - lastTopUpRef.current < TOP_UP_COOLDOWN_MS) return;
+
+  const nowS = Math.floor(now / 1000);
+  let inserted = false;
+
+  for (let i = 0; i < FUEL_TYPES.length; i++) {
+    const diff = perTypeLimits[i] - perTypeCounts[i];
+    if (diff > 0) {
+      for (let j = 0; j < diff; j++) {
+        db.insert(app.fuel_deposits, {
+          fuelType: FUEL_TYPES[i],
+          positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
+          createdAt: nowS,
+          collected: false,
+          collectedBy: "",
+        });
+      }
+      inserted = true;
     }
   }
+
+  if (inserted) lastTopUpRef.current = now;
 }
 
 /** Returns true if any synced field in GameState has changed meaningfully. */
@@ -57,7 +89,8 @@ function gameStateChanged(a: GameState, b: GameState): boolean {
     a.landerSpawnX !== b.landerSpawnX ||
     a.playerName !== b.playerName ||
     a.playerColor !== b.playerColor ||
-    a.requiredFuelType !== b.requiredFuelType
+    a.requiredFuelType !== b.requiredFuelType ||
+    a.thrusting !== b.thrusting
   );
 }
 
@@ -79,7 +112,11 @@ function syncPlayerState(
   }
 
   if (dbRowIdRef.current) {
-    if (lastSyncedRef.current && !gameStateChanged(lastSyncedRef.current, state)) return;
+    if (
+      lastSyncedRef.current &&
+      !gameStateChanged(lastSyncedRef.current, state)
+    )
+      return;
     db.update(app.players, dbRowIdRef.current, {
       playerId,
       name: state.playerName,
@@ -94,6 +131,7 @@ function syncPlayerState(
       requiredFuelType: state.requiredFuelType,
       landerFuelLevel: state.fuel,
       landerSpawnX: state.landerSpawnX,
+      thrusting: state.thrusting,
     });
     lastSyncedRef.current = { ...state };
   } else if (elapsed > GRACE_MS) {
@@ -111,6 +149,7 @@ function syncPlayerState(
       requiredFuelType: state.requiredFuelType,
       landerFuelLevel: state.fuel,
       landerSpawnX: state.landerSpawnX,
+      thrusting: state.thrusting,
     });
     lastSyncedRef.current = { ...state };
   }
@@ -135,14 +174,17 @@ function flushRefuelConsumptions(
   db: ReturnType<typeof useDb>,
   playerId: string,
   pending: React.MutableRefObject<FuelType[]>,
-  deposits:
-    | Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }>
-    | undefined,
+  deposits: Array<{
+    id: string;
+    collected: boolean;
+    collectedBy: string;
+    fuelType: string;
+  }>,
 ) {
   for (const fuelType of pending.current.splice(0)) {
-    if (!deposits) continue;
     const dep = deposits.find(
-      (d) => d.collected && d.collectedBy === playerId && d.fuelType === fuelType,
+      (d) =>
+        d.collected && d.collectedBy === playerId && d.fuelType === fuelType,
     );
     if (dep) {
       db.update(app.fuel_deposits, dep.id, { collectedBy: "" });
@@ -154,42 +196,52 @@ function flushRefuelConsumptions(
 function flushFuelShares(
   db: ReturnType<typeof useDb>,
   playerId: string,
-  pending: React.MutableRefObject<Array<{ fuelType: string; receiverPlayerId: string }>>,
-  deposits:
-    | Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }>
-    | undefined,
+  pending: React.MutableRefObject<
+    Array<{ fuelType: string; receiverPlayerId: string }>
+  >,
+  deposits: Array<{
+    id: string;
+    collected: boolean;
+    collectedBy: string;
+    fuelType: string;
+  }>,
 ) {
   for (const share of pending.current.splice(0)) {
-    if (!deposits) continue;
     const dep = deposits.find(
-      (d) => d.collected && d.collectedBy === playerId && d.fuelType === share.fuelType,
+      (d) =>
+        d.collected &&
+        d.collectedBy === playerId &&
+        d.fuelType === share.fuelType,
     );
     if (dep) {
-      db.update(app.fuel_deposits, dep.id, { collectedBy: share.receiverPlayerId });
+      db.update(app.fuel_deposits, dep.id, {
+        collectedBy: share.receiverPlayerId,
+      });
     }
   }
 }
 
-/** Write pending burst deposits to Jazz. */
+/** Write pending burst deposits to Jazz — orphan them (collected but unclaimed). */
 function flushBurstDeposits(
   db: ReturnType<typeof useDb>,
   playerId: string,
-  pending: React.MutableRefObject<Array<{ fuelType: string; newX: number }>>,
-  deposits:
-    | Array<{ id: string; collected: boolean; collectedBy: string; fuelType: string }>
-    | undefined,
+  pending: React.MutableRefObject<string[]>,
+  deposits: Array<{
+    id: string;
+    collected: boolean;
+    collectedBy: string;
+    fuelType: string;
+  }>,
 ) {
-  for (const burst of pending.current.splice(0)) {
-    if (!deposits) continue;
+  for (const fuelType of pending.current.splice(0)) {
     const dep = deposits.find(
-      (d) => d.collected && d.collectedBy === playerId && d.fuelType === burst.fuelType,
+      (d) =>
+        d.collected &&
+        d.collectedBy === playerId &&
+        d.fuelType === fuelType,
     );
     if (dep) {
-      db.update(app.fuel_deposits, dep.id, {
-        collected: false,
-        collectedBy: "",
-        positionX: Math.floor(burst.newX),
-      });
+      db.update(app.fuel_deposits, dep.id, { collectedBy: "" });
     }
   }
 }
@@ -213,23 +265,82 @@ function flushChatMessages(
 // GameWithSync — bridges Game ↔ Jazz DB
 // ---------------------------------------------------------------------------
 
-function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playerId: string }) {
+function GameWithSync({
+  physicsSpeed,
+  playerId,
+}: {
+  physicsSpeed?: number;
+  playerId: string;
+}) {
   const db = useDb();
   // Jazz-native filtering: only subscribe to remote players (ne = local)
-  const remotePlayerRows = useAll(app.players.where({ playerId: { ne: playerId } }));
+  const remotePlayerRows = useAll(
+    app.players.where({ playerId: { ne: playerId } }),
+  );
   // Separate subscription for the local player's row (for finding existing row on reload)
   const localPlayerRows = useAll(app.players.where({ playerId }));
-  const allDepositsRaw = useAll(app.fuel_deposits);
+  // Compute per-type deposit limits: DEPOSITS_PER_TYPE base + non-stale players needing that type.
+  // All clients compute the same limits from the same player data → same subscriptions → same deposits.
+  const localFuelType = localPlayerRows[0]?.requiredFuelType ?? FUEL_TYPES[0];
+  const perTypeLimit = useMemo(() => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const counts = new Map<string, number>();
+    for (const ft of FUEL_TYPES) counts.set(ft, DEPOSITS_PER_TYPE);
+    // +1 for local player
+    counts.set(localFuelType, (counts.get(localFuelType) ?? DEPOSITS_PER_TYPE) + 1);
+    // +1 per non-stale remote player needing each type
+    for (const p of remotePlayerRows) {
+      if (p.requiredFuelType && nowS - p.lastSeen < STALE_THRESHOLD_S) {
+        counts.set(p.requiredFuelType, (counts.get(p.requiredFuelType) ?? DEPOSITS_PER_TYPE) + 1);
+      }
+    }
+    return FUEL_TYPES.map((ft) => counts.get(ft) ?? DEPOSITS_PER_TYPE);
+  }, [remotePlayerRows, localFuelType]);
+
+  // Per-type subscriptions: limit = DEPOSITS_PER_TYPE + players needing that type.
+  // Each subscription tells the server exactly which objects to sync — no stale data.
+  // FUEL_TYPES is a compile-time constant (7 elements), so hook count is stable.
+  const uncollected0 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[0], collected: false }).limit(perTypeLimit[0]));
+  const uncollected1 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[1], collected: false }).limit(perTypeLimit[1]));
+  const uncollected2 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[2], collected: false }).limit(perTypeLimit[2]));
+  const uncollected3 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[3], collected: false }).limit(perTypeLimit[3]));
+  const uncollected4 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[4], collected: false }).limit(perTypeLimit[4]));
+  const uncollected5 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[5], collected: false }).limit(perTypeLimit[5]));
+  const uncollected6 = useAll(app.fuel_deposits.where({ fuelType: FUEL_TYPES[6], collected: false }).limit(perTypeLimit[6]));
+  // Deposits collected by this player (inventory)
+  const myCollectedDeposits = useAll(app.fuel_deposits.where({ collectedBy: playerId }));
   const allChatMessages = useAll(app.chat_messages);
+
+  // Merge per-type uncollected into a single array
+  const uncollectedDeposits = useMemo(
+    () => [...uncollected0, ...uncollected1, ...uncollected2, ...uncollected3,
+           ...uncollected4, ...uncollected5, ...uncollected6],
+    [uncollected0, uncollected1, uncollected2, uncollected3,
+     uncollected4, uncollected5, uncollected6],
+  );
+  // Combined view for consumers that need both uncollected + my-collected
+  const allDepositsRaw = useMemo(
+    () => [...uncollectedDeposits, ...myCollectedDeposits],
+    [uncollectedDeposits, myCollectedDeposits],
+  );
 
   // Track the Jazz row ID for the local player so we can update (not re-insert)
   const dbRowIdRef = useRef<string | null>(null);
   const localPlayerRowsRef = useRef(localPlayerRows);
   localPlayerRowsRef.current = localPlayerRows;
 
-  // Keep latest deposit subscription accessible from setInterval
+  // Keep latest subscriptions accessible from setInterval
   const allDepositsRef = useRef(allDepositsRaw);
   allDepositsRef.current = allDepositsRaw;
+  const perTypeCountsRef = useRef(FUEL_TYPES.map(() => 0));
+  perTypeCountsRef.current = [
+    uncollected0.length, uncollected1.length, uncollected2.length, uncollected3.length,
+    uncollected4.length, uncollected5.length, uncollected6.length,
+  ];
+  const perTypeLimitRef = useRef(perTypeLimit);
+  perTypeLimitRef.current = perTypeLimit;
+  const remotePlayerRowsRef = useRef(remotePlayerRows);
+  remotePlayerRowsRef.current = remotePlayerRows;
 
   // Buffer latest game state in a ref — written to DB on a separate interval
   // to avoid re-entrant WASM borrows when sync messages trigger React renders
@@ -254,15 +365,20 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
   }, []);
 
   // Pending fuel shares (rewrite collectedBy from local → receiver)
-  const pendingSharesRef = useRef<Array<{ fuelType: string; receiverPlayerId: string }>>([]);
-  const handleShareFuel = useCallback((fuelType: string, receiverPlayerId: string) => {
-    pendingSharesRef.current.push({ fuelType, receiverPlayerId });
-  }, []);
+  const pendingSharesRef = useRef<
+    Array<{ fuelType: string; receiverPlayerId: string }>
+  >([]);
+  const handleShareFuel = useCallback(
+    (fuelType: string, receiverPlayerId: string) => {
+      pendingSharesRef.current.push({ fuelType, receiverPlayerId });
+    },
+    [],
+  );
 
   // Pending burst deposits (eject back to surface at new position)
-  const pendingBurstsRef = useRef<Array<{ fuelType: string; newX: number }>>([]);
-  const handleBurstDeposit = useCallback((fuelType: string, newX: number) => {
-    pendingBurstsRef.current.push({ fuelType, newX });
+  const pendingBurstsRef = useRef<string[]>([]);
+  const handleBurstDeposit = useCallback((fuelType: string) => {
+    pendingBurstsRef.current.push(fuelType);
   }, []);
 
   // Pending chat messages
@@ -271,18 +387,25 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
     pendingMessagesRef.current.push(text);
   }, []);
 
-  // Seed flag — prevents re-seeding after initial population.
-  // Grace period lets the subscription deliver existing data from OPFS/server
-  // before we decide the table is empty.
-  const seededRef = useRef(false);
+  // Cooldown ref for deposit top-up (prevents racing the subscription)
+  const lastTopUpRef = useRef(0);
   const mountedAtRef = useRef(Date.now());
+
+  // Track when each deposit ID was first seen (monotonic seconds) for fade-in
+  const depositSpawnTimesRef = useRef<Map<string, number>>(new Map());
 
   // Flush all DB writes in a single setInterval (player sync + deposit collection + seeding)
   useEffect(() => {
     const id = setInterval(() => {
       const elapsed = Date.now() - mountedAtRef.current;
 
-      seedDepositsIfEmpty(db, seededRef, allDepositsRef.current, elapsed);
+      topUpDeposits(
+        db,
+        perTypeCountsRef.current,
+        perTypeLimitRef.current,
+        elapsed,
+        lastTopUpRef,
+      );
       syncPlayerState(
         db,
         playerId,
@@ -293,30 +416,64 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
         elapsed,
       );
       flushDepositCollections(db, playerId, pendingCollectionsRef);
-      flushRefuelConsumptions(db, playerId, pendingRefuelsRef, allDepositsRef.current);
+      flushRefuelConsumptions(
+        db,
+        playerId,
+        pendingRefuelsRef,
+        allDepositsRef.current,
+      );
       flushFuelShares(db, playerId, pendingSharesRef, allDepositsRef.current);
-      flushBurstDeposits(db, playerId, pendingBurstsRef, allDepositsRef.current);
+      flushBurstDeposits(
+        db,
+        playerId,
+        pendingBurstsRef,
+        allDepositsRef.current,
+      );
       flushChatMessages(db, playerId, pendingMessagesRef);
     }, DB_SYNC_INTERVAL_MS);
 
     return () => clearInterval(id);
   }, [db, playerId]);
 
-  // Map Jazz deposit subscription → Deposit[] for Game (uncollected only)
+  // Map Jazz deposit subscription → Deposit[] for Game (uncollected only, with fade-in timing)
   const deposits = useMemo(() => {
-    if (!allDepositsRaw) return [];
+    const spawnTimes = depositSpawnTimesRef.current;
+    const now = performance.now() / 1000;
+    // Record first-seen time for new deposits
+    const activeIds = new Set<string>();
+    for (const d of allDepositsRaw) {
+      if (d.collected) continue;
+      activeIds.add(d.id);
+      if (!spawnTimes.has(d.id)) {
+        spawnTimes.set(d.id, now);
+      }
+    }
+    // Prune stale entries
+    for (const id of spawnTimes.keys()) {
+      if (!activeIds.has(id)) spawnTimes.delete(id);
+    }
     return allDepositsRaw
       .filter((d) => !d.collected)
       .map((d) => ({
         id: d.id,
         x: d.positionX,
         type: d.fuelType as FuelType,
+        spawnTime: spawnTimes.get(d.id) ?? now,
       }));
   }, [allDepositsRaw]);
 
+  // Debug stats: DB row counts vs displayed
+  const dbStats = useMemo(() => {
+    return {
+      total: uncollectedDeposits.length + myCollectedDeposits.length,
+      uncollected: uncollectedDeposits.length,
+      collectedByMe: myCollectedDeposits.length,
+      collectedByOthers: 0, // not subscribed to others' collected deposits
+    };
+  }, [uncollectedDeposits, myCollectedDeposits]);
+
   // Derive inventory from Jazz: fuel types where collectedBy = this player
   const inventory = useMemo(() => {
-    if (!allDepositsRaw) return undefined;
     return allDepositsRaw
       .filter((d) => d.collected && d.collectedBy === playerId)
       .map((d) => d.fuelType as FuelType);
@@ -341,19 +498,6 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
   // Staleness filter applied here so Game receives only active players.
   const remotePlayers: RemotePlayer[] = useMemo(() => {
     const nowS = Math.floor(Date.now() / 1000);
-    // Build a set of playerIds that already own their required fuel type
-    const satisfiedPlayers = new Set<string>();
-    if (allDepositsRaw) {
-      for (const d of allDepositsRaw) {
-        if (d.collected && d.collectedBy) {
-          // Find the remote player row to check if this deposit is their required type
-          const rp = remotePlayerRows.find((p) => p.playerId === d.collectedBy);
-          if (rp && d.fuelType === rp.requiredFuelType) {
-            satisfiedPlayers.add(d.collectedBy);
-          }
-        }
-      }
-    }
     return remotePlayerRows
       .filter((p) => nowS - p.lastSeen < STALE_THRESHOLD_S)
       .map((p) => ({
@@ -368,11 +512,13 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
         requiredFuelType: p.requiredFuelType,
         lastSeen: p.lastSeen,
         landerFuelLevel: p.landerFuelLevel,
+        thrusting: p.thrusting,
         playerId: p.playerId,
         landerX: p.landerSpawnX,
-        hasRequiredFuel: p.playerId ? satisfiedPlayers.has(p.playerId) : false,
+        // Approximate: if lander fuel is at max, they've already collected their required type
+        hasRequiredFuel: p.landerFuelLevel >= 100,
       }));
-  }, [remotePlayerRows, allDepositsRaw]);
+  }, [remotePlayerRows]);
 
   return (
     <Game
@@ -382,6 +528,7 @@ function GameWithSync({ physicsSpeed, playerId }: { physicsSpeed?: number; playe
       deposits={deposits}
       inventory={inventory}
       chatMessages={chatMessages}
+      dbStats={dbStats}
       onCollectDeposit={handleCollectDeposit}
       onRefuel={handleRefuel}
       onShareFuel={handleShareFuel}
@@ -410,7 +557,10 @@ export function App({ config, playerId, physicsSpeed }: AppProps) {
 
   return (
     <JazzProvider config={config}>
-      <GameWithSync physicsSpeed={physicsSpeed} playerId={playerId ?? crypto.randomUUID()} />
+      <GameWithSync
+        physicsSpeed={physicsSpeed}
+        playerId={playerId ?? crypto.randomUUID()}
+      />
     </JazzProvider>
   );
 }

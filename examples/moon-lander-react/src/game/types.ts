@@ -16,6 +16,7 @@ export interface GameState {
   playerName: string;
   playerColor: string;
   requiredFuelType: FuelType;
+  thrusting: boolean;
 }
 
 /** A remote player received from Jazz and rendered in the game world. */
@@ -31,6 +32,7 @@ export interface RemotePlayer {
   requiredFuelType: string;
   lastSeen: number;
   landerFuelLevel: number;
+  thrusting: boolean;
   playerId?: string;
   landerX?: number;
   hasRequiredFuel?: boolean;
@@ -65,6 +67,8 @@ export interface Deposit {
   id: string;
   x: number;
   type: FuelType;
+  /** Monotonic time (seconds) when this deposit was first seen. Used for fade-in. */
+  spawnTime: number;
 }
 
 /** A remote player to render (already filtered for staleness). */
@@ -76,6 +80,7 @@ export interface RemotePlayerView {
   positionY: number;
   velocityY: number;
   color: string;
+  thrusting: boolean;
   landerX?: number;
   requiredFuelType?: string;
   playerId?: string;
@@ -91,6 +96,7 @@ export interface EngineState {
   landerX: number;
   landerY: number;
   fuel: number;
+  thrusting: boolean;
   depositCount: number;
   inventory: string[];
   remotePlayerCount: number;
@@ -111,6 +117,7 @@ export interface GameWorld {
   landerY: number;
   fuel: number;
   launchElapsed: number;
+  crashElapsed: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +141,7 @@ export interface PhysicsCallbacks {
   onCollectDeposit?: (id: string) => void;
   onRefuel?: (fuelType: FuelType) => void;
   onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
-  onBurstDeposit?: (fuelType: string, newX: number) => void;
+  onBurstDeposit?: (fuelType: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +173,7 @@ export interface SceneContext {
   particles: import("./particles.js").Particle[];
   thrustLeft: boolean;
   thrustRight: boolean;
-  /** Deposit pickups this frame: [{x, fuelType, isRequired}] for sparkle effects */
-  collectEffects: Array<{ x: number; fuelType: FuelType; isRequired: boolean }>;
+  /** Deposit pickups this frame: [{x, fuelType, isRequired, burst?}] for sparkle/burst effects */
+  collectEffects: Array<{ x: number; fuelType: FuelType; isRequired: boolean; burst?: boolean }>;
   walkingInput: boolean; // true if left/right keys held during walking mode
 }

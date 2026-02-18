@@ -1,7 +1,10 @@
 import {
   GROUND_LEVEL,
   ASTRONAUT_HEIGHT,
+  LANDER_HEIGHT,
   SHARE_PROXIMITY_RADIUS,
+  curveOffset,
+  leanAngle,
   type FuelType,
 } from "./constants.js";
 import {
@@ -11,12 +14,13 @@ import {
   drawDeposit,
   drawArrow,
   drawSplash,
+  drawCrashSplash,
   drawBubbles,
   DEPOSIT_COLOURS,
 } from "./render.js";
 import { wrapScreenX, wrapDistance, wrapLerp } from "./world.js";
 import { tickSpriteAnimation } from "./sprites.js";
-import { updateParticles, drawParticles, emitThrust, emitSparkle, emitTrail } from "./particles.js";
+import { updateParticles, drawParticles, emitThrust, emitSideThrust, emitSparkle, emitBurstUpward, emitTrail } from "./particles.js";
 import type { SceneContext } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -51,11 +55,20 @@ export function renderScene(scene: SceneContext): SceneResult {
   drawBackground(ctx, cameraX, cameraY, w, h, now);
 
   // --- Fuel deposits ---
+  const DEPOSIT_FADE_IN = 0.5; // seconds
   for (const dep of deposits) {
     if (collectedIds.has(dep.id)) continue;
     const dx = wrapScreenX(dep.x, cameraX);
     if (dx > -20 && dx < w + 20) {
-      drawDeposit(ctx, dx, groundScreenY, dep.type);
+      const depY = groundScreenY + curveOffset(dx, w);
+      const age = now - dep.spawnTime;
+      const alpha = Math.min(1, age / DEPOSIT_FADE_IN);
+      if (alpha <= 0) continue;
+      ctx.save();
+      ctx.translate(dx, depY);
+      ctx.rotate(leanAngle(dx, w));
+      drawDeposit(ctx, 0, 0, dep.type, alpha);
+      ctx.restore();
     }
   }
 
@@ -84,7 +97,7 @@ export function renderScene(scene: SceneContext): SceneResult {
     const arcX = wrapLerp(arc.startX, arc.endX, t);
     const arcY = GROUND_LEVEL - arc.peakHeight * 4 * t * (1 - t);
     const sx = wrapScreenX(arcX, cameraX);
-    const sy = arcY - cameraY;
+    const sy = arcY - cameraY + curveOffset(sx, w);
 
     // Update rotation
     arc.rotation += dt * 6;
@@ -108,20 +121,38 @@ export function renderScene(scene: SceneContext): SceneResult {
   }
 
   // --- Emit thrust particles ---
-  if (thrusting && (world.mode === "descending" || world.mode === "launched")) {
-    emitThrust(particles, world.posX, world.posY + 16);
+  const vx = world.velX;
+  const vy = world.velY;
+  if (thrusting && world.mode === "descending") {
+    emitThrust(particles, world.posX, world.posY + 16, vx, vy);
+  }
+  if (world.mode === "launched") {
+    const launchScreenY = world.posY - cameraY;
+    if (launchScreenY > -60) {
+      emitThrust(particles, world.posX, world.posY + 16, vx, vy);
+    }
+  }
+  if (world.mode === "descending") {
+    const jetY = world.posY - LANDER_HEIGHT * 0.65;
+    if (thrustRight) emitSideThrust(particles, world.posX - 12 - 5, jetY, -1, vx, vy);
+    if (thrustLeft) emitSideThrust(particles, world.posX + 12 + 5, jetY, 1, vx, vy);
   }
 
-  // --- Collection sparkles ---
+  // --- Collection sparkles + burst effects ---
   for (const effect of scene.collectEffects) {
     const colour = DEPOSIT_COLOURS[effect.fuelType] ?? "#ffffff";
-    emitSparkle(particles, effect.x, GROUND_LEVEL - 10, colour);
-    if (effect.isRequired) {
-      // Big celebration: 4 staggered bursts of sparkles in multiple colours
-      emitSparkle(particles, effect.x, GROUND_LEVEL - 10, "#ffffff");
-      emitSparkle(particles, effect.x, GROUND_LEVEL - 20, colour);
-      emitSparkle(particles, effect.x - 8, GROUND_LEVEL - 15, "#ffffff");
-      emitSparkle(particles, effect.x + 8, GROUND_LEVEL - 15, colour);
+    if (effect.burst) {
+      // Fuel ejected into space — upward particle shower from the lander
+      emitBurstUpward(particles, effect.x, GROUND_LEVEL - 20, colour);
+    } else {
+      emitSparkle(particles, effect.x, GROUND_LEVEL - 10, colour);
+      if (effect.isRequired) {
+        // Big celebration: 4 staggered bursts of sparkles in multiple colours
+        emitSparkle(particles, effect.x, GROUND_LEVEL - 10, "#ffffff");
+        emitSparkle(particles, effect.x, GROUND_LEVEL - 20, colour);
+        emitSparkle(particles, effect.x - 8, GROUND_LEVEL - 15, "#ffffff");
+        emitSparkle(particles, effect.x + 8, GROUND_LEVEL - 15, colour);
+      }
     }
   }
   scene.collectEffects.length = 0;
@@ -130,14 +161,24 @@ export function renderScene(scene: SceneContext): SceneResult {
   if (world.mode === "walking") {
     const landerSX = wrapScreenX(world.landerX, cameraX);
     if (landerSX > -40 && landerSX < w + 40) {
-      drawLander(ctx, landerSX, groundScreenY, false);
+      const landerY = groundScreenY + curveOffset(landerSX, w);
+      ctx.save();
+      ctx.translate(landerSX, landerY);
+      ctx.rotate(leanAngle(landerSX, w));
+      drawLander(ctx, 0, 0, false);
+      ctx.restore();
     }
   }
   for (const rp of remotePlayers) {
     if (rp.mode === "walking" && rp.landerX != null) {
       const rpLanderSX = wrapScreenX(rp.landerX, cameraX);
       if (rpLanderSX > -40 && rpLanderSX < w + 40) {
-        drawLander(ctx, rpLanderSX, groundScreenY, false, rp.color);
+        const rpLanderY = groundScreenY + curveOffset(rpLanderSX, w);
+        ctx.save();
+        ctx.translate(rpLanderSX, rpLanderY);
+        ctx.rotate(leanAngle(rpLanderSX, w));
+        drawLander(ctx, 0, 0, false, rp.color);
+        ctx.restore();
       }
     }
   }
@@ -159,22 +200,32 @@ export function renderScene(scene: SceneContext): SceneResult {
     const rpSX = wrapScreenX(s.x, cameraX);
     if (rpSX < -60 || rpSX > w + 60) continue;
 
+    const rpCurve = curveOffset(rpSX, w);
+    const rpLean = leanAngle(rpSX, w);
     if (rp.mode === "walking") {
-      const rpWalkY = s.y - cameraY;
+      const rpWalkY = s.y - cameraY + rpCurve;
       const isMoving = Math.abs(rp.positionX - (smoothed.get(rp.id)?.x ?? rp.positionX)) > 0.5;
-      drawAstronaut(ctx, rpSX, rpWalkY, rp.color, rp.name, isMoving);
+      ctx.save();
+      ctx.translate(rpSX, rpWalkY);
+      ctx.rotate(rpLean);
+      drawAstronaut(ctx, 0, 0, rp.color, rp.name, isMoving);
+      ctx.restore();
     } else if (rp.mode === "descending") {
-      const rpSY = s.y - cameraY;
+      const rpSY = s.y - cameraY + rpCurve;
       if (rpSY > -60 && rpSY < h + 60) {
-        drawLander(ctx, rpSX, rpSY, rp.velocityY < 0, rp.color, rp.name);
+        drawLander(ctx, rpSX, rpSY, rp.thrusting, rp.color, rp.name);
       }
     } else if (rp.mode === "launched") {
-      const rpSY = s.y - cameraY;
+      const rpSY = s.y - cameraY + rpCurve;
       if (rpSY > -60 && rpSY < h + 60) {
         drawLander(ctx, rpSX, rpSY, true, rp.color, rp.name);
       }
     } else {
-      drawLander(ctx, rpSX, groundScreenY, false, rp.color, rp.name);
+      ctx.save();
+      ctx.translate(rpSX, groundScreenY + rpCurve);
+      ctx.rotate(rpLean);
+      drawLander(ctx, 0, 0, false, rp.color, rp.name);
+      ctx.restore();
     }
   }
   for (const id of smoothed.keys()) {
@@ -183,25 +234,36 @@ export function renderScene(scene: SceneContext): SceneResult {
 
   // --- Local player ---
   const screenX = world.posX - cameraX;
+  const localCurve = curveOffset(screenX, w);
+  const localLean = leanAngle(screenX, w);
   const isWalking = world.mode === "walking";
   const localMoving = isWalking && scene.walkingInput;
   if (world.mode === "descending") {
-    const screenY = world.posY - cameraY;
+    const screenY = world.posY - cameraY + localCurve;
     drawLander(ctx, screenX, screenY, thrusting, undefined, undefined, thrustLeft, thrustRight);
   } else if (world.mode === "landed" || world.mode === "in_lander") {
-    drawLander(ctx, screenX, groundScreenY, false);
+    const landedY = groundScreenY + localCurve;
+    ctx.save();
+    ctx.translate(screenX, landedY);
+    ctx.rotate(localLean);
+    drawLander(ctx, 0, 0, false);
+    ctx.restore();
   } else if (isWalking) {
-    const walkScreenY = world.posY - cameraY;
-    drawAstronaut(ctx, screenX, walkScreenY, localPlayerColor || undefined, localPlayerName || undefined, localMoving);
+    const walkScreenY = world.posY - cameraY + localCurve;
+    ctx.save();
+    ctx.translate(screenX, walkScreenY);
+    ctx.rotate(localLean);
+    drawAstronaut(ctx, 0, 0, localPlayerColor || undefined, localPlayerName || undefined, localMoving);
+    ctx.restore();
   } else if (world.mode === "launched") {
-    const screenY = world.posY - cameraY;
+    const screenY = world.posY - cameraY + localCurve;
     if (screenY > -60 && screenY < h + 60) {
-      drawLander(ctx, screenX, screenY, world.launchElapsed < 3);
+      drawLander(ctx, screenX, screenY, true);
     }
   }
 
   // --- Draw particles ---
-  drawParticles(ctx, particles, cameraX, cameraY);
+  drawParticles(ctx, particles, cameraX, cameraY, w);
 
   // --- Speech bubbles ---
   const nowS = Math.floor(Date.now() / 1000);
@@ -221,9 +283,12 @@ export function renderScene(scene: SceneContext): SceneResult {
     }
     const localMsgs = byPlayer.get(localPlayerId);
     if (localMsgs) {
-      const localBubbleY = world.mode === "walking" ? world.posY - cameraY : groundScreenY;
-      const spriteTop = localBubbleY - ASTRONAUT_HEIGHT - 16;
-      drawBubbles(ctx, screenX, spriteTop, localMsgs);
+      const localBubbleY = (world.mode === "walking" ? world.posY - cameraY : groundScreenY) + localCurve;
+      // Lean the bubble along with the player — offset x by the lean at sprite top height
+      const spriteH = ASTRONAUT_HEIGHT + 16;
+      const bubbleDx = Math.sin(localLean) * spriteH;
+      const spriteTop = localBubbleY - spriteH * Math.cos(localLean);
+      drawBubbles(ctx, screenX - bubbleDx, spriteTop, localMsgs);
     }
     for (const rp of remotePlayers) {
       const rpMsgs = rp.playerId ? byPlayer.get(rp.playerId) : undefined;
@@ -232,16 +297,27 @@ export function renderScene(scene: SceneContext): SceneResult {
       if (!s) continue;
       const rpSX = wrapScreenX(s.x, cameraX);
       if (rpSX < -60 || rpSX > w + 60) continue;
-      const rpBubbleY = rp.mode === "walking" ? s.y - cameraY : groundScreenY;
-      const spriteTop = rpBubbleY - ASTRONAUT_HEIGHT - 16;
-      drawBubbles(ctx, rpSX, spriteTop, rpMsgs);
+      const rpBubCurve = curveOffset(rpSX, w);
+      const rpBubLean = leanAngle(rpSX, w);
+      const rpBubbleY = (rp.mode === "walking" ? s.y - cameraY : groundScreenY) + rpBubCurve;
+      const rpSpriteH = ASTRONAUT_HEIGHT + 16;
+      const rpBubbleDx = Math.sin(rpBubLean) * rpSpriteH;
+      const spriteTop = rpBubbleY - rpSpriteH * Math.cos(rpBubLean);
+      drawBubbles(ctx, rpSX - rpBubbleDx, spriteTop, rpMsgs);
     }
   }
 
   // --- Success splash ---
-  if (world.mode === "launched" && world.launchElapsed > 4) {
-    const splashAlpha = Math.min(1, (world.launchElapsed - 4) * 0.8);
-    drawSplash(ctx, w, h, splashAlpha);
+  if (world.mode === "launched" && world.launchElapsed > 6) {
+    const splashT = world.launchElapsed - 6;
+    const splashAlpha = Math.min(1, splashT * 0.8);
+    drawSplash(ctx, w, h, splashAlpha, splashT);
+  }
+
+  // --- Crash splash ---
+  if (world.mode === "crashed") {
+    const crashAlpha = Math.min(1, world.crashElapsed * 1.5);
+    drawCrashSplash(ctx, w, h, crashAlpha, world.crashElapsed);
   }
 
   // --- Proximity hint (walking mode only) ---

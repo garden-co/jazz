@@ -60,7 +60,8 @@ export type PlayerMode =
   | "landed"
   | "walking"
   | "in_lander"
-  | "launched";
+  | "launched"
+  | "crashed";
 
 // Colours — synthwave palette
 export const COLOURS = {
@@ -74,6 +75,20 @@ export const COLOURS = {
   orange: "#ff6600",
   softPink: "#ff66ff",
 } as const;
+
+// Visual curvature — derived from world circumference via π
+export const MOON_RADIUS = MOON_SURFACE_WIDTH / (2 * Math.PI);
+
+/** Vertical drop (px) at screenX due to spherical curvature. */
+export function curveOffset(screenX: number, screenW: number): number {
+  const dx = screenX - screenW / 2;
+  return MOON_RADIUS * (1 - Math.cos(dx / MOON_RADIUS));
+}
+
+/** Radial lean angle (radians) at screenX — for tilting entities on the sphere. */
+export function leanAngle(screenX: number, screenW: number): number {
+  return (screenX - screenW / 2) / MOON_RADIUS;
+}
 
 // Particles
 export const MAX_PARTICLES = 200;

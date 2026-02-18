@@ -1,17 +1,28 @@
-import { useMemo, useRef, useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { FuelType, PlayerMode } from "./game/constants.js";
+import type { Deposit, RemotePlayerView } from "./game/engine.js";
 import { useGameEngine } from "./game/engine.js";
-import type { RemotePlayerView, Deposit } from "./game/engine.js";
-import { getOrCreatePlayerId, derivePlayerProps } from "./game/player.js";
 import { Hud } from "./game/Hud.js";
-import type { PlayerMode, FuelType } from "./game/constants.js";
-import type { GameState, RemotePlayer, ChatMessage } from "./game/types.js";
+import { derivePlayerProps, getOrCreatePlayerId } from "./game/player.js";
+import type {
+  ChatMessage,
+  GameState,
+  RemotePlayer,
+} from "./game/types.js";
 
 export type { PlayerMode, FuelType };
-export type { GameState, RemotePlayer, ChatMessage } from "./game/types.js";
+export type { ChatMessage, GameState, RemotePlayer } from "./game/types.js";
 
 // ---------------------------------------------------------------------------
 // Game component
 // ---------------------------------------------------------------------------
+
+export interface DbStats {
+  total: number;
+  uncollected: number;
+  collectedByMe: number;
+  collectedByOthers: number;
+}
 
 interface GameProps {
   playerId?: string;
@@ -20,15 +31,30 @@ interface GameProps {
   deposits?: Deposit[];
   inventory?: FuelType[];
   chatMessages?: ChatMessage[];
+  dbStats?: DbStats;
   onCollectDeposit?: (id: string) => void;
   onRefuel?: (fuelType: FuelType) => void;
   onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
-  onBurstDeposit?: (fuelType: string, newX: number) => void;
+  onBurstDeposit?: (fuelType: string) => void;
   onSendMessage?: (text: string) => void;
   onStateChange?: (state: GameState) => void;
 }
 
-export function Game({ playerId: externalPlayerId, physicsSpeed, remotePlayers, deposits, inventory, chatMessages, onCollectDeposit, onRefuel, onShareFuel, onBurstDeposit, onSendMessage, onStateChange }: GameProps) {
+export function Game({
+  playerId: externalPlayerId,
+  physicsSpeed,
+  remotePlayers,
+  deposits,
+  inventory,
+  chatMessages,
+  dbStats,
+  onCollectDeposit,
+  onRefuel,
+  onShareFuel,
+  onBurstDeposit,
+  onSendMessage,
+  onStateChange,
+}: GameProps) {
   const fallbackPlayerId = useRef(getOrCreatePlayerId()).current;
   const playerId = externalPlayerId ?? fallbackPlayerId;
   const playerProps = useRef(derivePlayerProps(playerId)).current;
@@ -51,6 +77,7 @@ export function Game({ playerId: externalPlayerId, physicsSpeed, remotePlayers, 
       positionY: rp.positionY,
       velocityY: rp.velocityY,
       color: rp.color,
+      thrusting: rp.thrusting,
       landerX: rp.landerX,
       requiredFuelType: rp.requiredFuelType,
       playerId: rp.playerId,
@@ -89,6 +116,7 @@ export function Game({ playerId: externalPlayerId, physicsSpeed, remotePlayers, 
       playerName: playerProps.name,
       playerColor: playerProps.color,
       requiredFuelType: playerProps.requiredFuelType,
+      thrusting: engine.thrusting,
     });
   }, [engine, onStateChange, playerProps]);
 
@@ -161,6 +189,7 @@ export function Game({ playerId: externalPlayerId, physicsSpeed, remotePlayers, 
         landerX={engine.landerX}
         requiredFuelType={playerProps.requiredFuelType}
         inventory={engine.inventory}
+        dbStats={dbStats}
       />
       {chatOpen && (
         <input
@@ -186,6 +215,29 @@ export function Game({ playerId: externalPlayerId, physicsSpeed, remotePlayers, 
           }}
           placeholder="Type a message..."
         />
+      )}
+      {engine.mode === "crashed" && (
+        <button
+          onClick={() => window.location.reload()}
+          style={{
+            position: "absolute",
+            top: "60%",
+            left: "50%",
+            transform: "translateX(-50%)",
+            fontFamily: "monospace",
+            fontSize: 16,
+            color: "#ff3333",
+            background: "rgba(10, 10, 15, 0.8)",
+            border: "2px solid #ff3333",
+            borderRadius: 6,
+            padding: "10px 32px",
+            cursor: "pointer",
+            letterSpacing: 2,
+            textTransform: "uppercase",
+          }}
+        >
+          try again
+        </button>
       )}
     </div>
   );

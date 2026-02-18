@@ -10,7 +10,7 @@ import { getOrCreatePlayerId } from "./game/player.js";
 const DEV_SERVER_PORT = 4200;
 const DEV_JWT_SECRET = "dev-jwt-secret-moon-lander";
 const DEV_ADMIN_SECRET = "dev-admin-secret-moon-lander";
-const DEV_APP_ID = "00000000-0000-0000-0000-000000000003";
+const DEV_APP_ID = "00000000-0000-0000-0000-000000000004";
 
 function base64url(input: string | Uint8Array): string {
   const str =

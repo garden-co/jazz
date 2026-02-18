@@ -1,4 +1,5 @@
 import { COLOURS, type PlayerMode } from "./constants.js";
+import type { DbStats } from "../Game.js";
 
 interface HudProps {
   mode: PlayerMode;
@@ -10,6 +11,7 @@ interface HudProps {
   landerX: number;
   requiredFuelType: string;
   inventory: string[];
+  dbStats?: DbStats;
 }
 
 export function Hud({
@@ -22,6 +24,7 @@ export function Hud({
   landerX,
   requiredFuelType,
   inventory,
+  dbStats,
 }: HudProps) {
   return (
     <>
@@ -77,6 +80,39 @@ export function Hud({
           </div>
         )}
       </div>
+
+      {/* DB world-state panel (right side) */}
+      {dbStats && (
+        <div
+          style={{
+            position: "absolute",
+            top: 12,
+            right: 12,
+            fontFamily: "monospace",
+            fontSize: 13,
+            color: COLOURS.cyan,
+            background: "rgba(10, 10, 15, 0.7)",
+            padding: "8px 12px",
+            borderRadius: 4,
+            lineHeight: 1.6,
+            pointerEvents: "none",
+          }}
+        >
+          <div style={{ color: COLOURS.pink, marginBottom: 2 }}>db deposits</div>
+          <div>
+            total: <span style={{ color: COLOURS.orange }}>{dbStats.total}</span>
+          </div>
+          <div>
+            displayed: <span style={{ color: COLOURS.green }}>{dbStats.uncollected}</span>
+          </div>
+          <div>
+            my inv: <span style={{ color: COLOURS.yellow }}>{dbStats.collectedByMe}</span>
+          </div>
+          <div>
+            others: <span style={{ color: "#888" }}>{dbStats.collectedByOthers}</span>
+          </div>
+        </div>
+      )}
 
       {/* Controls hint */}
       <div

@@ -16,6 +16,7 @@ export interface Player {
   requiredFuelType: string;
   landerFuelLevel: number;
   landerSpawnX: number;
+  thrusting: boolean;
 }
 
 export interface FuelDeposit {
@@ -48,6 +49,7 @@ export interface PlayerInit {
   requiredFuelType: string;
   landerFuelLevel: number;
   landerSpawnX: number;
+  thrusting: boolean;
 }
 
 export interface FuelDepositInit {
@@ -93,6 +95,7 @@ export interface PlayerWhereInput {
   landerSpawnX?:
     | number
     | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  thrusting?: boolean;
 }
 
 export interface FuelDepositWhereInput {
@@ -209,6 +212,13 @@ export const wasmSchema: WasmSchema = {
           name: "landerSpawnX",
           column_type: {
             type: "Integer",
+          },
+          nullable: false,
+        },
+        {
+          name: "thrusting",
+          column_type: {
+            type: "Boolean",
           },
           nullable: false,
         },

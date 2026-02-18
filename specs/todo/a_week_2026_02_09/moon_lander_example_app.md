@@ -508,12 +508,21 @@ When a player enters the lander (presses E), ALL collected deposits that are NOT
 
 - [ ] Replace placeholder sprites with 32-bit pixel art
 - [x] Apply synthwave colour palette
-- [ ] Add glow effects (fuel, thrust, outlines)
-- [ ] Particle effects (thrust, collection sparkles)
+- [x] Add glow effects (fuel, thrust, outlines) — particles use shadowBlur glow; arc fuel shapes pulse with glow
+- [x] Particle effects (thrust, collection sparkles) — full particle system: main thrust, side thrusters, collection sparkles, arc trail particles, velocity inheritance
 - [x] Background (Earth, stars, gradient)
-- [ ] Share/burst arc animation: add glow, pulsing, and spinning to the fuel shape as it flies
-- [ ] Share arc should reactively track the receiver's current position (chase a moving player, not fly to where they were)
-- [ ] Launch success camera pan: slow down the upward pan so the lander stays visible longer during ascent
+- [x] Share/burst arc animation: add glow, pulsing, and spinning to the fuel shape as it flies
+- [x] Share arc should reactively track the receiver's current position (chase a moving player, not fly to where they were)
+- [x] Launch success camera pan: slow upward pan (lander visible 5s), camera freeze, success splash at 6s with rotating starbursts, pulsing rings, sparkles, scanlines
+- [x] Remote player thruster flames sync actual thrusting state (not velocity heuristic)
+- [x] Side thruster particle effects for lateral burns
+
+### Phase 6b: Deposit Management & Multiplayer Stability
+
+- [x] Replace `seedDepositsIfEmpty` with continuous `topUpDeposits`: maintains 3 base + 1 per player needing that type, inserts and culls to match target
+- [x] Leader election for deposit management: only the client with the smallest playerId runs topUpDeposits (prevents two-writer oscillation)
+- [x] DB stats debug HUD (right side): total deposits in DB, displayed, inventory, others — for diagnosing sync issues
+- [x] Fresh server DB namespace per schema change (DEV_APP_ID bump)
 
 ### Phase 7: Demo Assets
 

@@ -1,4 +1,4 @@
-import { COLOURS } from "./constants.js";
+import { COLOURS, curveOffset } from "./constants.js";
 
 // ---------------------------------------------------------------------------
 // Particle system — flat pre-allocated pool, no GC pressure
@@ -78,6 +78,7 @@ export function drawParticles(
   pool: Particle[],
   cameraX: number,
   cameraY: number,
+  screenW: number,
 ): void {
   // Group active particles by colour for batching
   const batches = new Map<string, Particle[]>();
@@ -102,7 +103,7 @@ export function drawParticles(
     for (const p of particles) {
       const alpha = p.life / p.maxLife;
       const sx = p.x - cameraX;
-      const sy = p.y - cameraY;
+      const sy = p.y - cameraY + curveOffset(sx, screenW);
       ctx.globalAlpha = alpha;
       ctx.fillRect(Math.floor(sx), Math.floor(sy), p.size, p.size);
     }
@@ -121,7 +122,7 @@ const THRUST_COLOURS = [COLOURS.pink, COLOURS.orange, COLOURS.yellow, "#ff8844"]
 const TAU = Math.PI * 2;
 
 /** Emit 2-4 particles from the lander exhaust. Call each frame while thrusting. */
-export function emitThrust(pool: Particle[], x: number, y: number): void {
+export function emitThrust(pool: Particle[], x: number, y: number, landerVx = 0, landerVy = 0): void {
   const count = 2 + Math.floor(Math.random() * 3);
   for (let i = 0; i < count; i++) {
     const colour = THRUST_COLOURS[Math.floor(Math.random() * THRUST_COLOURS.length)];
@@ -129,11 +130,29 @@ export function emitThrust(pool: Particle[], x: number, y: number): void {
     const speed = 40 + Math.random() * 60;
     spawn(
       pool, x, y,
-      Math.cos(angle) * speed * -1, // flip: exhaust goes DOWN
-      Math.abs(Math.sin(angle)) * speed + 30,
+      Math.cos(angle) * speed * -1 + landerVx, // inherit lander velocity
+      Math.abs(Math.sin(angle)) * speed + 30 + landerVy,
       0.3 + Math.random() * 0.3,
       colour,
       2,
+    );
+  }
+}
+
+/** Emit 1-2 particles from a lateral thruster. Direction: -1 = left, +1 = right. */
+export function emitSideThrust(pool: Particle[], x: number, y: number, direction: -1 | 1, landerVx = 0, landerVy = 0): void {
+  const count = 1 + (Math.random() > 0.4 ? 1 : 0);
+  for (let i = 0; i < count; i++) {
+    const colour = THRUST_COLOURS[Math.floor(Math.random() * THRUST_COLOURS.length)];
+    const spread = (Math.random() - 0.5) * 0.6;
+    const speed = 30 + Math.random() * 40;
+    spawn(
+      pool, x, y,
+      direction * speed + landerVx,
+      spread * speed + landerVy,
+      0.2 + Math.random() * 0.2,
+      colour,
+      1,
     );
   }
 }
@@ -146,6 +165,17 @@ export function emitSparkle(pool: Particle[], x: number, y: number, colour: stri
     const speed = 40 + Math.random() * 80;
     const c = Math.random() > 0.3 ? colour : "#ffffff";
     spawn(pool, x, y, Math.cos(angle) * speed, Math.sin(angle) * speed, 0.5 + Math.random() * 0.4, c, 2);
+  }
+}
+
+/** Burst of 12-18 particles firing upward into space. */
+export function emitBurstUpward(pool: Particle[], x: number, y: number, colour: string): void {
+  const count = 12 + Math.floor(Math.random() * 7);
+  for (let i = 0; i < count; i++) {
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * 1.2; // mostly upward
+    const speed = 100 + Math.random() * 150;
+    const c = Math.random() > 0.3 ? colour : "#ffffff";
+    spawn(pool, x, y, Math.cos(angle) * speed, Math.sin(angle) * speed, 0.6 + Math.random() * 0.5, c, 2);
   }
 }
 

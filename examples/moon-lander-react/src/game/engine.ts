@@ -32,7 +32,7 @@ export function useGameEngine(
     onCollectDeposit?: (id: string) => void;
     onRefuel?: (fuelType: FuelType) => void;
     onShareFuel?: (fuelType: string, receiverPlayerId: string) => void;
-    onBurstDeposit?: (fuelType: string, newX: number) => void;
+    onBurstDeposit?: (fuelType: string) => void;
     chatMessages?: Array<{ id: string; playerId: string; message: string; createdAt: number }>;
     localPlayerId?: string;
     localPlayerName?: string;
@@ -56,6 +56,7 @@ export function useGameEngine(
     landerY: 0,
     fuel: INITIAL_FUEL,
     launchElapsed: 0,
+    crashElapsed: 0,
   });
 
   // Camera smoothing
@@ -104,6 +105,7 @@ export function useGameEngine(
   const prevExternalInventoryRef = useRef<Set<FuelType>>(new Set());
   const sharedOutRef = useRef<Set<FuelType>>(new Set());
   const shareHintRef = useRef(false);
+  const thrustingRef = useRef(false);
 
   // Merge Jazz inventory into the working set each render (connected mode)
   if (options?.inventory !== undefined) {
@@ -135,6 +137,7 @@ export function useGameEngine(
     landerX: 0,
     landerY: 0,
     fuel: INITIAL_FUEL,
+    thrusting: false,
     depositCount: depositsRef.current.length,
     inventory: [],
     remotePlayerCount: 0,
@@ -235,9 +238,12 @@ export function useGameEngine(
           onCollectDeposit: (id) => onCollectDepositRef.current?.(id),
           onRefuel: (ft) => onRefuelRef.current?.(ft),
           onShareFuel: (ft, rpId) => onShareFuelRef.current?.(ft, rpId),
-          onBurstDeposit: (ft, x) => onBurstDepositRef.current?.(ft, x),
+          onBurstDeposit: (ft) => onBurstDepositRef.current?.(ft),
         },
       });
+
+      // Store thrusting state for sync interval
+      thrustingRef.current = thrusting;
 
       // --- Camera (smoothed) ---
       const cameraX = Math.floor(world.posX - w / 2);
@@ -245,9 +251,9 @@ export function useGameEngine(
 
       let targetCamY: number;
       if (world.mode === "launched") {
-        // Bias: lander starts in lower third, gradually centres over 3s
-        const launchBias = Math.max(0, 1 - world.launchElapsed / 3) * (h / 3);
-        targetCamY = world.posY - h / 2 + launchBias;
+        // Track the lander upward, centred on screen. Never pan downward.
+        targetCamY = world.posY - h / 2;
+        targetCamY = Math.min(targetCamY, smoothCamYRef.current);
       } else if (world.mode === "descending") {
         targetCamY = world.posY - h / 2;
       } else {
@@ -258,12 +264,8 @@ export function useGameEngine(
       if (isNaN(smoothCamYRef.current)) {
         smoothCamYRef.current = targetCamY;
       }
-      const camLerp = world.mode === "launched" ? 0.7 : 5;
+      const camLerp = world.mode === "launched" ? 3 : 5;
       smoothCamYRef.current += (targetCamY - smoothCamYRef.current) * Math.min(1, camLerp * dt);
-      // Never dip downward during launch — camera may only move up
-      if (world.mode === "launched") {
-        smoothCamYRef.current = Math.min(smoothCamYRef.current, targetCamY);
-      }
       const cameraY = Math.floor(smoothCamYRef.current);
 
       // --- Render ---
@@ -311,6 +313,7 @@ export function useGameEngine(
       landerX: NaN,
       landerY: NaN,
       fuel: NaN,
+      thrusting: false,
       depositCount: NaN,
       inventoryKey: "",
       remotePlayerCount: NaN,
@@ -328,6 +331,7 @@ export function useGameEngine(
       const fuel = world.fuel;
       const remotePlayerCount = remotePlayersRef.current.length;
       const shareHint = shareHintRef.current;
+      const isThrusting = thrustingRef.current;
 
       let depositCount = 0;
       for (const d of depositsRef.current) {
@@ -347,6 +351,7 @@ export function useGameEngine(
         landerX === prevRef.landerX &&
         landerY === prevRef.landerY &&
         fuel === prevRef.fuel &&
+        isThrusting === prevRef.thrusting &&
         depositCount === prevRef.depositCount &&
         inventoryKey === prevRef.inventoryKey &&
         remotePlayerCount === prevRef.remotePlayerCount &&
@@ -363,6 +368,7 @@ export function useGameEngine(
       prevRef.landerX = landerX;
       prevRef.landerY = landerY;
       prevRef.fuel = fuel;
+      prevRef.thrusting = isThrusting;
       prevRef.depositCount = depositCount;
       prevRef.inventoryKey = inventoryKey;
       prevRef.remotePlayerCount = remotePlayerCount;
@@ -377,6 +383,7 @@ export function useGameEngine(
         landerX,
         landerY,
         fuel,
+        thrusting: isThrusting,
         depositCount,
         inventory: inventoryArr,
         remotePlayerCount,

@@ -61,13 +61,13 @@ export function generateDeposits(requiredFuelType: FuelType, spawnX: number): De
       if (wrapDistance(x, spawnX) < noSpawnRadius) {
         x = wrapX(spawnX + noSpawnRadius + seededRand(seed + 0.7) * 1000);
       }
-      deposits.push({ id: String(deposits.length), x, type: FUEL_TYPES[ti] });
+      deposits.push({ id: String(deposits.length), x, type: FUEL_TYPES[ti], spawnTime: 0 });
     }
   }
 
   // 1 extra of the required type, placed 1/4–1/2 world away
   const offset = MOON_SURFACE_WIDTH / 4 + seededRand(9999) * (MOON_SURFACE_WIDTH / 4);
-  deposits.push({ id: String(deposits.length), x: wrapX(spawnX + offset), type: requiredFuelType });
+  deposits.push({ id: String(deposits.length), x: wrapX(spawnX + offset), type: requiredFuelType, spawnTime: 0 });
 
   return deposits;
 }

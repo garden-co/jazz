@@ -9,17 +9,36 @@ import {
 
 // Palette keys used in sprite grids:
 //   .  transparent
-//   B  body colour (player colour, default cyan)
-//   D  dark shade
-//   W  window / visor (pink)
+//
+// Lander palette:
+//   O  black outline (#000000)
+//   X  dark steel, main hull (#2e2e3e)
+//   Z  medium steel, cockpit frame (#484860)
+//   K  light steel, worn metal highlight (#5c5c74)
+//   V  panel seam shadow (#1a1a28)
+//   T  intake grille, near-black (#101018)
+//   B  player body colour (trim / accents)
 //   H  highlight (lighter body)
-//   S  suit grey
-//   A  accent (boots — same as body colour)
-//   F  flame orange
-//   G  flame yellow
-//   P  flame pink
+//   N  bright beacon glow (very light body)
+//   W  hot pink neon (#ff00ff)
+//   R  white reflection (#ffffff)
+//   L  cyan thruster glow (#00ffff)
+//   U  magenta underlight (#cc00cc)
+//
+// Astronaut palette:
+//   O  black outline (#000000)
+//   H  bright edge highlight (lighten player colour)
+//   B  player colour (plate highlights / accents)
+//   D  dark player colour (armour base, 45% darken)
+//   S  bodysuit, visible at joints (#303048)
+//   W  neon visor glow (#ff00ff)
+//   R  visor reflection (#ffffff)
+//
+// Deposit palette:
 //   C  deposit body colour
-//   E  white (suit detail)
+//   H  highlight
+//   I  inner detail (lighter fill)
+//   D  dark shade
 
 type Palette = Record<string, string>;
 
@@ -82,114 +101,115 @@ function stampSprite(grid: string[], palette: Palette): OffscreenCanvas {
 
 // ---------------------------------------------------------------------------
 // Lander sprite grid (24×32)
-// Tapered nose, boxy hull, pink window, splayed legs
+// Cyberpunk city lander — angular cockpit, panel lines, neon underlighting,
+// splayed landing skids, central thruster glow
 // ---------------------------------------------------------------------------
 
 const LANDER_BODY = padGrid([
-  // nose (rows 0-4)
-  "..........HH",
-  ".........HBBH",
-  "........HBBBBH",
-  ".......HBBBBBBH",
-  "......HBBBBBBBBH",
-  // hull (rows 5-8)
-  ".....HBBBBBBBBBBH",
-  ".....BBBBBBBBBBBB",
-  "....HBBBBBBBBBBBBH",
-  "....BBBBBBBBBBBBBB",
-  // window (rows 9-11)
-  "....BBBWWWWWWBBBBB",
-  "....BBBWWWWWWBBBBB",
-  "....BBBWWWWWWBBBBB",
-  // hull body (rows 12-18)
-  "....BBBBBBBBBBBBBB",
-  "....BBBBBBBBBBBBBB",
-  "....BBBHHHHHHBBBBB",
-  "....BBBBBBBBBBBBBB",
-  "....BBBBBBBBBBBBBB",
-  "....BBBBBBBBBBBBBB",
-  "....BBBBBBBBBBBBBB",
-  // hull bottom (rows 19-22)
-  ".....BBBBBBBBBBBB",
-  ".....DDDDDDDDDDDD",
-  ".....BBBBBBBBBBBB",
-  ".....BBBBBBBBBBBB",
-  // legs (rows 23-28)
-  "...BB...BBBBBB...BB",
-  "..BB....BBBBBB....BB",
-  ".BB.....BBBBBB.....BB",
-  "BB......BBBBBB......BB",
-  "BB......BBBBBB......BB",
-  "BBB.....BBBBBB.....BBB",
-  // nozzle (rows 29-31)
-  "........BBBBBB",
-  "........BBBBBB",
-  ".........BBBB",
+  // antenna / sensor mast (rows 0–2)
+  "...........OO",
+  "..........ONNO",
+  ".........OWBBWO",
+  // cockpit (rows 3–8)
+  "........OXXXXXXO",
+  ".......OXXZZZZXXO",
+  "......OXXXZZZZXXXO",
+  ".....OXZZWWWWWWZZXO",
+  ".....OXZWWRWWWRWZXO",
+  ".....OXXZZZZZZZZXXO",
+  // hull (rows 9–17, 16 px wide)
+  "....OBXXXXXXXXXXXXBO",
+  "....OXXXXXXVVXXXXXXO",
+  "....OXXVXXXXXXXXVXXO",
+  "....OXXXXXXVVXXXXXXO",
+  "....OBBBBBBBBBBBBBBO",
+  "....OXXXXXXVVXXXXXXO",
+  "....OXXVXXXXXXXXVXXO",
+  "....OXXXXXXVVXXXXXXO",
+  "....OXXKKKKKKKKKKXXO",
+  // engine section (rows 18–23)
+  ".....OXXXXXXXXXXXXO",
+  ".....OXTTTTTTTTTTXO",
+  ".....OXXXXXXXXXXXXO",
+  "....OWXXXXXXXXXXXXWO",
+  "....OXXXXXXUUXXXXXXO",
+  "....OXXXXUUUUUUXXXXO",
+  // landing gear + nozzle (rows 24–31)
+  "..OXO.OXXUUUUUUXXO.OXO",
+  ".OXO..OXXUUUUUUXXO..OXO",
+  "OXO....OWWUUUUWWO....OXO",
+  "OXO.....OLLLLLLO.....OXO",
+  "OXO.....OLLLLLLO.....OXO",
+  ".........OLLLLO",
+  "..........OLLO",
+  "...........OO",
 ], 24);
 
 // ---------------------------------------------------------------------------
 // Astronaut sprite grid (16×24)
-// Rounded helmet, bulky suit, pink visor, boots
+// Cyberpunk armoured suit — plated bodysuit, neon visor, idle stance facing right
 // ---------------------------------------------------------------------------
 
 const ASTRO_FRAME_0 = padGrid([
-  // helmet (rows 0-7)
-  "...BBBBBB",
-  "..BBBBBBBB",
-  ".BBBBBBBBBB",
-  ".BBWWWWBBBB",
-  ".BBWWWWBBBB",
-  ".BBBBBBBBBB",
-  "..BBBBBBBB",
-  "...BBBBBB",
-  // neck + suit body (rows 8-15)
-  "...ESSSE",
-  "..ESSSSSSE",
-  "..SSSSSSSS",
-  ".SSSSSSSSSS",
-  ".SSSSSSSSSS",
-  "..SSSSSSSS",
-  "..SSSSSSSS",
-  "...SSSSSS",
-  // legs + boots (rows 16-23)
-  "...SS..SS",
-  "...SS..SS",
-  "...SS..SS",
-  "...SS..SS",
-  "..AAA..SS",
-  "..AAA..SS",
-  ".......AAA",
-  ".......AAA",
+  // helmet (rows 0–6) — angular, top-lit player colour, visor on right
+  ".....OOOO",
+  "....OHHHHO",
+  "...OHBDDBHO",
+  "...OBDWWWWO",
+  "...OBDWWRWO",
+  "...OBDDDDBO",
+  "....OBDDBO",
+  // neck (row 7)
+  ".....OSSO",
+  // shoulders + torso (rows 8–15) — pauldrons, bodysuit at joints
+  "....OBDSSDBO",
+  "...OBHDSSDHBO",
+  "...OBDDSSDDBO",
+  "...ODDDBBBDDO",
+  "...ODDDSSSDDO",
+  "....ODDSSSDO",
+  "....ODDSSDDO",
+  "....ODDDDDDO",
+  // legs + boots (rows 16–23) — left foot forward, right foot behind
+  "...ODDO.ODDO",
+  "...ODDO.ODDO",
+  "...ODDO.ODDO",
+  "...ODDO.ODDO",
+  ".OBDDDO.ODDO",
+  ".OBDDDO.ODDO",
+  "........ODDBO",
+  "........ODDBO",
 ], 16);
 
 const ASTRO_FRAME_1 = padGrid([
   // helmet (same)
-  "...BBBBBB",
-  "..BBBBBBBB",
-  ".BBBBBBBBBB",
-  ".BBWWWWBBBB",
-  ".BBWWWWBBBB",
-  ".BBBBBBBBBB",
-  "..BBBBBBBB",
-  "...BBBBBB",
-  // suit body (same)
-  "...ESSSE",
-  "..ESSSSSSE",
-  "..SSSSSSSS",
-  ".SSSSSSSSSS",
-  ".SSSSSSSSSS",
-  "..SSSSSSSS",
-  "..SSSSSSSS",
-  "...SSSSSS",
-  // legs + boots (mirrored stride)
-  "...SS..SS",
-  "...SS..SS",
-  "...SS..SS",
-  "...SS..SS",
-  "...SS..AAA",
-  "...SS..AAA",
-  "..AAA",
-  "..AAA",
+  ".....OOOO",
+  "....OHHHHO",
+  "...OHBDDBHO",
+  "...OBDWWWWO",
+  "...OBDWWRWO",
+  "...OBDDDDBO",
+  "....OBDDBO",
+  // neck (same)
+  ".....OSSO",
+  // shoulders + torso (same)
+  "....OBDSSDBO",
+  "...OBHDSSDHBO",
+  "...OBDDSSDDBO",
+  "...ODDDBBBDDO",
+  "...ODDDSSSDDO",
+  "....ODDSSSDO",
+  "....ODDSSDDO",
+  "....ODDDDDDO",
+  // legs + boots (mirrored stride — right foot forward, left foot behind)
+  "...ODDO.ODDO",
+  "...ODDO.ODDO",
+  "...ODDO.ODDO",
+  "...ODDO.ODDO",
+  "...ODDO.ODDDBO",
+  "...ODDO.ODDDBO",
+  ".OBDDDO",
+  ".OBDDDO",
 ], 16);
 
 // ---------------------------------------------------------------------------
@@ -198,131 +218,138 @@ const ASTRO_FRAME_1 = padGrid([
 // ---------------------------------------------------------------------------
 
 const DEPOSIT_GRIDS: Record<FuelType, string[]> = {
+  // Circle: bold outline, concentric rings
   circle: [
-    "......CCCC......",
-    "....CHHHHHCC....",
-    "...CHCCCCCHC....",
-    "..CH.CCCCCC.CC..",
-    "..CC.CCCCCC.CC..",
-    ".CC..CCCCCC..CC.",
-    ".CC..CCCCCC..CC.",
-    ".CC..CCCCCC..CC.",
-    ".CC..CCCCCC..CC.",
-    ".CC..CCCCCC..CC.",
-    ".CC..CCCCCC..CC.",
-    "..CC.CCCCCC.CC..",
-    "..CC.CCCCCC.CC..",
-    "...CCCCCCCCCC...",
-    "....CCCCCCCC....",
-    "......CCCC......",
+    "......DDDD......",
+    "....DHHHHHHD....",
+    "...DHCCCCCCHD...",
+    "..DHC.CIIC.CHD..",
+    "..DC..ICCCI.CD..",
+    ".DC...ICCCI..CD.",
+    ".DC...CIIC...CD.",
+    ".DC...CCCC...CD.",
+    ".DC...CCCC...CD.",
+    ".DC...CIIC...CD.",
+    ".DC...ICCCI..CD.",
+    "..DC..ICCCI.CD..",
+    "..DHC.CIIC.CHD..",
+    "...DHCCCCCCHD...",
+    "....DHHHHHHD....",
+    "......DDDD......",
   ],
+  // Triangle: bold outline, inner triangle
   triangle: [
-    ".......HH.......",
-    "......HCCH......",
-    "......HCCH......",
-    ".....HCCCCH.....",
-    ".....HCCCCH.....",
-    "....HCCCCCCH....",
-    "....HCCCCCCH....",
-    "...HCCCCCCCCH...",
-    "...HCCCCCCCCH...",
-    "..HCCCCCCCCCCH..",
-    "..HCCCCCCCCCCH..",
-    ".HCCCCCCCCCCCCH.",
-    ".HCCCCCCCCCCCCH.",
-    "HCCCCCCCCCCCCCCH",
-    "CCCCCCCCCCCCCCCC",
-    "CCCCCCCCCCCCCCCC",
+    ".......DD.......",
+    "......DHHD......",
+    "......DCCD......",
+    ".....DCCCCDD....",
+    ".....DCICCD.....",
+    "....DCCIICCDD...",
+    "....DCCIICCD....",
+    "...DCCCIICCCDD..",
+    "...DCCCCCCCCD...",
+    "..DCCICCCCICCD..",
+    "..DCCIIIIIICCD..",
+    ".DCCCCCCCCCCCCDD",
+    ".DCCCCCCCCCCCCDD",
+    "DCCCCCCCCCCCCCCDD",
+    "DHHHHHHHHHHHHHHDD",
+    "DDDDDDDDDDDDDDDDD",
   ],
+  // Square: bold outline, crosshatch windows
   square: [
-    "HHHHHHHHHHHHHHHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HCCCCCCCCCCCCCHH",
-    "HHCCCCCCCCCCCCHH",
-    "HHHHHHHHHHHHHHHH",
+    "DDDDDDDDDDDDDDDD",
+    "DHHHHHHHHHHHHHHHD",
+    "DHCICCCCCCCICCHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHIIIIIIIIIIIICHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHCICCCCCCCICCHD",
+    "DHCICCCCCCCICCHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHIIIIIIIIIIIICHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHCICCCCCCCICCHD",
+    "DHHHHHHHHHHHHHHHD",
+    "DDDDDDDDDDDDDDDD",
   ],
+  // Pentagon: bold outline, radial spokes
   pentagon: [
-    "......HHHH......",
-    ".....HCCCCH.....",
-    "....HCCCCCCH....",
-    "...HCCCCCCCCH...",
-    "..HCCCCCCCCCCH..",
-    ".HCCCCCCCCCCCCH.",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    ".HCCCCCCCCCCCCH.",
-    "..HCCCCCCCCCCCH.",
-    "...HCCCCCCCCH...",
-    "....HCCCCCCH....",
-    ".....HCCCCH.....",
-    "......HCCH......",
-    ".......HH.......",
+    "......DDDD......",
+    ".....DHHHHHD....",
+    "....DHCCIICCDD..",
+    "...DHCCCIICCCDD.",
+    "..DHCCCCIICCCCDD",
+    ".DHCCCCCIICCCCDD",
+    "DHCCIICCCCCCIICDD",
+    "DHCCCIICCCCIICCDD",
+    "DHCCCCCIIIICCCCDD",
+    ".DHCCCCCCCCCCCHD",
+    "..DHCCCCCCCCCHD.",
+    "...DHCCCCCCHD...",
+    "....DHCCCCHD....",
+    ".....DHCCHD.....",
+    "......DHHD......",
+    ".......DD.......",
   ],
+  // Hexagon: bold outline, inner hex
   hexagon: [
-    "....HHHHHHHH....",
-    "...HCCCCCCCCH...",
-    "..HCCCCCCCCCCH..",
-    ".HCCCCCCCCCCCCH.",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    ".HCCCCCCCCCCCCH.",
-    "..HCCCCCCCCCCH..",
-    "...HCCCCCCCCH...",
-    "....HHHHHHHH....",
+    "....DDDDDDDD....",
+    "...DHHHHHHHHDD..",
+    "..DHCCCCCCCCCHD.",
+    ".DHCCDIIIIDCCHD.",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    "DHCCDICCCCICCCHD",
+    ".DHCCDIIIIDCCHD.",
+    "..DHCCCCCCCCCHD.",
+    "...DHHHHHHHHDD..",
+    "....DDDDDDDD....",
   ],
+  // Heptagon: bold outline, star spokes
   heptagon: [
-    "......HHHH......",
-    ".....HCCCCH.....",
-    "....HCCCCCCH....",
-    "...HCCCCCCCCH...",
-    "..HCCCCCCCCCCH..",
-    ".HCCCCCCCCCCCCH.",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    ".HCCCCCCCCCCCCH.",
-    "..HCCCCCCCCCCH..",
-    "..HCCCCCCCCCCH..",
-    "...HCCCCCCCCH...",
-    "....HCCCCCCH....",
-    ".....HHHHHH.....",
+    "......DDDD......",
+    ".....DHHHHHD....",
+    "....DHCCICCCDD..",
+    "...DHCCCICCCDD..",
+    "..DHCCCCICCCCCDD",
+    ".DHCCIIIICIIICCDD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHCCCDIIIIICCCHD",
+    "DHCCCCCCCCCCCCCHD",
+    "DHCCCCCCCCCCCCCHD",
+    ".DHCCIIIICIIICCDD",
+    "..DHCCCCICCCCCDD",
+    "..DHCCCCICCCCHD.",
+    "...DHCCCICCHD...",
+    "....DHCCIDHD....",
+    ".....DDDDDD.....",
   ],
+  // Octagon: bold outline, inner octagon
   octagon: [
-    "....HHHHHHHH....",
-    "...HCCCCCCCCH...",
-    "..HCCCCCCCCCCH..",
-    ".HCCCCCCCCCCCCH.",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    "HCCCCCCCCCCCCCCH",
-    ".HCCCCCCCCCCCCH.",
-    "..HCCCCCCCCCCH..",
-    "...HCCCCCCCCH...",
-    "....HHHHHHHH....",
+    "....DDDDDDDD....",
+    "...DHHHHHHHHDD..",
+    "..DHCCCIIIICCCHD",
+    ".DHCCCICCCCICCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    "DHCCCICCCCCICCCHD",
+    ".DHCCCICCCCICCHD",
+    "..DHCCCIIIICCCHD",
+    "...DHHHHHHHHDD..",
+    "....DDDDDDDD....",
   ],
 };
 
@@ -334,24 +361,31 @@ const cache = new Map<string, OffscreenCanvas>();
 
 function makeLanderPalette(colour: string): Palette {
   return {
-    B: colour,
-    D: darken(colour),
-    H: lighten(colour),
-    W: COLOURS.pink,
-    F: COLOURS.orange,
-    G: COLOURS.yellow,
-    P: COLOURS.pink,
+    O: "#000000",            // hard black outline
+    X: "#8080a0",            // mid steel (main hull)
+    Z: "#a0a0bc",            // light steel (cockpit frame)
+    K: "#c0c0d8",            // bright steel (worn metal highlight)
+    V: "#606080",            // panel seam shadow
+    T: "#505068",            // intake grille
+    B: colour,               // player body colour (trim / accents)
+    H: lighten(colour),      // highlight (lighter body)
+    N: lighten(colour, 0.7), // bright beacon glow
+    W: COLOURS.pink,         // hot pink neon
+    R: "#ffffff",             // white reflection
+    L: "#00ffff",            // cyan thruster glow
+    U: "#cc00cc",            // magenta underlight
   };
 }
 
 function makeAstroPalette(colour: string): Palette {
   return {
-    B: colour,
-    H: lighten(colour),
-    W: COLOURS.pink,
-    S: "#cccccc",
-    E: "#eeeeee",
-    A: colour,
+    O: "#000000",            // hard black outline
+    H: lighten(colour),      // bright edge highlight (top-lit)
+    B: colour,               // player colour (plate highlights)
+    D: darken(colour, 0.45), // dark player colour (armour base)
+    S: "#303048",            // bodysuit (visible at joints)
+    W: COLOURS.pink,         // neon visor glow
+    R: "#ffffff",             // visor reflection
   };
 }
 
@@ -371,6 +405,8 @@ function makeDepositPalette(fuelType: FuelType): Palette {
   return {
     C: colour,
     H: lighten(colour, 0.5),
+    I: lighten(colour, 0.25),
+    D: darken(colour, 0.5),
   };
 }
 
