@@ -35,6 +35,7 @@
   "scripts": {
     "build": "tsc && cp src/worker/groove-worker.ts dist/worker/groove-worker.ts",
     "test": "vitest run --config vitest.config.ts",
+    "test:build": "node dist/cli.js build --schema-dir tests/ts-dsl/fixtures/basic",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "stage:local": "node scripts/stage-local-binary.mjs",
     "pack:dry-run": "npm pack --dry-run"
