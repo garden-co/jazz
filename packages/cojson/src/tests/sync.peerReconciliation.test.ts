@@ -395,6 +395,10 @@ describe("peer reconciliation with garbageCollected CoValues", () => {
         "client -> server | LOAD Map sessions: header/1",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
+        "client -> storage | LOAD Group sessions: empty",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
       ]
     `);
   });
@@ -455,6 +459,10 @@ describe("peer reconciliation with garbageCollected CoValues", () => {
         "client -> server | LOAD Map sessions: header/1",
         "server -> client | KNOWN Group sessions: header/4",
         "server -> client | KNOWN Map sessions: header/1",
+        "client -> storage | LOAD Group sessions: empty",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 4",
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
       ]
     `);
   });

@@ -205,6 +205,8 @@ describe("sync after the garbage collector has run", () => {
         "server -> storage | CONTENT Group header: true new: After: 0 New: 4",
         "server -> client | KNOWN Map sessions: header/1",
         "server -> storage | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
       ]
     `);
   });
