@@ -1,16 +1,16 @@
 ---
 title: Permissions
-description: Fast RLS (ReBAC), simple policies, and INHERITS policies.
+description: Fast RLS (ReBAC), simple policies, and inherited access policies.
 ---
 
 ## Schema Policy Syntax
 
-Define policies directly in your schema, in either TypeScript DSL or SQL.
+Define policies in `permissions.ts` for TypeScript DSL apps, or directly in SQL.
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/schema/current.ts
+      ../examples/docs/todo-server-ts/schema/permissions.ts
     </include>
   </Tab>
   <Tab value="SQL">
@@ -44,7 +44,7 @@ Jazz permissions use relationship-based policy evaluation with requester session
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/request-context.ts#permissions-simple-ts
+      ../examples/docs/todo-server-ts/schema/permissions.ts#permissions-simple-ts
     </include>
   </Tab>
   <Tab value="Rust">
@@ -54,12 +54,14 @@ Jazz permissions use relationship-based policy evaluation with requester session
   </Tab>
 </Tabs>
 
-## INHERITS Policies
+## Inherited Access Policies (`allowedTo.*`)
+
+TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete(...)`, which compiles to `INHERITS` policy expressions.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/request-context.ts#permissions-inherits-ts
+      ../examples/docs/todo-server-ts/schema/permissions.ts#permissions-allowed-to-ts
     </include>
   </Tab>
   <Tab value="Rust">
